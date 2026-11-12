@@ -179,7 +179,13 @@ pub fn read_frame<T: DeserializeOwned>(
 /// against the service's working directory, not the bot's folder.
 pub fn engine_program() -> PathBuf {
     if let Some(p) = std::env::var_os("APPD_ENGINE").filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
+        let p = PathBuf::from(p);
+        // The engine runs in the bot's folder, so a relative path would resolve there; a bare name stays a `PATH` lookup.
+        return if p.components().count() > 1 {
+            std::path::absolute(&p).unwrap_or(p)
+        } else {
+            p
+        };
     }
     let sibling = std::env::current_exe()
         .ok()
