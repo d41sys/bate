@@ -1,3 +1,6 @@
 target/
 legacy/
 .DS_Store
+.agents/skills/
+.claude/skills/
+skills-lock.json
