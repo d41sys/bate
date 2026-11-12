@@ -18,10 +18,11 @@ const SETUP: Duration = Duration::from_secs(30);
 const CALL: Duration = Duration::from_secs(120);
 /// Largest HTTP reply read.
 const MAX_REPLY: u64 = 64 << 20;
+/// How often a wait for a server looks for `abort`.
+const POLL: Duration = Duration::from_millis(100);
+const ABORTED: &str = "Aborted by the user";
 
 /// The connectors tried so far. `None`: it failed to load, and is not tried again until it changes.
-// shortcut: a server that stops later is not restarted (its calls fail with "the server stopped")
-// until its settings change or the engine restarts; restart it here if that proves common.
 #[derive(Default)]
 pub struct Servers(Vec<(Connector, Option<Server>)>);
 
@@ -69,16 +70,34 @@ impl Servers {
     /// Makes the running servers match `connectors`: stops those removed, changed or disabled, and
     /// starts the new enabled ones. A connector that fails is reported on stderr (the service log).
     pub fn sync(&mut self, connectors: &[Connector], dir: &Path, control: &Control) {
-        self.0.retain(|(known, _)| connectors.contains(known));
-        for connector in connectors.iter().filter(|c| c.enabled) {
-            if self.0.iter().any(|(known, _)| known == connector) {
-                continue;
-            }
-            let mut server = Server::connect(connector, dir, control);
-            // An aborted start is not a failure: the next turn tries again.
-            if control.aborted() {
-                return;
-            }
+        // A server that has stopped is forgotten here, so it is started again below.
+        self.0.retain_mut(|(known, server)| {
+            connectors.contains(known) && server.as_mut().is_none_or(Server::alive)
+        });
+        let new: Vec<&Connector> = connectors
+            .iter()
+            .filter(|c| c.enabled && !self.0.iter().any(|(known, _)| known == *c))
+            .collect();
+        // Side by side: one slow server must not hold the others up.
+        let started: Vec<Result<Server, String>> = std::thread::scope(|scope| {
+            let starts: Vec<_> = new
+                .iter()
+                .map(|&c| scope.spawn(move || Server::connect(c, dir, control)))
+                .collect();
+            starts
+                .into_iter()
+                .map(|start| {
+                    start
+                        .join()
+                        .unwrap_or_else(|_| Err("its start panicked".into()))
+                })
+                .collect()
+        });
+        // An aborted start is not a failure: the next turn tries again.
+        if control.aborted() {
+            return;
+        }
+        for (connector, mut server) in new.into_iter().zip(started) {
             if let Ok(server) = &mut server {
                 // `x` + `y__z` and `x__y` + `z` would make the same name; the first one keeps it.
                 server.tools.retain(|tool| {
@@ -137,6 +156,14 @@ impl Servers {
 }
 
 impl Server {
+    /// Whether a stdio server's process still runs. An HTTP server has nothing to check.
+    fn alive(&mut self) -> bool {
+        match &mut self.link {
+            Link::Stdio { child, .. } => matches!(child.try_wait(), Ok(None)),
+            Link::Http { .. } => true,
+        }
+    }
+
     fn connect(connector: &Connector, dir: &Path, control: &Control) -> Result<Server, String> {
         let link = match &connector.transport {
             Transport::Stdio { command, args, env } => {
@@ -179,7 +206,6 @@ impl Server {
                 }
             }
             Transport::Http { url, headers } => {
-                // shortcut: `abort` cannot interrupt an HTTP call; it ends at this timeout at the latest.
                 let config = ureq::Agent::config_builder()
                     .http_status_as_error(false)
                     .timeout_global(Some(CALL))
@@ -206,6 +232,8 @@ impl Server {
         server.send(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
             None,
+            SETUP,
+            control,
         )?;
         let mut cursor = None;
         // At most 50 pages: a server that always names a next page must not hold the turn.
@@ -254,7 +282,13 @@ impl Server {
 
     /// Sends `message`. With `want`, the reply to that request id comes back over HTTP; over stdio
     /// replies arrive on `messages`.
-    fn send(&mut self, message: &Value, want: Option<u64>) -> Result<Option<Value>, String> {
+    fn send(
+        &mut self,
+        message: &Value,
+        want: Option<u64>,
+        timeout: Duration,
+        control: &Control,
+    ) -> Result<Option<Value>, String> {
         match &mut self.link {
             Link::Stdio { stdin, .. } => {
                 let mut line = serde_json::to_vec(message).map_err(|e| e.to_string())?;
@@ -270,57 +304,34 @@ impl Server {
                 headers,
                 session,
             } => {
-                let mut request = agent
-                    .post(url.as_str())
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("MCP-Protocol-Version", VERSION);
-                for (name, value) in headers.iter() {
-                    request = request.header(name.as_str(), value.as_str());
-                }
-                if let Some(session) = session {
-                    request = request.header("Mcp-Session-Id", session.as_str());
-                }
-                let body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
-                let response = request
-                    .send(&body[..])
-                    .map_err(|e| format!("cannot reach {url}: {e}"))?;
-                let status = response.status();
-                let header =
-                    |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok());
-                if let Some(id) = header("mcp-session-id") {
-                    *session = Some(id.to_owned());
-                }
-                let stream =
-                    header("content-type").is_some_and(|t| t.starts_with("text/event-stream"));
-                let mut reader = BufReader::new(response.into_body().into_reader().take(MAX_REPLY));
-                if !status.is_success() {
-                    let mut text = String::new();
-                    let _ = reader.take(4096).read_to_string(&mut text);
-                    return Err(format!("{url} answered {status}: {}", text.trim()));
-                }
-                let Some(id) = want else { return Ok(None) };
-                if !stream {
-                    return serde_json::from_reader(reader)
-                        .map(Some)
-                        .map_err(|e| format!("{url} sent a bad reply: {e}"));
-                }
-                // The reply is one of the stream's events; others are notifications.
-                let mut line = String::new();
+                // On its own thread, so `abort` does not wait for the server. A request given up
+                // on ends by itself at `timeout`.
+                let (tx, result) = mpsc::channel();
+                let post = Post {
+                    agent: agent.clone(),
+                    url: url.clone(),
+                    headers: headers.clone(),
+                    session: session.clone(),
+                    timeout,
+                };
+                let message = message.clone();
+                std::thread::spawn(move || tx.send(post.send(&message, want)));
                 loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => return Err(format!("{url} closed the stream without a reply")),
-                        Ok(_) => {}
-                        Err(e) => return Err(format!("the stream from {url} broke: {e}")),
-                    }
-                    let Some(data) = line.trim_end().strip_prefix("data:") else {
-                        continue;
-                    };
-                    if let Ok(message) = serde_json::from_str::<Value>(data)
-                        && is_reply(&message, id)
-                    {
-                        return Ok(Some(message));
+                    match result.recv_timeout(POLL) {
+                        Ok(result) => {
+                            let (id, reply) = result?;
+                            if id.is_some() {
+                                *session = id;
+                            }
+                            return Ok(reply);
+                        }
+                        Err(RecvTimeoutError::Timeout) if control.aborted() => {
+                            return Err(ABORTED.into());
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => {
+                            return Err(format!("the request to {url} was lost"));
+                        }
                     }
                 }
             }
@@ -338,7 +349,7 @@ impl Server {
         self.next_id += 1;
         let id = self.next_id;
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let mut reply = match self.send(&message, Some(id))? {
+        let mut reply = match self.send(&message, Some(id), timeout, control)? {
             Some(reply) => reply,
             None => {
                 let Link::Stdio { messages, .. } = &self.link else {
@@ -346,7 +357,7 @@ impl Server {
                 };
                 let deadline = Instant::now() + timeout;
                 loop {
-                    match messages.recv_timeout(Duration::from_millis(100)) {
+                    match messages.recv_timeout(POLL) {
                         Ok(message) if is_reply(&message, id) => break message,
                         // Notifications, requests to us (we offer no capabilities), replies to calls given up on.
                         Ok(_) => {}
@@ -354,7 +365,7 @@ impl Server {
                             return Err("the server stopped".into());
                         }
                         Err(RecvTimeoutError::Timeout) if control.aborted() => {
-                            return Err("Aborted by the user".into());
+                            return Err(ABORTED.into());
                         }
                         Err(RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
                             return Err(format!("no reply to {method} in {} s", timeout.as_secs()));
@@ -405,6 +416,91 @@ impl Server {
             Err(text)
         } else {
             Ok(text)
+        }
+    }
+}
+
+/// One HTTP POST to a server, with everything it needs owned so that it can run on its own thread.
+struct Post {
+    agent: ureq::Agent,
+    url: String,
+    headers: Vec<(String, String)>,
+    session: Option<String>,
+    timeout: Duration,
+}
+
+impl Post {
+    /// The session id the server set, if any, and the reply to request `want`.
+    fn send(
+        &self,
+        message: &Value,
+        want: Option<u64>,
+    ) -> Result<(Option<String>, Option<Value>), String> {
+        let url = &self.url;
+        let mut request = self
+            .agent
+            .post(url.as_str())
+            .config()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", VERSION);
+        for (name, value) in &self.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some(session) = &self.session {
+            request = request.header("Mcp-Session-Id", session.as_str());
+        }
+        let body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
+        let response = request
+            .send(&body[..])
+            .map_err(|e| format!("cannot reach {url}: {e}"))?;
+        let status = response.status();
+        let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok());
+        let session = header("mcp-session-id").map(str::to_owned);
+        let stream = header("content-type").is_some_and(|t| t.starts_with("text/event-stream"));
+        let mut reader = BufReader::new(response.into_body().into_reader().take(MAX_REPLY));
+        if !status.is_success() {
+            let mut text = String::new();
+            let _ = reader.take(4096).read_to_string(&mut text);
+            return Err(format!("{url} answered {status}: {}", text.trim()));
+        }
+        let Some(id) = want else {
+            return Ok((session, None));
+        };
+        if !stream {
+            return serde_json::from_reader(reader)
+                .map(|reply| (session, Some(reply)))
+                .map_err(|e| format!("{url} sent a bad reply: {e}"));
+        }
+        // The reply is one of the stream's events; others are notifications. An event's `data`
+        // lines are joined with newlines, and a blank line (or the end) closes it.
+        let (mut line, mut data) = (String::new(), String::new());
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("the stream from {url} broke: {e}"))?;
+            let text = line.trim_end_matches(['\r', '\n']);
+            if let Some(part) = text.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(part.strip_prefix(' ').unwrap_or(part));
+                continue;
+            }
+            if text.is_empty() {
+                if let Ok(message) = serde_json::from_str::<Value>(&data)
+                    && is_reply(&message, id)
+                {
+                    return Ok((session, Some(message)));
+                }
+                data.clear();
+            }
+            if read == 0 {
+                return Err(format!("{url} closed the stream without a reply"));
+            }
         }
     }
 }

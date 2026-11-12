@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
-/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`.
+/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
@@ -39,6 +39,7 @@ while IFS= read -r line; do
       choice=$(printf '%s' "$line" | sed 's/.*"choice":"\([^"]*\)".*/\1/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"chose $choice\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
+    *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *) echo "$ok" ;;
   esac
@@ -593,4 +594,24 @@ fn rewind_removes_the_prompt_and_what_followed_from_history() {
         entries.iter().filter(|e| e["type"] == "turn_end").count(),
         1
     );
+
+    // The engine no longer has that prompt, so its nonce can be sent again.
+    let again = w.ok("prompt", json!({"bot": bot, "nonce": "n2", "text": "hi"}));
+    assert_eq!(again.get("duplicate"), None, "{again}");
+    eventually("the prompt to reach the engine again", || {
+        prompts_received(&home, &bot, "n2") == 2
+    });
+}
+
+#[test]
+fn a_bot_is_busy_while_its_conversation_is_compacted() {
+    let home = home("compact-busy");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let compact = w.send("compact", json!({"bot": bot}));
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], true);
+    let done = w.wait_for(|f| f["type"] == "response" && f["id"] == compact.as_str());
+    assert_eq!(done["success"], true, "{done}");
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], false);
 }

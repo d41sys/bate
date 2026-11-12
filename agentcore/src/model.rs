@@ -5,6 +5,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
+
+/// How often a wait for the server looks for `abort`.
+const POLL: Duration = Duration::from_millis(100);
 
 pub struct Provider {
     agent: ureq::Agent,
@@ -82,8 +87,9 @@ impl Provider {
         })
     }
 
-    /// Streams one reply. `abort` is checked between streamed lines.
-    // shortcut: a server that stalls without sending blocks abort until it sends or closes; add a read timeout if that shows up.
+    /// Streams one reply. `abort` ends it within `POLL`, whether or not the server is sending.
+    // shortcut: after an abort the connection stays open until the server next sends or closes
+    // (ureq cannot close it from here); switch HTTP client if servers keep generating into it.
     pub fn stream(
         &self,
         ask: &Ask,
@@ -99,41 +105,57 @@ impl Provider {
             reasoning_effort: ask.effort,
         };
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-        let mut request = self
-            .agent
-            .post(&self.url)
-            .header("Content-Type", "application/json");
-        if let Some(key) = &self.key {
-            request = request.header("Authorization", format!("Bearer {key}"));
-        }
-        let response = request
-            .send(&body[..])
-            .map_err(|e| format!("cannot reach the model server at {}: {e}", self.url))?;
-        let status = response.status();
-        let mut reader = BufReader::new(response.into_body().into_reader());
-        if !status.is_success() {
-            let mut text = String::new();
-            let _ = reader.take(4096).read_to_string(&mut text);
-            return Err(format!(
-                "the model server answered {status}: {}",
-                text.trim()
-            ));
-        }
+        let (agent, url, key) = (self.agent.clone(), self.url.clone(), self.key.clone());
+        // The request is made and read on its own thread: a server that sends nothing must not
+        // hold `abort` up. Bounded, so a fast server waits for us.
+        let (tx, lines) = mpsc::sync_channel::<Result<String, String>>(64);
+        std::thread::spawn(move || {
+            let read = || -> Result<(), String> {
+                let mut request = agent.post(&url).header("Content-Type", "application/json");
+                if let Some(key) = &key {
+                    request = request.header("Authorization", format!("Bearer {key}"));
+                }
+                let response = request
+                    .send(&body[..])
+                    .map_err(|e| format!("cannot reach the model server at {url}: {e}"))?;
+                let status = response.status();
+                let mut reader = BufReader::new(response.into_body().into_reader());
+                if !status.is_success() {
+                    let mut text = String::new();
+                    let _ = reader.take(4096).read_to_string(&mut text);
+                    return Err(format!(
+                        "the model server answered {status}: {}",
+                        text.trim()
+                    ));
+                }
+                loop {
+                    let mut line = String::new();
+                    let n = reader
+                        .read_line(&mut line)
+                        .map_err(|e| format!("the model stream broke: {e}"))?;
+                    // The end of the stream, or nobody listens any more.
+                    if n == 0 || tx.send(Ok(line)).is_err() {
+                        return Ok(());
+                    }
+                }
+            };
+            if let Err(e) = read() {
+                let _ = tx.send(Err(e));
+            }
+        });
         let mut reply = Reply::default();
-        let mut line = String::new();
         loop {
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .map_err(|e| format!("the model stream broke: {e}"))?;
+            let received = lines.recv_timeout(POLL);
             if abort.load(Ordering::SeqCst) {
                 reply.calls.clear();
                 reply.aborted = true;
                 return Ok(reply);
             }
-            if n == 0 {
-                break;
-            }
+            let line = match received {
+                Ok(line) => line?,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
             let Some(data) = line.trim_end().strip_prefix("data:").map(str::trim_start) else {
                 continue;
             };

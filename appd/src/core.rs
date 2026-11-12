@@ -109,6 +109,8 @@ enum Settles {
     Question(String),
     /// The transcript goes back to before the prompt with this nonce.
     Rewind(String),
+    /// The bot stops counting as busy with this compaction.
+    Compact,
 }
 
 struct Running {
@@ -119,7 +121,10 @@ struct Running {
     /// Requests held until the engine says `ready`.
     queued: Vec<(String, Op)>,
     waiting: HashMap<String, Waiter>,
+    /// Between `turn_start` and `turn_end`.
     busy: bool,
+    /// `compact` requests the engine has not answered yet.
+    compacting: u32,
 }
 
 pub struct Core {
@@ -373,8 +378,10 @@ impl Core {
                 };
                 let settles = match &op {
                     Op::Rewind { entry, .. } => Settles::Rewind(entry.clone()),
+                    Op::Compact => Settles::Compact,
                     _ => Settles::Nothing,
                 };
+                let compact = matches!(settles, Settles::Compact);
                 self.send_op(
                     &bot,
                     op,
@@ -385,6 +392,9 @@ impl Core {
                         settles,
                     },
                 )?;
+                if compact && let Some(r) = self.engines.get_mut(&bot) {
+                    r.compacting += 1;
+                }
                 Ok(None)
             }
             "list_routines" => {
@@ -458,7 +468,7 @@ impl Core {
     fn bot_info(&self, bot: &str, mut row: Value) -> Value {
         let running = self.engines.get(bot);
         row["running"] = json!(running.is_some());
-        row["busy"] = json!(running.is_some_and(|r| r.busy));
+        row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         row
     }
 
@@ -605,6 +615,7 @@ impl Core {
                 queued: Vec::new(),
                 waiting: HashMap::new(),
                 busy: false,
+                compacting: 0,
             },
         );
         self.send_op(bot, open, Waiter::Service)?;
@@ -718,6 +729,11 @@ impl Core {
                                 self.broadcast(&json!({"type": "history_changed", "bot": bot}))
                             }
                             Err(e) => log!("bot {bot}: history not rewound: {e}"),
+                        }
+                    }
+                    (Settles::Compact, _) => {
+                        if let Some(r) = self.engines.get_mut(bot) {
+                            r.compacting = r.compacting.saturating_sub(1);
                         }
                     }
                     _ => {}

@@ -16,6 +16,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(10);
 
 /// Serves one scripted streaming reply per request, in order, and records each request body.
+/// A `null` chunk holds that reply open.
 struct Model {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -51,6 +52,12 @@ impl Model {
                     "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
                 );
                 for chunk in chunks {
+                    // `null` holds the reply open until the engine hangs up.
+                    if chunk.is_null() {
+                        let _ = stream.write_all(reply.as_bytes());
+                        let _ = reader.read(&mut [0]);
+                        break;
+                    }
                     reply.push_str(&format!("data: {chunk}\n\n"));
                 }
                 reply.push_str("data: [DONE]\n\n");
@@ -688,7 +695,10 @@ fn rewind_as_a_fork_starts_a_new_conversation_and_keeps_the_original() {
 }
 
 /// An MCP server over stdio: one tool, `echo`, which answers "echoed" and logs each call to `calls.log`.
+/// A stdio MCP server with one tool, `echo`. Writes its process id to `mcp.pid` and each call to
+/// `calls.log`.
 const FAKE_MCP: &str = r#"#!/bin/sh
+echo $$ > mcp.pid
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
@@ -862,21 +872,23 @@ fn mcp_http() -> (String, Receiver<(String, Value)>) {
                     "application/json",
                     "",
                     result(
-                        json!({"tools": [{"name": "hello", "inputSchema": {"type": "object"}}]}),
+                        json!({"tools": [{"name": "hello", "inputSchema": {"type": "object"}},
+                            {"name": "slow", "inputSchema": {"type": "object"}}]}),
                     ),
                 ),
-                "tools/call" => (
-                    "200 OK",
-                    "text/event-stream",
-                    "",
-                    format!(
-                        "event: message\ndata: {}\n\n",
-                        result(json!({"content": [{"type": "text", "text": "from http"}]}))
-                    ),
-                ),
+                "tools/call" => ("200 OK", "text/event-stream", "", {
+                    // One event whose data is split over two lines.
+                    let reply = result(json!({"content": [{"type": "text", "text": "from http"}]}));
+                    let (a, b) = reply.split_at(reply.find(',').unwrap() + 1);
+                    format!("event: message\ndata: {a}\ndata: {b}\n\n")
+                }),
                 _ => ("202 Accepted", "application/json", "", String::new()),
             };
+            let slow = body["params"]["name"] == "slow";
             let _ = tx.send((head, body));
+            if slow {
+                thread::sleep(WAIT * 3);
+            }
             let _ = write!(
                 stream,
                 "HTTP/1.1 {status}\r\ncontent-type: {kind}\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{payload}",
@@ -894,6 +906,8 @@ fn an_http_connector_keeps_its_session_and_headers_and_reads_a_streamed_reply() 
     let model = Model::serve(vec![
         vec![call("c1", "web__hello", json!({}))],
         vec![text("Done.")],
+        vec![call("c2", "web__hello", json!({}))],
+        vec![text("Not done.")],
     ]);
     let mut engine = Engine::start(&dir, &model);
     engine.open_new();
@@ -912,6 +926,11 @@ fn an_http_connector_keeps_its_session_and_headers_and_reads_a_streamed_reply() 
         "{events:?}"
     );
     assert!(tool_names(&model, 0).contains(&"web__hello".to_owned()));
+
+    // A denied call never reaches the server: one `tools/call` below.
+    engine.prompt_as("n2", "say hello again");
+    answer(&mut engine, "Deny");
+    engine.until(is_turn_end);
     let requests: Vec<(String, Value)> = seen.try_iter().collect();
     let methods: Vec<&str> = requests
         .iter()
@@ -993,4 +1012,140 @@ fn a_summary_that_fails_does_not_end_the_turn() {
     );
     // Nothing was summarised, so the model still gets the whole conversation.
     assert!(sent(&model, 3).contains("Q1"));
+}
+
+fn aborted() -> Event {
+    Event::TurnEnd {
+        reason: TurnEnd::Aborted,
+        error: None,
+    }
+}
+
+#[test]
+fn abort_ends_a_call_to_an_http_connector_that_does_not_answer() {
+    let dir = workdir("mcp-http-abort");
+    let (url, seen) = mcp_http();
+    let model = Model::serve(vec![vec![call("c1", "web__slow", json!({}))]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let transport = Transport::Http {
+        url,
+        headers: Default::default(),
+    };
+    let connectors = vec![connector("web", transport)];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+
+    engine.prompt_as("n1", "wait for it");
+    answer(&mut engine, "Approve");
+    // The server has the call and holds it for longer than this test waits.
+    while seen.recv_timeout(WAIT).unwrap().1["method"] != "tools/call" {}
+    assert_eq!(engine.request(Op::Abort), None);
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::ToolEnd { is_error: true, output, .. } if output.contains("Aborted")),
+        "{events:?}"
+    );
+    assert_eq!(events.last(), Some(&aborted()));
+}
+
+fn script(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, text).unwrap();
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    path
+}
+
+fn eventually(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if done() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn a_stdio_server_that_stopped_is_started_again_for_the_next_turn() {
+    let dir = workdir("mcp-restart");
+    let server = script(&dir, "fake-mcp", FAKE_MCP);
+    let model = Model::serve(vec![
+        vec![text("Hi.")],
+        vec![call("c1", "fake__echo", json!({"text": "hi"}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let connectors = vec![connector("fake", stdio(&server))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+    engine.exchange("n1", "hello");
+
+    let pid_file = dir.join("mcp.pid");
+    let first = fs::read_to_string(&pid_file).unwrap();
+    let state = || {
+        let ps = Command::new("ps")
+            .args(["-o", "state=", "-p", first.trim()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+    };
+    Command::new("kill").arg(first.trim()).status().unwrap();
+    // Gone, or dead and not yet collected by the engine.
+    eventually("the server to stop", || {
+        state().is_empty() || state().starts_with('Z')
+    });
+
+    engine.prompt_as("n2", "echo hi");
+    answer(&mut engine, "Approve");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::ToolEnd { output, is_error: false, .. } if output == "echoed"),
+        "{events:?}"
+    );
+    assert_ne!(fs::read_to_string(&pid_file).unwrap(), first);
+}
+
+#[test]
+fn a_connector_start_that_was_aborted_is_tried_again_on_the_next_turn() {
+    let dir = workdir("mcp-slow-start");
+    script(&dir, "fake-mcp", FAKE_MCP);
+    // Hangs the first time it is started, and is the fake server after that.
+    let slow = script(
+        &dir,
+        "slow-mcp",
+        "#!/bin/sh\nif [ ! -e started ]; then : > started; sleep 30; fi\nexec ./fake-mcp\n",
+    );
+    let model = Model::serve(vec![vec![text("Hi.")]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let connectors = vec![connector("slow", stdio(&slow))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+
+    engine.prompt_as("n1", "hello");
+    eventually("the server to start", || dir.join("started").exists());
+    assert_eq!(engine.request(Op::Abort), None);
+    assert_eq!(engine.until(is_turn_end), [aborted()]);
+
+    engine.exchange("n2", "hello again");
+    assert!(tool_names(&model, 0).contains(&"slow__echo".to_owned()));
+}
+
+#[test]
+fn abort_during_a_compaction_says_that_nothing_was_compacted() {
+    let dir = workdir("compact-abort");
+    let mut script = replies(&["A1", "A2", "A3"]);
+    script.push(vec![Value::Null]);
+    let model = Model::serve(script);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    for (nonce, text) in [("n1", "Q1"), ("n2", "Q2"), ("n3", "Q3")] {
+        engine.exchange(nonce, text);
+    }
+    let compact = engine.send(Op::Compact);
+    eventually("the request for a summary", || model.requests().len() == 4);
+    assert_eq!(engine.request(Op::Abort), None);
+    match engine.next() {
+        Event::Response { id, error: Some(e) } if id == compact => assert_eq!(e, "aborted"),
+        other => panic!("expected the refused compact, got {other:?}"),
+    }
 }

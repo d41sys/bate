@@ -161,15 +161,24 @@ impl Store {
         Ok(self.0.last_insert_rowid())
     }
 
-    /// Removes the prompt entry with `nonce` and everything after it. Does nothing if there is none.
+    /// Removes the prompt entry with `nonce` and everything after it, and forgets the removed
+    /// prompts in the ledger: the engine no longer has them. Does nothing if there is no such prompt.
     pub fn rewind_transcript(&self, bot: &str, nonce: &str) -> Result<()> {
-        self.0
-            .execute(
-                "DELETE FROM transcript WHERE bot = ?1 AND seq >= (SELECT min(seq) FROM transcript
-                 WHERE bot = ?1 AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?2)",
-                [bot, nonce],
-            )
-            .map(drop)
+        const FROM: &str = "(SELECT min(seq) FROM transcript WHERE bot = ?1
+            AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?2)";
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            &format!(
+                "DELETE FROM ledger WHERE bot = ?1 AND nonce IN (SELECT json_extract(entry, '$.nonce')
+                 FROM transcript WHERE bot = ?1 AND json_extract(entry, '$.type') = 'prompt' AND seq >= {FROM})"
+            ),
+            [bot, nonce],
+        )?;
+        tx.execute(
+            &format!("DELETE FROM transcript WHERE bot = ?1 AND seq >= {FROM}"),
+            [bot, nonce],
+        )?;
+        tx.commit()
     }
 
     /// A bot's whole transcript, oldest first, as `{seq, at, entry}`.
