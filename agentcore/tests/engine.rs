@@ -911,6 +911,7 @@ fn an_http_connector_keeps_its_session_and_headers_and_reads_a_streamed_reply() 
         matches!(&events[0], Event::ToolEnd { output, is_error: false, .. } if output == "from http"),
         "{events:?}"
     );
+    assert!(tool_names(&model, 0).contains(&"web__hello".to_owned()));
     let requests: Vec<(String, Value)> = seen.try_iter().collect();
     let methods: Vec<&str> = requests
         .iter()
@@ -931,4 +932,65 @@ fn an_http_connector_keeps_its_session_and_headers_and_reads_a_streamed_reply() 
         "{head}"
     );
     assert_eq!(body["params"]["name"], "hello");
+}
+
+#[test]
+fn compaction_keeps_a_tool_result_together_with_its_call() {
+    let dir = workdir("compact-tools");
+    fs::write(dir.join("a.txt"), "content\n").unwrap();
+    let model = Model::serve(vec![
+        vec![call("c1", "read", json!({"path": "a.txt"}))],
+        vec![text("A1")],
+        vec![text("A2")],
+        vec![text("SUMMARY")],
+        vec![text("A3")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.exchange("n1", "Q1");
+    engine.exchange("n2", "Q2");
+    // Six messages, the last four kept: the cut would fall on the tool result.
+    assert_eq!(engine.request(Op::Compact), None);
+    engine.exchange("n3", "Q3");
+
+    let messages = model.requests()[4]["messages"].as_array().unwrap().clone();
+    let result = messages
+        .iter()
+        .position(|m| m["role"] == "tool")
+        .expect("the result is kept");
+    let call_before = messages[..result]
+        .iter()
+        .any(|m| m["tool_calls"][0]["id"] == "c1");
+    assert!(call_before, "{messages:?}");
+}
+
+#[test]
+fn a_summary_that_fails_does_not_end_the_turn() {
+    let dir = workdir("compact-fails");
+    // The third reply answers the request for a summary with a tool call and no text.
+    let model = Model::serve(vec![
+        vec![text("A1")],
+        vec![text("A2")],
+        vec![call("c1", "read", json!({"path": "a.txt"}))],
+        vec![text("A3")],
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL_CONTEXT", "100")]);
+    engine.open_new();
+    let long = "x".repeat(150);
+    engine.exchange("n1", &format!("Q1 {long}"));
+    engine.exchange("n2", &format!("Q2 {long}"));
+    engine.prompt_as("n3", "Q3");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        events,
+        [
+            Event::Text { delta: "A3".into() },
+            Event::TurnEnd {
+                reason: TurnEnd::Done,
+                error: None
+            }
+        ]
+    );
+    // Nothing was summarised, so the model still gets the whole conversation.
+    assert!(sent(&model, 3).contains("Q1"));
 }

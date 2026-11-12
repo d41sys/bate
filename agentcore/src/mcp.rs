@@ -20,6 +20,8 @@ const CALL: Duration = Duration::from_secs(120);
 const MAX_REPLY: u64 = 64 << 20;
 
 /// The connectors tried so far. `None`: it failed to load, and is not tried again until it changes.
+// shortcut: a server that stops later is not restarted (its calls fail with "the server stopped")
+// until its settings change or the engine restarts; restart it here if that proves common.
 #[derive(Default)]
 pub struct Servers(Vec<(Connector, Option<Server>)>);
 
@@ -72,7 +74,25 @@ impl Servers {
             if self.0.iter().any(|(known, _)| known == connector) {
                 continue;
             }
-            let server = Server::connect(connector, dir, control)
+            let mut server = Server::connect(connector, dir, control);
+            // An aborted start is not a failure: the next turn tries again.
+            if control.aborted() {
+                return;
+            }
+            if let Ok(server) = &mut server {
+                // `x` + `y__z` and `x__y` + `z` would make the same name; the first one keeps it.
+                server.tools.retain(|tool| {
+                    let free = self.title(&tool.exposed).is_none();
+                    if !free {
+                        eprintln!(
+                            "connector {}: tool `{}` left out: the name `{}` is taken",
+                            connector.name, tool.name, tool.exposed
+                        );
+                    }
+                    free
+                });
+            }
+            let server = server
                 .map_err(|e| eprintln!("connector {}: {e}", connector.name))
                 .ok();
             self.0.push((connector.clone(), server));
@@ -131,7 +151,8 @@ impl Server {
                     .map_err(|e| format!("cannot start `{command}`: {e}"))?;
                 let stdin = child.stdin.take().expect("stdin is piped");
                 let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
-                let (tx, messages) = mpsc::channel();
+                // Bounded: a server that floods its output waits for us instead of filling memory.
+                let (tx, messages) = mpsc::sync_channel(256);
                 std::thread::spawn(move || {
                     let mut buf = Vec::new();
                     loop {

@@ -142,7 +142,7 @@ impl Engine {
 
     fn idle(&self) -> Result<(), String> {
         match self.running {
-            Some(_) => Err("a turn is running".into()),
+            Some(_) => Err("the engine is busy with a turn or a compaction".into()),
             None => Ok(()),
         }
     }

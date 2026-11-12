@@ -137,6 +137,14 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the first message is a compaction's summary.
+    pub fn starts_with_summary(&self) -> bool {
+        self.messages
+            .first()
+            .and_then(|m| m["content"].as_str())
+            .is_some_and(|c| c.starts_with(SUMMARY))
+    }
+
     /// Rough size of what the model sees.
     // shortcut: 4 bytes per token; use the server's own token counts once a provider reports them (#8).
     pub fn tokens(&self) -> usize {
@@ -175,10 +183,12 @@ impl Session {
             (self.id, self.path, self.file) = (id, path, file);
         } else {
             // Written beside the file and renamed over it, so a kill leaves the old or the new one.
+            // The handle is opened first: once the rename has happened nothing here can fail.
             let tmp = self.path.with_extension("tmp");
             fs::write(&tmp, kept)?;
+            let file = OpenOptions::new().append(true).open(&tmp)?;
             fs::rename(&tmp, &self.path)?;
-            self.file = OpenOptions::new().append(true).open(&self.path)?;
+            self.file = file;
         }
         self.messages = replay(kept);
         self.bytes = size(&self.messages);

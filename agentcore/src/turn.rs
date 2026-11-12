@@ -61,7 +61,7 @@ impl Turn {
         let turn = session
             .mark_prompt(&nonce)
             .map_err(saved)
-            .and_then(|()| self.turn(session, mcp, text));
+            .and_then(|()| self.turn(session, mcp, &nonce, text));
         let (reason, error) = match turn {
             Ok(reason) => (reason, None),
             Err(e) => (TurnEnd::Error, Some(e)),
@@ -73,8 +73,11 @@ impl Turn {
         &self,
         session: &mut Session,
         mcp: &mut Servers,
+        nonce: &str,
         text: String,
     ) -> Result<TurnEnd, String> {
+        // Numbers the tool calls a server sent without an id.
+        let mut unnamed = 0;
         let system = self.system();
         mcp.sync(&self.connectors, &self.dir, &self.control);
         let tools = tool_list(mcp);
@@ -91,7 +94,10 @@ impl Turn {
                 return Ok(TurnEnd::Aborted);
             }
             if session.tokens() > self.context / 5 * 4 {
-                self.compact(session, &system, &tools)?;
+                // A summary that fails must not end the turn, or every later prompt would fail the same way.
+                if let Err(e) = self.compact(session, &system, &tools) {
+                    eprintln!("the context was not compacted: {e}");
+                }
                 if self.control.aborted() {
                     return Ok(TurnEnd::Aborted);
                 }
@@ -110,12 +116,11 @@ impl Turn {
                 mut calls,
                 aborted,
             } = reply;
-            let base = session.messages.len();
-            for (i, call) in calls.iter_mut().enumerate() {
-                // Some local servers send no id; each call in the conversation still needs its own.
-                if call.id.is_empty() {
-                    call.id = format!("call_{base}_{i}");
-                }
+            for call in calls.iter_mut().filter(|c| c.id.is_empty()) {
+                // Some local servers send no id; each call in the conversation still needs its own,
+                // and the message count would repeat after a compaction.
+                call.id = format!("call_{nonce}_{unnamed}");
+                unnamed += 1;
             }
             if !text.is_empty() || !calls.is_empty() {
                 let mut message = json!({"role": "assistant", "content": text});
@@ -207,7 +212,7 @@ impl Turn {
     }
 
     /// Asks the model to summarise all but the last `KEEP` messages and puts the summary in their
-    /// place. Does nothing when there is nothing that old, or when the turn was aborted meanwhile.
+    /// place. Does nothing when there is nothing that old.
     fn compact(&self, session: &mut Session, system: &str, tools: &Value) -> Result<(), String> {
         let messages = &session.messages;
         let mut cut = messages.len().saturating_sub(KEEP);
@@ -215,7 +220,8 @@ impl Turn {
         while cut > 0 && messages[cut]["role"] == "tool" {
             cut -= 1;
         }
-        if cut == 0 {
+        // Nothing old, or only an earlier summary: summarising that again would only lose detail.
+        if cut == 0 || (cut == 1 && session.starts_with_summary()) {
             return Ok(());
         }
         // Same system text and tools as a turn, so a provider's prompt cache still applies.
@@ -225,7 +231,7 @@ impl Turn {
             .provider
             .stream(&ask, self.control.aborted_flag(), |_| {})?;
         if reply.aborted {
-            return Ok(());
+            return Err("aborted".into());
         }
         let summary = reply.text.trim();
         if summary.is_empty() {
