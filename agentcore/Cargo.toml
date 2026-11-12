@@ -1,0 +1,11 @@
+[package]
+name = "agentcore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0.2"
+proto = { path = "../proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"

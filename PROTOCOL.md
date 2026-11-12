@@ -55,6 +55,15 @@ An engine also exits when its standard input closes: the service has stopped or 
 
 A killed engine sends nothing more.
 
+## `agentcore` (Bate's own engine)
+
+- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
+- **Approval:** `write`, `edit` and `run` ask first: a `question` whose id is the tool call's id, options `Approve` and `Deny`. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
+- **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command and ends the turn `aborted`; calls not yet run get "Not run" results.
+- **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one chat message per line, written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
+- `rewind` and `compact` are refused until #9.
+
 ## Window ⇄ service (v1)
 
 `appd` is the per-user service (launchd label `com.oursnever.bate.appd`). Its data lives in `~/Library/Application Support/Bate/`, or in `$APPD_HOME`; a custom home gets the label `com.oursnever.bate.appd.<hash>` so a test never touches the real agent. `appd launch` registers and starts it; `appd unregister` stops and removes it. A second `appd` for the same home exits at once (`run/appd.lock`). The service log is `logs/appd.log`, capped at 5 MiB; older lines move to `appd.1.log` … `appd.3.log` and the oldest file is dropped.
