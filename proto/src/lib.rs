@@ -174,18 +174,12 @@ pub fn read_frame<T: DeserializeOwned>(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// The engine program: `$APPD_ENGINE` made absolute against the service's own
-/// working directory (the engine runs in the bot's folder), else `agentcore`
-/// next to the running executable, else `agentcore` on `PATH`.
+/// The engine program: `$APPD_ENGINE`, else `agentcore` next to the running
+/// executable, else `agentcore` on `PATH`. A relative `$APPD_ENGINE` resolves
+/// against the service's working directory, not the bot's folder.
 pub fn engine_program() -> PathBuf {
     if let Some(p) = std::env::var_os("APPD_ENGINE").filter(|p| !p.is_empty()) {
-        let p = PathBuf::from(p);
-        // A bare name stays a `PATH` lookup.
-        return if p.components().count() > 1 {
-            std::path::absolute(&p).unwrap_or(p)
-        } else {
-            p
-        };
+        return PathBuf::from(p);
     }
     let sibling = std::env::current_exe()
         .ok()
