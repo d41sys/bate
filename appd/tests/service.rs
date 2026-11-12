@@ -1,0 +1,288 @@
+//! Starts the real `appd` with a private home folder and a fake engine, and
+//! talks to it over its socket the way a window does.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+/// Answers every request. A prompt `hang` is never answered; a prompt `ask`
+/// asks question `q1`; any other prompt streams "hel", waits a second, then "lo".
+const FAKE_ENGINE: &str = r#"#!/bin/sh
+echo '{"type":"ready","protocol":1}'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
+  ok="{\"type\":\"response\",\"id\":\"$id\"}"
+  case "$line" in
+    *'"type":"start"'*) echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
+    *'"type":"prompt"'*)
+      printf '%s\n' "$line" >> prompts.log
+      nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
+      case "$line" in
+        *'"text":"hang"'*) ;;
+        *'"text":"ask"'*)
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
+        *)
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo '{"type":"text","delta":"hel"}'; sleep 1
+          echo '{"type":"text","delta":"lo"}'; echo '{"type":"turn_end","reason":"done"}' ;;
+      esac ;;
+    *'"type":"answer"'*)
+      choice=$(printf '%s' "$line" | sed 's/.*"choice":"\([^"]*\)".*/\1/')
+      echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"chose $choice\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
+    *) echo "$ok" ;;
+  esac
+done
+"#;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+fn home(name: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("appd-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    let engine = home.join("fake-engine");
+    fs::write(&engine, FAKE_ENGINE).unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    home
+}
+
+struct Service(Child);
+
+impl Service {
+    fn start(home: &Path) -> Service {
+        let child = Command::new(env!("CARGO_BIN_EXE_appd"))
+            .env("APPD_HOME", home)
+            .env("APPD_ENGINE", home.join("fake-engine"))
+            .stdin(Stdio::null())
+            .stderr(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(home.join("appd.log"))
+                    .unwrap(),
+            )
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        while UnixStream::connect(home.join("run/appd.sock")).is_err() {
+            assert!(Instant::now() < deadline, "appd did not open its socket");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Service(child)
+    }
+
+    /// SIGKILL: no chance to clean up, like a crash or power loss.
+    fn kill(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+struct Window {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    next: u64,
+}
+
+impl Window {
+    fn connect(home: &Path) -> Window {
+        let stream = UnixStream::connect(home.join("run/appd.sock")).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let mut w = Window {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+            next: 0,
+        };
+        assert_eq!(w.frame()["type"], "hello");
+        w.ok("hello", json!({"protocol": 1}));
+        w
+    }
+
+    fn frame(&mut self) -> Value {
+        let mut line = String::new();
+        self.reader
+            .read_line(&mut line)
+            .expect("no frame from appd in time");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn send(&mut self, command: &str, mut fields: Value) -> String {
+        self.next += 1;
+        let id = self.next.to_string();
+        fields["id"] = json!(id);
+        fields["type"] = json!(command);
+        writeln!(self.writer, "{fields}").unwrap();
+        id
+    }
+
+    /// The `data` of a successful reply; other frames that arrive first are skipped.
+    fn ok(&mut self, command: &str, fields: Value) -> Value {
+        let id = self.send(command, fields);
+        let reply = self.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["success"], true, "{command} failed: {reply}");
+        reply["data"].clone()
+    }
+
+    fn wait_for(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let f = self.frame();
+            if pred(&f) {
+                return f;
+            }
+        }
+    }
+
+    fn create_bot(&mut self) -> String {
+        self.ok("create_bot", json!({"name": "Ada"}))["bot"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+fn prompts_received(home: &Path, bot: &str, nonce: &str) -> usize {
+    let log =
+        fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default();
+    log.lines()
+        .filter(|l| l.contains(&format!("\"nonce\":\"{nonce}\"")))
+        .count()
+}
+
+fn eventually(what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !check() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_reply_finishes_after_the_window_quits_and_history_has_all_of_it() {
+    let home = home("socket");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let bots = w.ok("list_bots", json!({}));
+    assert_eq!(bots["bots"][0]["id"], bot.as_str());
+    assert_eq!(bots["bots"][0]["name"], "Ada");
+
+    assert_eq!(
+        w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"})),
+        json!({})
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["delta"] == "hel");
+    drop(w); // The window quits mid-reply: the engine still has a second to go.
+
+    let mut w = Window::connect(&home);
+    let deadline = Instant::now() + TIMEOUT;
+    let history = loop {
+        let history = w.ok("open_bot", json!({"bot": bot}))["history"]
+            .as_array()
+            .unwrap()
+            .clone();
+        if history.iter().any(|e| e["entry"]["type"] == "turn_end") {
+            break history;
+        }
+        assert!(Instant::now() < deadline, "the turn did not end");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let kinds: Vec<&str> = history
+        .iter()
+        .map(|e| e["entry"]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "prompt",
+            "session",
+            "turn_start",
+            "text",
+            "text",
+            "turn_end"
+        ]
+    );
+    let text: String = history
+        .iter()
+        .filter_map(|e| e["entry"]["delta"].as_str())
+        .collect();
+    assert_eq!(text, "hello");
+    assert_eq!(w.ok("open_bot", json!({"bot": bot}))["bot"]["busy"], false);
+}
+
+#[test]
+fn a_nonce_reaches_the_engine_once_even_across_a_crash() {
+    let home = home("ledger");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+
+    assert_eq!(
+        w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"})),
+        json!({})
+    );
+    assert_eq!(
+        w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"})),
+        json!({"duplicate": true})
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert_eq!(prompts_received(&home, &bot, "n1"), 1);
+
+    // The engine takes n2 but never answers; the service dies before it learns the outcome.
+    w.send("prompt", json!({"bot": bot, "nonce": "n2", "text": "hang"}));
+    eventually("the engine to receive n2", || {
+        prompts_received(&home, &bot, "n2") == 1
+    });
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(
+        w.ok("prompt", json!({"bot": bot, "nonce": "n2", "text": "hang"})),
+        json!({"duplicate": true, "uncertain": true})
+    );
+    assert_eq!(prompts_received(&home, &bot, "n2"), 1);
+}
+
+#[test]
+fn an_open_question_survives_a_reconnect_and_the_answer_reaches_the_engine() {
+    let home = home("questions");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "ask"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    drop(w);
+
+    let mut w = Window::connect(&home);
+    let questions = w.ok("open_bot", json!({"bot": bot}))["questions"].clone();
+    assert_eq!(questions[0]["question"], "q1");
+    assert_eq!(questions[0]["options"], json!(["Approve", "Deny"]));
+
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Approve"}),
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["delta"] == "chose Approve");
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["questions"],
+        json!([])
+    );
+    let again = w.send(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Approve"}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == again.as_str());
+    assert_eq!(reply["code"], "no_such_question");
+}

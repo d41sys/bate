@@ -9,12 +9,19 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+pub mod connectors;
+pub mod routines;
+
 /// Engine protocol version this build speaks; an engine announces it in `ready`.
 pub const PROTOCOL: u32 = 1;
 /// Largest service → engine frame, newline included.
 pub const MAX_OP_FRAME: usize = 1 << 20;
 /// Largest engine → service frame, newline included. Tool output is forwarded whole.
 pub const MAX_EVENT_FRAME: usize = 64 << 20;
+/// Window protocol version this build speaks (`hello`).
+pub const WINDOW_PROTOCOL: u32 = 1;
+/// Largest window → service frame, newline included.
+pub const MAX_WINDOW_FRAME: usize = 1 << 20;
 
 /// One operation sent to an engine, with the id its `response` carries back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

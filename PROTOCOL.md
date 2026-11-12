@@ -53,6 +53,89 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 
 A killed engine sends nothing more.
 
-## Window ⇄ service
+## Window ⇄ service (v1)
 
-Defined with the service in #3.
+`appd` is the per-user service (launchd label `com.oursnever.bate.appd`). Its data lives in `~/Library/Application Support/Bate/`, or in `$APPD_HOME`; a custom home gets the label `com.oursnever.bate.appd.<hash>` so a test never touches the real agent. `appd launch` registers and starts it; `appd unregister` stops and removes it. A second `appd` for the same home exits at once (`run/appd.lock`).
+
+### Transport
+
+- Unix socket `run/appd.sock` in the data folder. The folder is mode 0700, the socket 0600, and the service refuses a peer running as another user.
+- One JSON object per line. Window → service lines are capped at `proto::MAX_WINDOW_FRAME` (1 MiB); a longer line closes the connection.
+- On connect the service sends `{"type":"hello","app":"appd","protocols":[1],"pid":N}`. The window answers with the request `hello {protocol: 1}`. Any other request before it gets `hello_required`.
+
+### Requests and responses
+
+Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
+
+```json
+{"id":…,"type":"response","command":"<command>","success":true,"data":{…}}
+{"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
+```
+
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+
+| Command | Fields | `data` |
+|---|---|---|
+| `hello` | `protocol` | `{protocol}` |
+| `list_bots` | none | `{bots:[Bot]}` |
+| `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
+| `open_bot` | `bot` | `{bot: Bot, history:[Entry], questions:[question event]}` |
+| `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
+| `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open |
+| `steer` | `bot`, `text` | `{}` |
+| `abort`, `compact` | `bot` | `{}` |
+| `set_model` | `bot`, `model`, `effort?` | `{}` |
+| `rewind` | `bot`, `entry`, `fork` | `{}` |
+| `list_routines` | `bot` | `{routines:[Routine]}` |
+| `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
+| `delete_routine` | `bot`, `routineId` | `{}` |
+| `list_connectors` | `bot` | `{connectors:[Connector]}` |
+| `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
+| `delete_connector` | `bot`, `name` | `{}` |
+
+`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`.
+
+### Events (service → every window that said hello)
+
+| Frame | Meaning |
+|---|---|
+| `{"type":"transcript","bot","seq","at","entry"}` | An entry was appended to the bot's transcript. |
+| `{"type":"bots_changed"}` | Re-run `list_bots`. |
+| `{"type":"question_closed","bot","question"}` | The question was answered. |
+| `{"type":"engine_stopped","bot"}` | The bot's engine exited. Its open questions are dropped. |
+| `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
+| `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
+
+### Transcript
+
+The service appends every engine event except `ready` and `response` to the bot's transcript, plus `{"type":"prompt","nonce","text"}` for each prompt it sends. An `Entry` is `{seq, at, entry}`; `seq` grows and `at` is Unix milliseconds. Windows read history from here (`open_bot`), so a window that was closed or disconnected mid-reply sees the whole reply. Engines belong to the service, so closing a window never stops a reply.
+
+### Prompt ledger
+
+Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending`, committed to disk) before the prompt reaches the engine, and marks it `sent` when the engine answers the request. A nonce reaches the engine at most once:
+
+| A `prompt` whose nonce is… | Reply |
+|---|---|
+| new | sent; `{}` once the engine admits it |
+| `sending` or `sent` | `{duplicate:true}`; nothing is sent |
+| uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
+
+A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Questions
+
+An engine `question` is stored until `answer` or until the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
+
+### Routines
+
+Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly, monthly or yearly schedule at a wall time in an IANA zone, every `interval` periods counted from `anchor`. The service sets `id`, `anchor`, `nextRunMs` and `lastRun`. `name` is 1 to 80 characters, `prompt` 1 to 8000, and a bot has at most 50 routines.
+
+At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-<id>-<slotMs>`, through the ledger, so a crash cannot send it twice. A slot missed while the service was down runs once if it is at most 6 h old; an older one is recorded as `missed`. A wall time that does not exist (clocks jump forward) runs when the gap ends; one that happens twice runs at the earlier instant.
+
+### Connectors
+
+Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. Engines load them in #9.
+
+### Storage
+
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, routines and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
