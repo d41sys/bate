@@ -194,10 +194,11 @@ impl Engine {
                 self.respond(id, sent);
             }
             Op::Abort => {
+                // Respond first, so the response precedes the aborted turn's events.
+                self.respond(id, Ok(()));
                 if let Some(r) = &self.running {
                     r.control.abort();
                 }
-                self.respond(id, Ok(()));
             }
             Op::Answer { question, choice } => match &self.running {
                 Some(r) if lock(&r.control.question).as_deref() == Some(question.as_str()) => {
