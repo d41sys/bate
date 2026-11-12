@@ -57,10 +57,10 @@ A killed engine sends nothing more.
 
 ## `agentcore` (Bate's own engine)
 
-- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL` and `BATE_MODEL` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** `write`, `edit` and `run` ask first: a `question` whose id is the tool call's id, options `Approve` and `Deny`. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
-- **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command and ends the turn `aborted`; calls not yet run get "Not run" results.
+- **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
 - **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one chat message per line, written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
 - `rewind` and `compact` are refused until #9.
 
@@ -112,7 +112,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 |---|---|
 | `{"type":"transcript","bot","seq","at","entry"}` | An entry was appended to the bot's transcript. |
 | `{"type":"bots_changed"}` | Re-run `list_bots`. |
-| `{"type":"question_closed","bot","question"}` | The engine took an answer to the question. |
+| `{"type":"question_closed","bot","question"}` | The engine took an answer to the question, or the turn that asked it ended. |
 | `{"type":"engine_stopped","bot"}` | The bot's engine exited. Its open questions are dropped. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
@@ -135,7 +135,7 @@ A nonce the engine refused (`engine_error`), or that could not be sent because t
 
 ### Questions
 
-An engine `question` is stored until the engine takes an `answer` to it (an answer the engine refuses leaves it open) or until the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
+An engine `question` is stored until the engine takes an `answer` to it (an answer the engine refuses leaves it open), its turn ends, or the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
 
 ### Routines
 

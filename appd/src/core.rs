@@ -625,6 +625,10 @@ impl Core {
             }
             Event::TurnStart { .. } | Event::TurnEnd { .. } => {
                 r.busy = matches!(ev, Event::TurnStart { .. });
+                if !r.busy {
+                    // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
+                    self.close_questions(bot);
+                }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
             Event::Session { session } => {
@@ -641,6 +645,22 @@ impl Core {
             _ => {}
         }
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
+    }
+
+    fn close_questions(&mut self, bot: &str) {
+        let open = match self.store.questions(bot) {
+            Ok(open) => open,
+            Err(e) => return log!("bot {bot}: store: {e}"),
+        };
+        for q in open {
+            let q = q["question"].as_str().unwrap_or_default();
+            match self.store.take_question(bot, q) {
+                Ok(_) => {
+                    self.broadcast(&json!({"type": "question_closed", "bot": bot, "question": q}))
+                }
+                Err(e) => log!("bot {bot}: question not closed: {e}"),
+            }
+        }
     }
 
     fn on_response(&mut self, bot: &str, waiter: Waiter, error: Option<String>) {

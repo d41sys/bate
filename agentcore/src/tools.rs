@@ -6,8 +6,8 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 /// Most output a `run` or `search` returns; the rest is drained and dropped.
@@ -128,13 +128,13 @@ pub fn run(
     match tool {
         "read" => {
             let p = path("path")?;
-            let bytes = fs::read(&p).map_err(io(&p))?;
+            let bytes = fs::read(&p).map_err(at(&p))?;
             let content = String::from_utf8_lossy(&bytes);
             let first = number("offset").unwrap_or(1).max(1) as usize;
             let limit = number("limit").map_or(READ_LINES, |n| n as usize);
             let mut out = String::new();
             for (shown, (i, line)) in content.lines().enumerate().skip(first - 1).enumerate() {
-                if shown == limit || out.len() + line.len() > READ_CAP {
+                if shown == limit || (shown > 0 && out.len() + line.len() > READ_CAP) {
                     let left = content.lines().count() - i;
                     out.push_str(&format!(
                         "[{left} more lines; read on with offset {}]",
@@ -142,6 +142,8 @@ pub fn run(
                     ));
                     return Ok(out);
                 }
+                // A first line over the cap is cut, so `offset` always moves on.
+                let line = &line[..line.floor_char_boundary(READ_CAP)];
                 out.push_str(&format!("{:>6}\t{line}\n", i + 1));
             }
             Ok(out)
@@ -150,9 +152,9 @@ pub fn run(
             let p = path("path")?;
             let content = text("content")?;
             if let Some(parent) = p.parent() {
-                fs::create_dir_all(parent).map_err(io(parent))?;
+                fs::create_dir_all(parent).map_err(at(parent))?;
             }
-            fs::write(&p, content).map_err(io(&p))?;
+            fs::write(&p, content).map_err(at(&p))?;
             Ok(format!("wrote {} bytes to {}", content.len(), p.display()))
         }
         "edit" => {
@@ -161,11 +163,11 @@ pub fn run(
             if old.is_empty() {
                 return Err("`old` is empty".into());
             }
-            let content = fs::read_to_string(&p).map_err(io(&p))?;
+            let content = fs::read_to_string(&p).map_err(at(&p))?;
             match content.matches(old).count() {
                 0 => Err(format!("the text to replace is not in {}", p.display())),
                 1 => {
-                    fs::write(&p, content.replacen(old, new, 1)).map_err(io(&p))?;
+                    fs::write(&p, content.replacen(old, new, 1)).map_err(at(&p))?;
                     Ok(format!("edited {}", p.display()))
                 }
                 n => Err(format!(
@@ -199,7 +201,7 @@ pub fn run(
     }
 }
 
-fn io(p: &Path) -> impl Fn(io::Error) -> String + '_ {
+fn at(p: &Path) -> impl Fn(io::Error) -> String + '_ {
     move |e| format!("{}: {e}", p.display())
 }
 
@@ -223,11 +225,20 @@ fn capture(
     if control.aborted() {
         kill_group(group);
     }
-    let drain = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = (&mut reader).take(OUTPUT_CAP as u64).read_to_end(&mut out);
-        let cut = io::copy(&mut reader, &mut io::sink()).unwrap_or(0) > 0;
-        (out, cut)
+    // Output collects in `captured`; `done` fires at end of file. A process that escaped the group
+    // (its own session, a daemon) can hold the pipe open forever, so the turn never waits on the thread.
+    let captured = Arc::new(Mutex::new((Vec::new(), false)));
+    let (done, finished) = mpsc::channel();
+    let sink = captured.clone();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while let Ok(n @ 1..) = reader.read(&mut chunk) {
+            let (out, cut) = &mut *lock(&sink);
+            let room = OUTPUT_CAP - out.len();
+            out.extend_from_slice(&chunk[..n.min(room)]);
+            *cut |= n > room;
+        }
+        let _ = done.send(());
     });
     let started = Instant::now();
     let mut timed_out = false;
@@ -246,7 +257,8 @@ fn capture(
     // a tool that starts a long-lived server needs its own design.
     kill_group(group);
     *lock(&control.group) = None;
-    let (out, cut) = drain.join().unwrap_or_default();
+    let _ = finished.recv_timeout(Duration::from_secs(1));
+    let (out, cut) = std::mem::take(&mut *lock(&captured));
     let status = status.map_err(failed)?;
     if control.aborted() {
         return Err("Aborted by the user".into());
@@ -343,6 +355,20 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4));
         let big = call("run", json!({"command": "yes | head -c 200000"}), &d).unwrap();
         assert!(big.len() < OUTPUT_CAP + 100 && big.ends_with("[output cut at 64 KiB]"));
+    }
+
+    #[test]
+    fn a_process_that_escaped_the_group_does_not_hold_the_call() {
+        let d = dir("escaped");
+        let started = std::time::Instant::now();
+        // `setpgrp` leaves our process group, so the final kill misses it and it keeps the pipe open.
+        let out = call(
+            "run",
+            json!({"command": "perl -e 'setpgrp(0,0); sleep 20' & echo started"}),
+            &d,
+        );
+        assert_eq!(out.unwrap(), "started\n");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

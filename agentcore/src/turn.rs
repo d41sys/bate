@@ -28,13 +28,14 @@ const DENY: &str = "Deny";
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
 
 impl Turn {
-    pub fn run(&self, session: &mut Session, nonce: String, text: String) {
+    /// Runs the turn and returns its `turn_end`; the caller sends it once the conversation is back.
+    pub fn run(&self, session: &mut Session, nonce: String, text: String) -> Event {
         self.out.send(&Event::TurnStart { nonce });
         let (reason, error) = match self.turn(session, text) {
             Ok(reason) => (reason, None),
             Err(e) => (TurnEnd::Error, Some(e)),
         };
-        self.out.send(&Event::TurnEnd { reason, error });
+        Event::TurnEnd { reason, error }
     }
 
     fn turn(&self, session: &mut Session, text: String) -> Result<TurnEnd, String> {
@@ -96,7 +97,16 @@ impl Turn {
                 return Ok(TurnEnd::Aborted);
             }
             if calls.is_empty() {
-                return Ok(TurnEnd::Done);
+                // A `steer` that came during the last reply was accepted: the model must see it.
+                let late: Vec<String> = self.steer.try_iter().collect();
+                if late.is_empty() {
+                    return Ok(TurnEnd::Done);
+                }
+                for text in late {
+                    session
+                        .push(json!({"role": "user", "content": text}))
+                        .map_err(saved)?;
+                }
             }
             // Every call gets a result, even after an abort: the conversation must stay well-formed.
             for call in &calls {

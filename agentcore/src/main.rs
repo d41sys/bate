@@ -31,8 +31,8 @@ impl Out {
 
 enum Input {
     Op(Request),
-    /// The turn thread is done and hands the conversation back.
-    TurnDone(Session),
+    /// The turn thread is done and hands the conversation back with its `turn_end`.
+    TurnDone(Session, Event),
     Closed,
 }
 
@@ -93,18 +93,20 @@ fn main() {
         model: std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()),
         effort: None,
     };
-    for input in rx {
+    while let Ok(input) = rx.recv() {
         match input {
-            Input::Op(Request { id, op }) => {
-                let stop = matches!(op, Op::Stop);
-                engine.handle(id, op);
-                if stop {
-                    break;
-                }
+            Input::Op(Request { id, op: Op::Stop }) => {
+                engine.finish_turn(&rx);
+                // The answer is the last thing written: nothing follows `stop`'s response.
+                engine.respond(id, Ok(()));
+                break;
             }
-            Input::TurnDone(session) => {
+            Input::Op(Request { id, op }) => engine.handle(id, op),
+            Input::TurnDone(session, end) => {
+                // Sent here, not on the turn thread: a `prompt` that follows `turn_end` must find the engine idle.
                 engine.running = None;
                 engine.session = Some(session);
+                engine.out.send(&end);
             }
             Input::Closed => break,
         }
@@ -178,8 +180,8 @@ impl Engine {
                     let inputs = self.inputs.clone();
                     thread::spawn(move || {
                         let mut session = session;
-                        turn.run(&mut session, nonce, text);
-                        let _ = inputs.send(Input::TurnDone(session));
+                        let end = turn.run(&mut session, nonce, text);
+                        let _ = inputs.send(Input::TurnDone(session, end));
                     });
                 }
                 Err(e) => self.respond(id, Err(e)),
@@ -197,21 +199,21 @@ impl Engine {
                 }
                 self.respond(id, Ok(()));
             }
-            Op::Answer { question, choice } => {
-                let taken = match &self.running {
-                    Some(r) if lock(&r.control.question).as_deref() == Some(question.as_str()) => {
-                        if turn::OPTIONS.contains(&choice.as_str()) {
-                            r.answers
-                                .send((question, choice))
-                                .map_err(|_| "the turn has ended".into())
-                        } else {
-                            Err(format!("`{choice}` is not one of {:?}", turn::OPTIONS))
-                        }
+            Op::Answer { question, choice } => match &self.running {
+                Some(r) if lock(&r.control.question).as_deref() == Some(question.as_str()) => {
+                    if turn::OPTIONS.contains(&choice.as_str()) {
+                        // Respond before the turn thread wakes, so the response precedes the tool's events.
+                        self.respond(id, Ok(()));
+                        let _ = r.answers.send((question, choice));
+                    } else {
+                        self.respond(
+                            id,
+                            Err(format!("`{choice}` is not one of {:?}", turn::OPTIONS)),
+                        );
                     }
-                    _ => Err(format!("question {question} is not open")),
-                };
-                self.respond(id, taken);
-            }
+                }
+                _ => self.respond(id, Err(format!("question {question} is not open"))),
+            },
             Op::SetModel { model, effort } => {
                 self.model = Some(model);
                 self.effort = effort;
@@ -220,7 +222,22 @@ impl Engine {
             Op::Rewind { .. } | Op::Compact => {
                 self.respond(id, Err("not available yet (#9)".into()))
             }
-            Op::Stop => self.respond(id, Ok(())),
+            Op::Stop => unreachable!("handled by the operation loop"),
+        }
+    }
+
+    /// Aborts a running turn and waits a bounded time for its `turn_end`.
+    fn finish_turn(&mut self, rx: &mpsc::Receiver<Input>) {
+        let Some(r) = &self.running else { return };
+        r.control.abort();
+        while let Ok(input) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            match input {
+                Input::TurnDone(_, end) => return self.out.send(&end),
+                Input::Op(Request { id, .. }) => {
+                    self.respond(id, Err("the engine is stopping".into()))
+                }
+                Input::Closed => return,
+            }
         }
     }
 

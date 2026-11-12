@@ -43,13 +43,17 @@ impl Session {
             ));
         }
         let p = path(dir, id);
-        let text = fs::read_to_string(&p)?;
-        // A kill mid-write can leave a partial last line; it is skipped.
-        let messages = text
+        let bytes = fs::read(&p)?;
+        // A kill mid-write can leave a partial last line, even a cut character: it is skipped,
+        // and ended with a newline so the next message starts a line of its own.
+        let messages = String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
-        let file = OpenOptions::new().append(true).open(p)?;
+        let mut file = OpenOptions::new().append(true).open(p)?;
+        if bytes.last().is_some_and(|&b| b != b'\n') {
+            file.write_all(b"\n")?;
+        }
         Ok(Session {
             id: id.to_owned(),
             file,
@@ -86,5 +90,31 @@ impl Session {
             self.push(json!({"role": "tool", "tool_call_id": id, "content": INTERRUPTED}))?;
         }
         Ok(open)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_cut_by_a_kill_is_skipped_and_the_next_message_starts_a_new_line() {
+        let dir = std::env::temp_dir().join(format!("agentcore-session-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut s = Session::create(&dir).unwrap();
+        s.push(json!({"role": "user", "content": "first"})).unwrap();
+        // Killed mid-write, inside a two-byte character.
+        let cut = "{\"role\":\"assistant\",\"content\":\"é".as_bytes();
+        s.file.write_all(&cut[..cut.len() - 1]).unwrap();
+        let id = s.id.clone();
+        drop(s);
+
+        let mut s = Session::open(&dir, &id).unwrap();
+        assert_eq!(s.messages, [json!({"role": "user", "content": "first"})]);
+        s.push(json!({"role": "user", "content": "second"}))
+            .unwrap();
+        drop(s);
+        assert_eq!(Session::open(&dir, &id).unwrap().messages.len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

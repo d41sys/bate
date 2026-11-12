@@ -157,7 +157,8 @@ impl Provider {
                 on(Delta::Text(t));
             }
             for c in delta["tool_calls"].as_array().into_iter().flatten() {
-                let i = c["index"].as_u64().unwrap_or(0) as usize;
+                // At most one past the last call: a wild index must not allocate or panic.
+                let i = (c["index"].as_u64().unwrap_or(0) as usize).min(reply.calls.len());
                 if reply.calls.len() <= i {
                     reply.calls.resize_with(i + 1, Call::default);
                 }
