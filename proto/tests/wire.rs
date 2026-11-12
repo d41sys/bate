@@ -1,6 +1,6 @@
 use proto::{Event, MAX_OP_FRAME, Op, Request, TurnEnd, read_frame, write_frame};
 use serde_json::json;
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind};
 
 #[test]
 fn a_prompt_request_is_one_flat_json_object() {
@@ -70,25 +70,36 @@ fn an_event_type_outside_the_list_is_refused() {
 
 #[test]
 fn bad_lines_are_refused_without_losing_the_stream() {
-    let mut input = Cursor::new(b"not json\n[1,2]\n{\"type\":\"abort\"}\n".to_vec());
+    let mut input =
+        Cursor::new(b"not json\n[1,2]\n{\"type\":\"bogus\"}\n{\"type\":\"abort\"}\n".to_vec());
     let mut buf = Vec::new();
-    assert!(read_frame(&mut input, MAX_OP_FRAME, &mut buf).is_err());
-    assert!(read_frame(&mut input, MAX_OP_FRAME, &mut buf).is_err());
+    for _ in 0..3 {
+        let e = read_frame::<Op>(&mut input, MAX_OP_FRAME, &mut buf).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidData);
+    }
     assert_eq!(
-        read_frame(&mut input, MAX_OP_FRAME, &mut buf).unwrap(),
-        Some(json!({"type": "abort"}))
+        read_frame::<Op>(&mut input, MAX_OP_FRAME, &mut buf).unwrap(),
+        Some(Op::Abort)
     );
     assert_eq!(
-        read_frame(&mut input, MAX_OP_FRAME, &mut buf).unwrap(),
+        read_frame::<Op>(&mut input, MAX_OP_FRAME, &mut buf).unwrap(),
         None
     );
 }
 
 #[test]
 fn oversize_frames_are_refused_both_ways() {
-    let big = json!({"text": "x".repeat(64)});
-    assert!(write_frame(&mut Vec::new(), &big, 32).is_err());
-    let mut line = serde_json::to_vec(&big).unwrap();
-    line.push(b'\n');
-    assert!(read_frame(&mut Cursor::new(line), 32, &mut Vec::new()).is_err());
+    // `{"a":1}` plus newline is 8 bytes: a limit of 8 takes it, 7 refuses it, on both sides.
+    let frame = json!({"a": 1});
+    assert!(write_frame(&mut Vec::new(), &frame, 8).is_ok());
+    assert!(write_frame(&mut Vec::new(), &frame, 7).is_err());
+    let read = |limit| {
+        read_frame::<serde_json::Value>(
+            &mut Cursor::new(b"{\"a\":1}\n".to_vec()),
+            limit,
+            &mut Vec::new(),
+        )
+    };
+    assert_eq!(read(8).unwrap(), Some(frame));
+    assert_eq!(read(7).unwrap_err().kind(), ErrorKind::FileTooLarge);
 }

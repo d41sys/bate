@@ -4,7 +4,7 @@ The service (`appd`) runs one engine program per bot and talks to it over the pr
 
 ## Which program runs
 
-`$APPD_ENGINE` if set, else `agentcore` next to the service's executable (`proto::engine_program`). Set `APPD_ENGINE` to develop, test or swap an engine without changing the service.
+`$APPD_ENGINE` if set, else `agentcore` next to the service's executable, else `agentcore` on `PATH` (`proto::engine_program`). A relative `APPD_ENGINE` path is resolved against the service's working directory, not the bot's folder. Set `APPD_ENGINE` to develop, test or swap an engine without changing the service.
 
 The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`). The engine's standard error goes to the service log.
 
@@ -12,12 +12,12 @@ The service starts the program with the bot's folder as its working directory (`
 
 - One JSON object per line, UTF-8, `\n`-terminated.
 - Service → engine lines are capped at `proto::MAX_OP_FRAME` (1 MiB). Engine → service lines at `proto::MAX_EVENT_FRAME` (64 MiB), because tool output is forwarded whole.
-- A line over the cap ends the connection. A line that is not a JSON object, or whose `type` is not in the lists below, is refused and the next line is read normally.
+- A line over the cap ends the connection (`read_frame` returns `FileTooLarge`; the rest of the line is unread). A line that is not a JSON object, or whose `type` is not in the lists below, is refused (`InvalidData`) and the next line is read normally.
 - Field names are camelCase. `type` values are snake_case.
 
 ## Start-up
 
-The engine's first line is `{"type":"ready","protocol":1}`. The service sends nothing before it.
+The engine's first line is `{"type":"ready","protocol":1}`. `proto::Engine::spawn` does not wait for it: the service reads it first and sends nothing before it. An engine whose `protocol` is not `proto::PROTOCOL` is stopped and not used.
 
 ## Operations (service → engine)
 
@@ -25,8 +25,8 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `start` | `bot`, `workdir` | Begin a new conversation. The engine sends `session`. |
-| `open` | `bot`, `workdir`, `session` | Reopen an earlier conversation. The engine sends `session`. |
+| `start` | `bot` | Begin a new conversation. The engine sends `session`. The engine works in its working directory, the bot's folder. |
+| `open` | `bot`, `session` | Reopen an earlier conversation. The engine sends `session`. |
 | `prompt` | `nonce`, `text` | Send a user message. `nonce` is the prompt ledger's key and comes back in `turn_start`. |
 | `steer` | `text` | Add a message to the turn that is running. |
 | `abort` | none | End the running turn now. It ends with `turn_end` reason `aborted`. |
@@ -51,8 +51,8 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `question` | `question`, `title`, `options` | The engine waits until the service sends `answer`. Every action that changes something (a file write, a command) is asked this way. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
-A killed engine sends nothing more. The service marks that bot's unfinished tool calls as Interrupted.
+A killed engine sends nothing more.
 
 ## Window ⇄ service
 
-The window speaks to the service over the service's socket (#3). The service forwards each engine event to windows unchanged, labelled with its bot. The window's per-bot commands are these operations with a `bot` field added.
+Defined with the service in #3.

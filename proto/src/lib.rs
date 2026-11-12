@@ -2,8 +2,9 @@
 //! engine program per bot. Frames are JSON objects, one per line, size-capped
 //! per direction. The full list is in `PROTOCOL.md`.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -12,7 +13,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 pub const PROTOCOL: u32 = 1;
 /// Largest service → engine frame, newline included.
 pub const MAX_OP_FRAME: usize = 1 << 20;
-/// Largest engine → service frame. Tool output can be large; it is forwarded whole.
+/// Largest engine → service frame, newline included. Tool output is forwarded whole.
 pub const MAX_EVENT_FRAME: usize = 64 << 20;
 
 /// One operation sent to an engine, with the id its `response` carries back.
@@ -31,14 +32,10 @@ pub struct Request {
     rename_all_fields = "camelCase"
 )]
 pub enum Op {
-    /// Begin a new conversation for `bot`, working in `workdir`. The engine answers with a `session` event.
-    Start { bot: String, workdir: String },
+    /// Begin a new conversation for `bot`. The engine answers with a `session` event.
+    Start { bot: String },
     /// Reopen an earlier conversation.
-    Open {
-        bot: String,
-        workdir: String,
-        session: String,
-    },
+    Open { bot: String, session: String },
     /// Send a user message. `nonce` is the prompt ledger's key, echoed in `turn_start`.
     Prompt { nonce: String, text: String },
     /// Add a message to the turn that is running.
@@ -94,7 +91,7 @@ pub enum Event {
     ToolStart {
         call: String,
         tool: String,
-        args: Value,
+        args: Map<String, Value>,
     },
     ToolEnd {
         call: String,
@@ -122,7 +119,7 @@ pub enum TurnEnd {
     Error,
 }
 
-/// Writes one frame. Frames over `limit` are refused, not split.
+/// Writes one frame. Frames over `limit` (newline included) are refused, not split.
 pub fn write_frame(out: &mut impl Write, frame: &impl Serialize, limit: usize) -> io::Result<()> {
     let mut line = serde_json::to_vec(frame)?;
     line.push(b'\n');
@@ -136,15 +133,16 @@ pub fn write_frame(out: &mut impl Write, frame: &impl Serialize, limit: usize) -
     out.flush()
 }
 
-/// Reads one frame. `Ok(None)` at end of stream. A line longer than `limit`
-/// is an error (the stream cannot be resynchronised cheaply, so callers drop
-/// the connection); a line that is not a JSON object is returned as
-/// `Err(InvalidData)` after it has been consumed, so callers may continue.
-pub fn read_frame(
+/// Reads one frame. `Ok(None)` at end of stream.
+/// - A line over `limit` (newline included) is `Err(FileTooLarge)`: the rest of
+///   that line is still unread, so the caller must drop the connection.
+/// - A line that does not parse as `T` is `Err(InvalidData)` after it has been
+///   consumed, so the caller may read on.
+pub fn read_frame<T: DeserializeOwned>(
     input: &mut impl BufRead,
     limit: usize,
     buf: &mut Vec<u8>,
-) -> io::Result<Option<Value>> {
+) -> io::Result<Option<T>> {
     buf.clear();
     loop {
         let chunk = input.fill_buf()?;
@@ -154,44 +152,40 @@ pub fn read_frame(
             }
             break;
         }
-        match chunk.iter().position(|&b| b == b'\n') {
-            Some(i) => {
-                buf.extend_from_slice(&chunk[..i]);
-                input.consume(i + 1);
-                break;
-            }
-            None => {
-                let n = chunk.len();
-                buf.extend_from_slice(chunk);
-                input.consume(n);
-            }
-        }
-        if buf.len() > limit {
+        let n = chunk
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(chunk.len());
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() >= limit {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+                io::ErrorKind::FileTooLarge,
                 "frame too large",
             ));
         }
+        if n < chunk.len() {
+            input.consume(n + 1);
+            break;
+        }
+        input.consume(n);
     }
-    if buf.len() > limit {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
-    match serde_json::from_slice::<Value>(buf) {
-        Ok(v) if v.is_object() => Ok(Some(v)),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame is not a JSON object",
-        )),
-    }
+    serde_json::from_slice(buf)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// The engine program: `$APPD_ENGINE`, else `agentcore` next to the running executable.
+/// The engine program: `$APPD_ENGINE` made absolute against the service's own
+/// working directory (the engine runs in the bot's folder), else `agentcore`
+/// next to the running executable, else `agentcore` on `PATH`.
 pub fn engine_program() -> PathBuf {
     if let Some(p) = std::env::var_os("APPD_ENGINE").filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
+        let p = PathBuf::from(p);
+        // A bare name stays a `PATH` lookup.
+        return if p.components().count() > 1 {
+            std::path::absolute(&p).unwrap_or(p)
+        } else {
+            p
+        };
     }
     let sibling = std::env::current_exe()
         .ok()
@@ -214,7 +208,8 @@ pub struct EngineOutput {
 }
 
 impl Engine {
-    /// Starts `program` in `workdir`. Its stderr goes to the service's own (the log).
+    /// Starts `program` with the bot's folder `workdir` as its working directory.
+    /// Its stderr goes to the service's own (the log). The caller reads `ready` first.
     pub fn spawn(program: &Path, workdir: &Path) -> io::Result<Engine> {
         let mut child = Command::new(program)
             .current_dir(workdir)
@@ -237,26 +232,19 @@ impl Engine {
 
 impl EngineInput {
     pub fn send(&mut self, id: &str, op: &Op) -> io::Result<()> {
-        write_frame(
-            &mut self.0,
-            &Request {
-                id: id.to_owned(),
-                op: op.clone(),
-            },
-            MAX_OP_FRAME,
-        )
+        #[derive(Serialize)]
+        struct Borrowed<'a> {
+            id: &'a str,
+            #[serde(flatten)]
+            op: &'a Op,
+        }
+        write_frame(&mut self.0, &Borrowed { id, op }, MAX_OP_FRAME)
     }
 }
 
 impl EngineOutput {
-    /// Next event; `Ok(None)` once the engine closed its output. An event
-    /// outside the list is `Err(InvalidData)` and the stream stays usable.
+    /// Next event; `Ok(None)` once the engine closed its output. Errors as in `read_frame`.
     pub fn recv(&mut self) -> io::Result<Option<Event>> {
-        match read_frame(&mut self.stdout, MAX_EVENT_FRAME, &mut self.buf)? {
-            None => Ok(None),
-            Some(v) => serde_json::from_value(v)
-                .map(Some)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-        }
+        read_frame(&mut self.stdout, MAX_EVENT_FRAME, &mut self.buf)
     }
 }
