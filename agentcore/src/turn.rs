@@ -1,9 +1,11 @@
 //! One turn: model call, tool calls, model call, … until the model stops calling tools.
 
-use crate::Out;
-use crate::model::{Delta, Provider, Reply};
+use crate::mcp::Servers;
+use crate::model::{Ask, Delta, Provider, Reply};
 use crate::session::Session;
 use crate::tools::{self, Control, lock};
+use crate::{Out, Work};
+use proto::connectors::Connector;
 use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
@@ -17,6 +19,10 @@ pub struct Turn {
     pub provider: Provider,
     pub model: String,
     pub effort: Option<String>,
+    /// The model's context size in tokens; compaction starts at four fifths of it.
+    pub context: usize,
+    /// The bot's MCP servers as last sent by the service.
+    pub connectors: Vec<Connector>,
     pub control: Arc<Control>,
     /// `(question, choice)` from `answer`, already checked against the open question.
     pub answers: Receiver<(String, String)>,
@@ -26,25 +32,52 @@ pub struct Turn {
 const APPROVE: &str = "Approve";
 const DENY: &str = "Deny";
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
+/// Most recent messages a compaction leaves as they are.
+const KEEP: usize = 4;
+const SUMMARISE: &str = "Summarise the conversation so far for your own later use: what the user wants, \
+    what was decided, what was found, which files changed, and what is left to do. \
+    Answer with the summary only and do not call tools.";
+
+/// The engine's own tools, then the connectors'.
+fn tool_list(mcp: &Servers) -> Value {
+    let mut tools = tools::definitions();
+    if let Value::Array(list) = &mut tools {
+        list.extend(mcp.definitions().cloned());
+    }
+    tools
+}
+
+fn saved(e: std::io::Error) -> String {
+    format!("cannot save the conversation: {e}")
+}
 
 impl Turn {
     /// Runs the turn and returns its `turn_end`; the caller sends it once the conversation is back.
-    pub fn run(&self, session: &mut Session, nonce: String, text: String) -> Event {
-        self.out.send(&Event::TurnStart { nonce });
-        let (reason, error) = match self.turn(session, text) {
+    pub fn run(&self, work: &mut Work, nonce: String, text: String) -> Event {
+        let Work { session, mcp } = work;
+        self.out.send(&Event::TurnStart {
+            nonce: nonce.clone(),
+        });
+        let turn = session
+            .mark_prompt(&nonce)
+            .map_err(saved)
+            .and_then(|()| self.turn(session, mcp, text));
+        let (reason, error) = match turn {
             Ok(reason) => (reason, None),
             Err(e) => (TurnEnd::Error, Some(e)),
         };
         Event::TurnEnd { reason, error }
     }
 
-    fn turn(&self, session: &mut Session, text: String) -> Result<TurnEnd, String> {
-        let saved = |e: std::io::Error| format!("cannot save the conversation: {e}");
-        let system = format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.",
-            self.dir.display()
-        );
-        let tools = tools::definitions();
+    fn turn(
+        &self,
+        session: &mut Session,
+        mcp: &mut Servers,
+        text: String,
+    ) -> Result<TurnEnd, String> {
+        let system = self.system();
+        mcp.sync(&self.connectors, &self.dir, &self.control);
+        let tools = tool_list(mcp);
         session
             .push(json!({"role": "user", "content": text}))
             .map_err(saved)?;
@@ -57,20 +90,21 @@ impl Turn {
             if self.control.aborted() {
                 return Ok(TurnEnd::Aborted);
             }
-            let reply = self.provider.stream(
-                &self.model,
-                self.effort.as_deref(),
-                &system,
-                &session.messages,
-                &tools,
-                self.control.aborted_flag(),
-                |d| {
+            if session.tokens() > self.context / 5 * 4 {
+                self.compact(session, &system, &tools)?;
+                if self.control.aborted() {
+                    return Ok(TurnEnd::Aborted);
+                }
+            }
+            let ask = self.ask_model(&system, &session.messages, None, &tools);
+            let reply = self
+                .provider
+                .stream(&ask, self.control.aborted_flag(), |d| {
                     self.out.send(&match d {
                         Delta::Text(t) => Event::Text { delta: t.into() },
                         Delta::Thinking(t) => Event::Thinking { delta: t.into() },
                     })
-                },
-            )?;
+                })?;
             let Reply {
                 text,
                 mut calls,
@@ -125,7 +159,7 @@ impl Turn {
                 let result = if self.control.aborted() {
                     Err("Not run: the turn was aborted.".into())
                 } else {
-                    args.and_then(|args| self.call(&call.id, &call.name, &args))
+                    args.and_then(|args| self.call(mcp, &call.id, &call.name, &args))
                 };
                 let (output, is_error) = match result {
                     Ok(out) => (out, false),
@@ -143,15 +177,87 @@ impl Turn {
         }
     }
 
-    fn call(&self, id: &str, tool: &str, args: &Map<String, Value>) -> Result<String, String> {
-        if tools::needs_approval(tool) {
-            match self.ask(id, tools::title(tool, args)) {
+    fn system(&self) -> String {
+        format!(
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.",
+            self.dir.display()
+        )
+    }
+
+    fn ask_model<'a>(
+        &'a self,
+        system: &'a str,
+        messages: &'a [Value],
+        last: Option<&'a Value>,
+        tools: &'a Value,
+    ) -> Ask<'a> {
+        Ask {
+            model: &self.model,
+            effort: self.effort.as_deref(),
+            system,
+            messages,
+            last,
+            tools,
+        }
+    }
+
+    /// `compact` on request.
+    pub fn compact_now(&self, work: &mut Work) -> Result<(), String> {
+        self.compact(&mut work.session, &self.system(), &tool_list(&work.mcp))
+    }
+
+    /// Asks the model to summarise all but the last `KEEP` messages and puts the summary in their
+    /// place. Does nothing when there is nothing that old, or when the turn was aborted meanwhile.
+    fn compact(&self, session: &mut Session, system: &str, tools: &Value) -> Result<(), String> {
+        let messages = &session.messages;
+        let mut cut = messages.len().saturating_sub(KEEP);
+        // A tool result stays with the call it answers.
+        while cut > 0 && messages[cut]["role"] == "tool" {
+            cut -= 1;
+        }
+        if cut == 0 {
+            return Ok(());
+        }
+        // Same system text and tools as a turn, so a provider's prompt cache still applies.
+        let instruction = json!({"role": "user", "content": SUMMARISE});
+        let ask = self.ask_model(system, &messages[..cut], Some(&instruction), tools);
+        let reply = self
+            .provider
+            .stream(&ask, self.control.aborted_flag(), |_| {})?;
+        if reply.aborted {
+            return Ok(());
+        }
+        let summary = reply.text.trim();
+        if summary.is_empty() {
+            return Err("the model returned no summary".into());
+        }
+        let kept = messages.len() - cut;
+        session.compact(summary, kept).map_err(saved)
+    }
+
+    fn call(
+        &self,
+        mcp: &mut Servers,
+        id: &str,
+        tool: &str,
+        args: &Map<String, Value>,
+    ) -> Result<String, String> {
+        // Every connector tool asks: the engine cannot know which of them change something.
+        let connector = mcp.title(tool);
+        if connector.is_some() || tools::needs_approval(tool) {
+            let title = connector
+                .clone()
+                .unwrap_or_else(|| tools::title(tool, args));
+            match self.ask(id, title) {
                 Some(true) => {}
                 Some(false) => return Err("The user denied this action.".into()),
                 None => return Err("Aborted by the user".into()),
             }
         }
-        tools::run(tool, args, &self.dir, &self.control)
+        match connector {
+            Some(_) => mcp.call(tool, args, &self.control),
+            None => tools::run(tool, args, &self.dir, &self.control),
+        }
     }
 
     /// `Some(approved)`, or `None` when the turn was aborted while waiting.

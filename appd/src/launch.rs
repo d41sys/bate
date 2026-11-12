@@ -24,6 +24,7 @@ const PASS_ENV: &[&str] = &[
     "PATH",
     "BATE_MODEL_BASE_URL",
     "BATE_MODEL",
+    "BATE_MODEL_CONTEXT",
 ];
 
 fn custom_home() -> Option<PathBuf> {

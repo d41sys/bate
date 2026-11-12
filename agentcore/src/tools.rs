@@ -47,7 +47,7 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn kill_group(group: i32) {
+pub fn kill_group(group: i32) {
     // SAFETY: plain syscall; a group that is already gone only returns ESRCH.
     unsafe { libc::killpg(group, libc::SIGKILL) };
 }

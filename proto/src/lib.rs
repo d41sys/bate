@@ -60,6 +60,10 @@ pub enum Op {
     Rewind { entry: String, fork: bool },
     /// Summarise the working context now.
     Compact,
+    /// The bot's MCP servers: the whole list each time. The engine uses the enabled ones from its next turn on.
+    Connectors {
+        connectors: Vec<connectors::Connector>,
+    },
     /// Finish and exit.
     Stop,
 }

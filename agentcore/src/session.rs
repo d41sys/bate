@@ -1,4 +1,10 @@
-//! A conversation: one chat message per line in `.agentcore/sessions/<id>.jsonl` under the bot's folder.
+//! A conversation: one JSON object per line in `.agentcore/sessions/<id>.jsonl` under the bot's folder.
+//! A line is a chat message (it has `role`) or a marker (it has `mark`):
+//! - `{"mark":"prompt","nonce"}` comes before the user message of that prompt; `rewind` cuts there.
+//! - `{"mark":"compaction","summary","kept"}`: from here the model sees the summary, then the
+//!   `kept` messages before the marker, then what follows.
+//!
+//! The file keeps everything; `messages` is what the model sees.
 
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -7,30 +13,73 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const INTERRUPTED: &str = "Interrupted: the engine stopped before this tool finished.";
+const SUMMARY: &str = "Summary of the conversation so far:\n";
 
 pub struct Session {
     pub id: String,
+    path: PathBuf,
     file: File,
     /// Messages in the OpenAI chat shape (`role`, `content`, `tool_calls`, `tool_call_id`).
     pub messages: Vec<Value>,
+    /// Serialised size of `messages`.
+    bytes: usize,
 }
 
-fn path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(".agentcore/sessions").join(format!("{id}.jsonl"))
+fn new_id() -> io::Result<String> {
+    let mut bytes = [0u8; 8];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// What the model sees after reading the log `text`.
+fn replay(text: &str) -> Vec<Value> {
+    let mut messages = Vec::new();
+    // A kill mid-write can leave a partial last line: it does not parse and is skipped.
+    for line in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
+        match line["mark"].as_str() {
+            Some("compaction") => {
+                let kept = line["kept"].as_u64().unwrap_or(0) as usize;
+                summarise(&mut messages, line["summary"].as_str().unwrap_or(""), kept);
+            }
+            Some(_) => {}
+            None => messages.push(line),
+        }
+    }
+    messages
+}
+
+/// Replaces all but the last `kept` messages with `summary`.
+// shortcut: the summary is its own user message, so two user messages can follow each other;
+// merge it into the next one if a model's chat template insists on alternating roles.
+fn summarise(messages: &mut Vec<Value>, summary: &str, kept: usize) {
+    let tail = messages.split_off(messages.len().saturating_sub(kept));
+    messages.clear();
+    messages.push(json!({"role": "user", "content": format!("{SUMMARY}{summary}")}));
+    messages.extend(tail);
+}
+
+fn size(messages: &[Value]) -> usize {
+    messages.iter().map(|m| m.to_string().len()).sum()
 }
 
 impl Session {
     pub fn create(dir: &Path) -> io::Result<Session> {
-        let mut bytes = [0u8; 8];
-        File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let p = path(dir, &id);
-        fs::create_dir_all(p.parent().expect("has a parent"))?;
-        let file = OpenOptions::new().create_new(true).append(true).open(p)?;
+        let id = new_id()?;
+        let path = dir.join(".agentcore/sessions").join(format!("{id}.jsonl"));
+        fs::create_dir_all(path.parent().expect("has a parent"))?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)?;
         Ok(Session {
             id,
+            path,
             file,
             messages: Vec::new(),
+            bytes: 0,
         })
     }
 
@@ -42,31 +91,97 @@ impl Session {
                 "not a session id",
             ));
         }
-        let p = path(dir, id);
-        let bytes = fs::read(&p)?;
-        // A kill mid-write can leave a partial last line, even a cut character: it is skipped,
-        // and ended with a newline so the next message starts a line of its own.
-        let messages = String::from_utf8_lossy(&bytes)
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        let mut file = OpenOptions::new().append(true).open(p)?;
-        if bytes.last().is_some_and(|&b| b != b'\n') {
+        let path = dir.join(".agentcore/sessions").join(format!("{id}.jsonl"));
+        let log = fs::read(&path)?;
+        let messages = replay(&String::from_utf8_lossy(&log));
+        let mut file = OpenOptions::new().append(true).open(&path)?;
+        // A line cut by a kill, even inside a character, is ended so the next line starts clean.
+        if log.last().is_some_and(|&b| b != b'\n') {
             file.write_all(b"\n")?;
         }
+        let bytes = size(&messages);
         Ok(Session {
             id: id.to_owned(),
+            path,
             file,
             messages,
+            bytes,
         })
+    }
+
+    fn write(&mut self, line: &Value) -> io::Result<usize> {
+        let mut bytes = serde_json::to_vec(line)?;
+        bytes.push(b'\n');
+        self.file.write_all(&bytes)?;
+        Ok(bytes.len())
     }
 
     /// Appends one message, on disk first.
     pub fn push(&mut self, message: Value) -> io::Result<()> {
-        let mut line = serde_json::to_vec(&message)?;
-        line.push(b'\n');
-        self.file.write_all(&line)?;
+        self.bytes += self.write(&message)?;
         self.messages.push(message);
+        Ok(())
+    }
+
+    /// Marks where the prompt `nonce` begins, so `rewind` can return here.
+    pub fn mark_prompt(&mut self, nonce: &str) -> io::Result<()> {
+        self.write(&json!({"mark": "prompt", "nonce": nonce}))
+            .map(drop)
+    }
+
+    /// Replaces all but the last `kept` messages with `summary`, for the model only.
+    pub fn compact(&mut self, summary: &str, kept: usize) -> io::Result<()> {
+        self.write(&json!({"mark": "compaction", "summary": summary, "kept": kept}))?;
+        summarise(&mut self.messages, summary, kept);
+        self.bytes = size(&self.messages);
+        Ok(())
+    }
+
+    /// Rough size of what the model sees.
+    // shortcut: 4 bytes per token; use the server's own token counts once a provider reports them (#8).
+    pub fn tokens(&self) -> usize {
+        self.bytes / 4
+    }
+
+    /// Goes back to just before the prompt `nonce`: in this file, or in a new one when `fork`
+    /// (`id` changes and the old file is left as it was).
+    pub fn rewind(&mut self, nonce: &str, fork: bool) -> io::Result<()> {
+        let log = fs::read(&self.path)?;
+        let text = String::from_utf8_lossy(&log);
+        let mut end = 0;
+        let cut = text
+            .split_inclusive('\n')
+            .find_map(|line| {
+                let start = end;
+                end += line.len();
+                let line: Value = serde_json::from_str(line).ok()?;
+                (line["mark"] == "prompt" && line["nonce"] == nonce).then_some(start)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("this conversation has no prompt {nonce}"),
+                )
+            })?;
+        let kept = &text[..cut];
+        if fork {
+            let id = new_id()?;
+            let path = self.path.with_file_name(format!("{id}.jsonl"));
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .open(&path)?;
+            file.write_all(kept.as_bytes())?;
+            (self.id, self.path, self.file) = (id, path, file);
+        } else {
+            // Written beside the file and renamed over it, so a kill leaves the old or the new one.
+            let tmp = self.path.with_extension("tmp");
+            fs::write(&tmp, kept)?;
+            fs::rename(&tmp, &self.path)?;
+            self.file = OpenOptions::new().append(true).open(&self.path)?;
+        }
+        self.messages = replay(kept);
+        self.bytes = size(&self.messages);
         Ok(())
     }
 

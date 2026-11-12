@@ -88,9 +88,7 @@ enum Waiter {
         client: u64,
         id: Value,
         command: String,
-        prompt: Option<Outgoing>,
-        /// An answered question, closed only once the engine took the answer.
-        question: Option<String>,
+        settles: Settles,
     },
     Routine {
         routine: String,
@@ -98,6 +96,19 @@ enum Waiter {
     },
     /// The service's own `start` or `open`.
     Service,
+    /// The service's own `connectors`.
+    Connectors,
+}
+
+/// What a window's request changes in the store once the engine has accepted it.
+enum Settles {
+    Nothing,
+    /// The prompt enters the transcript and the ledger entry becomes `sent`.
+    Prompt(Outgoing),
+    /// The answered question is closed.
+    Question(String),
+    /// The transcript goes back to before the prompt with this nonce.
+    Rewind(String),
 }
 
 struct Running {
@@ -321,8 +332,7 @@ impl Core {
                             client,
                             id: id.clone(),
                             command: command.into(),
-                            prompt: Some(p),
-                            question: None,
+                            settles: Settles::Prompt(p),
                         })?;
                         Ok(None)
                     }
@@ -349,8 +359,7 @@ impl Core {
                         client,
                         id: id.clone(),
                         command: command.into(),
-                        prompt: None,
-                        question: Some(question.into()),
+                        settles: Settles::Question(question.into()),
                     },
                 )?;
                 Ok(None)
@@ -362,6 +371,10 @@ impl Core {
                     "compact" => Op::Compact,
                     _ => serde_json::from_value(f.clone()).map_err(|e| bad(e.to_string()))?,
                 };
+                let settles = match &op {
+                    Op::Rewind { entry, .. } => Settles::Rewind(entry.clone()),
+                    _ => Settles::Nothing,
+                };
                 self.send_op(
                     &bot,
                     op,
@@ -369,8 +382,7 @@ impl Core {
                         client,
                         id: id.clone(),
                         command: command.into(),
-                        prompt: None,
-                        question: None,
+                        settles,
                     },
                 )?;
                 Ok(None)
@@ -415,7 +427,7 @@ impl Core {
                         .map_err(|e| ("invalid_connector", e.to_string()))?;
                 check_connector(&c).map_err(|e| ("invalid_connector", e))?;
                 self.store.put_connector(&bot, &c).map_err(internal)?;
-                self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                self.connectors_changed(&bot);
                 Ok(Some(json!({"connector": c})))
             }
             "delete_connector" => {
@@ -427,7 +439,7 @@ impl Core {
                 {
                     return Err(("no_such_connector", "no such connector".into()));
                 }
-                self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                self.connectors_changed(&bot);
                 Ok(Some(json!({})))
             }
             _ => Err(("unknown_command", format!("unknown command `{command}`"))),
@@ -513,6 +525,7 @@ impl Core {
         let failed = |e: io::Error| ("engine_failed", format!("cannot start the engine: {e}"));
         sys::create_private_dir(&dir).map_err(failed)?;
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
+        let connectors = self.store.connectors(bot).map_err(internal)?;
         let open = match self.store.session(bot).map_err(internal)? {
             Some(session) => Op::Open {
                 bot: bot.into(),
@@ -594,7 +607,25 @@ impl Core {
                 busy: false,
             },
         );
-        self.send_op(bot, open, Waiter::Service)
+        self.send_op(bot, open, Waiter::Service)?;
+        self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)
+    }
+
+    /// After a change to the list: a running engine gets it now, any other when it starts.
+    fn connectors_changed(&mut self, bot: &str) {
+        if self.engines.contains_key(bot) {
+            let sent = self
+                .store
+                .connectors(bot)
+                .map_err(internal)
+                .and_then(|connectors| {
+                    self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)
+                });
+            if let Err((_, e)) = sent {
+                log!("bot {bot}: connectors not sent: {e}");
+            }
+        }
+        self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
     }
 
     fn on_event(&mut self, bot: &str, ev: Event) {
@@ -669,19 +700,27 @@ impl Core {
                 client,
                 id,
                 command,
-                prompt,
-                question,
+                settles,
             } => {
-                if let Some(p) = &prompt {
-                    self.settle_prompt(bot, p, error.is_none());
-                }
-                if let (Some(q), None) = (&question, &error) {
-                    match self.store.take_question(bot, q) {
+                match (&settles, &error) {
+                    (Settles::Prompt(p), _) => self.settle_prompt(bot, p, error.is_none()),
+                    // A question is closed only once the engine took the answer.
+                    (Settles::Question(q), None) => match self.store.take_question(bot, q) {
                         Ok(_) => self.broadcast(
                             &json!({"type": "question_closed", "bot": bot, "question": q}),
                         ),
                         Err(e) => log!("bot {bot}: question not closed: {e}"),
+                    },
+                    // The engine's conversation no longer has these entries, so history must not show them.
+                    (Settles::Rewind(nonce), None) => {
+                        match self.store.rewind_transcript(bot, nonce) {
+                            Ok(()) => {
+                                self.broadcast(&json!({"type": "history_changed", "bot": bot}))
+                            }
+                            Err(e) => log!("bot {bot}: history not rewound: {e}"),
+                        }
                     }
+                    _ => {}
                 }
                 let result = match error {
                     Some(e) => Err(("engine_error", e)),
@@ -693,6 +732,11 @@ impl Core {
                 self.settle_prompt(bot, &prompt, error.is_none());
                 if let Some(e) = error {
                     self.routine_failed(bot, &routine, e);
+                }
+            }
+            Waiter::Connectors => {
+                if let Some(e) = error {
+                    log!("bot {bot}: engine refused the connectors: {e}");
                 }
             }
             Waiter::Service => {
@@ -744,7 +788,8 @@ impl Core {
         let unwritten: Vec<String> = r.queued.iter().map(|(id, _)| id.clone()).collect();
         for (req, waiter) in r.waiting {
             if let Waiter::Window {
-                prompt: Some(p), ..
+                settles: Settles::Prompt(p),
+                ..
             }
             | Waiter::Routine { prompt: p, .. } = &waiter
                 && unwritten.contains(&req)
@@ -770,7 +815,7 @@ impl Core {
                 Waiter::Routine { routine, .. } => {
                     self.routine_failed(bot, &routine, "the engine stopped".into())
                 }
-                Waiter::Service => {}
+                Waiter::Service | Waiter::Connectors => {}
             }
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));

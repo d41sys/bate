@@ -1,6 +1,7 @@
 //! `agentcore`: Bate's own engine. Speaks the engine protocol (`PROTOCOL.md`) on
 //! stdin/stdout in the bot's folder; one turn at a time runs on its own thread.
 
+mod mcp;
 mod model;
 mod session;
 mod tools;
@@ -29,14 +30,23 @@ impl Out {
     }
 }
 
+const NO_SESSION: &str = "no conversation is open: send start or open first";
+
 enum Input {
     Op(Request),
-    /// The turn thread is done and hands the conversation back with its `turn_end`.
-    TurnDone(Session, Event),
+    /// The worker thread is done (a turn, or `compact`) and hands its state back, with the
+    /// event that ends its work: `turn_end`, or the response to `compact`.
+    Idle(Work, Event),
     Closed,
 }
 
-/// A turn in progress: its conversation is on the turn thread until `TurnDone`.
+/// What a turn works on. It is on the worker thread while one runs.
+pub struct Work {
+    pub session: Session,
+    pub mcp: mcp::Servers,
+}
+
+/// Work in progress: the conversation is on the worker thread until `Idle`.
 struct Running {
     control: Arc<Control>,
     answers: Sender<(String, String)>,
@@ -48,6 +58,9 @@ struct Engine {
     inputs: Sender<Input>,
     dir: PathBuf,
     session: Option<Session>,
+    /// Running MCP servers; they outlive a conversation.
+    mcp: mcp::Servers,
+    connectors: Vec<proto::connectors::Connector>,
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -89,6 +102,8 @@ fn main() {
         inputs,
         dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         session: None,
+        mcp: mcp::Servers::default(),
+        connectors: Vec::new(),
         running: None,
         model: std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()),
         effort: None,
@@ -102,10 +117,11 @@ fn main() {
                 break;
             }
             Input::Op(Request { id, op }) => engine.handle(id, op),
-            Input::TurnDone(session, end) => {
-                // Sent here, not on the turn thread: a `prompt` that follows `turn_end` must find the engine idle.
+            Input::Idle(Work { session, mcp }, end) => {
+                // Sent here, not on the worker thread: a `prompt` that follows `turn_end` must find the engine idle.
                 engine.running = None;
                 engine.session = Some(session);
+                engine.mcp = mcp;
                 engine.out.send(&end);
             }
             Input::Closed => break,
@@ -174,14 +190,13 @@ impl Engine {
                 }
             }
             Op::Prompt { nonce, text } => match self.begin_turn() {
-                Ok((turn, session)) => {
+                Ok((turn, mut work)) => {
                     // The response goes first: the service records the prompt before the turn's events.
                     self.respond(id, Ok(()));
                     let inputs = self.inputs.clone();
                     thread::spawn(move || {
-                        let mut session = session;
-                        let end = turn.run(&mut session, nonce, text);
-                        let _ = inputs.send(Input::TurnDone(session, end));
+                        let end = turn.run(&mut work, nonce, text);
+                        let _ = inputs.send(Input::Idle(work, end));
                     });
                 }
                 Err(e) => self.respond(id, Err(e)),
@@ -220,8 +235,36 @@ impl Engine {
                 self.effort = effort;
                 self.respond(id, Ok(()));
             }
-            Op::Rewind { .. } | Op::Compact => {
-                self.respond(id, Err("not available yet (#9)".into()))
+            Op::Rewind { entry, fork } => {
+                let rewound = self.idle().and_then(|()| {
+                    let session = self.session.as_mut().ok_or(NO_SESSION)?;
+                    session.rewind(&entry, fork).map_err(|e| e.to_string())?;
+                    Ok(session.id.clone())
+                });
+                match rewound {
+                    Ok(session) => {
+                        self.respond(id, Ok(()));
+                        if fork {
+                            self.out.send(&Event::Session { session });
+                        }
+                    }
+                    Err(e) => self.respond(id, Err(e)),
+                }
+            }
+            // A model call, so it runs like a turn: `abort` and `stop` reach it, and the response comes when it is done.
+            Op::Compact => match self.begin_turn() {
+                Ok((turn, mut work)) => {
+                    let inputs = self.inputs.clone();
+                    thread::spawn(move || {
+                        let error = turn.compact_now(&mut work).err();
+                        let _ = inputs.send(Input::Idle(work, Event::Response { id, error }));
+                    });
+                }
+                Err(e) => self.respond(id, Err(e)),
+            },
+            Op::Connectors { connectors } => {
+                self.connectors = connectors;
+                self.respond(id, Ok(()));
             }
             Op::Stop => unreachable!("handled by the operation loop"),
         }
@@ -233,7 +276,7 @@ impl Engine {
         r.control.abort();
         while let Ok(input) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
             match input {
-                Input::TurnDone(_, end) => return self.out.send(&end),
+                Input::Idle(_, end) => return self.out.send(&end),
                 Input::Op(Request { id, .. }) => {
                     self.respond(id, Err("the engine is stopping".into()))
                 }
@@ -242,17 +285,20 @@ impl Engine {
         }
     }
 
-    fn begin_turn(&mut self) -> Result<(turn::Turn, Session), String> {
+    fn begin_turn(&mut self) -> Result<(turn::Turn, Work), String> {
         self.idle()?;
         let model = self
             .model
             .clone()
             .ok_or("no model chosen: send set_model first")?;
         let provider = model::Provider::from_env()?;
-        let session = self
-            .session
-            .take()
-            .ok_or("no conversation is open: send start or open first")?;
+        let context = match std::env::var("BATE_MODEL_CONTEXT") {
+            Ok(tokens) => tokens
+                .parse()
+                .map_err(|_| "BATE_MODEL_CONTEXT is not a number of tokens")?,
+            Err(_) => 32_000,
+        };
+        let session = self.session.take().ok_or(NO_SESSION)?;
         let control = Arc::new(Control::default());
         let (answers, answers_rx) = mpsc::channel();
         let (steer, steer_rx) = mpsc::channel();
@@ -267,10 +313,13 @@ impl Engine {
             provider,
             model,
             effort: self.effort.clone(),
+            context,
+            connectors: self.connectors.clone(),
             control,
             answers: answers_rx,
             steer: steer_rx,
         };
-        Ok((turn, session))
+        let mcp = std::mem::take(&mut self.mcp);
+        Ok((turn, Work { session, mcp }))
     }
 }

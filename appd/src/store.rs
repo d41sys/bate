@@ -161,6 +161,17 @@ impl Store {
         Ok(self.0.last_insert_rowid())
     }
 
+    /// Removes the prompt entry with `nonce` and everything after it. Does nothing if there is none.
+    pub fn rewind_transcript(&self, bot: &str, nonce: &str) -> Result<()> {
+        self.0
+            .execute(
+                "DELETE FROM transcript WHERE bot = ?1 AND seq >= (SELECT min(seq) FROM transcript
+                 WHERE bot = ?1 AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?2)",
+                [bot, nonce],
+            )
+            .map(drop)
+    }
+
     /// A bot's whole transcript, oldest first, as `{seq, at, entry}`.
     // shortcut: no paging; #13 adds it for long chats.
     pub fn history(&self, bot: &str) -> Result<Vec<Value>> {

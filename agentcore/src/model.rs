@@ -43,13 +43,24 @@ struct Body<'a> {
     reasoning_effort: Option<&'a str>,
 }
 
-/// The system message, then the conversation, without copying it.
-struct Messages<'a>(&'a Value, &'a [Value]);
+/// The system message, the conversation, then `last`, without copying any of it.
+struct Messages<'a>(&'a Value, &'a [Value], Option<&'a Value>);
 
 impl Serialize for Messages<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_seq(std::iter::once(self.0).chain(self.1))
+        s.collect_seq(std::iter::once(self.0).chain(self.1).chain(self.2))
     }
+}
+
+/// One model call.
+pub struct Ask<'a> {
+    pub model: &'a str,
+    pub effort: Option<&'a str>,
+    pub system: &'a str,
+    pub messages: &'a [Value],
+    /// One more message after `messages`.
+    pub last: Option<&'a Value>,
+    pub tools: &'a Value,
 }
 
 impl Provider {
@@ -73,24 +84,19 @@ impl Provider {
 
     /// Streams one reply. `abort` is checked between streamed lines.
     // shortcut: a server that stalls without sending blocks abort until it sends or closes; add a read timeout if that shows up.
-    #[allow(clippy::too_many_arguments)] // one call site; a struct would only rename the arguments
     pub fn stream(
         &self,
-        model: &str,
-        effort: Option<&str>,
-        system: &str,
-        messages: &[Value],
-        tools: &Value,
+        ask: &Ask,
         abort: &AtomicBool,
         mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
-        let system = json!({"role": "system", "content": system});
+        let system = json!({"role": "system", "content": ask.system});
         let body = Body {
-            model,
-            messages: Messages(&system, messages),
-            tools,
+            model: ask.model,
+            messages: Messages(&system, ask.messages, ask.last),
+            tools: ask.tools,
             stream: true,
-            reasoning_effort: effort,
+            reasoning_effort: ask.effort,
         };
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         let mut request = self

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
-/// `abort` ends the turn `aborted`.
+/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
@@ -39,6 +39,7 @@ while IFS= read -r line; do
       choice=$(printf '%s' "$line" | sed 's/.*"choice":"\([^"]*\)".*/\1/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"chose $choice\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
+    *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *) echo "$ok" ;;
   esac
 done
@@ -511,5 +512,85 @@ fn the_real_engine_runs_a_turn_through_the_service() {
     assert_eq!(
         request["messages"][1],
         json!({"role": "user", "content": "hi"})
+    );
+}
+
+#[test]
+fn connectors_reach_the_engine_when_it_starts_and_when_they_change() {
+    let home = home("engine-connectors");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let connector = |name: &str| {
+        json!({"name": name, "enabled": true,
+            "transport": {"type": "http", "url": "https://example.com/mcp", "headers": {}}})
+    };
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": connector("first")}),
+    );
+    // Storing a connector does not start an engine.
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["running"], false);
+
+    let log = home.join("bots").join(&bot).join("connectors.log");
+    let sent = || -> Vec<String> {
+        let log = fs::read_to_string(&log).unwrap_or_default();
+        log.lines().map(str::to_owned).collect()
+    };
+    w.ok("set_model", json!({"bot": bot, "model": "m1"})); // starts the engine
+    eventually("the list at start", || sent().len() == 1);
+    assert!(sent()[0].contains(r#""name":"first""#), "{:?}", sent());
+
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": connector("second")}),
+    );
+    eventually("the list after a change", || sent().len() == 2);
+    assert!(
+        sent()[1].contains("first") && sent()[1].contains("second"),
+        "{:?}",
+        sent()
+    );
+
+    w.ok("delete_connector", json!({"bot": bot, "name": "first"}));
+    eventually("the list after a delete", || sent().len() == 3);
+    assert!(
+        !sent()[2].contains("first") && sent()[2].contains("second"),
+        "{:?}",
+        sent()
+    );
+}
+
+#[test]
+fn rewind_removes_the_prompt_and_what_followed_from_history() {
+    let home = home("rewind");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    for nonce in ["n1", "n2"] {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    }
+    w.send("rewind", json!({"bot": bot, "entry": "n2", "fork": false}));
+    let changed = w.wait_for(|f| f["type"] == "history_changed");
+    assert_eq!(changed["bot"], bot.as_str());
+
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let entries: Vec<&Value> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["entry"])
+        .collect();
+    let prompts: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["type"] == "prompt")
+        .map(|e| &e["nonce"])
+        .collect();
+    assert_eq!(prompts, ["n1"]);
+    assert_eq!(entries.last().unwrap()["type"], "turn_end");
+    assert_eq!(
+        entries.iter().filter(|e| e["type"] == "turn_end").count(),
+        1
     );
 }

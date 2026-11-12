@@ -32,8 +32,9 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `abort` | none | End the running turn now. It ends with `turn_end` reason `aborted`. |
 | `answer` | `question`, `choice` | Answer an open `question`. `choice` is one of its `options`. |
 | `set_model` | `model`, `effort?` | Model and thinking effort for the following model calls. |
-| `rewind` | `entry`, `fork` | Go back to `entry`: in place, or as a new conversation when `fork` is true (the engine sends the new `session`). |
-| `compact` | none | Summarise the working context now. |
+| `rewind` | `entry`, `fork` | Go back to `entry`, the `nonce` of an earlier prompt: the conversation is as it was just before that prompt. In place, or as a new conversation when `fork` is true (the engine sends the new `session`; the old one is left as it was). |
+| `compact` | none | Summarise the working context now. The response comes when the summary is in place. |
+| `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -57,12 +58,14 @@ A killed engine sends nothing more.
 
 ## `agentcore` (Bate's own engine)
 
-- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL` and `BATE_MODEL` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** `write`, `edit` and `run` ask first: a `question` whose id is the tool call's id, options `Approve` and `Deny`. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
-- **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one chat message per line, written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
-- `rewind` and `compact` are refused until #9.
+- **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one line per chat message or marker (where a prompt starts, where a compaction happened), written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
+- **Compaction:** the engine asks the model for a summary of all but the 4 most recent messages and shows the model the summary in their place. It does this on `compact`, and by itself before a model call when the context is over four fifths of `BATE_MODEL_CONTEXT` (tokens, 32000 if unset; size is estimated at 4 bytes per token). The summary is not streamed as a reply. The conversation file keeps every message.
+- **Rewind:** `entry` is a prompt's `nonce`. In place, the file loses that prompt and what followed. With `fork`, the part before it is copied to a new conversation and the engine continues there. Refused while a turn runs.
+- **Connectors (MCP):** on each turn the engine starts the enabled `stdio` servers it does not have yet (in the bot's folder, with the connector's `env` added) and reaches `http` ones by POST (JSON or an event stream back, `Mcp-Session-Id` kept). A tool appears to the model as `<connector>__<tool>`. Every connector tool call asks first, with the title `Use <connector>: <tool>`. A connector that fails to load is reported on standard error (the service log) and left out until its settings change or the engine restarts. A tool call waits at most 120 s.
 
 ## Window ⇄ service (v1)
 
@@ -96,7 +99,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `steer` | `bot`, `text` | `{}` |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model`, `effort?` | `{}` |
-| `rewind` | `bot`, `entry`, `fork` | `{}` |
+| `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. |
 | `list_routines` | `bot` | `{routines:[Routine]}` |
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
 | `delete_routine` | `bot`, `routineId` | `{}` |
@@ -114,6 +117,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"bots_changed"}` | Re-run `list_bots`. |
 | `{"type":"question_closed","bot","question"}` | The engine took an answer to the question, or the turn that asked it ended. |
 | `{"type":"engine_stopped","bot"}` | The bot's engine exited. Its open questions are dropped. |
+| `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 
@@ -145,7 +149,7 @@ At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-
 
 ### Connectors
 
-Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. Engines load them in #9.
+Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. The service sends a bot's list to its engine when the engine starts and after every change (`connectors`).
 
 ### Storage
 
