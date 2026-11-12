@@ -146,6 +146,12 @@ impl Store {
             .map(drop)
     }
 
+    pub fn clear_session(&self, bot: &str) -> Result<()> {
+        self.0
+            .execute("UPDATE bots SET session = NULL WHERE id = ?1", [bot])
+            .map(drop)
+    }
+
     /// Appends one transcript entry; returns its sequence number.
     pub fn append(&self, bot: &str, at: u64, entry: &Value) -> Result<i64> {
         self.0.execute(

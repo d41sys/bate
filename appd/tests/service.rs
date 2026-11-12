@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
-/// asks question `q1`; any other prompt streams "hel", waits a second, then "lo".
+/// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
@@ -33,6 +33,7 @@ while IFS= read -r line; do
           echo '{"type":"text","delta":"hel"}'; sleep 1
           echo '{"type":"text","delta":"lo"}'; echo '{"type":"turn_end","reason":"done"}' ;;
       esac ;;
+    *'"choice":"Maybe"'*) echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"not an option\"}" ;;
     *'"type":"answer"'*)
       choice=$(printf '%s' "$line" | sed 's/.*"choice":"\([^"]*\)".*/\1/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"chose $choice\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -206,8 +207,8 @@ fn a_reply_finishes_after_the_window_quits_and_history_has_all_of_it() {
     assert_eq!(
         kinds,
         [
-            "prompt",
             "session",
+            "prompt",
             "turn_start",
             "text",
             "text",
@@ -269,6 +270,17 @@ fn an_open_question_survives_a_reconnect_and_the_answer_reaches_the_engine() {
     let questions = w.ok("open_bot", json!({"bot": bot}))["questions"].clone();
     assert_eq!(questions[0]["question"], "q1");
     assert_eq!(questions[0]["options"], json!(["Approve", "Deny"]));
+
+    let refused = w.send(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Maybe"}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == refused.as_str());
+    assert_eq!(reply["code"], "engine_error");
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["questions"][0]["question"],
+        "q1"
+    );
 
     w.ok(
         "answer",

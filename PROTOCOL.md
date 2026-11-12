@@ -36,6 +36,8 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `compact` | none | Summarise the working context now. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
+An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
+
 ## Events (engine → service)
 
 | `type` | Fields | Meaning |
@@ -93,7 +95,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
 
-`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`.
+`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 
@@ -101,14 +103,14 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 |---|---|
 | `{"type":"transcript","bot","seq","at","entry"}` | An entry was appended to the bot's transcript. |
 | `{"type":"bots_changed"}` | Re-run `list_bots`. |
-| `{"type":"question_closed","bot","question"}` | The question was answered. |
+| `{"type":"question_closed","bot","question"}` | The engine took an answer to the question. |
 | `{"type":"engine_stopped","bot"}` | The bot's engine exited. Its open questions are dropped. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 
 ### Transcript
 
-The service appends every engine event except `ready` and `response` to the bot's transcript, plus `{"type":"prompt","nonce","text"}` for each prompt it sends. An `Entry` is `{seq, at, entry}`; `seq` grows and `at` is Unix milliseconds. Windows read history from here (`open_bot`), so a window that was closed or disconnected mid-reply sees the whole reply. Engines belong to the service, so closing a window never stops a reply.
+The service appends every engine event except `ready` and `response` to the bot's transcript, plus `{"type":"prompt","nonce","text"}` for each prompt the engine admitted. When an engine stops mid-turn, the service appends `turn_end` with reason `error`, so history never shows a reply still running. An `Entry` is `{seq, at, entry}`; `seq` grows and `at` is Unix milliseconds. Windows read history from here (`open_bot`), so a window that was closed or disconnected mid-reply sees the whole reply. Engines belong to the service, so closing a window never stops a reply.
 
 ### Prompt ledger
 
@@ -124,7 +126,7 @@ A nonce the engine refused (`engine_error`), or that could not be sent because t
 
 ### Questions
 
-An engine `question` is stored until `answer` or until the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
+An engine `question` is stored until the engine takes an `answer` to it (an answer the engine refuses leaves it open) or until the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
 
 ### Routines
 

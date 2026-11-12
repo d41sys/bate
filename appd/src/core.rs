@@ -73,17 +73,26 @@ struct Client {
     hello: bool,
 }
 
-/// Who waits for an engine's `response`.
+/// A prompt on its way to the engine: in the ledger as `sending`, not yet in
+/// the transcript, which only gets prompts the engine admitted.
+struct Outgoing {
+    nonce: String,
+    text: String,
+}
+
+/// Who waits for an engine's `response`, and what the response settles.
 enum Waiter {
     Window {
         client: u64,
         id: Value,
         command: String,
-        nonce: Option<String>,
+        prompt: Option<Outgoing>,
+        /// An answered question, closed only once the engine took the answer.
+        question: Option<String>,
     },
     Routine {
         routine: String,
-        nonce: String,
+        prompt: Outgoing,
     },
     /// The service's own `start` or `open`.
     Service,
@@ -302,13 +311,17 @@ impl Core {
                         Ok(Some(json!({"duplicate": true, "uncertain": true})))
                     }
                     None => {
-                        let waiter = Waiter::Window {
+                        let prompt = Outgoing {
+                            nonce: nonce.into(),
+                            text: text.into(),
+                        };
+                        self.send_prompt(&bot, prompt, |p| Waiter::Window {
                             client,
                             id: id.clone(),
                             command: command.into(),
-                            nonce: Some(nonce.into()),
-                        };
-                        self.send_prompt(&bot, nonce, text, waiter)?;
+                            prompt: Some(p),
+                            question: None,
+                        })?;
                         Ok(None)
                     }
                 }
@@ -316,15 +329,13 @@ impl Core {
             "answer" => {
                 let bot = self.bot_of(f)?;
                 let (question, choice) = (str_field(f, "question")?, str_field(f, "choice")?);
-                if !self.store.take_question(&bot, question).map_err(internal)? {
+                let open = self.store.questions(&bot).map_err(internal)?;
+                if !open.iter().any(|q| q["question"] == question) {
                     return Err((
                         "no_such_question",
                         format!("question `{question}` is not open"),
                     ));
                 }
-                self.broadcast(
-                    &json!({"type": "question_closed", "bot": bot, "question": question}),
-                );
                 let op = Op::Answer {
                     question: question.into(),
                     choice: choice.into(),
@@ -336,7 +347,8 @@ impl Core {
                         client,
                         id: id.clone(),
                         command: command.into(),
-                        nonce: None,
+                        prompt: None,
+                        question: Some(question.into()),
                     },
                 )?;
                 Ok(None)
@@ -355,7 +367,8 @@ impl Core {
                         client,
                         id: id.clone(),
                         command: command.into(),
-                        nonce: None,
+                        prompt: None,
+                        question: None,
                     },
                 )?;
                 Ok(None)
@@ -439,27 +452,41 @@ impl Core {
     fn send_prompt(
         &mut self,
         bot: &str,
-        nonce: &str,
-        text: &str,
-        waiter: Waiter,
+        prompt: Outgoing,
+        waiter: impl FnOnce(Outgoing) -> Waiter,
     ) -> Result<(), Refusal> {
+        let nonce = prompt.nonce.clone();
         self.store
-            .set_ledger(bot, nonce, Ledger::Sending, now_ms())
+            .set_ledger(bot, &nonce, Ledger::Sending, now_ms())
             .map_err(internal)?;
-        self.record(bot, json!({"type": "prompt", "nonce": nonce, "text": text}));
-        let sent = self.send_op(
-            bot,
-            Op::Prompt {
-                nonce: nonce.into(),
-                text: text.into(),
-            },
-            waiter,
-        );
+        let op = Op::Prompt {
+            nonce: nonce.clone(),
+            text: prompt.text.clone(),
+        };
+        let sent = self.send_op(bot, op, waiter(prompt));
         if sent.is_err() {
             // The engine never started, so it cannot have the prompt.
-            let _ = self.store.forget_ledger(bot, nonce);
+            let _ = self.store.forget_ledger(bot, &nonce);
         }
         sent
+    }
+
+    /// The engine answered a prompt: admitted (`sent`, and into the transcript) or refused (forgotten).
+    fn settle_prompt(&mut self, bot: &str, p: &Outgoing, admitted: bool) {
+        let stored = if admitted {
+            self.store.set_ledger(bot, &p.nonce, Ledger::Sent, now_ms())
+        } else {
+            self.store.forget_ledger(bot, &p.nonce)
+        };
+        if let Err(e) = stored {
+            log!("bot {bot}: ledger not updated: {e}");
+        }
+        if admitted {
+            self.record(
+                bot,
+                json!({"type": "prompt", "nonce": p.nonce, "text": p.text}),
+            );
+        }
     }
 
     fn send_op(&mut self, bot: &str, op: Op, waiter: Waiter) -> Result<(), Refusal> {
@@ -483,6 +510,14 @@ impl Core {
         let dir = paths::bot_dir(bot);
         let failed = |e: io::Error| ("engine_failed", format!("cannot start the engine: {e}"));
         sys::create_private_dir(&dir).map_err(failed)?;
+        // Read before spawning, so a store error never leaves an engine without `start`/`open`.
+        let open = match self.store.session(bot).map_err(internal)? {
+            Some(session) => Op::Open {
+                bot: bot.into(),
+                session,
+            },
+            None => Op::Start { bot: bot.into() },
+        };
         let Engine {
             child,
             input,
@@ -535,13 +570,6 @@ impl Core {
                 busy: false,
             },
         );
-        let open = match self.store.session(bot).map_err(internal)? {
-            Some(session) => Op::Open {
-                bot: bot.into(),
-                session,
-            },
-            None => Op::Start { bot: bot.into() },
-        };
         self.send_op(bot, open, Waiter::Service)
     }
 
@@ -592,24 +620,24 @@ impl Core {
     }
 
     fn on_response(&mut self, bot: &str, waiter: Waiter, error: Option<String>) {
-        let ledger = |store: &Store, nonce: &str| {
-            let r = match error {
-                Some(_) => store.forget_ledger(bot, nonce),
-                None => store.set_ledger(bot, nonce, Ledger::Sent, now_ms()),
-            };
-            if let Err(e) = r {
-                log!("bot {bot}: ledger not updated: {e}");
-            }
-        };
         match waiter {
             Waiter::Window {
                 client,
                 id,
                 command,
-                nonce,
+                prompt,
+                question,
             } => {
-                if let Some(n) = &nonce {
-                    ledger(&self.store, n);
+                if let Some(p) = &prompt {
+                    self.settle_prompt(bot, p, error.is_none());
+                }
+                if let (Some(q), None) = (&question, &error) {
+                    match self.store.take_question(bot, q) {
+                        Ok(_) => self.broadcast(
+                            &json!({"type": "question_closed", "bot": bot, "question": q}),
+                        ),
+                        Err(e) => log!("bot {bot}: question not closed: {e}"),
+                    }
                 }
                 let result = match error {
                     Some(e) => Err(("engine_error", e)),
@@ -617,15 +645,29 @@ impl Core {
                 };
                 self.reply(client, &id, &command, result);
             }
-            Waiter::Routine { routine, nonce } => {
-                ledger(&self.store, &nonce);
+            Waiter::Routine { routine, prompt } => {
+                self.settle_prompt(bot, &prompt, error.is_none());
                 if let Some(e) = error {
                     self.routine_failed(bot, &routine, e);
                 }
             }
             Waiter::Service => {
-                if let Some(e) = error {
-                    log!("bot {bot}: engine refused to open the conversation: {e}");
+                let Some(e) = error else { return };
+                // Only a refused `open` has a session to blame; a refused `start` is just logged.
+                if !matches!(self.store.session(bot), Ok(Some(_))) {
+                    log!("bot {bot}: engine refused to start a conversation: {e}");
+                    return;
+                }
+                // A stale session would fail every later start too: forget it and begin anew.
+                log!("bot {bot}: engine refused to open the conversation: {e}; starting a new one");
+                if let Err(e) = self.store.clear_session(bot) {
+                    log!("bot {bot}: session not cleared: {e}");
+                    return;
+                }
+                if let Err((_, e)) =
+                    self.send_op(bot, Op::Start { bot: bot.into() }, Waiter::Service)
+                {
+                    log!("bot {bot}: {e}");
                 }
             }
         }
@@ -638,6 +680,14 @@ impl Core {
         let _ = r.child.kill();
         let status = r.child.wait();
         log!("bot {bot}: engine stopped ({status:?})");
+        if r.busy {
+            // Close the turn in the transcript, so history never shows a reply still running.
+            let end = Event::TurnEnd {
+                reason: proto::TurnEnd::Error,
+                error: Some("the engine stopped".into()),
+            };
+            self.record(bot, serde_json::to_value(&end).expect("serializable"));
+        }
         for e in [
             self.store.ledger_engine_stopped(bot),
             self.store.clear_questions(bot),
@@ -646,7 +696,18 @@ impl Core {
                 log!("bot {bot}: store: {e}");
             }
         }
-        for (_, waiter) in r.waiting {
+        // Prompts still queued were never written: the engine cannot have them.
+        let unwritten: Vec<String> = r.queued.iter().map(|(id, _)| id.clone()).collect();
+        for (req, waiter) in r.waiting {
+            if let Waiter::Window {
+                prompt: Some(p), ..
+            }
+            | Waiter::Routine { prompt: p, .. } = &waiter
+                && unwritten.contains(&req)
+                && let Err(e) = self.store.forget_ledger(bot, &p.nonce)
+            {
+                log!("bot {bot}: ledger not updated: {e}");
+            }
             match waiter {
                 Waiter::Window {
                     client,
@@ -701,7 +762,7 @@ impl Core {
             None => None,
         };
         let now = now_ms();
-        r.id = Some(r.id.take().unwrap_or_else(|| sys::random_hex(4)));
+        r.id.get_or_insert_with(|| sys::random_hex(4));
         r.anchor = match old
             .filter(|o| o.schedule == r.schedule)
             .and_then(|o| o.anchor.clone())
@@ -761,15 +822,14 @@ impl Core {
                 match self.store.ledger(&bot, &nonce) {
                     Ok(None) => {
                         let text = format!("[Routine: {}]\n{}", r.name, r.prompt);
-                        match self.send_prompt(
-                            &bot,
-                            &nonce,
-                            &text,
-                            Waiter::Routine {
-                                routine: id.clone(),
-                                nonce: nonce.clone(),
-                            },
-                        ) {
+                        let prompt = Outgoing {
+                            nonce: nonce.clone(),
+                            text,
+                        };
+                        match self.send_prompt(&bot, prompt, |p| Waiter::Routine {
+                            routine: id.clone(),
+                            prompt: p,
+                        }) {
                             Ok(()) => (RunOutcome::Sent, None),
                             Err((_, e)) => (RunOutcome::Failed, Some(e)),
                         }
@@ -796,11 +856,7 @@ impl Core {
             }
         }
         self.next_due = next_due;
-        if next_due == u64::MAX {
-            Duration::from_secs(3600)
-        } else {
-            Duration::from_millis(next_due.saturating_sub(now)).min(TICK)
-        }
+        Duration::from_millis(next_due.saturating_sub(now)).min(TICK)
     }
 
     fn routine_failed(&mut self, bot: &str, id: &str, error: String) {
