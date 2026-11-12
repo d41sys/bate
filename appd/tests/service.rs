@@ -298,3 +298,77 @@ fn an_open_question_survives_a_reconnect_and_the_answer_reaches_the_engine() {
     let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == again.as_str());
     assert_eq!(reply["code"], "no_such_question");
 }
+
+#[test]
+fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
+    let home = home("routines");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Brief", "prompt": "hi", "enabled": true,
+            "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}}}),
+    )["routine"]
+        .clone();
+    let id = routine["id"].as_str().unwrap().to_owned();
+    assert!(routine["nextRunMs"].as_u64().unwrap() > 0);
+
+    // While the service is down, the routine's slot passes (one minute ago).
+    service.kill();
+    let due = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        - 60_000;
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "UPDATE routines SET routine = json_set(routine, '$.nextRunMs', ?1) WHERE id = ?2",
+        rusqlite::params![due, id],
+    )
+    .unwrap();
+    drop(db);
+
+    let nonce = format!("routine-{id}-{due}");
+    let mut service = Service::start(&home);
+    eventually("the routine's prompt", || {
+        prompts_received(&home, &bot, &nonce) == 1
+    });
+    let mut w = Window::connect(&home);
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"][0].clone();
+    assert_eq!(listed["lastRun"]["outcome"], "sent");
+    assert!(listed["nextRunMs"].as_i64().unwrap() > due);
+
+    // Another restart does not send the slot again.
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    w.ok("list_bots", json!({}));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(prompts_received(&home, &bot, &nonce), 1);
+
+    let connector = json!({"name": "github", "enabled": true,
+        "transport": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"TOKEN": "t"}}});
+    assert_eq!(
+        w.ok("set_connector", json!({"bot": bot, "connector": connector}))["connector"],
+        connector
+    );
+    assert_eq!(
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"],
+        json!([connector])
+    );
+    let bad = w.send(
+        "set_connector",
+        json!({"bot": bot, "connector": {"name": "Bad Name", "enabled": true,
+        "transport": {"type": "http", "url": "https://x"}}}),
+    );
+    assert_eq!(
+        w.wait_for(|f| f["type"] == "response" && f["id"] == bad.as_str())["code"],
+        "invalid_connector"
+    );
+    w.ok("delete_connector", json!({"bot": bot, "name": "github"}));
+    assert_eq!(
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"],
+        json!([])
+    );
+}
