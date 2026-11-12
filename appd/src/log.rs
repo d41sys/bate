@@ -59,7 +59,11 @@ impl Log {
                 _ => {}
             }
         }
-        fs::rename(self.dir.join("appd.log"), self.dir.join("appd.1.log"))?;
+        // `appd.log` may be gone (the user deleted it); rotation must still open a fresh one.
+        match fs::rename(self.dir.join("appd.log"), self.dir.join("appd.1.log")) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         (self.file, self.size) = open_current(&self.dir, self.onto_stderr)?;
         Ok(())
     }
@@ -115,7 +119,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let mut log = Log::open(&dir, 100, 2, false).unwrap();
         for i in 0..50 {
-            log.write_line(&format!("line {i:02} ........")).unwrap(); // 20 bytes with the newline
+            log.write_line(&format!("line {i:02} ........")).unwrap(); // 17 bytes with the newline
         }
         let mut names: Vec<String> = fs::read_dir(&dir)
             .unwrap()
@@ -139,6 +143,25 @@ mod tests {
             fs::read_to_string(dir.join("appd.1.log"))
                 .unwrap()
                 .starts_with("line 40")
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_deleted_log_file_does_not_stop_rotation() {
+        let dir = std::env::temp_dir().join(format!("appd-log-deleted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut log = Log::open(&dir, 100, 2, false).unwrap();
+        log.write_line("before the user deleted the file").unwrap();
+        fs::remove_file(dir.join("appd.log")).unwrap();
+        for i in 0..10 {
+            log.write_line(&format!("line {i:02} ........")).unwrap();
+        }
+        assert!(
+            fs::read_to_string(dir.join("appd.log"))
+                .unwrap()
+                .ends_with("line 09 ........\n")
         );
         fs::remove_dir_all(&dir).unwrap();
     }

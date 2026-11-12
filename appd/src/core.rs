@@ -2,7 +2,7 @@
 //! and one engine per active bot. Everything reaches it as a `Msg`.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -42,6 +42,8 @@ pub enum Msg {
     },
 }
 
+/// Longest piece of engine stderr logged as one line.
+const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
 /// A due routine slot older than this is recorded as missed, not run.
 const CATCH_UP_MS: u64 = 6 * 3600 * 1000;
@@ -526,11 +528,22 @@ impl Core {
         } = Engine::spawn(&engine_program(), &dir).map_err(failed)?;
         let name = bot.to_owned();
         // Engine diagnostics go through the service log, so they are rotated with it.
+        // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),
+        // and a line longer than `MAX_STDERR_LINE` is logged in pieces so memory stays bounded.
         thread::spawn(move || {
-            for line in io::BufReader::new(stderr).lines() {
-                match line {
-                    Ok(line) => log!("bot {name}: engine: {line}"),
-                    Err(_) => return,
+            let mut reader = io::BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match (&mut reader)
+                    .take(MAX_STDERR_LINE)
+                    .read_until(b'\n', &mut buf)
+                {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf);
+                        log!("bot {name}: engine: {}", line.trim_end_matches('\n'));
+                    }
                 }
             }
         });

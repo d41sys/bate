@@ -55,12 +55,13 @@ fn serve() -> io::Result<()> {
     for dir in [home.clone(), paths::run_dir(), paths::logs()] {
         sys::create_private_dir(&dir)?;
     }
-    log::init(&paths::logs())?;
     let Some(_lock) = sys::try_lock(&paths::lock())? else {
         // Exit 0: launchd must not restart a second copy.
         log!("another appd is already serving {}", home.display());
         return Ok(());
     };
+    // Only the instance that holds the lock owns (and rotates) the log file.
+    log::init(&paths::logs())?;
     let store = store::Store::open(&paths::db()).map_err(io::Error::other)?;
     let socket = paths::socket();
     // The lock is ours, so a socket file left here is stale.
