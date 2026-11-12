@@ -10,7 +10,7 @@ jobs:
   check:
     runs-on: macos-latest # the service is macOS-only (launchd); the toolchain comes from rust-toolchain.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -23,7 +23,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cargo build --release --locked -p appd -p agentcore
       - run: tar -czf "bate-$GITHUB_REF_NAME-macos-arm64.tar.gz" -C target/release appd agentcore
       - run: gh release create "$GITHUB_REF_NAME" bate-*.tar.gz --generate-notes
