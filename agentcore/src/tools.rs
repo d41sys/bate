@@ -317,6 +317,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "1 two two");
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -335,6 +336,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "     2\ty\n[1 more lines; read on with offset 3]");
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -355,6 +357,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4));
         let big = call("run", json!({"command": "yes | head -c 200000"}), &d).unwrap();
         assert!(big.len() < OUTPUT_CAP + 100 && big.ends_with("[output cut at 64 KiB]"));
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -369,6 +372,7 @@ mod tests {
         );
         assert_eq!(out.unwrap(), "started\n");
         assert!(started.elapsed() < Duration::from_secs(5));
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -381,6 +385,7 @@ mod tests {
             call("search", json!({"pattern": "nothing_here"}), &d).unwrap(),
             "no matches"
         );
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

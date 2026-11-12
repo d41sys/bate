@@ -197,11 +197,29 @@ impl Drop for Engine {
     }
 }
 
-fn workdir(name: &str) -> PathBuf {
+/// A working folder, removed when the test passes; kept after a failure, for a look at what is in it.
+struct Dir(PathBuf);
+
+impl std::ops::Deref for Dir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+fn workdir(name: &str) -> Dir {
     let d = std::env::temp_dir().join(format!("agentcore-engine-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
-    d
+    Dir(d)
 }
 
 fn is_turn_end(e: &Event) -> bool {

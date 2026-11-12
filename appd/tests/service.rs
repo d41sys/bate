@@ -46,14 +46,32 @@ done
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn home(name: &str) -> PathBuf {
+/// A private home folder, removed when the test passes; kept after a failure, for a look at what is in it.
+struct Home(PathBuf);
+
+impl std::ops::Deref for Home {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+fn home(name: &str) -> Home {
     let home = std::env::temp_dir().join(format!("appd-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&home);
     fs::create_dir_all(&home).unwrap();
     let engine = home.join("fake-engine");
     fs::write(&engine, FAKE_ENGINE).unwrap();
     fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    home
+    Home(home)
 }
 
 struct Service(Child);
