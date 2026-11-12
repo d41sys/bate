@@ -61,8 +61,8 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// One line to stderr, which launchd sends to `logs/appd.log`.
+/// One line to the service log (`crate::log`).
 macro_rules! log {
-    ($($arg:tt)*) => { eprintln!("{} {}", $crate::sys::now_ms(), format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::log::write(&format!("{} {}", $crate::sys::now_ms(), format_args!($($arg)*))) };
 }
 pub(crate) use log;

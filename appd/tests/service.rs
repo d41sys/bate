@@ -19,7 +19,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
   ok="{\"type\":\"response\",\"id\":\"$id\"}"
   case "$line" in
-    *'"type":"start"'*) echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
+    *'"type":"start"'*) echo "engine says hi" >&2; echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
@@ -371,4 +371,20 @@ fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
         w.ok("list_connectors", json!({"bot": bot}))["connectors"],
         json!([])
     );
+}
+
+#[test]
+fn engine_error_output_lands_in_the_service_log_tagged_with_its_bot() {
+    let home = home("stderr");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    let log = home.join("logs/appd.log");
+    eventually("the engine's line in the log", || {
+        fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l.contains(&format!("bot {bot}")) && l.ends_with("engine says hi"))
+    });
 }

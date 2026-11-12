@@ -2,7 +2,7 @@
 //! and one engine per active bot. Everything reaches it as a `Msg`.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, BufRead};
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -522,7 +522,18 @@ impl Core {
             child,
             input,
             mut output,
+            stderr,
         } = Engine::spawn(&engine_program(), &dir).map_err(failed)?;
+        let name = bot.to_owned();
+        // Engine diagnostics go through the service log, so they are rotated with it.
+        thread::spawn(move || {
+            for line in io::BufReader::new(stderr).lines() {
+                match line {
+                    Ok(line) => log!("bot {name}: engine: {line}"),
+                    Err(_) => return,
+                }
+            }
+        });
         self.counter += 1;
         let generation = self.counter;
         let (tx, name) = (self.tx.clone(), bot.to_owned());

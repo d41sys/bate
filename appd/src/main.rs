@@ -5,6 +5,7 @@
 mod clients;
 mod core;
 mod launch;
+mod log;
 mod paths;
 mod schedule;
 mod store;
@@ -54,6 +55,7 @@ fn serve() -> io::Result<()> {
     for dir in [home.clone(), paths::run_dir(), paths::logs()] {
         sys::create_private_dir(&dir)?;
     }
+    log::init(&paths::logs())?;
     let Some(_lock) = sys::try_lock(&paths::lock())? else {
         // Exit 0: launchd must not restart a second copy.
         log!("another appd is already serving {}", home.display());

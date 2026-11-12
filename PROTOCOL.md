@@ -6,7 +6,7 @@ The service (`appd`) runs one engine program per bot and talks to it over the pr
 
 `$APPD_ENGINE` if set, else `agentcore` next to the service's executable, else `agentcore` on `PATH` (`proto::engine_program`). A relative `APPD_ENGINE` path is resolved against the service's working directory, not the bot's folder. Set `APPD_ENGINE` to develop, test or swap an engine without changing the service.
 
-The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`). The engine's standard error goes to the service log.
+The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`). The service copies each line of the engine's standard error into its log, tagged with the bot.
 
 ## Frames
 
@@ -57,7 +57,7 @@ A killed engine sends nothing more.
 
 ## Window ⇄ service (v1)
 
-`appd` is the per-user service (launchd label `com.oursnever.bate.appd`). Its data lives in `~/Library/Application Support/Bate/`, or in `$APPD_HOME`; a custom home gets the label `com.oursnever.bate.appd.<hash>` so a test never touches the real agent. `appd launch` registers and starts it; `appd unregister` stops and removes it. A second `appd` for the same home exits at once (`run/appd.lock`).
+`appd` is the per-user service (launchd label `com.oursnever.bate.appd`). Its data lives in `~/Library/Application Support/Bate/`, or in `$APPD_HOME`; a custom home gets the label `com.oursnever.bate.appd.<hash>` so a test never touches the real agent. `appd launch` registers and starts it; `appd unregister` stops and removes it. A second `appd` for the same home exits at once (`run/appd.lock`). The service log is `logs/appd.log`, capped at 5 MiB; older lines move to `appd.1.log` … `appd.3.log` and the oldest file is dropped.
 
 ### Transport
 

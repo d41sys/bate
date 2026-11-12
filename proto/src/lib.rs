@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod connectors;
 pub mod routines;
@@ -205,6 +205,8 @@ pub struct Engine {
     pub child: Child,
     pub input: EngineInput,
     pub output: EngineOutput,
+    /// The engine's own diagnostics; the service copies them into its log.
+    pub stderr: ChildStderr,
 }
 
 pub struct EngineInput(ChildStdin);
@@ -216,16 +218,17 @@ pub struct EngineOutput {
 
 impl Engine {
     /// Starts `program` with the bot's folder `workdir` as its working directory.
-    /// Its stderr goes to the service's own (the log). The caller reads `ready` first.
+    /// The caller reads `ready` first, and must drain `stderr` so the engine never blocks on it.
     pub fn spawn(program: &Path, workdir: &Path) -> io::Result<Engine> {
         let mut child = Command::new(program)
             .current_dir(workdir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()?;
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
         Ok(Engine {
             child,
             input: EngineInput(stdin),
@@ -233,6 +236,7 @@ impl Engine {
                 stdout: BufReader::new(stdout),
                 buf: Vec::new(),
             },
+            stderr,
         })
     }
 }
