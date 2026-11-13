@@ -5,5 +5,6 @@ export default defineConfig({
   plugins: [react()],
   // The shell serves these files itself, from `tauri://localhost/`.
   base: "./",
-  build: { outDir: "dist", emptyOutDir: true, modulePreload: { polyfill: false } },
+  // One local file; its size is not a download.
+  build: { outDir: "dist", emptyOutDir: true, modulePreload: { polyfill: false }, chunkSizeWarningLimit: 2000 },
 });

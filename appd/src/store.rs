@@ -189,15 +189,22 @@ impl Store {
 
     /// A bot's whole transcript, oldest first, as `{seq, at, entry}`.
     // shortcut: no paging; #13 adds it for long chats.
-    pub fn history(&self, bot: &str) -> Result<Vec<Value>> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT seq, at, entry FROM transcript WHERE bot = ?1 ORDER BY seq")?;
-        stmt.query_map([bot], |r| {
-            let entry: Value = parse(r.get(2)?)?;
-            Ok(serde_json::json!({"seq": r.get::<_, i64>(0)?, "at": r.get::<_, i64>(1)?, "entry": entry}))
-        })?
-        .collect()
+    /// The last `limit` entries before `before`, oldest first, and whether there are older ones.
+    pub fn history(&self, bot: &str, before: i64, limit: i64) -> Result<(Vec<Value>, bool)> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT seq, at, entry FROM transcript WHERE bot = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+        )?;
+        // One more than asked for tells whether there is more.
+        let mut page = stmt
+            .query_map(rusqlite::params![bot, before, limit.saturating_add(1)], |r| {
+                let entry: Value = parse(r.get(2)?)?;
+                Ok(serde_json::json!({"seq": r.get::<_, i64>(0)?, "at": r.get::<_, i64>(1)?, "entry": entry}))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        let more = page.len() as i64 > limit;
+        page.truncate(limit as usize);
+        page.reverse();
+        Ok((page, more))
     }
 
     pub fn ledger(&self, bot: &str, nonce: &str) -> Result<Option<Ledger>> {
