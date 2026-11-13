@@ -1658,3 +1658,84 @@ fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
         "{system}"
     );
 }
+
+#[test]
+fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did() {
+    let dir = workdir("browser");
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "browser",
+            json!({"action": "open", "url": "https://example.com/"}),
+        )],
+        vec![call(
+            "c2",
+            "browser",
+            json!({"action": "click", "element": 3}),
+        )],
+        vec![call("c3", "browser", json!({"action": "fly"}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("look it up");
+
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question {
+        kind,
+        target,
+        title,
+        ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Connector), Some("browser"))
+    );
+    assert_eq!(title, "Browser: open https://example.com/");
+    let asked = engine.until(|e| matches!(e, Event::Browser { .. }));
+    let Some(Event::Browser { request, action }) = asked.last() else {
+        unreachable!()
+    };
+    assert_eq!(action["url"], "https://example.com/");
+    let result = |request: &str, output: Option<&str>, error: Option<&str>| Op::BrowserResult {
+        request: request.into(),
+        output: output.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+    // Only the open request takes a result, and a reply to a message is not one.
+    assert!(engine.request(result("b999", Some("x"), None)).is_some());
+    let reply = Op::Reply {
+        message: request.clone(),
+        text: Some("x".into()),
+        error: None,
+    };
+    assert!(engine.request(reply).is_some());
+    assert_eq!(
+        engine.request(result(request, Some("Title: Example"), None)),
+        None
+    );
+
+    answer(&mut engine, "Approve");
+    let asked = engine.until(|e| matches!(e, Event::Browser { .. }));
+    let Some(Event::Browser { request, .. }) = asked.last() else {
+        unreachable!()
+    };
+    let gone = "There is no element 3 on the page now: look again.";
+    assert_eq!(engine.request(result(request, None, Some(gone))), None);
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    assert!(offered(&requests[0]).contains(&"browser"));
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "Title: Example");
+    assert_eq!(result(2), gone);
+    // Not an action: not asked about, nor sent.
+    assert_eq!(
+        result(3),
+        "`fly` is not an action: open, look, click, type or back."
+    );
+}

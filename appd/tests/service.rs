@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
-/// The arguments it was started with are logged to `args.log`, one line per start; each `start`
+/// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
+/// service for that action in the bot's browser; the `browser_result` is logged to
+/// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
@@ -55,6 +57,17 @@ while IFS= read -r line; do
           words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"message\",\"message\":\"m-$nonce\",\"to\":\"$to\",\"text\":\"$words\"}" ;;
+        *'"text":"browse '*)
+          set -- $(printf '%s' "$line" | sed 's/.*"text":"browse \([^"]*\)".*/\1/')
+          case "$1" in
+            open) action="{\"action\":\"open\",\"url\":\"$2\"}" ;;
+            click) action="{\"action\":\"click\",\"element\":$2}" ;;
+            type) submit=false; [ "$4" = go ] && submit=true
+              action="{\"action\":\"type\",\"element\":$2,\"text\":\"$3\",\"submit\":$submit}" ;;
+            *) action="{\"action\":\"$1\"}" ;;
+          esac
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"browser\",\"request\":\"b-$nonce\",\"action\":$action}" ;;
         *'fall over'*) exit 1 ;;
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -72,6 +85,7 @@ while IFS= read -r line; do
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
+    *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"reply"'*)
       said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"$said\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -228,7 +242,7 @@ fn prompts_received(home: &Path, bot: &str, nonce: &str) -> usize {
         .count()
 }
 
-fn eventually(what: &str, check: impl Fn() -> bool) {
+fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + TIMEOUT;
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -2159,4 +2173,330 @@ fn a_bot_runs_on_an_installed_agent_once_it_has_the_whole_disk() {
     turn(&mut w, "n3");
     assert_eq!(started_with(), ["", "acp opencode acp", ""]);
     assert_eq!(conversations(), 3);
+}
+
+/// A connection to Chrome's DevTools over its debugging port: what a person does in the
+/// window, as far as a page can tell.
+struct DevTools {
+    stream: std::net::TcpStream,
+    next: u64,
+}
+
+impl DevTools {
+    /// The browser of the profile in `profile`, started with `--remote-debugging-port=0`.
+    fn connect(profile: &Path) -> DevTools {
+        let file = profile.join("DevToolsActivePort");
+        eventually("Chrome's debugging port", || file.exists());
+        let active = fs::read_to_string(&file).unwrap();
+        let mut lines = active.lines();
+        let (port, path) = (lines.next().unwrap(), lines.next().unwrap());
+        let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        assert!(
+            head.starts_with(b"HTTP/1.1 101"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        DevTools { stream, next: 0 }
+    }
+
+    fn call(&mut self, session: Option<&str>, method: &str, params: Value) -> Value {
+        self.next += 1;
+        let mut message = json!({"id": self.next, "method": method, "params": params});
+        if let Some(session) = session {
+            message["sessionId"] = json!(session);
+        }
+        let data = message.to_string().into_bytes();
+        // A text frame, masked (with a key of zeros) as a client's must be.
+        let mut frame = vec![0x81];
+        match data.len() {
+            n if n < 126 => frame.push(0x80 | n as u8),
+            n => {
+                frame.push(0x80 | 126);
+                frame.extend((n as u16).to_be_bytes());
+            }
+        }
+        frame.extend([0; 4]);
+        frame.extend(data);
+        self.stream.write_all(&frame).unwrap();
+        loop {
+            let mut head = [0; 2];
+            self.stream.read_exact(&mut head).unwrap();
+            let length = match head[1] & 0x7f {
+                126 => {
+                    let mut n = [0; 2];
+                    self.stream.read_exact(&mut n).unwrap();
+                    u16::from_be_bytes(n) as usize
+                }
+                127 => {
+                    let mut n = [0; 8];
+                    self.stream.read_exact(&mut n).unwrap();
+                    u64::from_be_bytes(n) as usize
+                }
+                n => n as usize,
+            };
+            let mut data = vec![0; length];
+            self.stream.read_exact(&mut data).unwrap();
+            let reply: Value = serde_json::from_slice(&data).unwrap();
+            if reply["id"] == self.next {
+                assert!(reply.get("error").is_none(), "{reply}");
+                return reply["result"].clone();
+            }
+        }
+    }
+
+    /// A person clicks in the page the bot works on.
+    fn click(&mut self) {
+        let targets = self.call(None, "Target.getTargets", json!({}));
+        let page = targets["targetInfos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["type"] == "page")
+            .unwrap()["targetId"]
+            .clone();
+        let attached = self.call(
+            None,
+            "Target.attachToTarget",
+            json!({"targetId": page, "flatten": true}),
+        );
+        let session = attached["sessionId"].as_str().unwrap().to_owned();
+        for kind in ["mousePressed", "mouseReleased"] {
+            let mouse =
+                json!({"type": kind, "x": 400, "y": 300, "button": "left", "clickCount": 1});
+            self.call(Some(&session), "Input.dispatchMouseEvent", mouse);
+        }
+    }
+}
+
+/// A small web site: `/` has a link to `/two` and a form that sends `q` to `/sent`.
+/// Gives its address and the paths asked for.
+fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut first = String::new();
+            let mut reader = BufReader::new(&stream);
+            if reader.read_line(&mut first).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = first.split(' ').nth(1).unwrap_or("").to_owned();
+            // Chrome opens connections ahead of need, and may close them unused.
+            if path.is_empty() {
+                continue;
+            }
+            if path == "/favicon.ico" {
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 404 -\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                continue;
+            }
+            log.lock().unwrap().push(path.clone());
+            let page = match path.as_str() {
+                "/" => "<title>Front</title><h1>Hello there</h1><a href='/two'>Next page</a><form action='/sent'><input name='q' placeholder='Query'><input type='password' name='pw'><button>Go</button></form>".to_owned(),
+                // The page's own script plays at being the user: that is not taking over.
+                other => format!("<title>Other</title><p>You are at {other}</p><script>window.dispatchEvent(new MouseEvent('mousedown'))</script>"),
+            };
+            let _ = write!(
+                &stream,
+                "HTTP/1.1 200 -\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
+                page.len()
+            );
+        }
+    });
+    (base, seen)
+}
+
+#[test]
+fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
+    let home = home("browser");
+    // Chrome without a window, and with a debugging port through which this test acts as the
+    // person at the window.
+    let chrome = home.join("chrome");
+    fs::write(
+        &chrome,
+        "#!/bin/sh\nexec \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless=new --use-mock-keychain --remote-debugging-port=0 \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_CHROME", &chrome);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let (site, seen) = web_site();
+    let log = home.join("bots").join(&bot).join("browser.log");
+    let results = || {
+        let all = fs::read_to_string(&log).unwrap_or_default();
+        all.lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let browse = |w: &mut Window, nonce: &str, what: &str| {
+        let before = results().len();
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "text": format!("browse {what}")}),
+        );
+        eventually("the browser's result", || results().len() > before);
+        let result = results().pop().unwrap();
+        assert_eq!(result["request"], format!("b-{nonce}"));
+        result
+    };
+
+    let page = browse(&mut w, "n1", &format!("open {site}/"));
+    let output = page["output"].as_str().unwrap_or_else(|| panic!("{page}"));
+    assert!(
+        output.starts_with(&format!(
+            "Title: Front\nAddress: {site}/\n\nHello there\nNext page"
+        )),
+        "{output}"
+    );
+    assert!(
+        output
+            .ends_with("Elements:\n[1] link \"Next page\"\n[2] field \"Query\"\n[3] password field \"pw\"\n[4] button \"Go\""),
+        "{output}"
+    );
+
+    let page = browse(&mut w, "n2", "click 1");
+    assert!(
+        page["output"].as_str().unwrap().contains("You are at /two"),
+        "{page}"
+    );
+    let page = browse(&mut w, "n3", "back");
+    assert!(
+        page["output"].as_str().unwrap().starts_with("Title: Front"),
+        "{page}"
+    );
+    // What is typed in a password field is not read back to the bot.
+    let page = browse(&mut w, "n3b", "type 3 hunter2x");
+    let output = page["output"].as_str().unwrap();
+    assert!(
+        output.contains("[3] password field \"pw\"") && !output.contains("hunter2x"),
+        "{output}"
+    );
+    let page = browse(&mut w, "n4", "type 2 tea go");
+    assert!(
+        page["output"]
+            .as_str()
+            .unwrap()
+            .contains("You are at /sent?q=tea"),
+        "{page}"
+    );
+
+    // No file of this Mac and no element that is not there.
+    let refused = browse(&mut w, "n5", "open file:///etc/hosts");
+    assert_eq!(refused["error"], "`url` must be an http or https address");
+    let refused = browse(&mut w, "n6", "click 99");
+    assert_eq!(
+        refused["error"],
+        "There is no element 99 on the page now: look again."
+    );
+
+    // The person at the window clicks: the bot's next action waits until they hand it back.
+    let profile = home.join("browsers").join(&bot);
+    let mut person = DevTools::connect(&profile);
+    person.click();
+    w.wait_for(|f| f["type"] == "bots_changed");
+    eventually("the browser to be taken", || {
+        w.ok("list_bots", json!({}))["bots"][0]["browserTaken"] == true
+    });
+    let before = results().len();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n7", "text": "browse look"}),
+    );
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(results().len(), before);
+    w.ok("hand_back_browser", json!({"bot": bot}));
+    eventually("the waiting action", || results().len() > before);
+    assert!(
+        results().pop().unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .contains("You are at /sent?q=tea")
+    );
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0].get("browserTaken"),
+        None
+    );
+
+    // An action that waited for a turn that has ended is not done when the browser comes back.
+    person.click();
+    eventually("the browser to be taken", || {
+        w.ok("list_bots", json!({}))["bots"][0]["browserTaken"] == true
+    });
+    let asked = seen.lock().unwrap().len();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n8", "text": "browse back"}),
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+    w.ok("abort", json!({"bot": bot}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    w.ok("hand_back_browser", json!({"bot": bot}));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(results().len(), before + 1);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        asked,
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    let pages = browse(&mut w, "n9", "look");
+    assert!(
+        pages["output"]
+            .as_str()
+            .unwrap()
+            .contains("You are at /sent?q=tea")
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        // Going back took the page from Chrome's cache.
+        ["/", "/two", "/sent?q=tea&pw=hunter2x"].map(String::from)
+    );
+}
+
+#[test]
+fn without_chrome_the_bot_is_told_so() {
+    let home = home("no-browser");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_CHROME", "/nonexistent/chrome");
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "browse open https://example.com/"}),
+    );
+    let log = home.join("bots").join(&bot).join("browser.log");
+    eventually("the browser's result", || log.exists());
+    let result: Value = serde_json::from_str(fs::read_to_string(&log).unwrap().trim()).unwrap();
+    let error = result["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("cannot start /nonexistent/chrome"),
+        "{error}"
+    );
 }

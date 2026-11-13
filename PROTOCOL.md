@@ -39,6 +39,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
+| `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -57,6 +58,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `tool_end` | `call`, `output`, `isError` | The call's result. |
 | `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
+| `browser` | `request`, `action` | An action in the bot's browser (see Browser). The engine waits until the service sends `browser_result` for `request`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
 A killed engine sends nothing more.
@@ -127,13 +129,14 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
 | `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
 | `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
+| `hand_back_browser` | `bot` | `{}`; the user gives the bot's browser back (see Browser) |
 | `set_agent` | `bot`, `command` | `{}`; `command` is a list (program, then arguments) or `null`; see Installed agents |
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}` |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
-`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent}` (`agent` only when set): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken}` (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 
@@ -275,6 +278,26 @@ The bot never holds the token. Its engine is sent the connector with `url` repla
 An access token within 30 s of its end is renewed before use; an answer of 401 from the server renews it once and sends the request again. Without tokens, or when renewing fails, the proxy answers 401 and the server is not asked. When the sign-in server refuses to renew, the tokens are forgotten: the connector shows as signed out. Tokens are for one address: changing a connector's `url`, `headers` or `oauth`, or removing it, forgets them. A connector that is off is not served.
 
 Tokens are stored as plain text in `app.db`, like connector values. A bot limited to its folder cannot read that file.
+
+### Browser
+
+Each bot has a web browser of its own: the Chrome installed on this Mac (`/Applications/Google Chrome.app`, else Chromium; `$APPD_CHROME` names another), started by the service on the bot's first browser action, in its own window, with a profile of the bot's own (`browsers/<bot>` in the service's folder, so the bot's programs cannot read its cookies and its sign-ins are kept apart from the user's and other bots'). Without one, the action fails with a message saying so; Bate does not install a browser.
+
+Bate's engine has a `browser` tool, asked about as kind `connector`, target `browser` (once for the browser, whatever the action). The action is sent as a `browser` event; the service checks it and drives the browser over the DevTools protocol. Only these exist, so nothing the bot runs can reach the browser another way:
+
+| `action` | Fields | Does |
+|---|---|---|
+| `open` | `url` | Goes to the address: `http` or `https` only, never a file of this Mac or the browser's own pages. |
+| `look` | none | Nothing. |
+| `click` | `element` | Clicks the element with that number. |
+| `type` | `element`, `text`, `submit?` | Puts `text` (at most 10 000 characters) in the field; with `submit`, sends its form. |
+| `back` | none | Goes back. |
+
+Every result is the page as it is after the action, once loaded (at most 15 s): `Title:`, `Address:`, the page's text (at most 20 000 characters) and `Elements:`, the numbered links, buttons and fields (at most 200) that `click` and `type` refer to; what is in a password field is not shown. A page that is not a web page (one the user opened) is not read. Downloads are refused: Chrome is not kept to the bot's folder.
+
+The user watches in the browser's window. Clicking, tapping or typing in a page there takes the browser over (in the page's own frame; not in a frame from another site, the address bar or another tab): `browserTaken` becomes true (`bots_changed`), and the bot's next browser action waits, its turn with it, until `hand_back_browser`. An action that waited for a turn which has ended meanwhile (an abort) is not done. Scrolling does not take the browser over. An action already under way when the user takes over finishes.
+
+The browser stays open while the service runs; a browser the user quit is started again by the next action.
 
 ### Installed agents (ACP)
 

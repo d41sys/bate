@@ -55,6 +55,7 @@ const SUB_AGENT: &str = "\n\nYou are a sub-agent: another agent handed you the o
 
 /// The tool that messages another bot.
 const MESSAGE: &str = "message_bot";
+const BROWSER: &str = "browser";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
 /// and `message_bot` when there is a bot to message.
@@ -62,6 +63,15 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
     let mut tools = tools::definitions();
     if let Value::Array(list) = &mut tools {
         list.extend(mcp.definitions().cloned());
+        list.push(json!({"type": "function", "function": {"name": BROWSER,
+            "description": "Use your own web browser, which the user can watch. `open` a web address, `look` at the page, `click` or `type` into one of the numbered elements that every result lists, or go `back`. Each result is the page as it is after the action: its title, address, text and elements. If the user takes the browser over, you wait until they hand it back.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["open", "look", "click", "type", "back"]},
+                "url": {"type": "string", "description": "For `open`: an http or https address"},
+                "element": {"type": "integer", "description": "For `click` and `type`: the element's number"},
+                "text": {"type": "string", "description": "For `type`: what to put in the field"},
+                "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"}},
+                "required": ["action"]}}}));
         if peers {
             list.push(json!({"type": "function", "function": {"name": MESSAGE,
                 "description": "Send a message to another bot and wait for its reply. It works on the message in its own folder with its own tools and knows nothing of this conversation: put everything it needs in `text`. A bot does one thing at a time; if it is busy you are told so.",
@@ -430,6 +440,9 @@ impl Turn {
         if tool == MESSAGE && !self.peers.is_empty() {
             return self.message(args);
         }
+        if tool == BROWSER {
+            return self.browse(args);
+        }
         // Every action is asked about: the service decides from the bot's permissions, and
         // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);
@@ -443,6 +456,43 @@ impl Turn {
         match connector {
             Some(_) => mcp.call(tool, args, &self.control),
             None => tools::run(tool, args, &self.dir, &self.control),
+        }
+    }
+
+    /// One action in the bot's browser, which the service runs. Asked about like a connector's
+    /// tool: once for the browser, whatever the action.
+    fn browse(&self, args: &Map<String, Value>) -> Result<String, String> {
+        let arg = |key: &str| {
+            args.get(key).map_or(String::new(), |v| match v {
+                Value::String(text) => text.chars().take(200).collect(),
+                other => other.to_string(),
+            })
+        };
+        let title = match arg("action").as_str() {
+            "open" => format!("Browser: open {}", arg("url")),
+            "look" => "Browser: look at the page".to_owned(),
+            "click" => format!("Browser: click element {}", arg("element")),
+            "type" => format!(
+                "Browser: type into element {}: {}",
+                arg("element"),
+                arg("text")
+            ),
+            "back" => "Browser: go back".to_owned(),
+            other => {
+                return Err(format!(
+                    "`{other}` is not an action: open, look, click, type or back."
+                ));
+            }
+        };
+        self.allowed(Kind::Connector, BROWSER.to_owned(), title)?;
+        let id = self.wait_on("b");
+        self.out.send(&Event::Browser {
+            request: id.clone(),
+            action: args.clone(),
+        });
+        match self.answer(&id) {
+            Some(result) => result,
+            None => Err("Aborted by the user".into()),
         }
     }
 

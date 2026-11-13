@@ -21,6 +21,7 @@ pub const BASE_LABEL: &str = "com.oursnever.bate.appd";
 const PASS_ENV: &[&str] = &[
     "APPD_HOME",
     "APPD_ENGINE",
+    "APPD_CHROME",
     "PATH",
     "BATE_MODEL_BASE_URL",
     "BATE_MODEL",

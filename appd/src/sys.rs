@@ -10,6 +10,11 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 /// Creates `dir` (and parents) and forces mode 0700 on it.
+/// Held while a program is started, and while descriptors are made that only become
+/// close-on-exec a moment later (macOS has no `pipe2`): a program started in between would
+/// keep them.
+pub static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
