@@ -50,6 +50,11 @@ pub enum Msg {
         id: Value,
         result: Result<(String, String, oauth::Pending), String>,
     },
+    Models {
+        client: u64,
+        id: Value,
+        models: Vec<String>,
+    },
     /// What came of an action in a bot's browser.
     Browsed {
         bot: String,
@@ -348,6 +353,9 @@ impl Core {
             Msg::BrowserTaken { bot } => {
                 log!("bot {bot}: the user took over its browser");
                 self.broadcast(&json!({"type": "bots_changed"}));
+            }
+            Msg::Models { client, id, models } => {
+                self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
             Msg::SignIn { client, id, result } => {
                 let reply = match result {
@@ -1089,12 +1097,19 @@ impl Core {
                     if !url.starts_with("http://") && !url.starts_with("https://") {
                         return Err(bad("`url` must start with http:// or https://"));
                     }
-                    let key = f
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|k| !k.is_empty());
-                    self.store.set_provider(url, key).map_err(internal)?;
+                    let existing_key = match self.store.provider().map_err(internal)? {
+                        Some((_, k)) => k,
+                        None => None,
+                    };
+                    let key = match f.get("key") {
+                        Some(Value::Null) => None,
+                        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+                        _ if f.get("clearKey").and_then(Value::as_bool) == Some(true) => None,
+                        _ => existing_key,
+                    };
+                    self.store
+                        .set_provider(url, key.as_deref())
+                        .map_err(internal)?;
                 }
                 Ok(Some(json!({})))
             }
@@ -1110,11 +1125,15 @@ impl Core {
                             .filter(|s| !s.is_empty()),
                     ),
                 };
-                let models = match url {
-                    Some(u) => fetch_models(&u, key.as_deref()),
-                    None => Vec::new(),
-                };
-                Ok(Some(json!({"models": models})))
+                let (tx, id) = (self.tx.clone(), id.clone());
+                std::thread::spawn(move || {
+                    let models = match url {
+                        Some(u) => fetch_models(&u, key.as_deref()),
+                        None => Vec::new(),
+                    };
+                    let _ = tx.send(Msg::Models { client, id, models });
+                });
+                Ok(None)
             }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())

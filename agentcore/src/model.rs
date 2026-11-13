@@ -96,20 +96,6 @@ impl Provider {
         }
     }
 
-    /// Backwards compatibility when started directly from the environment.
-    #[allow(dead_code)]
-    pub fn from_env() -> Result<Provider, String> {
-        let p = Self::new();
-        if p.default_url.is_none() {
-            return Err("no model server is set up: set BATE_MODEL_BASE_URL (for example http://127.0.0.1:1234/v1)".into());
-        }
-        Ok(p)
-    }
-
-    /// Streams one reply. `abort` ends it within `POLL`, whether or not the server is sending.
-    // shortcut: after an abort the reading thread and its connection stay until the server next
-    // sends or closes (ureq has no idle timeout and cannot be closed from here); switch HTTP
-    // client if servers keep generating into it.
     pub fn stream(
         &self,
         base_url: Option<&str>,

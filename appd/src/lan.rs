@@ -420,6 +420,7 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "set_lan",
     "pair_device",
     "remove_device",
+    "get_provider",
     "set_provider",
 ];
 

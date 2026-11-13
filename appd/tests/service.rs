@@ -1193,6 +1193,10 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "4");
     assert_eq!(refused["code"], "forbidden", "{refused}");
 
+    send(&device, json!({"id": "5", "type": "get_provider"}));
+    let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "5");
+    assert_eq!(refused["code"], "forbidden", "{refused}");
+
     // A line break would be two commands.
     assert_eq!(
         device

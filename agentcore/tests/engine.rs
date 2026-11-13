@@ -1875,3 +1875,33 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
         Some("Bearer sk-secret-token-123")
     );
 }
+
+#[test]
+fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
+    let dir = workdir("engine-token-err");
+    let model = Model::serve(vec![]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Hi");
+    let req = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    // The service answers with an error.
+    assert_eq!(
+        engine.request(Op::Token {
+            request: req,
+            url: None,
+            key: None,
+            error: Some("no model server configured".into()),
+        }),
+        None
+    );
+    assert_eq!(
+        engine.next(),
+        Event::TurnEnd {
+            reason: TurnEnd::Error,
+            error: Some("no model server configured".into()),
+        }
+    );
+}
