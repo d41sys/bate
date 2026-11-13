@@ -1,0 +1,15 @@
+[package]
+name = "window"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bate"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

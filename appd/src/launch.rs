@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn the_real_agent_runs_under_bates_label_with_data_in_application_support() {
-        let home = paths::default_home(Path::new("/Users/ada"));
+        let home = proto::paths::default_home(Path::new("/Users/ada"));
         assert_eq!(
             home,
             Path::new("/Users/ada/Library/Application Support/Bate")
