@@ -47,6 +47,12 @@ while IFS= read -r line; do
           target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"question\",\"question\":\"q-$nonce\",\"title\":\"$kind $target\",\"options\":[\"Approve\",\"Deny\"],\"kind\":\"$kind\",\"target\":\"$target\"}" ;;
+        *'"text":"tell '*)
+          to=$(printf '%s' "$line" | sed 's/.*"text":"tell \([^ ]*\) .*/\1/')
+          words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"message\",\"message\":\"m-$nonce\",\"to\":\"$to\",\"text\":\"$words\"}" ;;
+        *'fall over'*) exit 1 ;;
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
@@ -62,6 +68,10 @@ while IFS= read -r line; do
     *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
+    *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
+    *'"type":"reply"'*)
+      said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
+      echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"$said\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
     *) echo "$ok" ;;
   esac
 done
@@ -1530,4 +1540,121 @@ fn a_local_webhook_starts_a_routine_and_passes_the_requests_data_on() {
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(refused["code"], "invalid_routine", "{refused}");
     assert!(!prompts().contains("while off") && !prompts().contains("after"));
+}
+
+#[test]
+fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
+    let home = home("groups");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b, c) = (w.create_bot(), w.create_bot(), w.create_bot());
+    // What the bot `a` is told came of its message to `to`.
+    let tell = |w: &mut Window, nonce: &str, to: &str, words: &str| {
+        w.ok(
+            "prompt",
+            json!({"bot": a, "nonce": nonce, "text": format!("tell {to} {words}")}),
+        );
+        let said = w.wait_for(|f| {
+            f["type"] == "transcript" && f["bot"] == a.as_str() && f["entry"]["type"] == "text"
+        })["entry"]["delta"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+        said
+    };
+    let prompts_of = |bot: &str| {
+        fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
+    };
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+
+    // No group: no bot to message.
+    let said = tell(&mut w, "n1", &b, "anyone there");
+    assert_eq!(said, "error: that bot is not in a group with you");
+    assert!(prompts_of(&b).is_empty());
+
+    let group = json!({"name": " Team ", "lead": a, "members": [b, b]});
+    let id = w.send("set_group", json!({"group": group}));
+    w.wait_for(|f| f["type"] == "groups_changed");
+    let made =
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["data"]["group"].clone();
+    assert_eq!(made["name"], "Team");
+    assert_eq!(made["members"], json!([b]));
+    assert_eq!(w.ok("list_groups", json!({}))["groups"], json!([made]));
+    // The running engine hears who it may message now, and that it leads.
+    let peers_log = home.join("bots").join(&a).join("peers.log");
+    eventually("the lead's peers", || {
+        let log = fs::read_to_string(&peers_log).unwrap_or_default();
+        let last = log.lines().last().unwrap_or_default();
+        last.contains(&format!("\"id\":\"{b}\"")) && last.contains("\"leads\":true")
+    });
+
+    // The message arrives as a prompt that says who it is from; what the bot says is the reply.
+    let said = tell(&mut w, "n2", &b, "count the tests");
+    assert_eq!(said, "text: hello");
+    let got = prompts_of(&b);
+    assert!(
+        got.contains("[Message from the bot \\\"Ada\\\". It is another bot"),
+        "{got}"
+    );
+    assert!(got.contains("\\ncount the tests\""), "{got}");
+    assert!(got.contains(&format!("\"nonce\":\"bot-{a}-")), "{got}");
+
+    // A bot does one thing at a time: the lead is told, and cannot break in.
+    w.ok(
+        "prompt",
+        json!({"bot": b, "nonce": "n-own", "text": "work for the user"}),
+    );
+    let said = tell(&mut w, "n3", &b, "drop that and do this");
+    assert_eq!(
+        said,
+        "error: it is busy with something else; try again later"
+    );
+    assert!(!prompts_of(&b).contains("drop that"));
+    w.wait_for(|f| f["bot"] == b.as_str() && f["entry"]["type"] == "turn_end");
+
+    // A bot whose engine stops over the message leaves the lead with that, not waiting.
+    assert_eq!(
+        tell(&mut w, "n3b", &b, "fall over"),
+        "error: its engine stopped"
+    );
+
+    // Outside the group nobody is reached.
+    assert_eq!(
+        tell(&mut w, "n4", &c, "hi"),
+        "error: that bot is not in a group with you"
+    );
+
+    // What a group cannot be.
+    for bad in [
+        json!({"name": "x", "lead": a, "members": [a]}),
+        json!({"name": "x", "lead": a, "members": []}),
+        json!({"name": "x", "lead": a, "members": ["nobody"]}),
+        json!({"name": " ", "lead": a, "members": [b]}),
+    ] {
+        assert_eq!(
+            refused(&mut w, "set_group", json!({"group": bad})),
+            "invalid_group",
+            "{bad}"
+        );
+    }
+    let gone = json!({"id": "00000000", "name": "x", "lead": a, "members": [b]});
+    assert_eq!(
+        refused(&mut w, "set_group", json!({"group": gone})),
+        "no_such_group"
+    );
+
+    // Without the group the two are strangers again.
+    w.ok("delete_group", json!({"groupId": made["id"]}));
+    assert_eq!(
+        refused(&mut w, "delete_group", json!({"groupId": made["id"]})),
+        "no_such_group"
+    );
+    assert_eq!(
+        tell(&mut w, "n5", &b, "still there"),
+        "error: that bot is not in a group with you"
+    );
 }

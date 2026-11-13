@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod connectors;
+pub mod groups;
 pub mod memory;
 pub mod permissions;
 pub mod routines;
@@ -66,6 +67,20 @@ pub enum Op {
     /// The bot's MCP servers: the whole list each time. The engine uses the enabled ones from its next turn on.
     Connectors {
         connectors: Vec<connectors::Connector>,
+    },
+    /// The bots this one may message: the whole list each time. `leads`: it leads a group.
+    Peers {
+        peers: Vec<groups::Peer>,
+        #[serde(default)]
+        leads: bool,
+    },
+    /// What came of the open `message`: the other bot's reply, or why there is none.
+    Reply {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Finish and exit.
     Stop,
@@ -124,6 +139,13 @@ pub enum Event {
         /// With `kind`: the exact action (the command, the path, the connector tool).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+    },
+    /// A message for the bot `to`. The engine waits until the service sends `reply` for
+    /// `message`.
+    Message {
+        message: String,
+        to: String,
+        text: String,
     },
     TurnEnd {
         reason: TurnEnd,
