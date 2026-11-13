@@ -412,6 +412,17 @@ impl Core {
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({"routine": routine})))
             }
+            "list_routine_runs" => {
+                let bot = self.bot_of(f)?;
+                let id = str_field(f, "routineId")?;
+                let routines = self.store.routines(&bot).map_err(internal)?;
+                if !routines.iter().any(|r| r.id.as_deref() == Some(id)) {
+                    return Err(("no_such_routine", "no such routine".into()));
+                }
+                Ok(Some(
+                    json!({"runs": self.store.runs(&bot, id).map_err(internal)?}),
+                ))
+            }
             "delete_routine" => {
                 let bot = self.bot_of(f)?;
                 if !self
@@ -948,13 +959,15 @@ impl Core {
                     Err(e) => (RunOutcome::Failed, Some(e.to_string())),
                 }
             };
-            r.last_run = Some(RoutineRun {
+            let run = RoutineRun {
                 at_ms: now,
                 outcome: outcome.0,
                 error: outcome.1,
-            });
+            };
             r.next_run_ms = next;
-            if let Err(e) = self.store.put_routine(&bot, &r) {
+            let stored = self.store.add_run(&bot, &id, &run);
+            r.last_run = Some(run);
+            if let Err(e) = stored.and_then(|()| self.store.put_routine(&bot, &r)) {
                 log!("bot {bot}: routine {id} not stored: {e}");
             }
             self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
@@ -973,12 +986,16 @@ impl Core {
         let Some(mut r) = routines.into_iter().find(|r| r.id.as_deref() == Some(id)) else {
             return;
         };
-        r.last_run = Some(RoutineRun {
+        let run = RoutineRun {
             at_ms: now_ms(),
             outcome: RunOutcome::Failed,
             error: Some(error),
-        });
-        if let Err(e) = self.store.put_routine(bot, &r) {
+        };
+        // shortcut: the refusal is taken to belong to the newest run; give runs an id if a
+        // refusal can ever arrive after the routine's next slot (5 minutes at the least).
+        let stored = self.store.replace_last_run(bot, id, &run);
+        r.last_run = Some(run);
+        if let Err(e) = stored.and_then(|()| self.store.put_routine(bot, &r)) {
             log!("bot {bot}: routine {id} not stored: {e}");
         }
         self.broadcast(&json!({"type": "routines_changed", "bot": bot}));

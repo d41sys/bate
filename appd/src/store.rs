@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use proto::connectors::Connector;
-use proto::routines::Routine;
+use proto::routines::{Routine, RoutineRun};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -58,8 +58,13 @@ CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
+CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 ";
+
+/// Past runs kept per routine.
+const MAX_RUNS: u32 = 50;
 
 fn json<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).expect("serializable")
@@ -281,11 +286,51 @@ impl Store {
             .map(drop)
     }
 
+    /// Deletes a routine and its past runs.
     pub fn delete_routine(&self, bot: &str, id: &str) -> Result<bool> {
+        self.0.execute(
+            "DELETE FROM routine_runs WHERE bot = ?1 AND routine = ?2",
+            [bot, id],
+        )?;
         Ok(self
             .0
             .execute("DELETE FROM routines WHERE bot = ?1 AND id = ?2", [bot, id])?
             > 0)
+    }
+
+    /// Adds a run to a routine's history, which keeps the newest `MAX_RUNS`.
+    pub fn add_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO routine_runs(bot, routine, run) VALUES (?1, ?2, ?3)",
+            params![bot, routine, json(run)],
+        )?;
+        self.0
+            .execute(
+                "DELETE FROM routine_runs WHERE bot = ?1 AND routine = ?2 AND seq <=
+                 (SELECT seq FROM routine_runs WHERE bot = ?1 AND routine = ?2 ORDER BY seq DESC LIMIT 1 OFFSET ?3)",
+                params![bot, routine, MAX_RUNS],
+            )
+            .map(drop)
+    }
+
+    /// Replaces a routine's newest run: a prompt recorded as sent that the engine then refused.
+    pub fn replace_last_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE routine_runs SET run = ?3 WHERE seq =
+                 (SELECT max(seq) FROM routine_runs WHERE bot = ?1 AND routine = ?2)",
+                params![bot, routine, json(run)],
+            )
+            .map(drop)
+    }
+
+    /// A routine's past runs, newest first.
+    pub fn runs(&self, bot: &str, routine: &str) -> Result<Vec<RoutineRun>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT run FROM routine_runs WHERE bot = ?1 AND routine = ?2 ORDER BY seq DESC",
+        )?;
+        stmt.query_map([bot, routine], |r| parse(r.get(0)?))?
+            .collect()
     }
 
     pub fn connectors(&self, bot: &str) -> Result<Vec<Connector>> {
@@ -309,5 +354,45 @@ impl Store {
             "DELETE FROM connectors WHERE bot = ?1 AND name = ?2",
             [bot, name],
         )? > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::routines::RunOutcome;
+
+    #[test]
+    fn a_routine_keeps_its_newest_runs_and_a_refusal_replaces_only_the_last() {
+        let dir = std::env::temp_dir().join(format!("appd-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        let run = |at_ms, outcome| RoutineRun {
+            at_ms,
+            outcome,
+            error: None,
+        };
+        for at in 1..=MAX_RUNS as u64 + 5 {
+            store
+                .add_run("b1", "r1", &run(at, RunOutcome::Sent))
+                .unwrap();
+        }
+        store
+            .add_run("b1", "other", &run(1, RunOutcome::Sent))
+            .unwrap();
+        store
+            .replace_last_run("b1", "r1", &run(999, RunOutcome::Failed))
+            .unwrap();
+
+        let runs = store.runs("b1", "r1").unwrap();
+        assert_eq!(runs.len(), MAX_RUNS as usize);
+        assert_eq!(runs[0], run(999, RunOutcome::Failed));
+        assert_eq!(runs[1], run(MAX_RUNS as u64 + 4, RunOutcome::Sent));
+        assert_eq!(runs.last().unwrap().at_ms, 6);
+        assert_eq!(
+            store.runs("b1", "other").unwrap(),
+            [run(1, RunOutcome::Sent)]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

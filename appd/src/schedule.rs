@@ -1,7 +1,9 @@
 //! Schedule math for routines: validation, and the run slots of a schedule.
 //!
 //! A schedule is a wall time (`HH:MM`) in an IANA zone on the dates its
-//! frequency selects, counting intervals from an anchor date. Weeks start on
+//! frequency selects, counting intervals from an anchor date. `minutes` and
+//! `hourly` instead count real time from that wall time on the anchor date, so
+//! a clock change neither skips nor repeats a run. Weeks start on
 //! Monday. A wall time that does not exist (clocks jump forward) runs at the
 //! first instant after the gap; one that happens twice (clocks go back) runs
 //! at the earlier instant.
@@ -12,6 +14,8 @@ use jiff::{SignedDuration, Span, Timestamp, Unit};
 use proto::routines::{Frequency, Schedule, Weekday};
 
 const MAX_INTERVAL: u32 = 99;
+/// `minutes` runs at most every 5 minutes (each run is a model call) and at least daily.
+const MINUTES: std::ops::RangeInclusive<u32> = 5..=1440;
 /// Periods searched for the next slot; one or two are ever needed.
 const SEARCH_PERIODS: i64 = 8;
 /// Slots stepped through when catching up before giving up on the exact newest one.
@@ -22,8 +26,16 @@ const MAX_CATCH_UP: usize = 10_000;
 /// fields that do not apply to the frequency cleared.
 pub fn normalize(schedule: &Schedule) -> Result<Schedule, String> {
     let mut s = schedule.clone();
-    if !(1..=MAX_INTERVAL).contains(&s.interval) {
-        return Err(format!("`schedule.interval` must be 1 to {MAX_INTERVAL}"));
+    let allowed = match s.frequency {
+        Frequency::Minutes => MINUTES,
+        _ => 1..=MAX_INTERVAL,
+    };
+    if !allowed.contains(&s.interval) {
+        return Err(format!(
+            "`schedule.interval` must be {} to {}",
+            allowed.start(),
+            allowed.end()
+        ));
     }
     parse_time(&s.time)?;
     s.timezone = Some(match s.timezone.as_deref().map(str::trim) {
@@ -114,6 +126,13 @@ impl<'a> Slots<'a> {
 
     /// First slot strictly after `after_ms`, in Unix ms.
     pub fn next_after(&self, after_ms: u64) -> Option<u64> {
+        if let Some(step) = self.step_ms() {
+            let first = u64::try_from(self.instant(self.anchor)?.as_millisecond()).ok()?;
+            return Some(match after_ms.checked_sub(first) {
+                Some(since) => first + (since / step + 1) * step,
+                None => first,
+            });
+        }
         let after = timestamp(after_ms)?;
         let first = (self.period_of(after.to_zoned(self.zone.clone()).date())? - 1).max(0);
         for k in first..first + SEARCH_PERIODS {
@@ -127,10 +146,26 @@ impl<'a> Slots<'a> {
         None
     }
 
+    /// The length of one period of a frequency that counts real time.
+    fn step_ms(&self) -> Option<u64> {
+        let minutes = match self.schedule.frequency {
+            Frequency::Minutes => 1,
+            Frequency::Hourly => 60,
+            _ => return None,
+        };
+        Some(u64::from(self.schedule.interval) * minutes * 60_000)
+    }
+
     /// For a slot `from_ms` that is due at `now_ms`: the newest slot at or
     /// before `now_ms` (`from_ms` itself when no later one is due) and the
     /// first slot after `now_ms`.
     pub fn catch_up(&self, from_ms: u64, now_ms: u64) -> (u64, Option<u64>) {
+        if let Some(step) = self.step_ms() {
+            let next = self.next_after(now_ms);
+            // The slot one step before the next one, unless that is before `from_ms`.
+            let newest = next.and_then(|n| n.checked_sub(step)).unwrap_or(from_ms);
+            return (newest.max(from_ms), next);
+        }
         let mut newest = from_ms;
         for _ in 0..MAX_CATCH_UP {
             match self.next_after(newest) {
@@ -158,6 +193,8 @@ impl<'a> Slots<'a> {
             }
             Frequency::Monthly => month_index(date) - month_index(a),
             Frequency::Yearly => i64::from(date.year() - a.year()),
+            // Counted in real time by `next_after`, not in dates.
+            Frequency::Minutes | Frequency::Hourly => return None,
         };
         Some(gap.div_euclid(step))
     }
@@ -196,6 +233,7 @@ impl<'a> Slots<'a> {
                     s.month_day.unwrap_or(a.day() as u32),
                 )?]
             }
+            Frequency::Minutes | Frequency::Hourly => return None,
         };
         Some(dates.into_iter().filter(|d| *d >= a).collect())
     }
@@ -433,6 +471,56 @@ mod tests {
             (newest, next),
             (ms("2026-06-02T09:00:00Z"), Some(ms("2026-06-03T09:00:00Z")))
         );
+    }
+
+    #[test]
+    fn hourly_runs_every_n_hours_from_the_time_on_the_anchor_day() {
+        let mut s = schedule(Frequency::Hourly, "09:15", "UTC");
+        s.interval = 2;
+        let next = |after: &str| at(&s, "2026-01-01", after).unwrap();
+        // Not before the first slot.
+        assert_eq!(next("2026-01-01T03:00:00Z"), "2026-01-01T09:15:00Z");
+        assert_eq!(next("2026-01-01T09:15:00Z"), "2026-01-01T11:15:00Z");
+        assert_eq!(next("2026-01-01T23:30:00Z"), "2026-01-02T01:15:00Z");
+    }
+
+    #[test]
+    fn hourly_counts_real_hours_across_a_clock_change() {
+        let s = schedule(Frequency::Hourly, "00:30", "America/New_York");
+        // 01:30 EST is 06:30Z; an hour later the wall clock reads 03:30 EDT.
+        assert_eq!(
+            at(&s, "2026-03-08", "2026-03-08T06:30:00Z").unwrap(),
+            "2026-03-08T07:30:00Z"
+        );
+    }
+
+    #[test]
+    fn minutes_run_every_n_minutes_and_catch_up_to_the_newest_slot() {
+        let mut s = schedule(Frequency::Minutes, "00:00", "UTC");
+        s.interval = 30;
+        assert_eq!(
+            at(&s, "2026-01-01", "2026-01-01T10:07:00Z").unwrap(),
+            "2026-01-01T10:30:00Z"
+        );
+        let normal = normalize(&s).unwrap();
+        let slots = Slots::new(&normal, "2026-01-01").unwrap();
+        // Down from 10:00 for a month: one newest slot, and the one after now.
+        assert_eq!(
+            slots.catch_up(ms("2026-01-01T10:00:00Z"), ms("2026-02-01T10:40:00Z")),
+            (ms("2026-02-01T10:30:00Z"), Some(ms("2026-02-01T11:00:00Z")))
+        );
+    }
+
+    #[test]
+    fn an_interval_must_fit_its_frequency() {
+        let mut s = schedule(Frequency::Minutes, "00:00", "UTC");
+        for (interval, ok) in [(4, false), (5, true), (1440, true), (1441, false)] {
+            s.interval = interval;
+            assert_eq!(normalize(&s).is_ok(), ok, "{interval} minutes");
+        }
+        let mut s = schedule(Frequency::Hourly, "00:00", "UTC");
+        s.interval = 100;
+        assert!(normalize(&s).unwrap_err().contains("schedule.interval"));
     }
 
     #[test]
