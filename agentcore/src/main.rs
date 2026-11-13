@@ -223,7 +223,11 @@ impl Engine {
             Op::Answer { question, choice } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
                 match open {
-                    Some(mut open) if open.as_deref() == Some(question.as_str()) => {
+                    // A message the turn waits on (`m…`) takes a `reply`, never an `answer`.
+                    Some(mut open)
+                        if open.as_deref() == Some(question.as_str())
+                            && question.starts_with('q') =>
+                    {
                         if turn::OPTIONS.contains(&choice.as_str()) {
                             // A question takes one answer: a second one is refused, not accepted
                             // and dropped.
@@ -294,7 +298,10 @@ impl Engine {
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
                 match open {
-                    Some(mut open) if open.as_deref() == Some(message.as_str()) => {
+                    Some(mut open)
+                        if open.as_deref() == Some(message.as_str())
+                            && message.starts_with('m') =>
+                    {
                         *open = None;
                         drop(open);
                         self.respond(id, Ok(()));

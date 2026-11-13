@@ -115,6 +115,7 @@ enum Waiter {
     /// A message from the bot `from`, sent on as a prompt.
     Peer {
         from: String,
+        generation: u64,
         message: String,
         prompt: Outgoing,
     },
@@ -157,6 +158,9 @@ struct Running {
 /// A message one bot sent another, while the other works on it.
 struct PeerCall {
     from: String,
+    /// Which engine of `from` waits: a later one numbers its messages from the start again,
+    /// and must not get this one's reply.
+    generation: u64,
     message: String,
     /// What the bot said since its last tool call: at the turn's end, its reply.
     reply: String,
@@ -954,6 +958,7 @@ impl Core {
     /// The engine of `from` has a message for the bot `to`: sent on as a prompt. The reply
     /// follows when that bot's turn ends; a message that cannot be sent is answered at once.
     fn on_message(&mut self, from: &str, message: String, to: &str, text: &str) {
+        let generation = self.engines.get(from).map_or(0, |engine| engine.generation);
         let sent = self
             .peers_of(from)
             .map_err(|e| e.to_string())
@@ -976,19 +981,26 @@ impl Core {
                 };
                 self.send_prompt(to, prompt, |p| Waiter::Peer {
                     from: from.to_owned(),
+                    generation,
                     message: message.clone(),
                     prompt: p,
                 })
                 .map_err(|(_, e)| e)
             });
         if let Err(e) = sent {
-            self.send_reply(from, message, Err(e));
+            self.send_reply(from, generation, message, Err(e));
         }
     }
 
-    /// Tells the engine of `to` what came of its `message`, if it still runs.
-    fn send_reply(&mut self, to: &str, message: String, reply: Result<String, String>) {
-        if !self.engines.contains_key(to) {
+    /// Tells the engine of `to` what came of its `message`, if that very engine still runs.
+    fn send_reply(
+        &mut self,
+        to: &str,
+        generation: u64,
+        message: String,
+        reply: Result<String, String>,
+    ) {
+        if self.engines.get(to).map(|engine| engine.generation) != Some(generation) {
             return;
         }
         let (text, error) = match reply {
@@ -1103,7 +1115,7 @@ impl Core {
                             error.as_deref().unwrap_or("no reason given")
                         )),
                     };
-                    self.send_reply(&call.from, call.message, reply);
+                    self.send_reply(&call.from, call.generation, call.message, reply);
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
@@ -1233,16 +1245,18 @@ impl Core {
             }
             Waiter::Peer {
                 from,
+                generation,
                 message,
                 prompt,
             } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
                 match error {
-                    Some(e) => self.send_reply(&from, message, Err(e)),
+                    Some(e) => self.send_reply(&from, generation, message, Err(e)),
                     None => {
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.call = Some(PeerCall {
                                 from,
+                                generation,
                                 message,
                                 reply: String::new(),
                             });
@@ -1333,14 +1347,18 @@ impl Core {
                 Waiter::Routine { routine, .. } => {
                     self.routine_failed(bot, &routine, "the engine stopped".into())
                 }
-                Waiter::Peer { from, message, .. } => {
-                    self.send_reply(&from, message, Err("its engine stopped".into()))
-                }
+                Waiter::Peer {
+                    from,
+                    generation,
+                    message,
+                    ..
+                } => self.send_reply(&from, generation, message, Err("its engine stopped".into())),
                 Waiter::Service | Waiter::Connectors | Waiter::Decision | Waiter::Quiet => {}
             }
         }
         if let Some(call) = r.call {
-            self.send_reply(&call.from, call.message, Err("its engine stopped".into()));
+            let stopped = Err("its engine stopped".into());
+            self.send_reply(&call.from, call.generation, call.message, stopped);
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));
         self.broadcast(&json!({"type": "bots_changed"}));

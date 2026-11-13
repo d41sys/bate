@@ -300,7 +300,9 @@ impl Turn {
         );
         for peer in &self.peers {
             let role = if peer.lead { " (leads your group)" } else { "" };
-            text.push_str(&format!("\n- {}{role}", peer.name));
+            // One line each: a name is the user's text.
+            let name = peer.name.replace(char::is_control, " ");
+            text.push_str(&format!("\n- {name}{role}"));
         }
         if self.leads {
             text.push_str(

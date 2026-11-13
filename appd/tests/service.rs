@@ -52,6 +52,7 @@ while IFS= read -r line; do
           words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"message\",\"message\":\"m-$nonce\",\"to\":\"$to\",\"text\":\"$words\"}" ;;
+        *'fall over'*) exit 1 ;;
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
@@ -1614,6 +1615,12 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
     );
     assert!(!prompts_of(&b).contains("drop that"));
     w.wait_for(|f| f["bot"] == b.as_str() && f["entry"]["type"] == "turn_end");
+
+    // A bot whose engine stops over the message leaves the lead with that, not waiting.
+    assert_eq!(
+        tell(&mut w, "n3b", &b, "fall over"),
+        "error: its engine stopped"
+    );
 
     // Outside the group nobody is reached.
     assert_eq!(
