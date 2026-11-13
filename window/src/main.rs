@@ -24,8 +24,8 @@ async fn recv(bridge: State<'_, Arc<Bridge>>) -> Result<String, String> {
 }
 
 /// Whether a view (the page or one of its frames) may go to `url`: only to the page's own
-/// files and to bots' files. This also runs for frames, so a bot's page can't send anything out
-/// by going to an address of its own choosing.
+/// files and to bots' files. The page's `frame-src botfile:` already stops a frame going
+/// elsewhere; this is the second lock, as it also runs for frames.
 fn stays(url: &Url) -> bool {
     matches!(
         (url.scheme(), url.host_str()),
@@ -73,6 +73,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_may_hold_only_bots_files() {
+        // The first lock on a bot's page: a frame navigating itself anywhere else is refused by
+        // the web view (measured: with `https:` added here, its self-navigation got out).
+        let conf = include_str!("../tauri.conf.json");
+        let frames: Vec<&str> = conf
+            .split(';')
+            .filter_map(|d| d.trim().strip_prefix("frame-src "))
+            .map(|d| d.split('"').next().unwrap_or(d))
+            .collect();
+        assert_eq!(frames, ["botfile:"]);
+    }
 
     #[test]
     fn a_view_stays_on_the_pages_files_and_bots_files() {
