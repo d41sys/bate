@@ -768,6 +768,87 @@ fn an_hourly_routine_lists_its_past_runs_newest_first() {
 }
 
 #[test]
+fn a_file_comes_in_parts_into_the_bots_folder_and_a_chat_exports_as_markdown() {
+    let home = home("attach");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let attach = |w: &mut Window, fields: Value| {
+        let id = w.send("attach", fields);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())
+    };
+
+    // "hello " then "world", in two parts.
+    let first = attach(
+        &mut w,
+        json!({"bot": bot, "name": "note.txt", "data": "aGVsbG8g"}),
+    );
+    let upload = first["data"]["upload"].as_str().unwrap().to_owned();
+    // Another window cannot add to it.
+    let mut other = Window::connect(&home);
+    let refused = attach(
+        &mut other,
+        json!({"bot": bot, "upload": upload, "data": "eA==", "last": true}),
+    );
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+    let done = attach(
+        &mut w,
+        json!({"bot": bot, "upload": upload, "data": "d29ybGQ=", "last": true}),
+    );
+    assert_eq!(done["data"]["path"], "attachments/note.txt", "{done}");
+    let folder = home.join("bots").join(&bot);
+    assert_eq!(
+        fs::read_to_string(folder.join("attachments/note.txt")).unwrap(),
+        "hello world"
+    );
+    // The same name again does not replace the first file.
+    let again = attach(
+        &mut w,
+        json!({"bot": bot, "name": "note.txt", "data": "Mg==", "last": true}),
+    );
+    assert_eq!(again["data"]["path"], "attachments/1-note.txt", "{again}");
+    assert_eq!(
+        fs::read_to_string(folder.join("attachments/note.txt")).unwrap(),
+        "hello world"
+    );
+    for bad in [
+        json!({"bot": bot, "name": "../out.txt", "data": "eA==", "last": true}),
+        json!({"bot": bot, "name": "x.txt", "data": "not base64!", "last": true}),
+    ] {
+        let refused = attach(&mut w, bad);
+        assert_eq!(refused["code"], "bad_request", "{refused}");
+    }
+    assert!(!folder.join("out.txt").exists());
+
+    // The bot made `attachments` a link out of its folder: nothing is written through it.
+    let outside = home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::rename(folder.join("attachments"), folder.join("kept")).unwrap();
+    std::os::unix::fs::symlink(&outside, folder.join("attachments")).unwrap();
+    let refused = attach(
+        &mut w,
+        json!({"bot": bot, "name": "y.txt", "data": "eA==", "last": true}),
+    );
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    let path = w.ok("export_chat", json!({"bot": bot}))["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        path.starts_with(home.join("exports").to_str().unwrap()),
+        "{path}"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "# Ada\n\n## You\n\nhi\n\n## Bot\n\nhello\n"
+    );
+}
+
+#[test]
 fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     let home = home("report");
     let _service = Service::start(&home);

@@ -17,6 +17,7 @@ use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_program};
 use serde_json::{Value, json};
 
+use crate::attach;
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
@@ -110,6 +111,8 @@ fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refu
 struct Client {
     handle: ClientHandle,
     hello: bool,
+    /// Files this window is sending, by upload id; they go with the window.
+    uploads: HashMap<String, attach::Upload>,
 }
 
 /// A prompt on its way to the engine: in the ledger as `sending`, not yet in
@@ -257,6 +260,7 @@ impl Core {
                     Client {
                         handle,
                         hello: false,
+                        uploads: HashMap::new(),
                     },
                 );
             }
@@ -760,6 +764,75 @@ impl Core {
                 }
                 self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
                 Ok(Some(json!({})))
+            }
+            "attach" => {
+                let bot = self.bot_of(f)?;
+                let data = attach::base64(str_field(f, "data")?)
+                    .ok_or_else(|| bad("`data` must be base64"))?;
+                let last = f.get("last").and_then(Value::as_bool).unwrap_or(false);
+                let uploads = &mut self
+                    .clients
+                    .get_mut(&client)
+                    .ok_or_else(|| bad("this window is gone"))?
+                    .uploads;
+                let id = match f.get("upload").and_then(Value::as_str) {
+                    Some(id) => match uploads.get(id) {
+                        Some(u) if u.bot == bot => id.to_owned(),
+                        _ => return Err(bad(format!("no upload `{id}` for this bot"))),
+                    },
+                    None => {
+                        let name = str_field(f, "name")?;
+                        attach::check_name(name).map_err(bad)?;
+                        if uploads.len() >= attach::MAX_UPLOADS {
+                            return Err(bad(format!(
+                                "at most {} files may be on their way at once",
+                                attach::MAX_UPLOADS
+                            )));
+                        }
+                        let id = sys::random_hex(8);
+                        uploads.insert(
+                            id.clone(),
+                            attach::Upload {
+                                bot: bot.clone(),
+                                name: name.to_owned(),
+                                bytes: Vec::new(),
+                            },
+                        );
+                        id
+                    }
+                };
+                let upload = uploads.get_mut(&id).expect("just found or made");
+                if upload.bytes.len() + data.len() > attach::MAX_BYTES {
+                    uploads.remove(&id);
+                    return Err(bad(format!(
+                        "a file may be at most {} MiB",
+                        attach::MAX_BYTES >> 20
+                    )));
+                }
+                upload.bytes.extend_from_slice(&data);
+                if !last {
+                    return Ok(Some(json!({"upload": id})));
+                }
+                let upload = uploads.remove(&id).expect("just used");
+                let path = attach::save(&bot, &upload.name, &upload.bytes)
+                    .map_err(|e| ("internal", format!("the file was not saved: {e}")))?;
+                Ok(Some(json!({"path": path})))
+            }
+            "export_chat" => {
+                let bot = self.bot_of(f)?;
+                let name = self
+                    .store
+                    .bot(&bot)
+                    .map_err(internal)?
+                    .expect("checked")
+                    .name;
+                let (history, _) = self
+                    .store
+                    .history(&bot, i64::MAX, i64::MAX)
+                    .map_err(internal)?;
+                let path = attach::export(&bot, &name, &history, now_ms())
+                    .map_err(|e| ("export_failed", e.to_string()))?;
+                Ok(Some(json!({"path": path})))
             }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
