@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The port when `APPD_HOOK_PORT` does not name another (0: any free one).
 const DEFAULT_PORT: u16 = 47821;
@@ -78,16 +78,29 @@ fn ask(tx: &Sender<Msg>, token: String, data: String) -> Answer {
         .unwrap_or((503, "the service is busy".into()))
 }
 
+/// Reads from the connection until a moment that holds for the whole request, however slowly
+/// its bytes come.
+struct Until<'a>(&'a TcpStream, Instant);
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.1.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.0.set_read_timeout(Some(left))?;
+        self.0.read(buf)
+    }
+}
+
 /// Reads one request. `Ok(None)`: not a webhook path.
 fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
     let bad = |line: &str| (400, line.to_owned());
     stream
-        .set_read_timeout(Some(WAIT))
-        .map_err(|_| bad("bad connection"))?;
-    stream
         .set_write_timeout(Some(WAIT))
         .map_err(|_| bad("bad connection"))?;
-    let mut reader = BufReader::new(stream.take(MAX_HEAD));
+    let deadline = Instant::now() + WAIT;
+    let mut reader = BufReader::new(Until(stream, deadline).take(MAX_HEAD));
     let mut line = String::new();
     reader
         .read_line(&mut line)
@@ -100,7 +113,7 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
         let n = reader
             .read_line(&mut header)
             .map_err(|_| bad("bad request"))?;
-        if n == 0 {
+        if n == 0 || !header.ends_with('\n') {
             return Err(bad("the request's head is cut short or longer than 8 KiB"));
         }
         if header.trim_end().is_empty() {
@@ -117,6 +130,9 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
                     .map_err(|_| bad("bad content-length"))?;
             }
             "transfer-encoding" => return Err((411, "send a content-length".into())),
+            // A web page that learnt a URL must not be able to use it: browsers say where a
+            // request comes from, other callers have no reason to.
+            "origin" => return Err((403, "not from a web page".into())),
             _ => {}
         }
     }
@@ -133,9 +149,8 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
     let mut body = reader.buffer().to_vec();
     body.truncate(length);
     let mut rest = vec![0; length - body.len()];
-    stream
-        .try_clone()
-        .and_then(|mut stream| stream.read_exact(&mut rest))
+    Until(stream, deadline)
+        .read_exact(&mut rest)
         .map_err(|_| bad("the data is shorter than its content-length"))?;
     body.extend(rest);
     Ok(Some((
