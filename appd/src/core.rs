@@ -436,6 +436,11 @@ impl Core {
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
+            "export_report" => {
+                let path = crate::report::export(&self.store, now_ms())
+                    .map_err(|e| ("export_failed", e.to_string()))?;
+                Ok(Some(json!({"path": path})))
+            }
             "list_connectors" => {
                 let bot = self.bot_of(f)?;
                 Ok(Some(

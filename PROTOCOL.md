@@ -107,6 +107,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
 `Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
@@ -151,6 +152,12 @@ At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-
 ### Connectors
 
 Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. The service sends a bot's list to its engine when the engine starts and after every change (`connectors`).
+
+### Bug report
+
+`export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines without name or prompt, and its connectors with only the names of `env` and header entries, the number of arguments, and the URL without its query. Conversations are not included.
+
+Secrets are removed from the logs in two ways: every stored connector value (`env` values, header values and their words, arguments, URL query values) and the service's `BATE_MODEL_API_KEY` of 4 characters or more is replaced by `[removed]`; and so is whatever follows `authorization`, `password`, `passwd`, `secret`, `token` or a word ending in `key` and a `:` or `=`, and the word after `bearer`. A secret the service never stored, printed with none of those words, is not recognised.
 
 ### Storage
 

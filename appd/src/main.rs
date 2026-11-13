@@ -7,6 +7,7 @@ mod core;
 mod launch;
 mod log;
 mod paths;
+mod report;
 mod schedule;
 mod store;
 mod sys;
