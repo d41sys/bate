@@ -1200,11 +1200,15 @@ fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
     fs::write(&secret, "outside").unwrap();
     std::os::unix::fs::symlink(&secret, folder.join("link.md")).unwrap();
     let link = json!({"bot": bot, "name": "link.md"});
-    fs::hard_link(&secret, folder.join("hard.md")).unwrap();
+    assert_eq!(names_of(&mut w, &bot), ["Likes tea.md"]);
+    assert_eq!(refused(&mut w, "read_memory", link), "no_such_note");
+    // A second name for a file elsewhere is a link too.
+    let other = home.join("other.txt");
+    fs::write(&other, "outside too").unwrap();
+    fs::hard_link(&other, folder.join("hard.md")).unwrap();
     assert_eq!(names_of(&mut w, &bot), ["Likes tea.md"]);
     let hard = json!({"bot": bot, "name": "hard.md"});
     assert_eq!(refused(&mut w, "read_memory", hard), "no_such_note");
-    assert_eq!(refused(&mut w, "read_memory", link), "no_such_note");
     w.ok(
         "write_memory",
         json!({"bot": bot, "name": "link.md", "text": "mine"}),
@@ -1230,4 +1234,154 @@ fn names_of(w: &mut Window, bot: &str) -> Vec<String> {
     names
         .map(|n| n["name"].as_str().unwrap().to_owned())
         .collect()
+}
+
+#[test]
+fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
+    let home = home("skills");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    let skill_md = |description: &str| {
+        format!("---\nname: pdf-forms\ndescription: {description}\n---\nHow to.\n")
+    };
+    let source = home.join("picked/Some Folder");
+    fs::create_dir_all(source.join("scripts")).unwrap();
+    fs::write(source.join("SKILL.md"), skill_md("Fill in PDF forms.")).unwrap();
+    fs::write(source.join("scripts/fill.sh"), "#!/bin/sh\n").unwrap();
+    // Runnable stays runnable; setuid does not come along.
+    fs::set_permissions(
+        source.join("scripts/fill.sh"),
+        fs::Permissions::from_mode(0o4755),
+    )
+    .unwrap();
+    let skills = home.join("bots").join(&bot).join("skills");
+    let install = |w: &mut Window, path: &Path| {
+        w.ok("install_skill", json!({"bot": bot, "path": path}))["skill"].clone()
+    };
+    let listed =
+        |w: &mut Window, bot: &str| w.ok("list_skills", json!({"bot": bot}))["skills"].clone();
+
+    // Installed under the skill's own name, whatever the picked folder is called.
+    let expected = json!({"name": "pdf-forms", "description": "Fill in PDF forms."});
+    assert_eq!(install(&mut w, &source), expected);
+    assert_eq!(listed(&mut w, &bot), json!([expected]));
+    assert_eq!(listed(&mut w, &other), json!([]));
+    let script = skills.join("pdf-forms/scripts/fill.sh");
+    assert_eq!(fs::read_to_string(&script).unwrap(), "#!/bin/sh\n");
+    assert_eq!(
+        fs::metadata(&script).unwrap().permissions().mode() & 0o7777,
+        0o755
+    );
+
+    // Installing again replaces the whole skill.
+    fs::write(skills.join("pdf-forms/stale.txt"), "x").unwrap();
+    fs::write(source.join("SKILL.md"), skill_md("Fill in any PDF form.")).unwrap();
+    assert_eq!(
+        install(&mut w, &source)["description"],
+        "Fill in any PDF form."
+    );
+    assert!(!skills.join("pdf-forms/stale.txt").exists());
+
+    // Not a skill: no folder, no SKILL.md, a link inside. Nothing is left half installed.
+    let bad = home.join("picked/bad");
+    fs::create_dir_all(&bad).unwrap();
+    let args = |path: &Path| json!({"bot": other, "path": path});
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&source.join("SKILL.md"))),
+        "invalid_skill"
+    );
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&bad)),
+        "invalid_skill"
+    );
+    fs::write(bad.join("SKILL.md"), skill_md("Bad.")).unwrap();
+    std::os::unix::fs::symlink(home.join("app.db"), bad.join("data")).unwrap();
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&bad)),
+        "invalid_skill"
+    );
+    assert_eq!(listed(&mut w, &other), json!([]));
+    eventually("an empty staging folder", || {
+        fs::read_dir(home.join("staging")).unwrap().count() == 0
+    });
+
+    // Nor a pipe for a SKILL.md (which must not be waited on), nor too many files.
+    let pipe = home.join("picked/pipe");
+    fs::create_dir_all(&pipe).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(pipe.join("SKILL.md"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&pipe)),
+        "invalid_skill"
+    );
+    let many = home.join("picked/many");
+    fs::create_dir_all(&many).unwrap();
+    fs::write(many.join("SKILL.md"), skill_md("Many.")).unwrap();
+    for n in 0..500 {
+        fs::write(many.join(format!("{n}.txt")), "").unwrap();
+    }
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&many)),
+        "invalid_skill"
+    );
+    assert_eq!(listed(&mut w, &other), json!([]));
+
+    // A folder in the skill that nobody may enter does not keep a new copy from going in.
+    let locked = skills.join("pdf-forms/locked");
+    fs::create_dir_all(locked.join("sub")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    install(&mut w, &source);
+    assert!(!locked.exists());
+
+    // The bot can write in its folder, so it can put a link where a skill goes. The service
+    // replaces the link; what it pointed to is untouched.
+    let victim = home.join("victim");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("keep.txt"), "mine").unwrap();
+    // A skill of its own: were the link followed, it would be listed.
+    fs::write(victim.join("SKILL.md"), skill_md("Not installed.")).unwrap();
+    fs::remove_dir_all(skills.join("pdf-forms")).unwrap();
+    std::os::unix::fs::symlink(&victim, skills.join("pdf-forms")).unwrap();
+    assert_eq!(listed(&mut w, &bot), json!([]));
+    install(&mut w, &source);
+    assert!(
+        fs::symlink_metadata(skills.join("pdf-forms"))
+            .unwrap()
+            .is_dir()
+    );
+    assert_eq!(fs::read_dir(&victim).unwrap().count(), 2);
+
+    w.ok("delete_skill", json!({"bot": bot, "name": "pdf-forms"}));
+    assert!(!skills.join("pdf-forms").exists());
+    let gone = json!({"bot": bot, "name": "pdf-forms"});
+    assert_eq!(
+        refused(&mut w, "delete_skill", gone.clone()),
+        "no_such_skill"
+    );
+    // Removing a link removes the link.
+    std::os::unix::fs::symlink(&victim, skills.join("pdf-forms")).unwrap();
+    w.ok("delete_skill", gone);
+    assert_eq!(fs::read_to_string(victim.join("keep.txt")).unwrap(), "mine");
+    let up = json!({"bot": bot, "name": "../victim"});
+    assert_eq!(refused(&mut w, "delete_skill", up), "bad_request");
+
+    // Nor is anything installed through a skills folder that is itself a link.
+    fs::remove_dir_all(&skills).unwrap();
+    std::os::unix::fs::symlink(&victim, &skills).unwrap();
+    let args = json!({"bot": bot, "path": source});
+    assert_eq!(refused(&mut w, "install_skill", args), "invalid_skill");
+    assert_eq!(fs::read_dir(&victim).unwrap().count(), 2);
+    eventually("an empty staging folder", || {
+        fs::read_dir(home.join("staging")).unwrap().count() == 0
+    });
 }

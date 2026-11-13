@@ -1339,3 +1339,41 @@ fn notes_in_the_memory_folder_reach_the_model_in_every_conversation() {
         system(2)
     );
 }
+
+#[test]
+fn the_model_is_told_which_skills_it_has_and_where_to_read_them() {
+    let dir = workdir("skills");
+    fs::create_dir_all(dir.join("skills/pdf-forms")).unwrap();
+    fs::write(
+        dir.join("skills/pdf-forms/SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nStep one: never guess a field.\n",
+    )
+    .unwrap();
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "read",
+            json!({"path": "skills/pdf-forms/SKILL.md"}),
+        )],
+        vec![text("Filled.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("fill in form.pdf");
+    answer(&mut engine, "Approve");
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("- pdf-forms (skills/pdf-forms/SKILL.md): Fill in PDF forms."),
+        "{system}"
+    );
+    // The instructions are not sent until the model reads them: then they are.
+    assert!(!system.contains("never guess a field"));
+    assert!(
+        requests[1]["messages"]
+            .to_string()
+            .contains("never guess a field")
+    );
+}

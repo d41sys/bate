@@ -1,15 +1,13 @@
 //! A bot's memory, for the window's panel: the Markdown files in `memory/` in the bot's folder.
-//! The bot writes there too, so nothing in the folder is trusted: only plain files directly in
-//! a plain `memory` folder are listed, read or replaced, never what a link points to.
+//! The bot writes there too and can swap anything for a link at any moment, so the folder is
+//! held open (`sys::Dir`) and only plain files directly in it are listed, read or replaced.
 
-use crate::{paths, sys};
+use crate::paths;
+use crate::sys::Dir;
 use proto::memory::{DIR, is_note_name};
 use serde::Serialize;
-use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
 use std::time::UNIX_EPOCH;
-use std::{fs, io};
 
 /// Most bytes of a note the panel is given: the bot may have written more.
 const MAX_READ: u64 = 1024 * 1024;
@@ -24,7 +22,7 @@ pub struct Note {
     pub modified_ms: u64,
 }
 
-/// A file name ending in `.md`, with nothing that could leave the folder or hide the file.
+/// A note's name: nothing that could leave the folder or hide the file.
 pub fn check_name(name: &str) -> Result<(), String> {
     if is_note_name(name) {
         Ok(())
@@ -36,47 +34,51 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// A file with one name: a second name for a file elsewhere is a link too.
-fn plain(meta: &fs::Metadata) -> bool {
-    meta.is_file() && meta.nlink() == 1
+fn open(bot: &str, name: &str, create: bool) -> io::Result<Dir> {
+    Dir::open(&paths::bot_dir(bot))?
+        .subdir(name, create)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => e,
+            _ => io::Error::other(format!("`{name}` in the bot's folder is not a folder: {e}")),
+        })
 }
 
-/// The memory folder, if it is a real folder. `None`: there is none yet.
-fn dir(bot: &str) -> io::Result<Option<PathBuf>> {
-    let dir = paths::bot_dir(bot).join(DIR);
-    match fs::symlink_metadata(&dir) {
-        Ok(meta) if meta.is_dir() => Ok(Some(dir)),
-        Ok(_) => Err(io::Error::other(
-            "`memory` in the bot's folder is not a folder",
-        )),
+/// The folder `name` in the bot's folder, held open. `None`: there is none. An error if a link
+/// or a file has that name.
+pub fn folder(bot: &str, name: &str) -> io::Result<Option<Dir>> {
+    match open(bot, name, false) {
+        Ok(dir) => Ok(Some(dir)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
 }
 
+/// The same, made first if missing. An error too if the bot takes it away in between.
+pub fn made(bot: &str, name: &str) -> io::Result<Dir> {
+    open(bot, name, true)
+}
+
 /// The notes, by name.
 pub fn list(bot: &str) -> io::Result<Vec<Note>> {
-    let Some(dir) = dir(bot)? else {
+    let Some(dir) = folder(bot, DIR)? else {
         return Ok(Vec::new());
     };
     let mut notes = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let Ok(name) = entry.file_name().into_string() else {
+    for name in dir.names()? {
+        if !is_note_name(&name) {
             continue;
-        };
-        // `DirEntry::metadata` does not follow links. A note the bot removes meanwhile is skipped.
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if plain(&meta) && is_note_name(&name) {
-            let modified = meta.modified()?.duration_since(UNIX_EPOCH);
-            notes.push(Note {
-                name,
-                bytes: meta.len(),
-                modified_ms: modified.map_or(0, |d| d.as_millis() as u64),
-            });
         }
+        // A note the bot removes meanwhile, or anything that is not a plain file, is skipped.
+        let Ok(Some(file)) = dir.read(&name) else {
+            continue;
+        };
+        let meta = file.metadata()?;
+        let modified = meta.modified()?.duration_since(UNIX_EPOCH);
+        notes.push(Note {
+            name,
+            bytes: meta.len(),
+            modified_ms: modified.map_or(0, |d| d.as_millis() as u64),
+        });
     }
     notes.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(notes)
@@ -84,59 +86,37 @@ pub fn list(bot: &str) -> io::Result<Vec<Note>> {
 
 /// The note's text; `None` if there is no such note.
 pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(dir) = dir(bot)? else {
+    let Some(file) = folder(bot, DIR)?
+        .map(|dir| dir.read(name))
+        .transpose()?
+        .flatten()
+    else {
         return Ok(None);
     };
-    let path = dir.join(name);
-    match fs::symlink_metadata(&path) {
-        Ok(meta) if plain(&meta) => {
-            // Not through a link put there since the check, and no more than the panel shows.
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(path)?;
-            let mut bytes = Vec::new();
-            file.take(MAX_READ).read_to_end(&mut bytes)?;
-            Ok(Some(String::from_utf8_lossy(&bytes).into()))
-        }
-        Ok(_) => Ok(None),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    let mut bytes = Vec::new();
+    file.take(MAX_READ).read_to_end(&mut bytes)?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into()))
 }
 
 /// Creates or replaces the note. The new file takes the name's place, so a link the bot left
 /// under that name is replaced, not followed.
 pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
-    let dir = match dir(bot)? {
-        Some(dir) => dir,
-        None => {
-            let dir = paths::bot_dir(bot).join(DIR);
-            sys::create_private_dir(&dir)?;
-            dir
-        }
-    };
-    let tmp = dir.join(format!(".{}.{}", sys::random_hex(4), name));
-    // `create_new` does not follow a link either.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| fs::rename(&tmp, dir.join(name)))
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&tmp);
-        })
+    let dir = made(bot, DIR)?;
+    let tmp = format!(".{}.{name}", crate::sys::random_hex(4));
+    let written = dir
+        .create(&tmp)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .and_then(|()| dir.rename(&tmp, name));
+    if written.is_err() {
+        let _ = dir.remove(&tmp);
+    }
+    written
 }
 
 /// Removes the note (or the link under its name); false if there was none.
 pub fn delete(bot: &str, name: &str) -> io::Result<bool> {
-    let Some(dir) = dir(bot)? else {
-        return Ok(false);
-    };
-    match fs::remove_file(dir.join(name)) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+    match folder(bot, DIR)? {
+        Some(dir) => dir.remove(name),
+        None => Ok(false),
     }
 }
