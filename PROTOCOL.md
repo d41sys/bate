@@ -107,7 +107,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
 
-`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 

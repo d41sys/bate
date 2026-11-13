@@ -609,9 +609,12 @@ fn a_bot_is_busy_while_its_conversation_is_compacted() {
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
-    let compact = w.send("compact", json!({"bot": bot}));
-    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], true);
-    let done = w.wait_for(|f| f["type"] == "response" && f["id"] == compact.as_str());
-    assert_eq!(done["success"], true, "{done}");
-    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], false);
+    // Past the `bots_changed` of the bot's creation.
+    w.ok("list_bots", json!({}));
+    w.send("compact", json!({"bot": bot}));
+    // Windows are told each time to look again.
+    for busy in [true, false] {
+        w.wait_for(|f| f["type"] == "bots_changed");
+        assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], busy);
+    }
 }

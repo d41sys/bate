@@ -394,6 +394,7 @@ impl Core {
                 )?;
                 if compact && let Some(r) = self.engines.get_mut(&bot) {
                     r.compacting += 1;
+                    self.broadcast(&json!({"type": "bots_changed"}));
                 }
                 Ok(None)
             }
@@ -734,6 +735,7 @@ impl Core {
                     (Settles::Compact, _) => {
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.compacting = r.compacting.saturating_sub(1);
+                            self.broadcast(&json!({"type": "bots_changed"}));
                         }
                     }
                     _ => {}

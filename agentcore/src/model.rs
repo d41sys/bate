@@ -88,8 +88,9 @@ impl Provider {
     }
 
     /// Streams one reply. `abort` ends it within `POLL`, whether or not the server is sending.
-    // shortcut: after an abort the connection stays open until the server next sends or closes
-    // (ureq cannot close it from here); switch HTTP client if servers keep generating into it.
+    // shortcut: after an abort the reading thread and its connection stay until the server next
+    // sends or closes (ureq has no idle timeout and cannot be closed from here); switch HTTP
+    // client if servers keep generating into it.
     pub fn stream(
         &self,
         ask: &Ask,

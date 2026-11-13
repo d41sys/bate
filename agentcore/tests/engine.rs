@@ -694,9 +694,8 @@ fn rewind_as_a_fork_starts_a_new_conversation_and_keeps_the_original() {
     assert!(!kept.contains("Q3"), "{kept}");
 }
 
-/// An MCP server over stdio: one tool, `echo`, which answers "echoed" and logs each call to `calls.log`.
-/// A stdio MCP server with one tool, `echo`. Writes its process id to `mcp.pid` and each call to
-/// `calls.log`.
+/// An MCP server over stdio: one tool, `echo`, which answers "echoed". It writes its process id
+/// to `mcp.pid` and each call to `calls.log`.
 const FAKE_MCP: &str = r#"#!/bin/sh
 echo $$ > mcp.pid
 while IFS= read -r line; do
@@ -1131,7 +1130,7 @@ fn a_connector_start_that_was_aborted_is_tried_again_on_the_next_turn() {
 }
 
 #[test]
-fn abort_during_a_compaction_says_that_nothing_was_compacted() {
+fn abort_during_a_compaction_ends_it_with_an_error() {
     let dir = workdir("compact-abort");
     let mut script = replies(&["A1", "A2", "A3"]);
     script.push(vec![Value::Null]);

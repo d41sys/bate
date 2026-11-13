@@ -59,7 +59,7 @@ enum Link {
 impl Drop for Link {
     fn drop(&mut self) {
         if let Link::Stdio { child, .. } = self {
-            // Not reaped yet, so the group id is still the child's.
+            // Its children too. A process id is not given out again while its group has members.
             kill_group(child.id() as i32);
             let _ = child.wait();
         }
