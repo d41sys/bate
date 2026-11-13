@@ -127,7 +127,14 @@ impl<'a> Slots<'a> {
     /// First slot strictly after `after_ms`, in Unix ms.
     pub fn next_after(&self, after_ms: u64) -> Option<u64> {
         if let Some(step) = self.step_ms() {
-            let first = u64::try_from(self.instant(self.anchor)?.as_millisecond()).ok()?;
+            // `compatible`, not `instant`: in a clock gap that would start at the gap's end and
+            // move every later run off the schedule's minute for good.
+            let first = self
+                .zone
+                .to_ambiguous_timestamp(self.anchor.to_datetime(self.time))
+                .compatible()
+                .ok()?;
+            let first = u64::try_from(first.as_millisecond()).ok()?;
             return Some(match after_ms.checked_sub(first) {
                 Some(since) => first + (since / step + 1) * step,
                 None => first,
@@ -491,6 +498,26 @@ mod tests {
         assert_eq!(
             at(&s, "2026-03-08", "2026-03-08T06:30:00Z").unwrap(),
             "2026-03-08T07:30:00Z"
+        );
+        // Clocks go back: 01:30 happens twice (05:30Z and 06:30Z) and both are runs.
+        let s = schedule(Frequency::Hourly, "01:30", "America/New_York");
+        assert_eq!(
+            at(&s, "2026-10-31", "2026-11-01T05:30:00Z").unwrap(),
+            "2026-11-01T06:30:00Z"
+        );
+    }
+
+    #[test]
+    fn an_hourly_start_inside_a_clock_gap_keeps_its_minute() {
+        let s = schedule(Frequency::Hourly, "02:30", "America/New_York");
+        // 02:30 does not exist on 2026-03-08; the runs stay at half past, from 03:30 EDT.
+        assert_eq!(
+            at(&s, "2026-03-08", "2026-03-08T05:00:00Z").unwrap(),
+            "2026-03-08T07:30:00Z"
+        );
+        assert_eq!(
+            at(&s, "2026-03-08", "2026-03-08T07:30:00Z").unwrap(),
+            "2026-03-08T08:30:00Z"
         );
     }
 

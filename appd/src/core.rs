@@ -959,18 +959,13 @@ impl Core {
                     Err(e) => (RunOutcome::Failed, Some(e.to_string())),
                 }
             };
-            let run = RoutineRun {
+            r.last_run = Some(RoutineRun {
                 at_ms: now,
                 outcome: outcome.0,
                 error: outcome.1,
-            };
+            });
             r.next_run_ms = next;
-            let stored = self.store.add_run(&bot, &id, &run);
-            r.last_run = Some(run);
-            if let Err(e) = stored.and_then(|()| self.store.put_routine(&bot, &r)) {
-                log!("bot {bot}: routine {id} not stored: {e}");
-            }
-            self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+            self.record_run(&bot, &r, false);
             if let Some(n) = next {
                 next_due = next_due.min(n);
             }
@@ -986,16 +981,21 @@ impl Core {
         let Some(mut r) = routines.into_iter().find(|r| r.id.as_deref() == Some(id)) else {
             return;
         };
-        let run = RoutineRun {
+        r.last_run = Some(RoutineRun {
             at_ms: now_ms(),
             outcome: RunOutcome::Failed,
             error: Some(error),
-        };
+        });
         // shortcut: the refusal is taken to belong to the newest run; give runs an id if a
         // refusal can ever arrive after the routine's next slot (5 minutes at the least).
-        let stored = self.store.replace_last_run(bot, id, &run);
-        r.last_run = Some(run);
-        if let Err(e) = stored.and_then(|()| self.store.put_routine(bot, &r)) {
+        self.record_run(bot, &r, true);
+    }
+
+    /// Stores a routine whose `last_run` was just set, adds that run to its history (or puts it
+    /// in the newest one's place) and tells the windows.
+    fn record_run(&mut self, bot: &str, routine: &Routine, replace_last: bool) {
+        if let Err(e) = self.store.put_run(bot, routine, replace_last) {
+            let id = routine.id.as_deref().unwrap_or_default();
             log!("bot {bot}: routine {id} not stored: {e}");
         }
         self.broadcast(&json!({"type": "routines_changed", "bot": bot}));

@@ -630,10 +630,13 @@ fn an_hourly_routine_lists_its_past_runs_newest_first() {
     let mut service = Service::start(&home);
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
+    // Half an hour from now, so no real slot passes during the test.
+    let minute = (now_ms() / 60_000 + 30) % (24 * 60);
+    let time = format!("{:02}:{:02}", minute / 60, minute % 60);
     let routine = w.ok(
         "set_routine",
         json!({"bot": bot, "routine": {"name": "Check", "prompt": "hi", "enabled": true,
-            "schedule": {"frequency": "hourly", "interval": 2, "time": "00:10", "timezone": "UTC"}}}),
+            "schedule": {"frequency": "hourly", "interval": 2, "time": time, "timezone": "UTC"}}}),
     )["routine"]
         .clone();
     let id = routine["id"].as_str().unwrap().to_owned();

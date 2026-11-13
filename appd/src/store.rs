@@ -298,8 +298,24 @@ impl Store {
             > 0)
     }
 
+    /// Stores `routine` together with its `last_run` as a past run, in one transaction: a crash
+    /// cannot keep the run and lose the routine's next slot. `replace_last`: the run takes the
+    /// place of the newest one (a prompt recorded as sent that the engine then refused).
+    pub fn put_run(&self, bot: &str, routine: &Routine, replace_last: bool) -> Result<()> {
+        let id = routine.id.as_deref().expect("stored routines have an id");
+        let run = routine.last_run.as_ref().expect("the run to record");
+        let tx = self.0.unchecked_transaction()?;
+        if replace_last {
+            self.replace_last_run(bot, id, run)?;
+        } else {
+            self.add_run(bot, id, run)?;
+        }
+        self.put_routine(bot, routine)?;
+        tx.commit()
+    }
+
     /// Adds a run to a routine's history, which keeps the newest `MAX_RUNS`.
-    pub fn add_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
+    fn add_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
         self.0.execute(
             "INSERT INTO routine_runs(bot, routine, run) VALUES (?1, ?2, ?3)",
             params![bot, routine, json(run)],
@@ -313,8 +329,7 @@ impl Store {
             .map(drop)
     }
 
-    /// Replaces a routine's newest run: a prompt recorded as sent that the engine then refused.
-    pub fn replace_last_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
+    fn replace_last_run(&self, bot: &str, routine: &str, run: &RoutineRun) -> Result<()> {
         self.0
             .execute(
                 "UPDATE routine_runs SET run = ?3 WHERE seq =
