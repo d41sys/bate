@@ -47,6 +47,9 @@ const WHOLE_LINE: [&str; 3] = ["authorization", "auth", "cookie"];
 pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
     let db = io::Error::other;
     let mut secrets: Vec<String> = std::env::var("BATE_MODEL_API_KEY").into_iter().collect();
+    if let Ok(Some((_, Some(key)))) = store.provider() {
+        secrets.push(key);
+    }
     let mut bots = Vec::new();
     for bot in store.bots().map_err(db)? {
         let mut connectors = Vec::new();

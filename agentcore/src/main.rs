@@ -349,6 +349,38 @@ impl Engine {
                     }
                 }
             }
+            Op::Token {
+                request,
+                url,
+                key,
+                error,
+            } => {
+                let open = self.running.as_ref().map(|r| lock(&r.control.question));
+                match open {
+                    Some(mut open)
+                        if open.as_deref() == Some(request.as_str())
+                            && request.starts_with("tok") =>
+                    {
+                        *open = None;
+                        drop(open);
+                        self.respond(id, Ok(()));
+                        let res = match (url, error) {
+                            (Some(u), None) => {
+                                let k = key.unwrap_or_default();
+                                Ok(format!("{u}\n{k}"))
+                            }
+                            (_, Some(e)) => Err(e),
+                            _ => Err("no model server is set up".into()),
+                        };
+                        let r = self.running.as_ref().expect("checked above");
+                        let _ = r.answers.send((request, res));
+                    }
+                    open => {
+                        drop(open);
+                        self.respond(id, Err(format!("token request {request} is not open")));
+                    }
+                }
+            }
             Op::Stop => unreachable!("handled by the operation loop"),
         }
     }
@@ -374,7 +406,7 @@ impl Engine {
             .model
             .clone()
             .ok_or("no model chosen: send set_model first")?;
-        let provider = model::Provider::from_env()?;
+        let provider = model::Provider::new();
         let context = match std::env::var("BATE_MODEL_CONTEXT") {
             Ok(tokens) => tokens
                 .parse()

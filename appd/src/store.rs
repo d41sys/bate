@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
+CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
@@ -241,6 +242,30 @@ impl Store {
                  ON CONFLICT(bot) DO UPDATE SET model = ?2, effort = ?3",
                 params![bot, model, effort],
             )
+            .map(drop)
+    }
+
+    /// The model server URL and optional API key configured in the service.
+    pub fn provider(&self) -> Result<Option<(String, Option<String>)>> {
+        self.0
+            .query_row("SELECT url, key FROM providers WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+    }
+
+    pub fn set_provider(&self, url: &str, key: Option<&str>) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO providers (id, url, key) VALUES (1, ?1, ?2)                  ON CONFLICT(id) DO UPDATE SET url = ?1, key = ?2",
+                params![url, key],
+            )
+            .map(drop)
+    }
+
+    pub fn delete_provider(&self) -> Result<()> {
+        self.0
+            .execute("DELETE FROM providers WHERE id = 1", [])
             .map(drop)
     }
 

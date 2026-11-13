@@ -17,7 +17,8 @@ use crate::{paths, sys};
 
 pub const BASE_LABEL: &str = "com.oursnever.bate.appd";
 /// Environment the registering process passes on to the service (and so to its engines).
-// shortcut: `BATE_MODEL_API_KEY` is not passed, because the plist is plain text; #8 keeps keys in the service.
+// `BATE_MODEL_API_KEY` is not passed, because the plist is plain text: the key is saved with
+// `set_provider`, and the variable is only for a service run by hand.
 const PASS_ENV: &[&str] = &[
     "APPD_HOME",
     "APPD_ENGINE",

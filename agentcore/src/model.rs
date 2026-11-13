@@ -1,5 +1,6 @@
 //! One model provider: the OpenAI-compatible streaming chat API (LM Studio, Ollama,
-//! llama.cpp server, or an API key). #8 adds ChatGPT sign-in and tokens from the service.
+//! llama.cpp server, or an API key). The server and the key come from the service, for each
+//! call. #1 adds ChatGPT sign-in.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -26,8 +27,6 @@ const POLL: Duration = Duration::from_millis(100);
 
 pub struct Provider {
     agent: ureq::Agent,
-    url: String,
-    key: Option<String>,
 }
 
 pub enum Delta<'a> {
@@ -82,28 +81,24 @@ pub struct Ask<'a> {
 }
 
 impl Provider {
-    /// shortcut: the server and key come from `BATE_MODEL_BASE_URL` / `BATE_MODEL_API_KEY`; #8 moves them into the service.
-    pub fn from_env() -> Result<Provider, String> {
-        let url = std::env::var("BATE_MODEL_BASE_URL")
-            .ok()
-            .filter(|u| !u.is_empty())
-            .ok_or("no model server is set up: set BATE_MODEL_BASE_URL (for example http://127.0.0.1:1234/v1)")?;
+    pub fn new() -> Provider {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build();
-        Ok(Provider {
+        Provider {
             agent: ureq::Agent::new_with_config(config),
-            url: format!("{}/chat/completions", url.trim_end_matches('/')),
-            key: std::env::var(KEY).ok().filter(|k| !k.is_empty()),
-        })
+        }
     }
 
-    /// Streams one reply. `abort` ends it within `POLL`, whether or not the server is sending.
+    /// `base_url` and `key` are the service's answer to this call's `token` request, and the
+    /// only source: a key in the engine's own environment may belong to another server.
     // shortcut: after an abort the reading thread and its connection stay until the server next
     // sends or closes (ureq has no idle timeout and cannot be closed from here); switch HTTP
     // client if servers keep generating into it.
     pub fn stream(
         &self,
+        base_url: &str,
+        key: Option<&str>,
         ask: &Ask,
         abort: &AtomicBool,
         mut on: impl FnMut(Delta),
@@ -117,7 +112,9 @@ impl Provider {
             reasoning_effort: ask.effort,
         };
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-        let (agent, url, key) = (self.agent.clone(), self.url.clone(), self.key.clone());
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let key = key.map(String::from);
+        let agent = self.agent.clone();
         // The request is made and read on its own thread: a server that sends nothing must not
         // hold `abort` up. Bounded, so a fast server waits for us.
         let (tx, lines) = mpsc::sync_channel::<Result<String, String>>(64);

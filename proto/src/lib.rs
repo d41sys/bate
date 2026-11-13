@@ -93,6 +93,16 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none.
+    Token {
+        request: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Finish and exit.
     Stop,
 }
@@ -163,6 +173,11 @@ pub enum Event {
     Browser {
         request: String,
         action: Map<String, Value>,
+    },
+    /// The engine asks the service for the endpoint and token before a model call.
+    /// The engine waits until the service sends `token` for `request`.
+    Token {
+        request: String,
     },
     TurnEnd {
         reason: TurnEnd,

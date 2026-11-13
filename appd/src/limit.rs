@@ -63,6 +63,10 @@ const PROFILE: &str = r#"(version 1)
 (allow network-outbound (remote unix-socket (subpath (param "FOLDER"))))
 "#;
 
+/// The model server's key: no engine gets it in its environment. The service hands it over for
+/// each model call.
+const KEY: &str = "BATE_MODEL_API_KEY";
+
 /// What a limited engine gets of the service's environment, besides its own `BATE_` settings:
 /// the rest may hold the user's tokens.
 const PASSED: [&str; 7] = ["PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM"];
@@ -73,7 +77,7 @@ const PASSED: [&str; 7] = ["PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
 pub fn command(program: &Path, folder: &Path, whole_disk: bool) -> io::Result<Command> {
     if whole_disk {
         let mut command = Command::new(program);
-        command.current_dir(folder);
+        command.current_dir(folder).env_remove(KEY);
         return Ok(command);
     }
     // The system compares real paths: a link in any of these would make the rule miss.
@@ -101,8 +105,9 @@ pub fn command(program: &Path, folder: &Path, whole_disk: bool) -> io::Result<Co
         .arg(&program)
         .env_clear()
         .envs(std::env::vars_os().filter(|(name, _)| {
-            name.to_str()
-                .is_some_and(|name| PASSED.contains(&name) || name.starts_with("BATE_"))
+            name.to_str().is_some_and(|name| {
+                PASSED.contains(&name) || name.starts_with("BATE_") && name != KEY
+            })
         }))
         // Programs keep their settings, caches and temporary files where they may write.
         .env("HOME", &folder)

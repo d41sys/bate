@@ -22,6 +22,7 @@ const WAIT: Duration = Duration::from_secs(10);
 struct Model {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
 }
 
 impl Model {
@@ -52,21 +53,28 @@ impl Model {
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
+        let headers_list = Arc::new(Mutex::new(Vec::new()));
+        let seen_headers = headers_list.clone();
         thread::spawn(move || {
             for (stream, reply) in listener.incoming().zip(bodies) {
                 let mut stream = stream.unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut length = 0;
+                let mut req_headers = std::collections::HashMap::new();
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
                     if line == "\r\n" {
                         break;
                     }
+                    if let Some((k, v)) = line.split_once(':') {
+                        req_headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_owned());
+                    }
                     if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         length = v.trim().parse().unwrap();
                     }
                 }
+                seen_headers.lock().unwrap().push(req_headers);
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 seen.lock()
@@ -80,11 +88,19 @@ impl Model {
                 }
             }
         });
-        Model { url, requests }
+        Model {
+            url,
+            requests,
+            headers: headers_list,
+        }
     }
 
     fn requests(&self) -> Vec<Value> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn headers(&self) -> Vec<std::collections::HashMap<String, String>> {
+        self.headers.lock().unwrap().clone()
     }
 }
 
@@ -106,7 +122,7 @@ fn call(id: &str, tool: &str, args: Value) -> Value {
 
 struct Engine {
     child: Child,
-    input: ChildStdin,
+    input: Arc<Mutex<ChildStdin>>,
     events: Receiver<Event>,
     next_id: u32,
 }
@@ -116,10 +132,17 @@ impl Engine {
         Engine::start_with(dir, model, &[])
     }
 
+    fn start_manual_token(dir: &Path, model: &Model, env: &[(&str, &str)]) -> Engine {
+        Self::start_internal(dir, model, env, false)
+    }
+
     fn start_with(dir: &Path, model: &Model, env: &[(&str, &str)]) -> Engine {
+        Self::start_internal(dir, model, env, true)
+    }
+
+    fn start_internal(dir: &Path, model: &Model, env: &[(&str, &str)], auto_token: bool) -> Engine {
         let mut child = Command::new(env!("CARGO_BIN_EXE_agentcore"))
             .current_dir(dir)
-            .env("BATE_MODEL_BASE_URL", &model.url)
             .env_remove("BATE_MODEL_API_KEY")
             .env_remove("BATE_MODEL")
             .env_remove("BATE_MODEL_CONTEXT")
@@ -128,14 +151,34 @@ impl Engine {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let input = child.stdin.take().unwrap();
+        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let (tx, events) = mpsc::channel();
+        let loop_input = input.clone();
+        let model_url = model.url.clone();
         thread::spawn(move || {
             let mut buf = Vec::new();
             while let Ok(Some(event)) =
                 proto::read_frame::<Event>(&mut output, MAX_EVENT_FRAME, &mut buf)
             {
+                if let Event::Response { ref id, .. } = event
+                    && id == "auto-tok"
+                {
+                    continue;
+                }
+                if auto_token && let Event::Token { ref request } = event {
+                    let op = Request {
+                        id: "auto-tok".into(),
+                        op: Op::Token {
+                            request: request.clone(),
+                            url: Some(model_url.clone()),
+                            key: None,
+                            error: None,
+                        },
+                    };
+                    let _ = proto::write_frame(&mut *loop_input.lock().unwrap(), &op, MAX_OP_FRAME);
+                    continue;
+                }
                 if tx.send(event).is_err() {
                     return;
                 }
@@ -164,7 +207,7 @@ impl Engine {
         self.next_id += 1;
         let id = self.next_id.to_string();
         proto::write_frame(
-            &mut self.input,
+            &mut *self.input.lock().unwrap(),
             &Request { id: id.clone(), op },
             MAX_OP_FRAME,
         )
@@ -1786,5 +1829,124 @@ fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did
     assert_eq!(
         result(3),
         "`fly` is not an action: open, look, click, type or back."
+    );
+}
+
+#[test]
+fn the_engine_asks_for_the_token_before_each_model_call() {
+    let dir = workdir("engine-token");
+    let model = Model::serve(vec![vec![text("Hello with token")]]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Hi");
+    let req = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    // The service answers with the model endpoint and an authorization key.
+    assert_eq!(
+        engine.request(Op::Token {
+            request: req,
+            url: Some(model.url.clone()),
+            key: Some("sk-secret-token-123".into()),
+            error: None,
+        }),
+        None
+    );
+    assert_eq!(
+        engine.next(),
+        Event::Text {
+            delta: "Hello with token".into()
+        }
+    );
+    assert_eq!(
+        engine.next(),
+        Event::TurnEnd {
+            reason: TurnEnd::Done,
+            error: None
+        }
+    );
+
+    // The model server received the Authorization header.
+    let headers = model.headers();
+    assert_eq!(
+        headers[0].get("authorization").map(String::as_str),
+        Some("Bearer sk-secret-token-123")
+    );
+}
+
+#[test]
+fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
+    let dir = workdir("engine-token-err");
+    let model = Model::serve(vec![]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Hi");
+    let req = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    // The service answers with an error.
+    assert_eq!(
+        engine.request(Op::Token {
+            request: req,
+            url: None,
+            key: None,
+            error: Some("no model server configured".into()),
+        }),
+        None
+    );
+    assert_eq!(
+        engine.next(),
+        Event::TurnEnd {
+            reason: TurnEnd::Error,
+            error: Some("no model server configured".into()),
+        }
+    );
+}
+
+#[test]
+fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment() {
+    let dir = workdir("engine-token-nokey");
+    let model = Model::serve(vec![vec![text("Hi")]]);
+    let mut engine = Engine::start_manual_token(
+        &dir,
+        &model,
+        &[("BATE_MODEL_API_KEY", "sk-for-another-host")],
+    );
+    engine.open_new();
+    engine.prompt("Hi");
+    let req = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        engine.request(Op::Token {
+            request: req,
+            url: Some(model.url.clone()),
+            key: None,
+            error: None,
+        }),
+        None
+    );
+    assert_eq!(engine.next(), Event::Text { delta: "Hi".into() });
+    assert_eq!(model.headers()[0].get("authorization"), None);
+}
+
+#[test]
+fn an_abort_while_the_engine_waits_for_the_token_ends_the_turn_as_aborted() {
+    let dir = workdir("engine-token-abort");
+    let model = Model::serve(vec![]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Hi");
+    assert!(matches!(engine.next(), Event::Token { .. }));
+    assert_eq!(engine.request(Op::Abort), None);
+    assert_eq!(
+        engine.next(),
+        Event::TurnEnd {
+            reason: TurnEnd::Aborted,
+            error: None
+        }
     );
 }

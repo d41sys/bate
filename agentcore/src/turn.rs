@@ -158,14 +158,23 @@ impl Turn {
                 }
             }
             let ask = self.ask_model(&system, &session.messages, None, &tools);
-            let reply = self
-                .provider
-                .stream(&ask, self.control.aborted_flag(), |d| {
+            let (url, key) = match self.get_token() {
+                Ok(token) => token,
+                Err(_) if self.control.aborted() => return Ok(TurnEnd::Aborted),
+                Err(e) => return Err(e),
+            };
+            let reply = self.provider.stream(
+                &url,
+                key.as_deref(),
+                &ask,
+                self.control.aborted_flag(),
+                |d| {
                     self.out.send(&match d {
                         Delta::Text(t) => Event::Text { delta: t.into() },
                         Delta::Thinking(t) => Event::Thinking { delta: t.into() },
                     })
-                })?;
+                },
+            )?;
             let Reply {
                 text,
                 mut calls,
@@ -260,13 +269,18 @@ impl Turn {
                 return Err("Aborted by the user".into());
             }
             let ask = self.ask_model(&system, &messages, None, &tools);
+            let (url, key) = self.get_token()?;
             let Reply {
                 text,
                 mut calls,
                 aborted,
-            } = self
-                .provider
-                .stream(&ask, self.control.aborted_flag(), |_| {})?;
+            } = self.provider.stream(
+                &url,
+                key.as_deref(),
+                &ask,
+                self.control.aborted_flag(),
+                |_| {},
+            )?;
             if aborted {
                 return Err("Aborted by the user".into());
             }
@@ -411,9 +425,14 @@ impl Turn {
         // Same system text and tools as a turn, so a provider's prompt cache still applies.
         let instruction = json!({"role": "user", "content": SUMMARISE});
         let ask = self.ask_model(system, &messages[..cut], Some(&instruction), tools);
-        let reply = self
-            .provider
-            .stream(&ask, self.control.aborted_flag(), |_| {})?;
+        let (url, key) = self.get_token()?;
+        let reply = self.provider.stream(
+            &url,
+            key.as_deref(),
+            &ask,
+            self.control.aborted_flag(),
+            |_| {},
+        )?;
         if reply.aborted {
             return Err("aborted".into());
         }
@@ -515,6 +534,30 @@ impl Turn {
         match self.answer(&id) {
             Some(Ok(choice)) if choice == APPROVE => Ok(()),
             Some(_) => Err("The user denied this action.".into()),
+            None => Err("Aborted by the user".into()),
+        }
+    }
+
+    /// Asks the service for the model server and key of the coming model call. Its ids count
+    /// apart from questions', so a turn's question ids stay what they were without it.
+    fn get_token(&self) -> Result<(String, Option<String>), String> {
+        static TOK: AtomicU64 = AtomicU64::new(0);
+        let id = format!("tok{}", TOK.fetch_add(1, Ordering::Relaxed) + 1);
+        *lock(&self.control.question) = Some(id.clone());
+        self.out.send(&Event::Token {
+            request: id.clone(),
+        });
+        match self.answer(&id) {
+            Some(Ok(val)) => {
+                let (url, key) = val.split_once('\n').unwrap_or((&val, ""));
+                let key = if key.is_empty() {
+                    None
+                } else {
+                    Some(key.to_owned())
+                };
+                Ok((url.to_owned(), key))
+            }
+            Some(Err(e)) => Err(e),
             None => Err("Aborted by the user".into()),
         }
     }

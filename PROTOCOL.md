@@ -41,6 +41,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
+| `token` | `request`, `url?`, `key?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -60,13 +61,14 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
 | `browser` | `request`, `action` | An action in the bot's browser (see Browser). The engine waits until the service sends `browser_result` for `request`. Not part of the transcript. |
+| `token` | `request` | The engine asks the service for the endpoint and token before a model call. The engine waits until the service sends `token` for `request`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
 A killed engine sends nothing more.
 
 ## `agentcore` (Bate's own engine)
 
-- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** every tool call asks first: a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
@@ -142,6 +144,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
+| `get_provider` | none | `{url?, hasKey, fromEnv?}`: the configured model server URL and whether an API key is saved |
+| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user or password. Without `key`, or with an empty one, the saved key stays if the scheme, host and port are the same; `key: null` removes it. |
+| `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable |
 | `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
@@ -223,14 +228,14 @@ A bot is kept inside its folder (`bots/<id>` under the service's home) by the op
 - **Writing:** only inside the folder.
 - **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder and the engine's program. System files stay readable.
 - **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to or looks at processes outside (so no `pgrep`), no drivers, no shared memory, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), no preferences (`defaults` would write into the user's home), and only the system services needed to look up names and check certificates (so not the keychain, the clipboard or the file index).
-- **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
+- **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings except `BATE_MODEL_API_KEY`; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
 - **Network:** open, local ports included: the engine has to reach its model.
 
 `set_disk_access` stores the choice and stops the bot's idle engine; the next thing the bot does starts an engine under the new rule. `bots_changed` follows. During a turn it is refused with `busy`. On a system without `sandbox-exec` a limited bot's engine does not start (`engine_failed`).
 
 Not covered: what a bot sends over the network from its own folder; services listening on local ports; anything a bot started while it had the whole disk. A limited bot cannot use programs installed under `/Users` (a connector's command there cannot be read), and a program that insists on the system's own temporary folder (`mktemp` with no template, Xcode's tool cache) is refused there.
 
-Whatever the limit, a command or connector the model starts does not get `BATE_MODEL_API_KEY`.
+Whatever the limit, no engine gets `BATE_MODEL_API_KEY` in its environment, and a command or connector the model starts does not get it either.
 
 ### Permissions
 
@@ -339,7 +344,7 @@ When enabled in Settings, the service serves Bate's web client over HTTPS on por
 
 Secrets are removed from the logs, and from `settings.json`, in three ways:
 
-- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So is the service's `BATE_MODEL_API_KEY`.
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY` and the key saved with `set_provider`.
 - What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
 - PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
 

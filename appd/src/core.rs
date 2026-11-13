@@ -50,6 +50,11 @@ pub enum Msg {
         id: Value,
         result: Result<(String, String, oauth::Pending), String>,
     },
+    Models {
+        client: u64,
+        id: Value,
+        models: Vec<String>,
+    },
     /// What came of an action in a bot's browser.
     Browsed {
         bot: String,
@@ -348,6 +353,9 @@ impl Core {
             Msg::BrowserTaken { bot } => {
                 log!("bot {bot}: the user took over its browser");
                 self.broadcast(&json!({"type": "bots_changed"}));
+            }
+            Msg::Models { client, id, models } => {
+                self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
             Msg::SignIn { client, id, result } => {
                 let reply = match result {
@@ -1059,6 +1067,52 @@ impl Core {
                 self.lan.remove(device).map_err(|e| ("no_such_device", e))?;
                 Ok(Some(json!({})))
             }
+            "get_provider" => {
+                let (url, key, from_env) = self.provider().map_err(internal)?;
+                Ok(Some(
+                    json!({"url": url, "hasKey": key.is_some(), "fromEnv": from_env}),
+                ))
+            }
+            "set_provider" => {
+                let url = f
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if url.is_empty() {
+                    self.store.delete_provider().map_err(internal)?;
+                } else {
+                    let Some(host) = host_of(url) else {
+                        return Err(bad(
+                            "`url` must be an http:// or https:// URL with a host and no user or password",
+                        ));
+                    };
+                    let (old_url, old_key, _) = self.provider().map_err(internal)?;
+                    let key = match f.get("key") {
+                        Some(Value::Null) => None,
+                        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+                        // A key is for the server the user gave it for: it does not follow
+                        // the URL to another host, nor from https to http.
+                        _ => old_key.filter(|_| old_url.as_deref().and_then(host_of) == Some(host)),
+                    };
+                    self.store
+                        .set_provider(url, key.as_deref())
+                        .map_err(internal)?;
+                }
+                Ok(Some(json!({})))
+            }
+            "list_models" => {
+                let (url, key, _) = self.provider().map_err(internal)?;
+                let (tx, id) = (self.tx.clone(), id.clone());
+                std::thread::spawn(move || {
+                    let models = match url {
+                        Some(u) => fetch_models(&u, key.as_deref()),
+                        None => Vec::new(),
+                    };
+                    let _ = tx.send(Msg::Models { client, id, models });
+                });
+                Ok(None)
+            }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
                     .map_err(|e| ("export_failed", e.to_string()))?;
@@ -1139,6 +1193,17 @@ impl Core {
             }
             _ => Err(("unknown_command", format!("unknown command `{command}`"))),
         }
+    }
+
+    /// The model server and its key: the saved ones, or else the service's environment's (the
+    /// flag says which). A saved server without a key has none: the environment's key was
+    /// given for the environment's server.
+    fn provider(&self) -> rusqlite::Result<(Option<String>, Option<String>, bool)> {
+        let env = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Ok(match self.store.provider()? {
+            Some((url, key)) => (Some(url), key, false),
+            None => (env("BATE_MODEL_BASE_URL"), env("BATE_MODEL_API_KEY"), true),
+        })
     }
 
     fn bot_of(&self, f: &Value) -> Result<String, Refusal> {
@@ -1690,6 +1755,30 @@ impl Core {
     }
 
     fn on_event(&mut self, bot: &str, mut ev: Event) {
+        if let Event::Token { request } = &ev {
+            let (url, key, error) = match self.provider() {
+                Ok((Some(url), key, _)) => (Some(url), key, None),
+                Ok((None, ..)) => (
+                    None,
+                    None,
+                    Some(
+                        "no model server is set up: set one in Settings or set BATE_MODEL_BASE_URL"
+                            .into(),
+                    ),
+                ),
+                Err(e) => (None, None, Some(internal(e).1)),
+            };
+            let op = Op::Token {
+                request: request.clone(),
+                url,
+                key,
+                error,
+            };
+            if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                log!("bot {bot}: token response not sent: {e}");
+            }
+            return;
+        }
         if let Event::Question {
             question,
             options,
@@ -2300,4 +2389,50 @@ fn encode(frame: &Value) -> Arc<[u8]> {
     let mut bytes = serde_json::to_vec(frame).expect("serializable");
     bytes.push(b'\n');
     bytes.into()
+}
+
+/// The scheme, host and port of an `http://` or `https://` URL without a user or password;
+/// `None` for anything else.
+fn host_of(url: &str) -> Option<String> {
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    let (scheme, host) = (uri.scheme_str()?, uri.authority()?.as_str());
+    (matches!(scheme, "http" | "https") && !host.contains('@'))
+        .then(|| format!("{scheme}://{host}").to_ascii_lowercase())
+}
+
+fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .http_status_as_error(false)
+        .build();
+    let agent: ureq::Agent = config.into();
+    let mut req = ureq::http::Request::builder().method("GET").uri(&url);
+    if let Some(key) = key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let Ok(req) = req.body(Vec::<u8>::new()) else {
+        return Vec::new();
+    };
+    let Ok(mut resp) = agent.run(req) else {
+        return Vec::new();
+    };
+    if resp.status().as_u16() != 200 {
+        return Vec::new();
+    }
+    let Ok(text) = resp.body_mut().read_to_string() else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    val.get("data")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
