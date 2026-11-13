@@ -97,7 +97,8 @@ pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
 fn build(staging: &Path, archive: &Path, settings: &Value, secrets: &[String]) -> io::Result<()> {
     fs::create_dir_all(staging.join("logs"))?;
     let pretty = serde_json::to_string_pretty(settings).map_err(io::Error::other)?;
-    fs::write(staging.join("settings.json"), pretty)?;
+    // Scrubbed too: a routine's last error is free text.
+    fs::write(staging.join("settings.json"), scrub(&pretty, secrets))?;
     for entry in fs::read_dir(paths::logs())? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
