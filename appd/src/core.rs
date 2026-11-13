@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::clients::ClientHandle;
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{paths, schedule};
+use crate::{limit, paths, schedule};
 
 pub enum Msg {
     ClientConnected {
@@ -457,6 +457,29 @@ impl Core {
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
+            "set_disk_access" => {
+                let bot = self.bot_of(f)?;
+                let whole_disk = f
+                    .get("wholeDisk")
+                    .and_then(Value::as_bool)
+                    .ok_or(bad("`wholeDisk` must be true or false"))?;
+                if self.store.whole_disk(&bot).map_err(internal)? != whole_disk {
+                    // A turn would go on under the old rule, and so would what it started.
+                    if self.engines.get(&bot).is_some_and(|r| r.busy) {
+                        return Err(("busy", "the bot is in a turn; stop it first".into()));
+                    }
+                    self.store
+                        .set_whole_disk(&bot, whole_disk)
+                        .map_err(internal)?;
+                    // The limit is set when an engine starts: the idle one is stopped, and the
+                    // next thing the bot does starts one under the new rule.
+                    if let Some(r) = self.engines.get_mut(&bot) {
+                        let _ = r.child.kill();
+                    }
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                }
+                Ok(Some(json!({})))
+            }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;
                 let mut levels = HashMap::new();
@@ -539,6 +562,8 @@ impl Core {
         let running = self.engines.get(bot);
         row["running"] = json!(running.is_some());
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
+        // Unreadable counts as limited: that is also what a start would refuse to go beyond.
+        row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
         row
     }
 
@@ -606,6 +631,7 @@ impl Core {
         sys::create_private_dir(&dir).map_err(failed)?;
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.store.connectors(bot).map_err(internal)?;
+        let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let open = match self.store.session(bot).map_err(internal)? {
             Some(session) => Op::Open {
                 bot: bot.into(),
@@ -618,7 +644,9 @@ impl Core {
             input,
             mut output,
             stderr,
-        } = Engine::spawn(&engine_program(), &dir).map_err(failed)?;
+        } = limit::command(&engine_program(), &dir, whole_disk)
+            .and_then(Engine::run)
+            .map_err(failed)?;
         let name = bot.to_owned();
         // Engine diagnostics go through the service log, so they are rotated with it.
         // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),

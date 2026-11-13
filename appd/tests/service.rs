@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
-/// the turn then says which choice the engine was given.
+/// the turn then says which choice the engine was given. A prompt `probe write <path>` or
+/// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
@@ -27,6 +28,20 @@ while IFS= read -r line; do
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
       case "$line" in
         *'"text":"hang"'*) ;;
+        *'"text":"probe '*)
+          what=$(printf '%s' "$line" | sed 's/.*"text":"probe \([a-z]*\) .*/\1/')
+          path=$(printf '%s' "$line" | sed 's/.*"text":"probe [a-z]* \([^"]*\)".*/\1/')
+          case "$what" in
+            write) (echo x > "$path") 2>/dev/null && r=ok || r=refused ;;
+            connect) nc -U -w 2 "$path" </dev/null >/dev/null 2>&1 && r=ok || r=refused ;;
+            keychain) security list-keychains >/dev/null 2>&1 && r=ok || r=refused ;;
+            signal) kill -0 "$path" 2>/dev/null && r=ok || r=refused ;;
+            prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
+            env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
+            *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
+          esac
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"text\",\"delta\":\"$r\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
         *'"text":"do '*)
           kind=$(printf '%s' "$line" | sed 's/.*"text":"do \([a-z]*\) .*/\1/')
           target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z]* \([^"]*\)".*/\1/')
@@ -1001,4 +1016,123 @@ fn a_connector_that_is_changed_or_removed_loses_its_grants() {
     let id = set(&mut w, "web__search", "x");
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(refused["code"], "invalid_connector", "{refused}");
+}
+
+/// Has the bot's engine try `write <path>` or `read <path>`; returns `ok` or `refused`.
+fn probe(w: &mut Window, bot: &str, nonce: &str, what: &str) -> String {
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": nonce, "text": format!("probe {what}")}),
+    );
+    let said = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "text");
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    said["entry"]["delta"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() {
+    let home = home("folder-limit");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("USER_TOKEN", "t0ken")
+            .env("BATE_MODEL", "m1");
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let outside = home.join("outside.txt");
+    let write_outside = format!("write {}", outside.display());
+    // A file of the user's, outside the bot's folder: this crate's manifest.
+    let read_outside = format!("read {}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"], false);
+    assert_eq!(probe(&mut w, &bot, "n1", "write inside.txt"), "ok");
+    assert_eq!(probe(&mut w, &bot, "n2", "read inside.txt"), "ok");
+    assert_eq!(probe(&mut w, &bot, "n3", &write_outside), "refused");
+    assert!(!outside.exists());
+    assert_eq!(probe(&mut w, &bot, "n4", &read_outside), "refused");
+    // The service's own files and its socket: whoever connects there is taken for a window and
+    // could lift the limit.
+    let socket = format!("connect {}", home.join("run/appd.sock").display());
+    assert_eq!(probe(&mut w, &bot, "n4b", &socket), "refused");
+    assert_eq!(probe(&mut w, &bot, "n4d", "keychain x"), "refused");
+    let signal = format!("signal {}", std::process::id());
+    assert_eq!(probe(&mut w, &bot, "n4e", &signal), "refused");
+    // Preferences are written by a system service into the user's real home, for whoever
+    // asks: an app's startup settings would be a way out.
+    let domain = format!("com.bate.probe-{}", std::process::id());
+    let wrote = probe(&mut w, &bot, "n4j", &format!("prefs {domain}"));
+    let read = Command::new("/usr/bin/defaults")
+        .args(["read", &domain])
+        .output();
+    let _ = Command::new("/usr/bin/defaults")
+        .args(["delete", &domain])
+        .output();
+    assert_eq!(wrote, "refused");
+    assert!(
+        !read.unwrap().status.success(),
+        "the preference was written"
+    );
+    // Other programs' temporary files.
+    let tmp = PathBuf::from(format!("/private/tmp/appd-probe-{}", std::process::id()));
+    fs::write(&tmp, "x").unwrap();
+    let read_tmp = format!("read {}", tmp.display());
+    assert_eq!(probe(&mut w, &bot, "n4f", &read_tmp), "refused");
+    // The service's environment may hold the user's tokens; the engine's own settings pass.
+    assert_eq!(probe(&mut w, &bot, "n4g", "env USER_TOKEN"), "refused");
+    assert_eq!(probe(&mut w, &bot, "n4h", "env BATE_MODEL"), "ok");
+    // Still there: looking up names, which every hosted model needs.
+    let lookup = "connect /private/var/run/mDNSResponder";
+    assert_eq!(probe(&mut w, &bot, "n4i", lookup), "ok");
+    let db = format!("read {}", home.join("app.db").display());
+    assert_eq!(probe(&mut w, &bot, "n4c", &db), "refused");
+    // A way round through the folder itself is closed too.
+    std::os::unix::fs::symlink(&home.0, home.join("bots").join(&bot).join("up")).unwrap();
+    assert_eq!(probe(&mut w, &bot, "n5", "write up/outside.txt"), "refused");
+    assert!(!outside.exists());
+
+    // The limit is set when an engine starts, so the running one is stopped.
+    let stopped = |w: &mut Window, whole_disk: bool| {
+        w.ok(
+            "set_disk_access",
+            json!({"bot": bot, "wholeDisk": whole_disk}),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.ok("list_bots", json!({}))["bots"][0]["running"] != false {
+            assert!(Instant::now() < deadline, "the engine was not stopped");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"],
+            whole_disk
+        );
+    };
+    stopped(&mut w, true);
+    assert_eq!(probe(&mut w, &bot, "n6", &write_outside), "ok");
+    assert!(outside.exists());
+    assert_eq!(probe(&mut w, &bot, "n7", &read_outside), "ok");
+    assert_eq!(probe(&mut w, &bot, "n7b", &socket), "ok");
+    assert_eq!(probe(&mut w, &bot, "n7c", "keychain x"), "ok");
+    assert_eq!(probe(&mut w, &bot, "n7d", &signal), "ok");
+    assert_eq!(probe(&mut w, &bot, "n7e", "env USER_TOKEN"), "ok");
+    assert_eq!(probe(&mut w, &bot, "n7f", &read_tmp), "ok");
+    fs::remove_file(&tmp).unwrap();
+
+    // And back: the limit holds again from the next thing the bot does.
+    // A link the bot left where the service makes its temporary folder is not followed.
+    let tmp_dir = home.join("bots").join(&bot).join(".tmp");
+    let _ = fs::remove_dir_all(&tmp_dir);
+    std::os::unix::fs::symlink(&home.0, &tmp_dir).unwrap();
+    stopped(&mut w, false);
+    fs::remove_file(&outside).unwrap();
+    assert_eq!(probe(&mut w, &bot, "n8", &write_outside), "refused");
+    assert!(!outside.exists());
+    assert!(fs::symlink_metadata(&tmp_dir).unwrap().is_dir());
+
+    // Not in the middle of a turn: it would go on under the old rule.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n9", "text": "hi"}));
+    w.wait_for(|f| f["entry"]["type"] == "turn_start");
+    let id = w.send("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "busy", "{refused}");
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"], false);
 }
