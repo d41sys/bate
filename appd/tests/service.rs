@@ -1497,8 +1497,10 @@ fn a_local_webhook_starts_a_routine_and_passes_the_requests_data_on() {
         404
     );
     assert_eq!(http(url, "GET", None, "", ""), 405);
+    // The refusal must arrive although the data is still being sent when it is made.
+    let big = "x".repeat(70000);
     assert_eq!(
-        http(url, "POST", None, "content-length: 70000\r\n", ""),
+        http(url, "POST", None, "content-length: 70000\r\n", &big),
         413
     );
     assert_eq!(
