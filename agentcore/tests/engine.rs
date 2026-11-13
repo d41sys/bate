@@ -1692,6 +1692,23 @@ fn the_users_instructions_come_first_in_the_system_prompt() {
 }
 
 #[test]
+fn an_empty_model_goes_back_to_the_default() {
+    let dir = workdir("model-default");
+    let model = Model::serve(vec![vec![text("ok")]]);
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL", "base")]);
+    engine.open_new();
+    let set = |model: &str| Op::SetModel {
+        model: model.into(),
+        effort: None,
+    };
+    assert_eq!(engine.request(set("m1")), None);
+    assert_eq!(engine.request(set("")), None);
+    engine.prompt("hi");
+    engine.until(is_turn_end);
+    assert_eq!(model.requests()[0]["model"], "base");
+}
+
+#[test]
 fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did() {
     let dir = workdir("browser");
     let model = Model::serve(vec![

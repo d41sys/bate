@@ -119,7 +119,8 @@ function App() {
                 ))}
               </div>
             </header>
-            {tab === "chat" && <Model key={bot.id} bot={bot} bots={bots} />}
+            {/* An installed agent chooses its own model. */}
+            {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
             {tab === "chat" && <Chat key={`${bot.id}-${connection}`} bot={bot} />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}

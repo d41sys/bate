@@ -191,7 +191,14 @@ impl Store {
             .optional()
     }
 
+    /// An empty `model`: back to the engine's default.
     pub fn set_model(&self, bot: &str, model: &str, effort: Option<&str>) -> Result<()> {
+        if model.is_empty() {
+            return self
+                .0
+                .execute("DELETE FROM models WHERE bot = ?1", [bot])
+                .map(drop);
+        }
         self.0
             .execute(
                 "INSERT INTO models(bot, model, effort) VALUES (?1, ?2, ?3) \

@@ -991,8 +991,9 @@ fn a_bots_model_and_effort_are_kept_and_given_to_its_engine_each_start() {
             (&json!("m1"), &json!("high"))
         );
         for bad in [
-            json!({"bot": bot, "model": ""}),
+            json!({"bot": bot, "model": " m1"}),
             json!({"bot": bot, "model": "m1", "effort": "max"}),
+            json!({"bot": bot, "model": "", "effort": "high"}),
         ] {
             let id = w.send("set_model", bad);
             let refusal = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
@@ -1015,6 +1016,21 @@ fn a_bots_model_and_effort_are_kept_and_given_to_its_engine_each_start() {
         "{}",
         told()
     );
+
+    // An empty model: back to the engine's default, for this engine and the next.
+    w.ok("set_model", json!({"bot": bot, "model": ""}));
+    let row = w.ok("list_bots", json!({}))["bots"][0].clone();
+    assert_eq!(
+        (&row["model"], &row["effort"]),
+        (&Value::Null, &Value::Null)
+    );
+    eventually("the default sent", || {
+        told()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .contains(r#""model":"""#)
+    });
 }
 
 #[test]

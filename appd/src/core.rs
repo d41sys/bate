@@ -569,7 +569,7 @@ impl Core {
                     _ => serde_json::from_value(f.clone()).map_err(|e| bad(e.to_string()))?,
                 };
                 if let Op::SetModel { model, effort } = &op {
-                    if model.trim().is_empty()
+                    if model.trim() != model
                         || model.len() > 200
                         || model.chars().any(char::is_control)
                     {
@@ -581,11 +581,9 @@ impl Core {
                             EFFORTS.join(", ")
                         )));
                     }
-                    // Kept, so the next engine of this bot starts with it.
-                    self.store
-                        .set_model(&bot, model, effort.as_deref())
-                        .map_err(internal)?;
-                    self.broadcast(&json!({"type": "bots_changed"}));
+                    if model.is_empty() && effort.is_some() {
+                        return Err(bad("an empty `model` (the default) takes no `effort`"));
+                    }
                 }
                 let settles = match &op {
                     Op::Rewind { entry, .. } => Settles::Rewind(entry.clone()),
@@ -593,6 +591,10 @@ impl Core {
                     _ => Settles::Nothing,
                 };
                 let compact = matches!(settles, Settles::Compact);
+                let chosen = match &op {
+                    Op::SetModel { model, effort } => Some((model.clone(), effort.clone())),
+                    _ => None,
+                };
                 self.send_op(
                     &bot,
                     op,
@@ -603,6 +605,13 @@ impl Core {
                         settles,
                     },
                 )?;
+                // Kept once sent, so the bot's next engine starts with it too.
+                if let Some((model, effort)) = chosen {
+                    self.store
+                        .set_model(&bot, &model, effort.as_deref())
+                        .map_err(internal)?;
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                }
                 if compact && let Some(r) = self.engines.get_mut(&bot) {
                     r.compacting += 1;
                     self.broadcast(&json!({"type": "bots_changed"}));
