@@ -1302,3 +1302,40 @@ fn a_command_the_model_runs_does_not_get_the_model_servers_key() {
         "{events:?}"
     );
 }
+
+#[test]
+fn notes_in_the_memory_folder_reach_the_model_in_every_conversation() {
+    let dir = workdir("memory");
+    fs::create_dir(dir.join("memory")).unwrap();
+    fs::write(dir.join("memory/user.md"), "The user is called Ada.\n").unwrap();
+    let model = Model::serve(vec![
+        vec![text("Hello Ada.")],
+        vec![text("Tea it is.")],
+        vec![text("Still Ada.")],
+    ]);
+    let system = |n: usize| model.requests()[n]["messages"][0]["content"].to_string();
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.exchange("n1", "hi");
+    assert!(
+        system(0).contains("The user is called Ada."),
+        "{}",
+        system(0)
+    );
+
+    // The user edits a note between turns: the next turn has it.
+    fs::write(dir.join("memory/likes.md"), "Prefers tea.\n").unwrap();
+    engine.exchange("n2", "what do I drink?");
+    assert!(system(1).contains("Prefers tea."), "{}", system(1));
+
+    // A new conversation starts with the same notes.
+    assert_eq!(engine.request(Op::Start { bot: "b1".into() }), None);
+    engine.until(|e| matches!(e, Event::Session { .. }));
+    engine.exchange("n3", "who am I?");
+    assert_eq!(model.requests()[2]["messages"].as_array().unwrap().len(), 2);
+    assert!(
+        system(2).contains("The user is called Ada."),
+        "{}",
+        system(2)
+    );
+}

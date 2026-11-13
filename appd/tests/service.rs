@@ -1136,3 +1136,98 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     assert_eq!(refused["code"], "busy", "{refused}");
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"], false);
 }
+
+#[test]
+fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
+    let home = home("memory");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot).join("memory");
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    assert_eq!(w.ok("list_memory", json!({"bot": bot}))["notes"], json!([]));
+
+    w.ok(
+        "write_memory",
+        json!({"bot": bot, "name": "user.md", "text": "Called Ada.\n"}),
+    );
+    assert_eq!(
+        fs::read_to_string(folder.join("user.md")).unwrap(),
+        "Called Ada.\n"
+    );
+    // What the bot itself wrote there is listed too, by name; other files are not notes.
+    fs::write(folder.join("Likes tea.md"), "Tea.").unwrap();
+    fs::write(folder.join("scratch.txt"), "x").unwrap();
+    let notes = w.ok("list_memory", json!({"bot": bot}))["notes"].clone();
+    let names: Vec<_> = notes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| &n["name"])
+        .collect();
+    assert_eq!(names, ["Likes tea.md", "user.md"]);
+    assert_eq!(notes[1]["bytes"], 12);
+    assert!(notes[1]["modifiedMs"].as_i64().unwrap() > now_ms() - 60_000);
+    assert_eq!(
+        w.ok("read_memory", json!({"bot": bot, "name": "Likes tea.md"}))["text"],
+        "Tea."
+    );
+
+    w.ok("delete_memory", json!({"bot": bot, "name": "user.md"}));
+    assert!(!folder.join("user.md").exists());
+    let gone = json!({"bot": bot, "name": "user.md"});
+    assert_eq!(refused(&mut w, "read_memory", gone.clone()), "no_such_note");
+    assert_eq!(refused(&mut w, "delete_memory", gone), "no_such_note");
+
+    // A name cannot leave the folder, and a note has a size limit.
+    for name in ["../app.md", "a/b.md", ".hidden.md", "notes.txt", ".md"] {
+        let args = json!({"bot": bot, "name": name, "text": "x"});
+        assert_eq!(
+            refused(&mut w, "write_memory", args),
+            "bad_request",
+            "{name}"
+        );
+    }
+    let long = json!({"bot": bot, "name": "long.md", "text": "x".repeat(64 * 1024 + 1)});
+    assert_eq!(refused(&mut w, "write_memory", long), "bad_request");
+
+    // The bot can write in its folder, so it can leave a link under a note's name: the
+    // service, which is not limited, neither reads nor writes through it.
+    let secret = home.join("secret.txt");
+    fs::write(&secret, "outside").unwrap();
+    std::os::unix::fs::symlink(&secret, folder.join("link.md")).unwrap();
+    let link = json!({"bot": bot, "name": "link.md"});
+    fs::hard_link(&secret, folder.join("hard.md")).unwrap();
+    assert_eq!(names_of(&mut w, &bot), ["Likes tea.md"]);
+    let hard = json!({"bot": bot, "name": "hard.md"});
+    assert_eq!(refused(&mut w, "read_memory", hard), "no_such_note");
+    assert_eq!(refused(&mut w, "read_memory", link), "no_such_note");
+    w.ok(
+        "write_memory",
+        json!({"bot": bot, "name": "link.md", "text": "mine"}),
+    );
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "outside");
+    assert_eq!(fs::read_to_string(folder.join("link.md")).unwrap(), "mine");
+
+    // Nor when the folder itself is a link.
+    fs::remove_dir_all(&folder).unwrap();
+    std::os::unix::fs::symlink(&home.0, &folder).unwrap();
+    let args = json!({"bot": bot, "name": "secret.md", "text": "x"});
+    assert_eq!(refused(&mut w, "write_memory", args), "internal");
+    assert!(!home.join("secret.md").exists());
+    assert_eq!(
+        refused(&mut w, "list_memory", json!({"bot": bot})),
+        "internal"
+    );
+}
+
+fn names_of(w: &mut Window, bot: &str) -> Vec<String> {
+    let notes = w.ok("list_memory", json!({"bot": bot}))["notes"].clone();
+    let names = notes.as_array().unwrap().iter();
+    names
+        .map(|n| n["name"].as_str().unwrap().to_owned())
+        .collect()
+}

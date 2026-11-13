@@ -86,7 +86,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -107,6 +107,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `list_memory` | `bot` | `{notes:[{name, bytes, modifiedMs}]}`, by name |
+| `read_memory` | `bot`, `name` | `{text}`, or `no_such_note` |
+| `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
+| `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
 | `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}` |
@@ -127,6 +131,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
+| `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
 
 ### Transcript
 
@@ -143,6 +148,12 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Memory
+
+A bot's memory is the Markdown files in `memory/` in its folder: plain files the user can open in any editor. The engine puts them before the model at the start of every turn, in every conversation, in name order and up to 16 KiB; a note that does not fit, or is not text, is only named. The bot adds and changes notes with its ordinary `write` and `edit` tools, so the bot's `write` permission applies.
+
+The memory commands are for the window's panel. A `name` is a file name ending in `.md`, at most 100 bytes, without `/` and not starting with a dot (`bad_request` otherwise); `text` is at most 64 KiB. The bot can write in its folder, so the service trusts nothing there: only plain files directly in a plain `memory` folder are listed, read or replaced, never what a link points to (a file with a second name elsewhere counts as one), and the engine shows the model exactly the notes `list_memory` lists.
 
 ### Folder limit
 

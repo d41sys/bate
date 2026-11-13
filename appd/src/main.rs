@@ -7,6 +7,7 @@ mod core;
 mod launch;
 mod limit;
 mod log;
+mod memory;
 mod paths;
 mod report;
 mod schedule;

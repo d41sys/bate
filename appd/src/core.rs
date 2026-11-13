@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::clients::ClientHandle;
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{limit, paths, schedule};
+use crate::{limit, memory, paths, schedule};
 
 pub enum Msg {
     ClientConnected {
@@ -456,6 +456,44 @@ impl Core {
                 self.next_due = 0;
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
+            }
+            "list_memory" => {
+                let bot = self.bot_of(f)?;
+                Ok(Some(
+                    json!({"notes": memory::list(&bot).map_err(|e| ("internal", e.to_string()))?}),
+                ))
+            }
+            "read_memory" | "write_memory" | "delete_memory" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                memory::check_name(name).map_err(bad)?;
+                let failed = |e: io::Error| ("internal", e.to_string());
+                let missing = || ("no_such_note", format!("no note `{name}`"));
+                match command {
+                    "read_memory" => {
+                        let text = memory::read(&bot, name).map_err(failed)?;
+                        Ok(Some(json!({"text": text.ok_or_else(missing)?})))
+                    }
+                    "write_memory" => {
+                        let text = str_field(f, "text")?;
+                        if text.len() > memory::MAX_NOTE {
+                            return Err(bad(format!(
+                                "`text` is longer than {} bytes",
+                                memory::MAX_NOTE
+                            )));
+                        }
+                        memory::write(&bot, name, text).map_err(failed)?;
+                        self.broadcast(&json!({"type": "memory_changed", "bot": bot}));
+                        Ok(Some(json!({})))
+                    }
+                    _ => {
+                        if !memory::delete(&bot, name).map_err(failed)? {
+                            return Err(missing());
+                        }
+                        self.broadcast(&json!({"type": "memory_changed", "bot": bot}));
+                        Ok(Some(json!({})))
+                    }
+                }
             }
             "set_disk_access" => {
                 let bot = self.bot_of(f)?;
