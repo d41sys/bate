@@ -852,12 +852,12 @@ fn a_file_comes_in_parts_into_the_bots_folder_and_a_chat_exports_as_markdown() {
 #[test]
 fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
     let home = home("editor");
-    // The service's HOME, so the Trash used is this test's.
-    let user = home.join("user");
-    fs::create_dir_all(&user).unwrap();
+    // This test's Trash, in place of the user's.
+    let bin = home.join("Trash");
+    fs::create_dir_all(&bin).unwrap();
     let _service = Service::start_with(&home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"));
-        c.env("HOME", &user);
+        c.env("APPD_TRASH", &bin);
     });
     let mut w = Window::connect(&home);
     let (a, b) = (w.create_bot(), w.create_bot());
@@ -936,6 +936,25 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
         "set_group",
         json!({"group": {"name": "Pair", "lead": b, "members": [a]}}),
     );
+    // A Trash that takes nothing: the bot stays as it was.
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        refused(&mut w, "delete_bot", json!({"bot": a})),
+        "trash_failed"
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ids(&mut w), [b.clone(), a.clone()]);
+    assert_eq!(
+        fs::read_to_string(home.join("bots").join(&a).join("kept.txt")).unwrap(),
+        "mine"
+    );
+    assert_eq!(
+        w.ok("list_groups", json!({}))["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     w.ok("delete_bot", json!({"bot": a}));
     assert_eq!(ids(&mut w), std::slice::from_ref(&b));
     assert_eq!(
@@ -944,7 +963,7 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
     );
     assert_eq!(w.ok("list_groups", json!({}))["groups"], json!([]));
     assert!(!home.join("bots").join(&a).exists());
-    let trashed = user.join(".Trash").join(format!("Bea {a}"));
+    let trashed = bin.join(format!("Bea {a}"));
     assert_eq!(
         fs::read_to_string(trashed.join("kept.txt")).unwrap(),
         "mine"

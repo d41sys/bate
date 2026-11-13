@@ -103,20 +103,37 @@ fn str_field<'a>(f: &'a Value, key: &str) -> Result<&'a str, Refusal> {
         .ok_or_else(|| bad(format!("`{key}` must be a string")))
 }
 
-/// Moves `from` to the user's Trash as `name` (with the time added if that is taken). Nothing
-/// to move is no error.
+/// Asks Foundation to move a file to the Trash, as Finder does (so Put Back works): a plain
+/// rename into `~/.Trash` is refused to a service without Full Disk Access.
+const TRASH_JS: &str = "function run(argv) { ObjC.import('Foundation'); \
+    if (!$.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(\
+    $.NSURL.fileURLWithPath(argv[0]), null, null)) throw new Error('not moved to the Trash'); }";
+
+/// Moves `from` to the Trash under `name`. Nothing to move is no error; a failure leaves it
+/// where it was. `APPD_TRASH` (tests) names a folder to move it to instead.
 fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
     if fs::symlink_metadata(from).is_err() {
         return Ok(());
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no HOME"))?;
-    let bin = std::path::Path::new(&home).join(".Trash");
-    fs::create_dir_all(&bin)?;
-    let mut to = bin.join(name);
-    if fs::symlink_metadata(&to).is_ok() {
-        to = bin.join(format!("{name} {}", now_ms()));
+    let named = from.with_file_name(name);
+    fs::rename(from, &named)?;
+    let moved = match std::env::var_os("APPD_TRASH") {
+        Some(dir) => fs::rename(&named, std::path::Path::new(&dir).join(name)),
+        None => std::process::Command::new("/usr/bin/osascript")
+            .args(["-l", "JavaScript", "-e", TRASH_JS])
+            .arg(&named)
+            .output()
+            .and_then(|out| match out.status.success() {
+                true => Ok(()),
+                false => Err(io::Error::other(
+                    String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+                )),
+            }),
+    };
+    if moved.is_err() {
+        let _ = fs::rename(&named, from);
     }
-    fs::rename(from, to)
+    moved
 }
 
 /// A field with a fixed set of values (`kind`, `level`).
@@ -930,6 +947,22 @@ impl Core {
                 self.on_engine_gone(&bot);
                 // Its Chrome closes with the handle.
                 self.browsers.remove(&bot);
+                // To the Trash first: if that fails, the bot stays as it was.
+                let label = format!("{} {bot}", name.replace('/', "-"));
+                for (from, what) in [
+                    (
+                        paths::home().join("browsers").join(&bot),
+                        format!("{label} browser"),
+                    ),
+                    (paths::bot_dir(&bot), label),
+                ] {
+                    trash(&from, &what).map_err(|e| {
+                        (
+                            "trash_failed",
+                            format!("{} was not moved to the Trash: {e}", from.display()),
+                        )
+                    })?;
+                }
                 let mut groups_changed = false;
                 for mut g in self.store.groups().map_err(internal)? {
                     if g.lead != bot && !g.members.contains(&bot) {
@@ -946,18 +979,6 @@ impl Core {
                     }
                 }
                 self.store.delete_bot(&bot).map_err(internal)?;
-                let label = format!("{} {bot}", name.replace('/', "-"));
-                for (from, what) in [
-                    (paths::bot_dir(&bot), label.clone()),
-                    (
-                        paths::home().join("browsers").join(&bot),
-                        format!("{label} browser"),
-                    ),
-                ] {
-                    if let Err(e) = trash(&from, &what) {
-                        log!("bot {bot}: {} not moved to the Trash: {e}", from.display());
-                    }
-                }
                 if groups_changed {
                     self.groups_changed();
                 }
