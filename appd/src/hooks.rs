@@ -4,7 +4,7 @@
 use crate::core::Msg;
 use crate::sys::log;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -17,6 +17,8 @@ pub const MAX_BODY: usize = 64 * 1024;
 const MAX_HEAD: u64 = 8 * 1024;
 /// How long a request may take to arrive, and the service to answer.
 const WAIT: Duration = Duration::from_secs(5);
+/// How long a connection is read on after its answer was sent.
+const LINGER: Duration = Duration::from_secs(1);
 /// Requests served at once; more are dropped unanswered.
 const MAX_OPEN: usize = 16;
 
@@ -55,11 +57,21 @@ pub fn start(tx: Sender<Msg>) -> io::Result<u16> {
                     Err(answer) => answer,
                 };
                 let _ = respond(&stream, status, &line);
+                finish(&stream);
                 OPEN.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
     Ok(port)
+}
+
+/// Ends the connection so that the answer arrives. Whoever called may still be sending (a
+/// request refused at its head); closing on unread data would reset the connection and the
+/// answer would be lost with it. So: no more from us, then read what still comes, briefly.
+fn finish(stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut rest = Until(stream, Instant::now() + LINGER).take(4 * MAX_BODY as u64);
+    let _ = io::copy(&mut rest, &mut io::sink());
 }
 
 /// Hands the request to the service's one thread and waits for what it says.
