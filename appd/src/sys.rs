@@ -61,6 +61,21 @@ pub fn random_hex(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// This Mac's name on the network, without `.local`.
+pub fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: the pointer and length describe `buf`.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+    let name = if ok {
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    } else {
+        String::new()
+    };
+    let name = name.split('.').next().unwrap_or("").to_owned();
+    if name.is_empty() { "mac".into() } else { name }
+}
+
 /// Unix milliseconds now.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()

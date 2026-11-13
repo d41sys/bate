@@ -1033,6 +1033,193 @@ fn a_bots_model_and_effort_are_kept_and_given_to_its_engine_each_start() {
     });
 }
 
+/// A device on the network: plain HTTPS calls, its certificate taken as it is (as a user who
+/// compared the fingerprint would).
+struct Device {
+    agent: ureq::Agent,
+    base: String,
+    cookie: Option<String>,
+}
+
+impl Device {
+    fn new(port: u64) -> Device {
+        let tls = ureq::tls::TlsConfig::builder()
+            .disable_verification(true)
+            .build();
+        let config = ureq::Agent::config_builder()
+            .tls_config(tls)
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(40)))
+            .build();
+        Device {
+            agent: config.into(),
+            base: format!("https://127.0.0.1:{port}"),
+            cookie: None,
+        }
+    }
+
+    /// Status and body; `from_page`: with the header only Bate's page sends.
+    fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        from_page: bool,
+    ) -> (u16, String, Option<String>) {
+        let url = format!("{}{path}", self.base);
+        let mut request = ureq::http::Request::builder().method(method).uri(url);
+        if from_page {
+            request = request.header("x-bate", "1");
+        }
+        if let Some(cookie) = &self.cookie {
+            request = request.header("cookie", cookie);
+        }
+        let mut response = self
+            .agent
+            .run(request.body(body.to_owned()).unwrap())
+            .unwrap();
+        let cookie = response
+            .headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().to_owned());
+        let text = response.body_mut().read_to_string().unwrap();
+        (response.status().as_u16(), text, cookie)
+    }
+
+    fn post(&self, path: &str, body: &str) -> (u16, String) {
+        let (status, text, _) = self.call("POST", path, body, true);
+        (status, text)
+    }
+}
+
+#[test]
+fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
+    let home = home("lan");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0");
+    });
+    let mut w = Window::connect(&home);
+    assert_eq!(w.ok("lan_status", json!({}))["on"], false);
+    let status = w.ok("set_lan", json!({"on": true}));
+    assert_eq!(
+        status["fingerprint"].as_str().unwrap().len(),
+        32 * 3 - 1,
+        "{status}"
+    );
+    let mut device = Device::new(status["port"].as_u64().unwrap());
+
+    // The page itself is for anyone who comes; nothing else is.
+    let (code, _, _) = device.call("GET", "/", "", false);
+    assert!(code == 200 || code == 503, "{code}");
+    assert_eq!(device.post("/api/session", "").0, 401);
+
+    let code = w.ok("pair_device", json!({}))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pair = |device: &Device, code: &str| {
+        device.call(
+            "POST",
+            "/api/pair",
+            &json!({"code": code, "name": "Phone"}).to_string(),
+            true,
+        )
+    };
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    assert_eq!(pair(&device, wrong).0, 403);
+    // Not from Bate's page: refused before the code is looked at.
+    let (refused, _, _) = device.call(
+        "POST",
+        "/api/pair",
+        &json!({"code": code}).to_string(),
+        false,
+    );
+    assert_eq!(refused, 403);
+    let (paired, _, cookie) = pair(&device, &code);
+    assert_eq!(paired, 200);
+    let cookie = cookie.expect("a cookie");
+    assert!(
+        cookie.contains("HttpOnly")
+            && cookie.contains("Secure")
+            && cookie.contains("SameSite=Strict"),
+        "{cookie}"
+    );
+    assert_eq!(pair(&device, &code).0, 403, "a code works once");
+    device.cookie = Some(cookie.split(';').next().unwrap().to_owned());
+
+    // A page on the device is one more window.
+    let (status, body) = device.post("/api/session", "");
+    assert_eq!(status, 200, "{body}");
+    let session: Value = serde_json::from_str(&body).unwrap();
+    let session = session["session"].as_str().unwrap().to_owned();
+    let recv = |device: &Device| -> Vec<Value> {
+        let (status, body, _) =
+            device.call("GET", &format!("/api/recv?session={session}"), "", true);
+        assert_eq!(status, 200, "{body}");
+        serde_json::from_str(&body).unwrap()
+    };
+    let until = |device: &Device, f: &dyn Fn(&Value) -> bool| -> Value {
+        for _ in 0..10 {
+            if let Some(found) = recv(device).into_iter().find(|v| f(v)) {
+                return found;
+            }
+        }
+        panic!("nothing came");
+    };
+    until(&device, &|v| v["type"] == "hello");
+    let send = |device: &Device, line: Value| {
+        let (status, body) =
+            device.post(&format!("/api/send?session={session}"), &line.to_string());
+        assert_eq!(status, 200, "{body}");
+    };
+    send(&device, json!({"id": "1", "type": "hello", "protocol": 1}));
+    send(
+        &device,
+        json!({"id": "2", "type": "create_bot", "name": "From the phone"}),
+    );
+    let made = until(&device, &|v| v["type"] == "response" && v["id"] == "2");
+    assert_eq!(made["data"]["bot"]["name"], "From the phone", "{made}");
+
+    // A device cannot manage other devices or turn off the network page.
+    send(&device, json!({"id": "3", "type": "pair_device"}));
+    let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "3");
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(refused["code"], "forbidden", "{refused}");
+
+    // A line break would be two commands.
+    assert_eq!(
+        device
+            .post(&format!("/api/send?session={session}"), "{}\n{}")
+            .0,
+        400
+    );
+
+    // Forgotten in the window: the device is out at once.
+    let devices = w.ok("lan_status", json!({}))["devices"].clone();
+    assert_eq!(devices[0]["name"], "Phone");
+    w.ok("remove_device", json!({"device": devices[0]["id"]}));
+    assert_eq!(device.post("/api/session", "").0, 401);
+
+    // Five wrong tries close a code.
+    let code = w.ok("pair_device", json!({}))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    for _ in 0..5 {
+        assert_eq!(pair(&device, wrong).0, 403);
+    }
+    assert_eq!(pair(&device, &code).0, 403);
+
+    w.ok("set_lan", json!({"on": false}));
+    std::thread::sleep(Duration::from_millis(300));
+    let request = ureq::http::Request::builder()
+        .uri(format!("{}/", device.base))
+        .body(())
+        .unwrap();
+    assert!(device.agent.run(request).is_err(), "still serving");
+}
+
 #[test]
 fn search_finds_words_in_prompts_and_whole_replies_of_one_bot_or_all() {
     let home = home("search");

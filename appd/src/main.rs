@@ -7,6 +7,7 @@ mod browser;
 mod clients;
 mod core;
 mod hooks;
+mod lan;
 mod launch;
 mod limit;
 mod log;
@@ -85,6 +86,7 @@ fn serve() -> io::Result<()> {
     let hook_port = hooks::start(tx.clone())
         .inspect_err(|e| log!("webhooks are off: {e}"))
         .ok();
-    core::Core::new(store, tx, hook_port).run(rx);
+    let lan = lan::Lan::start();
+    core::Core::new(store, tx, hook_port, lan).run(rx);
     Ok(())
 }

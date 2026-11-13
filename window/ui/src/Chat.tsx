@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { listen, request } from "./service.ts";
+import { inShell, listen, request } from "./service.ts";
 import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
 import { SANDBOX, fileUrl } from "./frame.ts";
 import { Markdown } from "./Markdown.ts";
@@ -321,7 +321,8 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
                 busy={bot.busy || sending}
                 retry={retry}
                 fork={fork}
-                open={setShown}
+                // Bots' files open in the window's frames only, not on other devices.
+                open={inShell ? setShown : undefined}
                 edit={(item) => {
                   setEditing(item.nonce);
                   setText(item.text);
@@ -412,7 +413,7 @@ type Actions = {
   retry: (p: Prompt) => void;
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
-  open: (path: string) => void;
+  open?: (path: string) => void;
 };
 
 function Row({ item, busy, retry, edit, fork, open }: { item: Item } & Actions) {
