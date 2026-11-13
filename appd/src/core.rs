@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use proto::connectors::{Connector, Transport};
+use proto::groups::{Group, Peer};
 use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_program};
@@ -48,6 +49,10 @@ pub enum Msg {
 /// Longest piece of engine stderr logged as one line.
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
+const MAX_GROUPS: usize = 50;
+const MAX_MEMBERS: usize = 20;
+/// Most bytes of a bot's reply passed on to the bot that messaged it.
+const MAX_REPLY: usize = 100_000;
 /// A due routine slot older than this is recorded as missed, not run.
 const CATCH_UP_MS: u64 = 6 * 3600 * 1000;
 /// The core wakes at least this often while a routine is enabled.
@@ -107,6 +112,15 @@ enum Waiter {
     Service,
     /// The service's own `connectors`.
     Connectors,
+    /// A message from the bot `from`, sent on as a prompt.
+    Peer {
+        from: String,
+        message: String,
+        prompt: Outgoing,
+    },
+    /// The service's own `peers` or `reply`: a refusal changes nothing (the turn that waited
+    /// for the reply may be over).
+    Quiet,
     /// The service's own `answer` to a question its permissions decided.
     Decision,
 }
@@ -136,6 +150,16 @@ struct Running {
     busy: bool,
     /// `compact` requests the engine has not answered yet.
     compacting: u32,
+    /// The message from another bot that the running turn answers.
+    call: Option<PeerCall>,
+}
+
+/// A message one bot sent another, while the other works on it.
+struct PeerCall {
+    from: String,
+    message: String,
+    /// What the bot said since its last tool call: at the turn's end, its reply.
+    reply: String,
 }
 
 pub struct Core {
@@ -478,6 +502,25 @@ impl Core {
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
+            "list_groups" => Ok(Some(
+                json!({"groups": self.store.groups().map_err(internal)?}),
+            )),
+            "set_group" => {
+                let group = self.set_group(f.get("group").cloned().unwrap_or(Value::Null))?;
+                self.groups_changed();
+                Ok(Some(json!({"group": group})))
+            }
+            "delete_group" => {
+                if !self
+                    .store
+                    .delete_group(str_field(f, "groupId")?)
+                    .map_err(internal)?
+                {
+                    return Err(("no_such_group", "no such group".into()));
+                }
+                self.groups_changed();
+                Ok(Some(json!({})))
+            }
             "list_skills" => {
                 let bot = self.bot_of(f)?;
                 Ok(Some(
@@ -713,6 +756,7 @@ impl Core {
         sys::create_private_dir(&dir).map_err(failed)?;
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.store.connectors(bot).map_err(internal)?;
+        let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let open = match self.store.session(bot).map_err(internal)? {
             Some(session) => Op::Open {
@@ -796,10 +840,176 @@ impl Core {
                 waiting: HashMap::new(),
                 busy: false,
                 compacting: 0,
+                call: None,
             },
         );
         self.send_op(bot, open, Waiter::Service)?;
-        self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)
+        self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)?;
+        self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
+    }
+
+    /// The bots `bot` shares a group with, and whether it leads one.
+    fn peers_of(&self, bot: &str) -> rusqlite::Result<(Vec<Peer>, bool)> {
+        let mut peers: Vec<Peer> = Vec::new();
+        let mut leads = false;
+        for group in self.store.groups()? {
+            let all = || group.members.iter().chain([&group.lead]);
+            if !all().any(|id| id == bot) {
+                continue;
+            }
+            leads |= group.lead == bot;
+            for id in all().filter(|id| *id != bot) {
+                let lead = *id == group.lead;
+                match peers.iter_mut().find(|p| p.id == *id) {
+                    Some(peer) => peer.lead |= lead,
+                    None => {
+                        if let Some(row) = self.store.bot(id)? {
+                            peers.push(Peer {
+                                id: row.id,
+                                name: row.name,
+                                lead,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok((peers, leads))
+    }
+
+    /// After a change to the groups: every running engine is told its bot's peers again.
+    fn groups_changed(&mut self) {
+        let running: Vec<String> = self.engines.keys().cloned().collect();
+        for bot in running {
+            let sent = self
+                .peers_of(&bot)
+                .map_err(internal)
+                .and_then(|(peers, leads)| {
+                    self.send_op(&bot, Op::Peers { peers, leads }, Waiter::Quiet)
+                });
+            if let Err((_, e)) = sent {
+                log!("bot {bot}: peers not sent: {e}");
+            }
+        }
+        self.broadcast(&json!({"type": "groups_changed"}));
+    }
+
+    /// Validates and stores a group from `set_group`.
+    fn set_group(&mut self, raw: Value) -> Result<Group, Refusal> {
+        let invalid = |e: String| ("invalid_group", e);
+        let mut g: Group = serde_json::from_value(raw).map_err(|e| invalid(e.to_string()))?;
+        g.name = g.name.trim().to_owned();
+        if g.name.is_empty() || g.name.chars().count() > 80 {
+            return Err(invalid("`name` must be 1 to 80 characters".into()));
+        }
+        g.members.sort();
+        g.members.dedup();
+        if g.members.is_empty() || g.members.len() > MAX_MEMBERS {
+            return Err(invalid(format!(
+                "a group has 1 to {MAX_MEMBERS} members beside its lead"
+            )));
+        }
+        if g.members.contains(&g.lead) {
+            return Err(invalid("the lead is not listed among the members".into()));
+        }
+        for bot in g.members.iter().chain([&g.lead]) {
+            if self.store.bot(bot).map_err(internal)?.is_none() {
+                return Err(invalid(format!("no bot `{bot}`")));
+            }
+        }
+        let existing = self.store.groups().map_err(internal)?;
+        match &g.id {
+            Some(id) if !existing.iter().any(|o| o.id.as_ref() == Some(id)) => {
+                return Err(("no_such_group", format!("no group `{id}`")));
+            }
+            None if existing.len() >= MAX_GROUPS => {
+                return Err(invalid(format!("there are at most {MAX_GROUPS} groups")));
+            }
+            _ => {}
+        }
+        g.id.get_or_insert_with(|| sys::random_hex(4));
+        self.store.put_group(&g).map_err(internal)?;
+        Ok(g)
+    }
+
+    /// Whether a prompt sent to `bot` now would be refused: a turn runs, or a prompt is with
+    /// the engine and not answered yet.
+    fn occupied(&self, bot: &str) -> bool {
+        self.engines.get(bot).is_some_and(|engine| {
+            engine.busy
+                || engine.waiting.values().any(|waiter| {
+                    matches!(
+                        waiter,
+                        Waiter::Routine { .. }
+                            | Waiter::Peer { .. }
+                            | Waiter::Window {
+                                settles: Settles::Prompt(_),
+                                ..
+                            }
+                    )
+                })
+        })
+    }
+
+    /// The engine of `from` has a message for the bot `to`: sent on as a prompt. The reply
+    /// follows when that bot's turn ends; a message that cannot be sent is answered at once.
+    fn on_message(&mut self, from: &str, message: String, to: &str, text: &str) {
+        let sent = self
+            .peers_of(from)
+            .map_err(|e| e.to_string())
+            .and_then(|(peers, _)| {
+                if !peers.iter().any(|p| p.id == to) {
+                    return Err("that bot is not in a group with you".to_owned());
+                }
+                if self.occupied(to) {
+                    return Err("it is busy with something else; try again later".to_owned());
+                }
+                let name = match self.store.bot(from) {
+                    Ok(Some(row)) => row.name,
+                    _ => from.to_owned(),
+                };
+                let prompt = Outgoing {
+                    nonce: format!("bot-{from}-{}", sys::random_hex(4)),
+                    text: format!(
+                        "[Message from the bot {name:?}. It is another bot, not your user. What you say last goes back to it as your reply.]\n{text}"
+                    ),
+                };
+                self.send_prompt(to, prompt, |p| Waiter::Peer {
+                    from: from.to_owned(),
+                    message: message.clone(),
+                    prompt: p,
+                })
+                .map_err(|(_, e)| e)
+            });
+        if let Err(e) = sent {
+            self.send_reply(from, message, Err(e));
+        }
+    }
+
+    /// Tells the engine of `to` what came of its `message`, if it still runs.
+    fn send_reply(&mut self, to: &str, message: String, reply: Result<String, String>) {
+        if !self.engines.contains_key(to) {
+            return;
+        }
+        let (text, error) = match reply {
+            Ok(mut text) => {
+                let mut end = text.len().min(MAX_REPLY);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+                (Some(text), None)
+            }
+            Err(e) => (None, Some(e)),
+        };
+        let op = Op::Reply {
+            message,
+            text,
+            error,
+        };
+        if let Err((_, e)) = self.send_op(to, op, Waiter::Quiet) {
+            log!("bot {to}: reply not sent: {e}");
+        }
     }
 
     /// After a change to the list: a running engine gets it now, any other when it starts.
@@ -842,7 +1052,16 @@ impl Core {
             }
             *options = [APPROVE, ALWAYS, DENY].map(String::from).to_vec();
         }
+        if let Event::Message { message, to, text } = &ev {
+            // Not for the transcript: the tool call that sent it is there already.
+            return self.on_message(bot, message.clone(), to, text);
+        }
         let r = self.engines.get_mut(bot).expect("checked by generation");
+        match (&ev, &mut r.call) {
+            (Event::Text { delta }, Some(call)) => call.reply.push_str(delta),
+            (Event::ToolStart { .. }, Some(call)) => call.reply.clear(),
+            _ => {}
+        }
         match &ev {
             Event::Ready { protocol } => {
                 if *protocol != PROTOCOL {
@@ -869,9 +1088,22 @@ impl Core {
             }
             Event::TurnStart { .. } | Event::TurnEnd { .. } => {
                 r.busy = matches!(ev, Event::TurnStart { .. });
+                let answered = if r.busy { None } else { r.call.take() };
                 if !r.busy {
                     // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
                     self.close_questions(bot);
+                }
+                if let (Some(call), Event::TurnEnd { reason, error }) = (answered, &ev) {
+                    let reply = match (reason, call.reply.trim()) {
+                        (proto::TurnEnd::Done, "") => Err("it ended without a reply".into()),
+                        (proto::TurnEnd::Done, reply) => Ok(reply.to_owned()),
+                        (proto::TurnEnd::Aborted, _) => Err("its user stopped it".into()),
+                        (proto::TurnEnd::Error, _) => Err(format!(
+                            "its turn failed: {}",
+                            error.as_deref().unwrap_or("no reason given")
+                        )),
+                    };
+                    self.send_reply(&call.from, call.message, reply);
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
@@ -999,6 +1231,26 @@ impl Core {
                     log!("bot {bot}: engine refused the connectors: {e}");
                 }
             }
+            Waiter::Peer {
+                from,
+                message,
+                prompt,
+            } => {
+                self.settle_prompt(bot, &prompt, error.is_none());
+                match error {
+                    Some(e) => self.send_reply(&from, message, Err(e)),
+                    None => {
+                        if let Some(r) = self.engines.get_mut(bot) {
+                            r.call = Some(PeerCall {
+                                from,
+                                message,
+                                reply: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            Waiter::Quiet => {}
             Waiter::Decision => {
                 if let Some(e) = error {
                     log!("bot {bot}: engine refused the decision: {e}");
@@ -1056,7 +1308,8 @@ impl Core {
                 settles: Settles::Prompt(p),
                 ..
             }
-            | Waiter::Routine { prompt: p, .. } = &waiter
+            | Waiter::Routine { prompt: p, .. }
+            | Waiter::Peer { prompt: p, .. } = &waiter
                 && unwritten.contains(&req)
                 && let Err(e) = self.store.forget_ledger(bot, &p.nonce)
             {
@@ -1080,8 +1333,14 @@ impl Core {
                 Waiter::Routine { routine, .. } => {
                     self.routine_failed(bot, &routine, "the engine stopped".into())
                 }
-                Waiter::Service | Waiter::Connectors | Waiter::Decision => {}
+                Waiter::Peer { from, message, .. } => {
+                    self.send_reply(&from, message, Err("its engine stopped".into()))
+                }
+                Waiter::Service | Waiter::Connectors | Waiter::Decision | Waiter::Quiet => {}
             }
+        }
+        if let Some(call) = r.call {
+            self.send_reply(&call.from, call.message, Err("its engine stopped".into()));
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));
         self.broadcast(&json!({"type": "bots_changed"}));
@@ -1173,20 +1432,7 @@ impl Core {
         };
         // One at a time: a prompt the engine has not answered yet, or a turn that runs, would
         // have it refuse this one, and whoever called should hear that now.
-        let busy = self.engines.get(&bot).is_some_and(|engine| {
-            engine.busy
-                || engine.waiting.values().any(|waiter| {
-                    matches!(
-                        waiter,
-                        Waiter::Routine { .. }
-                            | Waiter::Window {
-                                settles: Settles::Prompt(_),
-                                ..
-                            }
-                    )
-                })
-        });
-        if busy {
+        if self.occupied(&bot) {
             return (409, "the bot is busy".into());
         }
         let id = r.id.clone().unwrap_or_default();

@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use proto::connectors::Connector;
+use proto::groups::Group;
 use proto::permissions::{Grant, Kind, Level};
 use proto::routines::{Routine, RoutineRun};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target 
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
+CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 ";
 
@@ -455,6 +457,27 @@ impl Store {
                 params![bot, c.name, json(c)],
             )
             .map(drop)
+    }
+
+    pub fn groups(&self) -> Result<Vec<Group>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT grp FROM groups ORDER BY id")?;
+        stmt.query_map([], |r| parse(r.get(0)?))?.collect()
+    }
+
+    pub fn put_group(&self, group: &Group) -> Result<()> {
+        let id = group.id.as_deref().expect("stored groups have an id");
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO groups(id, grp) VALUES (?1, ?2)",
+                params![id, json(group)],
+            )
+            .map(drop)
+    }
+
+    pub fn delete_group(&self, id: &str) -> Result<bool> {
+        Ok(self.0.execute("DELETE FROM groups WHERE id = ?1", [id])? > 0)
     }
 
     pub fn delete_connector(&self, bot: &str, name: &str) -> Result<bool> {

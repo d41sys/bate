@@ -35,6 +35,8 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `rewind` | `entry`, `fork` | Go back to `entry`, the `nonce` of an earlier prompt: the conversation is as it was just before that prompt. In place, or as a new conversation when `fork` is true (the engine sends the new `session`; the old one is left as it was). |
 | `compact` | none | Summarise the working context now. The response comes when the summary is in place. |
 | `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
+| `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
+| `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -52,6 +54,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `tool_start` | `call`, `tool`, `args` | A tool call began. `args` is a JSON object. |
 | `tool_end` | `call`, `output`, `isError` | The call's result. |
 | `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
+| `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
 A killed engine sends nothing more.
@@ -61,6 +64,8 @@ A killed engine sends nothing more.
 - **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** every tool call asks first: a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
+- **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
+- **Other bots:** when `peers` is not empty the tool `message_bot {bot, text}` is offered and the system prompt names the peers (and says so when the bot leads a group). A call first asks a `question` of kind `connector` with target `bot:<id>`, then sends `message` and waits for `reply`; an abort ends the wait, not the other bot's work.
 - **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command, gives up a model call or connector call that is under way (within about 0.1 s, also when the server is sending nothing) and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
 - **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one line per chat message or marker (where a prompt starts, where a compaction happened), written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
 - **Compaction:** the engine asks the model for a summary of all but the 4 most recent messages and shows the model the summary in their place. It does this on `compact`, and by itself before a model call when the context is over four fifths of `BATE_MODEL_CONTEXT` (tokens, 32000 if unset; size is estimated at 4 bytes per token). The summary is not streamed as a reply. If the model gives no summary, an automatic compaction is skipped and the turn goes on; `compact` answers with an error, also when it was aborted (`aborted`). The conversation file keeps every message.
@@ -86,7 +91,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -107,6 +112,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `list_groups` | none | `{groups:[Group]}` |
+| `set_group` | `group` | `{group}`; creates when `group.id` is missing. `invalid_group`, `no_such_group` |
+| `delete_group` | `groupId` | `{}`, or `no_such_group` |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
 | `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
 | `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
@@ -134,6 +142,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
+| `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
 
@@ -152,6 +161,16 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Bots together
+
+Same shapes as `proto::groups`. A group is `{id, name, lead, members}`: `name` is 1 to 80 characters, `lead` a bot's id, `members` 1 to 20 other bots; there are at most 50 groups, and a bot may be in several. The bots of a group may message each other; no other bots can. The service tells each running engine its bot's peers (`peers`) when it starts and after every change to the groups.
+
+A message (`message` from an engine) is passed on by the service as a prompt to the other bot, with nonce `bot-<from>-<random>` and a first line that says which bot it is from and that it is not the user. What that bot says after its last tool call is the reply, sent back (`reply`) when its turn ends. No reply, and the reason instead, when: the two share no group; the other bot is in a turn or has an unanswered prompt (nothing is queued, and nothing interrupts it); its turn is stopped by its user or fails; its engine stops; or it says nothing. A reply is cut at 100 000 bytes.
+
+A lead differs from a member in what its engine tells the model: that it leads, and to hand out tasks and put the results together. It has no way to stop or redirect another bot; only the user stops a bot. Each bot acts with its own permissions and its own folder limit, whoever messaged it, and its questions go to the user as always.
+
+Whether a bot may message another is asked like a connector's tool: a `question` of kind `connector`, target `bot:<id>`. `Always` remembers it for that bot; the `connector` level of the sender applies.
 
 ### Skills
 
@@ -254,4 +273,4 @@ Not recognised: a secret the service never stored that is printed with none of t
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.

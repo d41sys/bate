@@ -51,7 +51,7 @@ pub struct Work {
 /// Work in progress: the conversation is on the worker thread until `Idle`.
 struct Running {
     control: Arc<Control>,
-    answers: Sender<(String, String)>,
+    answers: Sender<turn::Answer>,
     steer: Sender<String>,
 }
 
@@ -63,6 +63,8 @@ struct Engine {
     /// Running MCP servers; they outlive a conversation.
     mcp: mcp::Servers,
     connectors: Vec<proto::connectors::Connector>,
+    /// The bots this one may message, and whether it leads a group.
+    peers: (Vec<proto::groups::Peer>, bool),
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -106,6 +108,7 @@ fn main() {
         session: None,
         mcp: mcp::Servers::default(),
         connectors: Vec::new(),
+        peers: (Vec::new(), false),
         running: None,
         model: std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()),
         effort: None,
@@ -229,7 +232,7 @@ impl Engine {
                             // Respond before the turn thread wakes, so the response precedes the tool's events.
                             self.respond(id, Ok(()));
                             let r = self.running.as_ref().expect("checked above");
-                            let _ = r.answers.send((question, choice));
+                            let _ = r.answers.send((question, Ok(choice)));
                         } else {
                             drop(open);
                             self.respond(
@@ -280,6 +283,34 @@ impl Engine {
                 self.connectors = connectors;
                 self.respond(id, Ok(()));
             }
+            Op::Peers { peers, leads } => {
+                self.peers = (peers, leads);
+                self.respond(id, Ok(()));
+            }
+            Op::Reply {
+                message,
+                text,
+                error,
+            } => {
+                let open = self.running.as_ref().map(|r| lock(&r.control.question));
+                match open {
+                    Some(mut open) if open.as_deref() == Some(message.as_str()) => {
+                        *open = None;
+                        drop(open);
+                        self.respond(id, Ok(()));
+                        let reply = match (text, error) {
+                            (Some(text), None) => Ok(text),
+                            (_, error) => Err(error.unwrap_or_else(|| "no reply".into())),
+                        };
+                        let r = self.running.as_ref().expect("checked above");
+                        let _ = r.answers.send((message, reply));
+                    }
+                    open => {
+                        drop(open);
+                        self.respond(id, Err(format!("message {message} is not open")));
+                    }
+                }
+            }
             Op::Stop => unreachable!("handled by the operation loop"),
         }
     }
@@ -329,6 +360,8 @@ impl Engine {
             effort: self.effort.clone(),
             context,
             connectors: self.connectors.clone(),
+            peers: self.peers.0.clone(),
+            leads: self.peers.1,
             control,
             answers: answers_rx,
             steer: steer_rx,

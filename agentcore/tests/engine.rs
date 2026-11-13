@@ -1,6 +1,7 @@
 //! `agentcore` over stdin/stdout against a mock OpenAI-compatible model server.
 
 use proto::connectors::{Connector, Transport};
+use proto::groups::Peer;
 use proto::permissions::Kind;
 use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, TurnEnd};
 use serde_json::{Value, json};
@@ -1517,4 +1518,140 @@ fn sub_agents_nest_five_deep_and_no_deeper() {
             ..
         })
     ));
+}
+
+#[test]
+fn a_bot_messages_another_bot_after_asking_and_gets_its_reply_or_why_there_is_none() {
+    let dir = workdir("message");
+    let tell = |id: &str| {
+        vec![call(
+            id,
+            "message_bot",
+            json!({"bot": "scout", "text": "How many tests fail?"}),
+        )]
+    };
+    let model = Model::serve(vec![
+        tell("c1"),
+        tell("c2"),
+        vec![call(
+            "c3",
+            "message_bot",
+            json!({"bot": "Nobody", "text": "hi"}),
+        )],
+        vec![text("Two fail.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let peers = vec![
+        Peer {
+            id: "b2".into(),
+            name: "Scout".into(),
+            lead: false,
+        },
+        Peer {
+            id: "b3".into(),
+            name: "Boss".into(),
+            lead: true,
+        },
+    ];
+    assert_eq!(
+        engine.request(Op::Peers {
+            peers,
+            leads: false
+        }),
+        None
+    );
+    engine.prompt("ask around");
+
+    // Reaching another bot is asked about, for that bot.
+    let events = engine.until(is_question);
+    let Some(Event::Question {
+        question,
+        kind,
+        target,
+        title,
+        ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Connector), Some("bot:b2"))
+    );
+    assert_eq!(title, "Message Scout: How many tests fail?");
+    let approve = Op::Answer {
+        question: question.clone(),
+        choice: "Approve".into(),
+    };
+    assert_eq!(engine.request(approve), None);
+    let sent = engine.until(|e| matches!(e, Event::Message { .. }));
+    let Some(Event::Message { message, to, text }) = sent.last() else {
+        unreachable!()
+    };
+    assert_eq!((to.as_str(), text.as_str()), ("b2", "How many tests fail?"));
+    // Only the open message takes a reply.
+    let reply = |message: &str| Op::Reply {
+        message: message.into(),
+        text: Some("Two.".into()),
+        error: None,
+    };
+    assert!(engine.request(reply("m999")).is_some());
+    assert_eq!(engine.request(reply(message)), None);
+
+    // The second message gets no reply: the model is told why.
+    answer(&mut engine, "Approve");
+    let sent = engine.until(|e| matches!(e, Event::Message { .. }));
+    let Some(Event::Message { message, .. }) = sent.last() else {
+        unreachable!()
+    };
+    let busy = Op::Reply {
+        message: message.clone(),
+        text: None,
+        error: Some("it is busy".into()),
+    };
+    assert_eq!(engine.request(busy), None);
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("- Scout\n- Boss (leads your group)"),
+        "{system}"
+    );
+    assert!(!system.contains("You lead a group"));
+    assert!(offered(&requests[0]).contains(&"message_bot"));
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "Two.");
+    assert_eq!(result(2), "No reply from Scout: it is busy");
+    // A bot it was not given is not asked about, nor messaged.
+    assert_eq!(result(3), "No bot `Nobody`. You can message: Scout, Boss.");
+}
+
+#[test]
+fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
+    let dir = workdir("message-none");
+    let model = Model::serve(vec![vec![text("ok")], vec![text("ok")]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("hi");
+    engine.until(is_turn_end);
+    let peers = vec![Peer {
+        id: "b2".into(),
+        name: "Scout".into(),
+        lead: false,
+    }];
+    assert_eq!(engine.request(Op::Peers { peers, leads: true }), None);
+    engine.prompt_as("n2", "hi again");
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    assert!(!offered(&requests[0]).contains(&"message_bot"));
+    assert!(!requests[0].to_string().contains("other bots"));
+    let system = requests[1]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("You lead a group") && system.contains("cannot stop or redirect"),
+        "{system}"
+    );
 }
