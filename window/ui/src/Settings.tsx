@@ -1,5 +1,6 @@
+import { Devices } from "./Devices.tsx";
 import { useEffect, useState } from "react";
-import { listen, request } from "./service.ts";
+import { inShell, listen, request } from "./service.ts";
 import { KINDS, type Bot, type Level, type Permissions } from "./types.ts";
 
 const ACTIONS = { read: "Read files", write: "Change files", run: "Run commands", connector: "Use connectors" };
@@ -86,6 +87,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
       <h2>Bug report</h2>
       <button onClick={() => run(request<{ path: string }>("export_report").then((d) => setReport(d.path)))}>Export a bug report</button>
       {report && <p>Saved to <code>{report}</code></p>}
+      {inShell && <Devices />}
       <h2>Delete</h2>
       {deleting ? (
         <p>

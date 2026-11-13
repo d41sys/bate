@@ -142,6 +142,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
+| `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
+| `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
+| `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
+| `remove_device` | `device` (an id) | `{}`: forgets the device, ending its active sessions immediately |
 
 `Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color, model, effort}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
@@ -318,6 +322,16 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 - Not offered to the agent: reading or writing files and running terminals through Bate (it does these itself). Refused by this engine: `steer`, `rewind`, `compact`. `set_model` is accepted and has no effect; choose the model in the agent. Memory, skills and messages between bots are Bate's own engine's and are not given to an agent.
 - If the agent fails to open a conversation, the error names the agent's own ways to sign in.
 - A turn that was aborted ends `aborted` however the agent ends it. A tool call the agent did not finish by the end of its turn gets a `tool_end` with `isError`. A tool's output is cut at 64 KiB.
+
+### Other devices on the local network (LAN)
+
+When enabled in Settings, the service serves Bate's web client over HTTPS on port 47822 (`APPD_LAN_PORT`) using a self-signed certificate generated once in `lan/cert.pem` with its SHA-256 fingerprint shown in the window.
+
+- Devices pair using a 6-digit code shown in Bate's window; pairing issues an `HttpOnly`, `Secure`, `SameSite=Strict` cookie containing a 32-byte hex token. The service stores only the SHA-256 hash of the token in `lan/devices.json`.
+- All API requests require the `X-Bate: 1` header.
+- Each paired web client opens a session via `POST /api/session`, which connects to Bate's Unix domain socket as an independent window connection. Commands are sent via `POST /api/send?session=…` and received via long-polling `GET /api/recv?session=…`.
+- Removing a device in Settings terminates its sessions and revokes its cookie immediately.
+- Files (`botfile://`) open in Bate's native window frames only and are not served to LAN devices.
 
 ### Bug report
 

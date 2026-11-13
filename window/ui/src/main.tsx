@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { listen, newWindow, request } from "./service.ts";
+import { listen, newWindow, pair, request } from "./service.ts";
+import { Pair } from "./Devices.tsx";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
@@ -23,6 +24,8 @@ function App() {
   const [tab, setTab] = useState<Tab>("chat");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
+  // On another device that has not paired yet.
+  const [unpaired, setUnpaired] = useState(false);
   // Bumped on each new connection, so every screen loads again.
   const [connection, setConnection] = useState(0);
   const [dragged, setDragged] = useState<string>();
@@ -34,7 +37,10 @@ function App() {
   useEffect(() => {
     const load = () => request<{ bots: Bot[] }>("list_bots").then((d) => setBots(d.bots), (e) => setError(e.message));
     return listen((frame) => {
-      if (frame.type === "connected") {
+      if (frame.type === "unpaired") {
+        setUnpaired(true);
+      } else if (frame.type === "connected") {
+        setUnpaired(false);
         setState("");
         setConnection((n) => n + 1);
         load();
@@ -117,6 +123,7 @@ function App() {
     { label: "New window", hint: "⇧⌘N", run: actions["new-window"] },
   ];
 
+  if (unpaired) return <Pair onPair={pair} />;
   return (
     <div className="app">
       <nav className="bots" aria-label="Bots">

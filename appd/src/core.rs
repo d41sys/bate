@@ -235,6 +235,8 @@ struct PeerCall {
 pub struct Core {
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
+    /// The page for other devices on the network.
+    lan: Arc<crate::lan::Lan>,
     /// Sign-ins the browser has not come back from, by the `state` given to it.
     sign_ins: HashMap<String, oauth::Pending>,
     /// Each bot's browser, from its first use on.
@@ -250,7 +252,12 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(store: Store, tx: Sender<Msg>, hook_port: Option<u16>) -> Core {
+    pub fn new(
+        store: Store,
+        tx: Sender<Msg>,
+        hook_port: Option<u16>,
+        lan: Arc<crate::lan::Lan>,
+    ) -> Core {
         if hook_port.is_none() {
             // Whoever holds the port instead is handed the token of every request meant for
             // us. New tokens make those worthless.
@@ -265,6 +272,7 @@ impl Core {
         }
         Core {
             hook_port,
+            lan,
             sign_ins: HashMap::new(),
             browsers: HashMap::new(),
             store,
@@ -1035,6 +1043,21 @@ impl Core {
                     .search(bot.as_deref(), text, limit as usize)
                     .map_err(internal)?;
                 Ok(Some(json!({"hits": hits})))
+            }
+            "lan_status" => Ok(Some(self.lan.status())),
+            "set_lan" => {
+                let on = f
+                    .get("on")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| bad("`on` must be true or false"))?;
+                self.lan.set(on).map_err(|e| ("lan_failed", e))?;
+                Ok(Some(self.lan.status()))
+            }
+            "pair_device" => self.lan.pair_code().map(Some).map_err(|e| ("lan_off", e)),
+            "remove_device" => {
+                let device = str_field(f, "device")?;
+                self.lan.remove(device).map_err(|e| ("no_such_device", e))?;
+                Ok(Some(json!({})))
             }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
