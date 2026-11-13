@@ -301,6 +301,35 @@ fn a_reply_finishes_after_the_window_quits_and_history_has_all_of_it() {
         .collect();
     assert_eq!(text, "hello");
     assert_eq!(w.ok("open_bot", json!({"bot": bot}))["bot"]["busy"], false);
+
+    // A long chat comes in pages, newest first: the last `limit` entries, then the ones
+    // before the oldest one the window has.
+    let seqs = |page: &Value| -> Vec<i64> {
+        page["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_i64().unwrap())
+            .collect()
+    };
+    let all: Vec<i64> = history.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+    let last = w.ok("open_bot", json!({"bot": bot, "limit": 4}));
+    assert_eq!(
+        (seqs(&last), &last["more"]),
+        (all[2..].to_vec(), &json!(true))
+    );
+    let before = w.ok(
+        "open_bot",
+        json!({"bot": bot, "limit": 4, "before": all[2]}),
+    );
+    assert_eq!(
+        (seqs(&before), &before["more"]),
+        (all[..2].to_vec(), &json!(false))
+    );
+    assert_eq!(w.ok("open_bot", json!({"bot": bot}))["more"], false);
+    let bad = w.send("open_bot", json!({"bot": bot, "limit": 0}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == bad.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
 }
 
 #[test]

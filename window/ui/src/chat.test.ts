@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, type Entry } from "./chat.ts";
+import { add, build, type Entry } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -19,7 +19,10 @@ test("a transcript becomes the chat the user reads", () => {
     { type: "text", delta: "par" },
     { type: "turn_end", reason: "error", error: "the engine stopped" },
   ];
-  assert.deepEqual(entries.reduce(add, []), [
+  const chat = build(entries);
+  // Live, one entry at a time, it comes out the same.
+  assert.deepEqual(entries.reduce(add, []), chat);
+  assert.deepEqual(chat, [
     { kind: "user", text: "hi", nonce: "n1" },
     { kind: "thinking", text: "let me look" },
     { kind: "tool", call: "c1", tool: "read", args: { path: "a.txt" }, output: "A", isError: false },

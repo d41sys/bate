@@ -102,7 +102,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `hello` | `protocol` | `{protocol}` |
 | `list_bots` | none | `{bots:[Bot]}` |
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
-| `open_bot` | `bot` | `{bot: Bot, history:[Entry], questions:[question event]}` |
+| `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` when there are older ones |
 | `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
 | `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |
 | `steer` | `bot`, `text` | `{}` |

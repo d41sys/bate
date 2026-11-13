@@ -436,9 +436,19 @@ impl Core {
                     .bot(&bot)
                     .map_err(internal)?
                     .expect("checked by bot_of");
+                let number = |key: &str, default: i64| match f.get(key) {
+                    None | Some(Value::Null) => Ok(default),
+                    Some(v) => v
+                        .as_i64()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| bad(format!("`{key}` must be a whole number above 0"))),
+                };
+                let (before, limit) = (number("before", i64::MAX)?, number("limit", i64::MAX)?);
+                let (history, more) = self.store.history(&bot, before, limit).map_err(internal)?;
                 Ok(Some(json!({
                     "bot": self.bot_info(&bot, serde_json::to_value(&row).expect("serializable")),
-                    "history": self.store.history(&bot).map_err(internal)?,
+                    "history": history,
+                    "more": more,
                     "questions": self.store.questions(&bot).map_err(internal)?,
                 })))
             }
