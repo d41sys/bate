@@ -105,6 +105,9 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         <label>URL <input placeholder="http://127.0.0.1:1234/v1" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} /></label>
         <label>API key <input type="password" placeholder={hasKey ? "(key saved; enter new to change)" : "optional"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></label>
         <button>Save</button>
+        {hasKey && (
+          <button type="button" onClick={() => run(request("set_provider", { url: serverUrl.trim(), key: null }).then(() => setHasKey(false)))}>Remove key</button>
+        )}
       </form>
         </>
       )}

@@ -143,7 +143,6 @@ impl Engine {
     fn start_internal(dir: &Path, model: &Model, env: &[(&str, &str)], auto_token: bool) -> Engine {
         let mut child = Command::new(env!("CARGO_BIN_EXE_agentcore"))
             .current_dir(dir)
-            .env("BATE_MODEL_BASE_URL", &model.url)
             .env_remove("BATE_MODEL_API_KEY")
             .env_remove("BATE_MODEL")
             .env_remove("BATE_MODEL_CONTEXT")

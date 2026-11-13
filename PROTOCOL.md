@@ -145,7 +145,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 | `get_provider` | none | `{url?, hasKey, fromEnv?}`: the configured model server URL and whether an API key is saved |
-| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service |
+| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user or password. Without `key`, or with an empty one, the saved key stays if the host and port are the same; `key: null` removes it. |
 | `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable |
 | `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
@@ -228,14 +228,14 @@ A bot is kept inside its folder (`bots/<id>` under the service's home) by the op
 - **Writing:** only inside the folder.
 - **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder and the engine's program. System files stay readable.
 - **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to or looks at processes outside (so no `pgrep`), no drivers, no shared memory, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), no preferences (`defaults` would write into the user's home), and only the system services needed to look up names and check certificates (so not the keychain, the clipboard or the file index).
-- **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
+- **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings except `BATE_MODEL_API_KEY`; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
 - **Network:** open, local ports included: the engine has to reach its model.
 
 `set_disk_access` stores the choice and stops the bot's idle engine; the next thing the bot does starts an engine under the new rule. `bots_changed` follows. During a turn it is refused with `busy`. On a system without `sandbox-exec` a limited bot's engine does not start (`engine_failed`).
 
 Not covered: what a bot sends over the network from its own folder; services listening on local ports; anything a bot started while it had the whole disk. A limited bot cannot use programs installed under `/Users` (a connector's command there cannot be read), and a program that insists on the system's own temporary folder (`mktemp` with no template, Xcode's tool cache) is refused there.
 
-Whatever the limit, a command or connector the model starts does not get `BATE_MODEL_API_KEY`.
+Whatever the limit, no engine gets `BATE_MODEL_API_KEY` in its environment, and a command or connector the model starts does not get it either.
 
 ### Permissions
 

@@ -1,5 +1,6 @@
 //! One model provider: the OpenAI-compatible streaming chat API (LM Studio, Ollama,
-//! llama.cpp server, or an API key). #8 adds ChatGPT sign-in and tokens from the service.
+//! llama.cpp server, or an API key). The server and the key come from the service, for each
+//! call. #1 adds ChatGPT sign-in.
 
 use serde::Serialize;
 use serde_json::{Value, json};

@@ -517,15 +517,27 @@ fn a_question_is_closed_when_its_turn_ends_unanswered() {
     );
 }
 
-/// A model server that answers one request with a streamed "Hello." and hands over the request body.
-fn mock_model() -> (String, std::sync::mpsc::Receiver<Value>) {
+/// Builds the real engine next to `appd`, where the service looks for it when `APPD_ENGINE`
+/// is unset.
+fn build_engine() {
+    let mut cargo = Command::new(env!("CARGO"));
+    cargo.args(["build", "-q", "-p", "agentcore"]);
+    if !cfg!(debug_assertions) {
+        cargo.arg("--release");
+    }
+    assert!(cargo.status().unwrap().success(), "agentcore did not build");
+}
+
+/// A model server that answers one request with a streamed "Hello." and hands over the request
+/// body and its `Authorization` header.
+fn mock_model() -> (String, std::sync::mpsc::Receiver<(Value, Option<String>)>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     let (tx, requests) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut length = 0;
+        let (mut length, mut authorization) = (0, None);
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -535,10 +547,14 @@ fn mock_model() -> (String, std::sync::mpsc::Receiver<Value>) {
             if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                 length = v.trim().parse().unwrap();
             }
+            if line.to_ascii_lowercase().starts_with("authorization:") {
+                authorization = Some(line["authorization:".len()..].trim().to_owned());
+            }
         }
         let mut body = vec![0; length];
         reader.read_exact(&mut body).unwrap();
-        tx.send(serde_json::from_slice(&body).unwrap()).unwrap();
+        tx.send((serde_json::from_slice(&body).unwrap(), authorization))
+            .unwrap();
         let chunk = json!({"choices": [{"index": 0, "delta": {"content": "Hello."}}]});
         write!(
             stream,
@@ -551,14 +567,7 @@ fn mock_model() -> (String, std::sync::mpsc::Receiver<Value>) {
 
 #[test]
 fn the_real_engine_runs_a_turn_through_the_service() {
-    // Built next to `appd`, where the service looks for its engine when `APPD_ENGINE` is unset.
-    let mut cargo = Command::new(env!("CARGO"));
-    cargo.args(["build", "-q", "-p", "agentcore"]);
-    if !cfg!(debug_assertions) {
-        cargo.arg("--release");
-    }
-    assert!(cargo.status().unwrap().success(), "agentcore did not build");
-
+    build_engine();
     let (url, requests) = mock_model();
     let home = home("agentcore");
     let _service = Service::start_with(&home, |c| {
@@ -589,12 +598,44 @@ fn the_real_engine_runs_a_turn_through_the_service() {
         ["session", "prompt", "turn_start", "text", "turn_end"]
     );
     assert_eq!(entries[3]["delta"], "Hello.");
-    let request = requests.recv_timeout(TIMEOUT).unwrap();
+    let (request, authorization) = requests.recv_timeout(TIMEOUT).unwrap();
     assert_eq!(request["model"], "m1");
     assert_eq!(
         request["messages"][1],
         json!({"role": "user", "content": "hi"})
     );
+    assert_eq!(authorization, None);
+}
+
+#[test]
+fn the_saved_model_server_and_its_key_reach_the_real_engine_before_the_environments() {
+    build_engine();
+    let (url, requests) = mock_model();
+    let home = home("agentcore-provider");
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            // Nothing listens there: a turn that used it would fail.
+            .env("BATE_MODEL_BASE_URL", "http://127.0.0.1:9/v1")
+            .env("BATE_MODEL_API_KEY", "sk-from-the-environment");
+    });
+    let mut w = Window::connect(&home);
+    w.ok("set_provider", json!({"url": url, "key": "sk-saved"}));
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    let end = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert_eq!(end["entry"]["reason"], "done", "{end}");
+    let (_, authorization) = requests.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(authorization.as_deref(), Some("Bearer sk-saved"));
+
+    // Neither the request for the key nor the key is in the conversation or the log.
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
+    assert!(
+        !history.contains("sk-saved") && !history.contains("\"token\""),
+        "{history}"
+    );
+    let log = fs::read_to_string(home.join("appd.log")).unwrap();
+    assert!(!log.contains("sk-saved"), "{log}");
 }
 
 #[test]
@@ -1614,6 +1655,7 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     let _service = Service::start_with(&home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"))
             .env("USER_TOKEN", "t0ken")
+            .env("BATE_MODEL_API_KEY", "sk-env")
             .env("BATE_MODEL", "m1");
     });
     let mut w = Window::connect(&home);
@@ -1659,6 +1701,9 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     // The service's environment may hold the user's tokens; the engine's own settings pass.
     assert_eq!(probe(&mut w, &bot, "n4g", "env USER_TOKEN"), "refused");
     assert_eq!(probe(&mut w, &bot, "n4h", "env BATE_MODEL"), "ok");
+    // The key stays in the service, which hands it over for each model call.
+    let key = "env BATE_MODEL_API_KEY";
+    assert_eq!(probe(&mut w, &bot, "n4k", key), "refused");
     // Still there: looking up names, which every hosted model needs.
     let lookup = "connect /private/var/run/mDNSResponder";
     assert_eq!(probe(&mut w, &bot, "n4i", lookup), "ok");
@@ -1688,6 +1733,7 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     stopped(&mut w, true);
     assert_eq!(probe(&mut w, &bot, "n6", &write_outside), "ok");
     assert!(outside.exists());
+    assert_eq!(probe(&mut w, &bot, "n6b", key), "refused");
     assert_eq!(probe(&mut w, &bot, "n7", &read_outside), "ok");
     assert_eq!(probe(&mut w, &bot, "n7b", &socket), "ok");
     assert_eq!(probe(&mut w, &bot, "n7c", "keychain x"), "ok");
@@ -3060,17 +3106,29 @@ fn without_chrome_the_bot_is_told_so() {
 #[test]
 fn provider_configuration_and_models_listing() {
     let home = home("provider-cfg");
-    let _service = Service::start(&home);
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env_remove("BATE_MODEL_BASE_URL")
+            .env_remove("BATE_MODEL_API_KEY");
+    });
     let mut w = Window::connect(&home);
 
     let initial = w.ok("get_provider", json!({}));
     assert_eq!(initial["url"], Value::Null);
     assert_eq!(initial["hasKey"], false);
 
-    // Invalid URLs are refused.
-    let id = w.send("set_provider", json!({"url": "not-a-valid-url"}));
-    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
-    assert_eq!(reply["code"], "bad_request");
+    // Invalid URLs are refused: no scheme, no host, a user and password, a line break.
+    for url in [
+        "not-a-valid-url",
+        "http://",
+        "ftp://example.com/v1",
+        "http://user:pw@example.com/v1",
+        "http://example.com/v1\nsk-x",
+    ] {
+        let id = w.send("set_provider", json!({"url": url}));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
+        assert_eq!(reply["code"], "bad_request", "{url}");
+    }
 
     // Mock an OpenAI-compatible /models endpoint.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3123,6 +3181,27 @@ fn provider_configuration_and_models_listing() {
         *auth_header.lock().unwrap(),
         Some("Bearer sk-secret-token".into())
     );
+
+    // Saved again without a key, as the form does: the key stays for the same host.
+    let moved = format!("http://127.0.0.1:{port}/v2");
+    w.ok("set_provider", json!({"url": moved, "key": ""}));
+    let kept = w.ok("get_provider", json!({}));
+    assert_eq!(
+        (&kept["url"], &kept["hasKey"]),
+        (&json!(moved), &json!(true))
+    );
+    // It does not follow the URL to another host.
+    let elsewhere = format!("http://localhost:{port}/v1");
+    w.ok("set_provider", json!({"url": elsewhere}));
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], false);
+    *auth_header.lock().unwrap() = None;
+    w.ok("list_models", json!({}));
+    assert_eq!(*auth_header.lock().unwrap(), None);
+    // `null` removes it.
+    w.ok("set_provider", json!({"url": elsewhere, "key": "sk-2"}));
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], true);
+    w.ok("set_provider", json!({"url": elsewhere, "key": null}));
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], false);
 
     // Clearing the provider deletes it.
     w.ok("set_provider", json!({"url": ""}));

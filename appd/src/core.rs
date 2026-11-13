@@ -1068,21 +1068,9 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "get_provider" => {
-                let (url, has_key, from_env) = match self.store.provider().map_err(internal)? {
-                    Some((u, k)) => (Some(u), k.is_some(), false),
-                    None => (
-                        std::env::var("BATE_MODEL_BASE_URL")
-                            .ok()
-                            .filter(|s| !s.is_empty()),
-                        std::env::var("BATE_MODEL_API_KEY")
-                            .ok()
-                            .filter(|s| !s.is_empty())
-                            .is_some(),
-                        true,
-                    ),
-                };
+                let (url, key, from_env) = self.provider().map_err(internal)?;
                 Ok(Some(
-                    json!({"url": url, "hasKey": has_key, "fromEnv": from_env}),
+                    json!({"url": url, "hasKey": key.is_some(), "fromEnv": from_env}),
                 ))
             }
             "set_provider" => {
@@ -1094,17 +1082,18 @@ impl Core {
                 if url.is_empty() {
                     self.store.delete_provider().map_err(internal)?;
                 } else {
-                    if !url.starts_with("http://") && !url.starts_with("https://") {
-                        return Err(bad("`url` must start with http:// or https://"));
-                    }
-                    let existing_key = match self.store.provider().map_err(internal)? {
-                        Some((_, k)) => k,
-                        None => None,
+                    let Some(host) = host_of(url) else {
+                        return Err(bad(
+                            "`url` must be an http:// or https:// URL with a host and no user or password",
+                        ));
                     };
+                    let (old_url, old_key, _) = self.provider().map_err(internal)?;
                     let key = match f.get("key") {
                         Some(Value::Null) => None,
                         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
-                        _ => existing_key,
+                        // A key is for the server the user gave it for: it does not follow
+                        // the URL to another host.
+                        _ => old_key.filter(|_| old_url.as_deref().and_then(host_of) == Some(host)),
                     };
                     self.store
                         .set_provider(url, key.as_deref())
@@ -1113,17 +1102,7 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_models" => {
-                let (url, key) = match self.store.provider().map_err(internal)? {
-                    Some((u, k)) => (Some(u), k),
-                    None => (
-                        std::env::var("BATE_MODEL_BASE_URL")
-                            .ok()
-                            .filter(|s| !s.is_empty()),
-                        std::env::var("BATE_MODEL_API_KEY")
-                            .ok()
-                            .filter(|s| !s.is_empty()),
-                    ),
-                };
+                let (url, key, _) = self.provider().map_err(internal)?;
                 let (tx, id) = (self.tx.clone(), id.clone());
                 std::thread::spawn(move || {
                     let models = match url {
@@ -1214,6 +1193,17 @@ impl Core {
             }
             _ => Err(("unknown_command", format!("unknown command `{command}`"))),
         }
+    }
+
+    /// The model server and its key: the saved ones, or else the service's environment's (the
+    /// flag says which). A saved server without a key has none: the environment's key was
+    /// given for the environment's server.
+    fn provider(&self) -> rusqlite::Result<(Option<String>, Option<String>, bool)> {
+        let env = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Ok(match self.store.provider()? {
+            Some((url, key)) => (Some(url), key, false),
+            None => (env("BATE_MODEL_BASE_URL"), env("BATE_MODEL_API_KEY"), true),
+        })
     }
 
     fn bot_of(&self, f: &Value) -> Result<String, Refusal> {
@@ -1766,20 +1756,9 @@ impl Core {
 
     fn on_event(&mut self, bot: &str, mut ev: Event) {
         if let Event::Token { request } = &ev {
-            let (url, key) = match self.store.provider() {
-                Ok(Some((u, k))) => (Some(u), k),
-                _ => (
-                    std::env::var("BATE_MODEL_BASE_URL")
-                        .ok()
-                        .filter(|s| !s.is_empty()),
-                    std::env::var("BATE_MODEL_API_KEY")
-                        .ok()
-                        .filter(|s| !s.is_empty()),
-                ),
-            };
-            let (url, key, error) = match url {
-                Some(u) => (Some(u), key, None),
-                None => (
+            let (url, key, error) = match self.provider() {
+                Ok((Some(url), key, _)) => (Some(url), key, None),
+                Ok((None, ..)) => (
                     None,
                     None,
                     Some(
@@ -1787,6 +1766,7 @@ impl Core {
                             .into(),
                     ),
                 ),
+                Err(e) => (None, None, Some(internal(e).1)),
             };
             let op = Op::Token {
                 request: request.clone(),
@@ -2409,6 +2389,15 @@ fn encode(frame: &Value) -> Arc<[u8]> {
     let mut bytes = serde_json::to_vec(frame).expect("serializable");
     bytes.push(b'\n');
     bytes.into()
+}
+
+/// The host and port of an `http://` or `https://` URL without a user or password; `None` for
+/// anything else.
+fn host_of(url: &str) -> Option<String> {
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    let host = uri.authority()?.as_str();
+    (matches!(uri.scheme_str(), Some("http" | "https")) && !host.contains('@'))
+        .then(|| host.to_ascii_lowercase())
 }
 
 fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {

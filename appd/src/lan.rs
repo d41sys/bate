@@ -439,7 +439,7 @@ fn send(s: &Session, body: &[u8]) -> Answer {
             "command": cmd,
             "success": false,
             "code": "forbidden",
-            "error": "manage other devices in Bate's window"
+            "error": "only Bate's own window can do this"
         });
         let _ = s.tx.send(error.to_string());
         return Answer::json(200, &json!({}));
