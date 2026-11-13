@@ -9,7 +9,8 @@ use std::process::Command;
 
 /// Requests and their ids arrive as `{"id":N,"jsonrpc":"2.0","method":…}`. What the agent is
 /// sent goes to `agent.log` in its folder. Prompts: `use a tool` asks for permission (request
-/// id 900) and goes on when answered; `hang` works until cancelled; `stop early` runs out of
+/// id 900) and goes on when answered (when the request is called off, it ends its turn as if
+/// done, leaving the call unfinished); `hang` works until cancelled; `stop early` runs out of
 /// tokens; `die` exits; anything else is answered with a thought and two pieces of text.
 /// With a file `signed-out` in the folder, no conversation is opened.
 const AGENT: &str = r#"#!/bin/sh
@@ -57,6 +58,7 @@ while IFS= read -r line; do
           update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"in_progress"}'
           update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"notes.txt"}}]}'
           chunk agent_message_chunk "One file." ;;
+        *'"cancelled"'*) ;;
         *)
           update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"failed","rawOutput":"not allowed"}' ;;
       esac
@@ -279,7 +281,14 @@ fn abort_cancels_the_agents_turn_and_what_it_asked() {
     bridge.next();
     assert!(matches!(bridge.next(), Event::Question { .. }));
     assert_eq!(bridge.request(Op::Abort), None);
-    bridge.rest();
+    // The agent finishes its turn as if nothing happened: it is still the aborted one, and the
+    // call it never finished is ended with it.
+    let unfinished = Event::ToolEnd {
+        call: "t1".into(),
+        output: "the turn ended before this call did".into(),
+        is_error: true,
+    };
+    assert_eq!(bridge.rest(), [unfinished, end(TurnEnd::Aborted, None)]);
     assert!(
         bridge
             .log()

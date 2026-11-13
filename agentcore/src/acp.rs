@@ -4,6 +4,7 @@
 //! agent's standard input and output. The agent keeps its own model, login and tools; this
 //! only translates.
 
+use crate::tools::OUTPUT_CAP;
 use proto::connectors::{Connector, Transport};
 use proto::permissions::{APPROVE, DENY, Kind};
 use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, PROTOCOL, Request, TurnEnd};
@@ -12,6 +13,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
@@ -66,13 +68,24 @@ struct Bridge {
     questions: u64,
     /// Tool calls shown as started.
     started: Vec<String>,
+    /// The turn was aborted: however the agent ends it, it ends `aborted`.
+    aborted: bool,
 }
+
+/// The agent's process, so that it is not left running when this one ends.
+static AGENT_PID: AtomicI32 = AtomicI32::new(0);
 
 fn out(event: &Event) {
     let mut stdout = io::stdout().lock();
-    if proto::write_frame(&mut stdout, event, MAX_EVENT_FRAME).is_err() {
-        // The service is gone: nothing left to translate for.
-        std::process::exit(0);
+    if let Err(e) = proto::write_frame(&mut stdout, event, MAX_EVENT_FRAME) {
+        // The service is gone (or would not take the line): nothing left to translate for.
+        eprintln!("cannot send an event: {e}");
+        let pid = AGENT_PID.load(Ordering::SeqCst);
+        if pid > 0 {
+            // SAFETY: a plain signal to our own child.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        std::process::exit(1);
     }
 }
 
@@ -220,6 +233,7 @@ impl Bridge {
             Op::Abort => {
                 respond(id, Ok(()));
                 if self.turn {
+                    self.aborted = true;
                     self.close_permissions();
                     let params = json!({"sessionId": self.session});
                     self.send(
@@ -283,7 +297,15 @@ impl Bridge {
     fn end_turn(&mut self, reason: TurnEnd, error: Option<String>) {
         self.close_permissions();
         self.turn = false;
-        self.started.clear();
+        self.aborted = false;
+        // A call the agent never finished is shown as ended with the turn.
+        for call in std::mem::take(&mut self.started) {
+            out(&Event::ToolEnd {
+                call,
+                output: "the turn ended before this call did".into(),
+                is_error: true,
+            });
+        }
         out(&Event::TurnEnd { reason, error });
     }
 
@@ -365,6 +387,7 @@ impl Bridge {
                     Err(e) => respond(op, Err(e)),
                 }
             }
+            Asked::Prompt if self.aborted => self.end_turn(TurnEnd::Aborted, None),
             Asked::Prompt => match result.map(|r| r["stopReason"].as_str().unwrap_or("")) {
                 Ok("end_turn") => self.end_turn(TurnEnd::Done, None),
                 Ok("cancelled") => self.end_turn(TurnEnd::Aborted, None),
@@ -425,6 +448,10 @@ impl Bridge {
                         other => other.to_string(),
                     };
                 }
+                if output.len() > OUTPUT_CAP {
+                    output.truncate(output.floor_char_boundary(OUTPUT_CAP));
+                    output.push_str("\n[output cut at 64 KiB]");
+                }
                 self.started.retain(|started| started != id);
                 out(&Event::ToolEnd {
                     call: id.to_owned(),
@@ -481,6 +508,7 @@ fn start(program: &str, args: &[String]) -> io::Result<(Child, Bridge, mpsc::Rec
         // The agent's own diagnostics go where ours go: into the service's log.
         .stderr(Stdio::inherit())
         .spawn()?;
+    AGENT_PID.store(child.id() as i32, Ordering::SeqCst);
     let agent = child.stdin.take().expect("piped");
     let from_agent = child.stdout.take().expect("piped");
     let (tx, rx) = mpsc::channel();
@@ -535,6 +563,7 @@ fn start(program: &str, args: &[String]) -> io::Result<(Child, Bridge, mpsc::Rec
         permissions: HashMap::new(),
         questions: 0,
         started: Vec::new(),
+        aborted: false,
     };
     Ok((child, bridge, rx))
 }

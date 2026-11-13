@@ -287,6 +287,7 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 - The bot's enabled connectors are given to the agent when a conversation starts or is reopened (those over http only to an agent that takes them). A connector that signs in is given with the service's local address, as to Bate's own engine.
 - Not offered to the agent: reading or writing files and running terminals through Bate (it does these itself). Refused by this engine: `steer`, `rewind`, `compact`. `set_model` is accepted and has no effect; choose the model in the agent. Memory, skills and messages between bots are Bate's own engine's and are not given to an agent.
 - If the agent fails to open a conversation, the error names the agent's own ways to sign in.
+- A turn that was aborted ends `aborted` however the agent ends it. A tool call the agent did not finish by the end of its turn gets a `tool_end` with `isError`. A tool's output is cut at 64 KiB.
 
 ### Bug report
 
