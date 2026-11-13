@@ -169,6 +169,7 @@ impl Server {
             Transport::Stdio { command, args, env } => {
                 let mut child = Command::new(command)
                     .args(args)
+                    .env_remove(crate::model::KEY)
                     .envs(env)
                     .current_dir(dir)
                     .stdin(Stdio::piped())

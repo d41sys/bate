@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot
 CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
@@ -349,6 +350,26 @@ impl Store {
         )?;
         stmt.query_map([bot, routine], |r| parse(r.get(0)?))?
             .collect()
+    }
+
+    /// Whether the bot may reach the whole disk. Unless the user said so, it is kept in its folder.
+    pub fn whole_disk(&self, bot: &str) -> Result<bool> {
+        let stored = self
+            .0
+            .query_row("SELECT whole_disk FROM access WHERE bot = ?1", [bot], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(stored.unwrap_or(false))
+    }
+
+    pub fn set_whole_disk(&self, bot: &str, whole_disk: bool) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO access(bot, whole_disk) VALUES (?1, ?2)",
+                params![bot, whole_disk],
+            )
+            .map(drop)
     }
 
     /// What the bot may do with actions of `kind`; the kind's default if the user never chose.

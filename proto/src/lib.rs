@@ -232,8 +232,14 @@ impl Engine {
     /// Starts `program` with the bot's folder `workdir` as its working directory.
     /// The caller reads `ready` first, and must drain `stderr` so the engine never blocks on it.
     pub fn spawn(program: &Path, workdir: &Path) -> io::Result<Engine> {
-        let mut child = Command::new(program)
-            .current_dir(workdir)
+        let mut command = Command::new(program);
+        command.current_dir(workdir);
+        Engine::run(command)
+    }
+
+    /// Starts an engine with a command the caller prepared (its program, folder and limits).
+    pub fn run(mut command: Command) -> io::Result<Engine> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

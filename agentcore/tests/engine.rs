@@ -1279,3 +1279,26 @@ fn recorded_conversations_replay_to_their_expected_transcripts() {
         different.join("\n")
     );
 }
+
+#[test]
+fn a_command_the_model_runs_does_not_get_the_model_servers_key() {
+    let dir = workdir("key");
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "run",
+            json!({"command": "echo key=$BATE_MODEL_API_KEY other=$OTHER"}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let env = [("BATE_MODEL_API_KEY", "sk-secret"), ("OTHER", "kept")];
+    let mut engine = Engine::start_with(&dir, &model, &env);
+    engine.open_new();
+    engine.prompt("print it");
+    answer(&mut engine, "Approve");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::ToolEnd { output, .. } if output == "key= other=kept\n"),
+        "{events:?}"
+    );
+}

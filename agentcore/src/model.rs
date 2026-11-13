@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
+/// The variable with the model server's key. It is the engine's alone: what the model starts
+/// (commands, connectors) does not get it.
+pub const KEY: &str = "BATE_MODEL_API_KEY";
+
 /// The stream's last line.
 const DONE: &str = "[DONE]";
 
@@ -90,9 +94,7 @@ impl Provider {
         Ok(Provider {
             agent: ureq::Agent::new_with_config(config),
             url: format!("{}/chat/completions", url.trim_end_matches('/')),
-            key: std::env::var("BATE_MODEL_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty()),
+            key: std::env::var(KEY).ok().filter(|k| !k.is_empty()),
         })
     }
 

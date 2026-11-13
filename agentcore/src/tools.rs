@@ -186,7 +186,10 @@ pub fn run(
         "run" => {
             let secs = number("timeoutSecs").unwrap_or(120).clamp(1, 600);
             let mut cmd = Command::new("/bin/sh");
-            cmd.arg("-c").arg(text("command")?).current_dir(dir);
+            cmd.arg("-c")
+                .arg(text("command")?)
+                .current_dir(dir)
+                .env_remove(crate::model::KEY);
             match capture(cmd, Duration::from_secs(secs), control)? {
                 (out, Some(0)) => Ok(out),
                 (out, Some(code)) => Err(format!("{out}\nexit code {code}")),

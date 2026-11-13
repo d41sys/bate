@@ -86,7 +86,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -107,12 +107,13 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}` |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
-`Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 
@@ -142,6 +143,22 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Folder limit
+
+A bot is kept inside its folder (`bots/<id>` under the service's home) by the operating system unless `wholeDisk` is true; a new bot is limited. The service starts a limited bot's engine under macOS `sandbox-exec`, so the rule holds for the engine and for every program it starts, whatever was approved:
+
+- **Writing:** only inside the folder.
+- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores` or the service's home, except the folder and the engine's program. System files stay readable.
+- **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to processes outside, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), and only the system services needed to look up names, check certificates and read preferences (so not the keychain, the clipboard or the file index).
+- **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
+- **Network:** open, local ports included: the engine has to reach its model.
+
+`set_disk_access` stores the choice and stops the bot's idle engine; the next thing the bot does starts an engine under the new rule. `bots_changed` follows. During a turn it is refused with `busy`. On a system without `sandbox-exec` a limited bot's engine does not start (`engine_failed`).
+
+Not covered: what a bot sends over the network from its own folder; services listening on local ports; anything a bot started while it had the whole disk. A limited bot cannot use programs installed under `/Users` (a connector's command there cannot be read), and a program that insists on the system's own temporary folder (`mktemp` with no template, Xcode's tool cache) is refused there.
+
+Whatever the limit, a command or connector the model starts does not get `BATE_MODEL_API_KEY`.
 
 ### Permissions
 
@@ -182,4 +199,4 @@ Not recognised: a secret the service never stored that is printed with none of t
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, permission levels and grants, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
