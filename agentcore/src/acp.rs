@@ -282,6 +282,9 @@ impl Bridge {
                 Err("this agent summarises its context by itself".into()),
             ),
             Op::Reply { message, .. } => respond(id, Err(format!("message {message} is not open"))),
+            Op::BrowserResult { request, .. } => {
+                respond(id, Err(format!("request {request} is not open")))
+            }
             Op::Stop => unreachable!("handled by the loop"),
         }
     }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Read};
 use std::process::Child;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -18,10 +19,10 @@ use serde_json::{Value, json};
 
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
-use crate::oauth;
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
+use crate::{browser, oauth};
 use crate::{limit, memory, paths, schedule, skills};
 
 pub enum Msg {
@@ -46,6 +47,17 @@ pub enum Msg {
         client: u64,
         id: Value,
         result: Result<(String, String, oauth::Pending), String>,
+    },
+    /// What came of an action in a bot's browser.
+    Browsed {
+        bot: String,
+        generation: u64,
+        request: String,
+        result: Result<String, String>,
+    },
+    /// The user clicked or typed in a bot's browser.
+    BrowserTaken {
+        bot: String,
     },
     /// `event: None`: the engine closed its output (it exited or broke the protocol).
     Engine {
@@ -164,6 +176,9 @@ struct Running {
     compacting: u32,
     /// The message from another bot that the running turn answers.
     call: Option<PeerCall>,
+    /// The browser action the running turn waits on: set when the turn ends, so that an
+    /// action still waiting for the user's hand-back is not run.
+    browsing: Option<Arc<AtomicBool>>,
 }
 
 /// A message one bot sent another, while the other works on it.
@@ -182,6 +197,8 @@ pub struct Core {
     hook_port: Option<u16>,
     /// Sign-ins the browser has not come back from, by the `state` given to it.
     sign_ins: HashMap<String, oauth::Pending>,
+    /// Each bot's browser, from its first use on.
+    browsers: HashMap<String, browser::Handle>,
     store: Store,
     tx: Sender<Msg>,
     clients: HashMap<u64, Client>,
@@ -209,6 +226,7 @@ impl Core {
         Core {
             hook_port,
             sign_ins: HashMap::new(),
+            browsers: HashMap::new(),
             store,
             tx,
             clients: HashMap::new(),
@@ -256,6 +274,32 @@ impl Core {
                 let _ = hit.answer.send(answer);
             }
             Msg::Proxy(ask) => self.on_proxy(ask),
+            Msg::Browsed {
+                bot,
+                generation,
+                request,
+                result,
+            } => {
+                if self.engines.get(&bot).map(|r| r.generation) != Some(generation) {
+                    return;
+                }
+                let (output, error) = match result {
+                    Ok(output) => (Some(output), None),
+                    Err(e) => (None, Some(e)),
+                };
+                let op = Op::BrowserResult {
+                    request,
+                    output,
+                    error,
+                };
+                if let Err((_, e)) = self.send_op(&bot, op, Waiter::Quiet) {
+                    log!("bot {bot}: browser result not sent: {e}");
+                }
+            }
+            Msg::BrowserTaken { bot } => {
+                log!("bot {bot}: the user took over its browser");
+                self.broadcast(&json!({"type": "bots_changed"}));
+            }
             Msg::SignIn { client, id, result } => {
                 let reply = match result {
                     Ok((url, state, pending)) => {
@@ -636,6 +680,16 @@ impl Core {
                 }
                 Ok(Some(json!({})))
             }
+            "hand_back_browser" => {
+                let bot = self.bot_of(f)?;
+                if let Some(handle) = self.browsers.get(&bot)
+                    && handle.taken()
+                {
+                    handle.hand_back();
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                }
+                Ok(Some(json!({})))
+            }
             "set_agent" => {
                 let bot = self.bot_of(f)?;
                 let command: Option<Vec<String>> = serde_json::from_value(f["command"].clone())
@@ -794,6 +848,9 @@ impl Core {
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
+        if self.browsers.get(bot).is_some_and(browser::Handle::taken) {
+            row["browserTaken"] = json!(true);
+        }
         if let Ok(Some(agent)) = self.store.agent(bot) {
             row["agent"] = json!(agent);
         }
@@ -964,6 +1021,7 @@ impl Core {
                 busy: false,
                 compacting: 0,
                 call: None,
+                browsing: None,
             },
         );
         self.send_op(bot, open, Waiter::Service)?;
@@ -1182,6 +1240,44 @@ impl Core {
         }
     }
 
+    /// The engine asks for an action in the bot's browser: checked here, run on the browser's
+    /// own thread, and answered with `browser_result` when done.
+    fn on_browser(&mut self, bot: &str, request: String, action: &serde_json::Map<String, Value>) {
+        let Some(r) = self.engines.get_mut(bot) else {
+            return;
+        };
+        let action = match browser::Action::parse(action) {
+            Ok(action) => action,
+            Err(e) => {
+                let op = Op::BrowserResult {
+                    request,
+                    output: None,
+                    error: Some(e),
+                };
+                if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                    log!("bot {bot}: browser result not sent: {e}");
+                }
+                return;
+            }
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if let Some(old) = r.browsing.replace(cancelled.clone()) {
+            old.store(true, Ordering::SeqCst);
+        }
+        let generation = r.generation;
+        let tx = self.tx.clone();
+        let handle = self.browsers.entry(bot.to_owned()).or_insert_with(|| {
+            let profile = browser::profile(&paths::home(), bot);
+            browser::Handle::start(bot, profile, paths::bot_dir(bot).join("downloads"), tx)
+        });
+        handle.act(browser::Job {
+            request,
+            generation,
+            action,
+            cancelled,
+        });
+    }
+
     /// The local port's threads ask for what only this thread may read or keep.
     fn on_proxy(&mut self, ask: proxy::Ask) {
         match ask {
@@ -1288,6 +1384,10 @@ impl Core {
             }
             *options = [APPROVE, ALWAYS, DENY].map(String::from).to_vec();
         }
+        if let Event::Browser { request, action } = &ev {
+            // Not for the transcript either: the tool call is there.
+            return self.on_browser(bot, request.clone(), action);
+        }
         if let Event::Message { message, to, text } = &ev {
             // Not for the transcript: the tool call that sent it is there already.
             return self.on_message(bot, message.clone(), to, text);
@@ -1324,6 +1424,9 @@ impl Core {
             }
             Event::TurnStart { .. } | Event::TurnEnd { .. } => {
                 r.busy = matches!(ev, Event::TurnStart { .. });
+                if let Some(browsing) = r.browsing.take() {
+                    browsing.store(true, Ordering::SeqCst);
+                }
                 let answered = if r.busy { None } else { r.call.take() };
                 if !r.busy {
                     // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
@@ -1520,6 +1623,9 @@ impl Core {
         let Some(mut r) = self.engines.remove(bot) else {
             return;
         };
+        if let Some(browsing) = r.browsing.take() {
+            browsing.store(true, Ordering::SeqCst);
+        }
         let _ = r.child.kill();
         let status = r.child.wait();
         log!("bot {bot}: engine stopped ({status:?})");

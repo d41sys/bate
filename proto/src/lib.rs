@@ -82,6 +82,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// What came of the open `browser` request: the page as the bot sees it, or why not.
+    BrowserResult {
+        request: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Finish and exit.
     Stop,
 }
@@ -146,6 +154,12 @@ pub enum Event {
         message: String,
         to: String,
         text: String,
+    },
+    /// Something to do in the bot's browser, which the service runs. The engine waits until
+    /// the service sends `browser_result` for `request`.
+    Browser {
+        request: String,
+        action: Map<String, Value>,
     },
     TurnEnd {
         reason: TurnEnd,

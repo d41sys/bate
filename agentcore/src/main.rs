@@ -159,6 +159,12 @@ impl Engine {
     }
 
     fn handle(&mut self, id: String, op: Op) {
+        // What a `reply` or a `browser_result` may answer: a message, or a browser request.
+        let prefix = if matches!(op, Op::BrowserResult { .. }) {
+            'b'
+        } else {
+            'm'
+        };
         let saved = |e: io::Error| format!("cannot save the conversation: {e}");
         match op {
             Op::Start { .. } => match self
@@ -301,12 +307,18 @@ impl Engine {
                 message,
                 text,
                 error,
+            }
+            // What the browser did is waited on as a message is (`b…` in place of `m…`).
+            | Op::BrowserResult {
+                request: message,
+                output: text,
+                error,
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
-                match open {
+                                match open {
                     Some(mut open)
                         if open.as_deref() == Some(message.as_str())
-                            && message.starts_with('m') =>
+                            && message.starts_with(prefix) =>
                     {
                         *open = None;
                         drop(open);
