@@ -69,6 +69,10 @@ macro_rules! log {
 }
 pub(crate) use log;
 
+/// Most names `Dir::names` gives: the bot decides how many there are, and the service's one
+/// thread reads them.
+const MAX_NAMES: usize = 10_000;
+
 /// A folder held open. A bot can swap anything in its own folder for a link at any moment, so
 /// the service reaches in only through this: what is done here stays in this very folder, and
 /// a name in it is never followed if it is a link.
@@ -108,11 +112,12 @@ impl Dir {
     pub fn subdir(&self, name: &str, create: bool) -> io::Result<Dir> {
         if create {
             // SAFETY: a valid descriptor and C string for the call.
-            let made = unsafe {
+            let made = done(unsafe {
                 libc::mkdirat(self.0.as_raw_fd(), c_name(name.as_ref())?.as_ptr(), 0o700)
-            };
-            if made != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-                return Err(io::Error::last_os_error());
+            });
+            match made {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
             }
         }
         Dir::open_at(self.0.as_raw_fd(), name.as_ref())
@@ -140,6 +145,14 @@ impl Dir {
     /// The plain file `name` for reading: `None` if there is none, or it is a link, a pipe, or
     /// a file with a second name elsewhere (a link too).
     pub fn read(&self, name: &str) -> io::Result<Option<File>> {
+        match self.regular(name)? {
+            Some(file) if file.metadata()?.nlink() == 1 => Ok(Some(file)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The regular file `name` for reading: `None` if there is none, or it is a link or a pipe.
+    pub fn regular(&self, name: &str) -> io::Result<Option<File>> {
         let file = match self.file(name, libc::O_RDONLY) {
             Ok(file) => file,
             // `ELOOP`: the name is a link.
@@ -150,8 +163,7 @@ impl Dir {
             }
             Err(e) => return Err(e),
         };
-        let meta = file.metadata()?;
-        Ok((meta.is_file() && meta.nlink() == 1).then_some(file))
+        Ok(file.metadata()?.is_file().then_some(file))
     }
 
     /// A new file `name`; fails if anything has that name.
@@ -217,7 +229,9 @@ impl Dir {
         }
     }
 
-    /// The names in this folder (without `.` and `..`).
+    /// The names in this folder (without `.` and `..`), `MAX_NAMES` at most.
+    // shortcut: a folder with more entries is listed in part, in no order; page the listing
+    // if a bot's memory or skills ever need that many.
     pub fn names(&self) -> io::Result<Vec<String>> {
         // SAFETY: `dup` gives a descriptor of our own, which `fdopendir` takes over and
         // `closedir` closes; `readdir`'s entry is read before the next call.
@@ -235,9 +249,13 @@ impl Dir {
             // The copy shares its place in the folder with every earlier listing.
             libc::rewinddir(stream);
             let mut names = Vec::new();
-            loop {
+            let mut failed = None;
+            while names.len() < MAX_NAMES {
+                *libc::__error() = 0;
                 let entry = libc::readdir(stream);
                 if entry.is_null() {
+                    failed =
+                        Some(io::Error::last_os_error()).filter(|e| e.raw_os_error() != Some(0));
                     break;
                 }
                 let name = CStr::from_ptr((*entry).d_name.as_ptr());
@@ -249,7 +267,7 @@ impl Dir {
                 }
             }
             libc::closedir(stream);
-            Ok(names)
+            failed.map_or(Ok(names), Err)
         }
     }
 }

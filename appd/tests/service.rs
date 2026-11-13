@@ -1253,9 +1253,10 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
     fs::create_dir_all(source.join("scripts")).unwrap();
     fs::write(source.join("SKILL.md"), skill_md("Fill in PDF forms.")).unwrap();
     fs::write(source.join("scripts/fill.sh"), "#!/bin/sh\n").unwrap();
+    // Runnable stays runnable; setuid does not come along.
     fs::set_permissions(
         source.join("scripts/fill.sh"),
-        fs::Permissions::from_mode(0o755),
+        fs::Permissions::from_mode(0o4755),
     )
     .unwrap();
     let skills = home.join("bots").join(&bot).join("skills");
@@ -1273,7 +1274,7 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
     let script = skills.join("pdf-forms/scripts/fill.sh");
     assert_eq!(fs::read_to_string(&script).unwrap(), "#!/bin/sh\n");
     assert_eq!(
-        fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&script).unwrap().permissions().mode() & 0o7777,
         0o755
     );
 
@@ -1305,13 +1306,50 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
         "invalid_skill"
     );
     assert_eq!(listed(&mut w, &other), json!([]));
-    assert_eq!(fs::read_dir(home.join("staging")).unwrap().count(), 0);
+    eventually("an empty staging folder", || {
+        fs::read_dir(home.join("staging")).unwrap().count() == 0
+    });
+
+    // Nor a pipe for a SKILL.md (which must not be waited on), nor too many files.
+    let pipe = home.join("picked/pipe");
+    fs::create_dir_all(&pipe).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(pipe.join("SKILL.md"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&pipe)),
+        "invalid_skill"
+    );
+    let many = home.join("picked/many");
+    fs::create_dir_all(&many).unwrap();
+    fs::write(many.join("SKILL.md"), skill_md("Many.")).unwrap();
+    for n in 0..500 {
+        fs::write(many.join(format!("{n}.txt")), "").unwrap();
+    }
+    assert_eq!(
+        refused(&mut w, "install_skill", args(&many)),
+        "invalid_skill"
+    );
+    assert_eq!(listed(&mut w, &other), json!([]));
+
+    // A folder in the skill that nobody may enter does not keep a new copy from going in.
+    let locked = skills.join("pdf-forms/locked");
+    fs::create_dir_all(locked.join("sub")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    install(&mut w, &source);
+    assert!(!locked.exists());
 
     // The bot can write in its folder, so it can put a link where a skill goes. The service
     // replaces the link; what it pointed to is untouched.
     let victim = home.join("victim");
     fs::create_dir_all(&victim).unwrap();
     fs::write(victim.join("keep.txt"), "mine").unwrap();
+    // A skill of its own: were the link followed, it would be listed.
+    fs::write(victim.join("SKILL.md"), skill_md("Not installed.")).unwrap();
     fs::remove_dir_all(skills.join("pdf-forms")).unwrap();
     std::os::unix::fs::symlink(&victim, skills.join("pdf-forms")).unwrap();
     assert_eq!(listed(&mut w, &bot), json!([]));
@@ -1321,7 +1359,7 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
             .unwrap()
             .is_dir()
     );
-    assert_eq!(fs::read_dir(&victim).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&victim).unwrap().count(), 2);
 
     w.ok("delete_skill", json!({"bot": bot, "name": "pdf-forms"}));
     assert!(!skills.join("pdf-forms").exists());
@@ -1342,6 +1380,8 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
     std::os::unix::fs::symlink(&victim, &skills).unwrap();
     let args = json!({"bot": bot, "path": source});
     assert_eq!(refused(&mut w, "install_skill", args), "invalid_skill");
-    assert_eq!(fs::read_dir(&victim).unwrap().count(), 1);
-    assert_eq!(fs::read_dir(home.join("staging")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&victim).unwrap().count(), 2);
+    eventually("an empty staging folder", || {
+        fs::read_dir(home.join("staging")).unwrap().count() == 0
+    });
 }

@@ -166,7 +166,7 @@ description: Fill in PDF forms. Use for any .pdf with fields.
 
 `name` is 1 to 64 characters of a-z, 0-9 and `-`; `description` is one line of 1 to 1024 characters. Other keys are ignored. The rest of the file, and any other files in the folder, are the instructions and what they need.
 
-`install_skill` copies the folder at `path` into `skills/<name>/` in the bot's folder, in place of a skill of the same name. It is refused (`invalid_skill`) when `path` is not a folder, has no valid `SKILL.md`, holds a link or a special file, or is larger than 500 files, 20 MiB or 12 folders deep. The copy is made in the service's own `staging/` folder and moved in whole.
+`install_skill` copies the folder at `path` into `skills/<name>/` in the bot's folder, in place of a skill of the same name. It is refused (`invalid_skill`) when `path` is not a folder, has no valid `SKILL.md`, holds a link or a special file, or is larger than 500 files and folders, 20 MiB or 12 folders deep. `description` may hold no control or line-break characters. The copy is made in the service's own `staging/` folder and moved in whole.
 
 The engine tells the model, at the start of every turn, each skill's name, description and file (`skills/<name>/SKILL.md`), at most 50, and to read that file before a task the skill is for. The instructions themselves are read with the ordinary `read` tool, so the bot's `read` permission applies. A folder whose name is not its skill's `name` is not a skill.
 

@@ -52,9 +52,11 @@ pub fn parse(text: &str) -> Result<Skill, String> {
     let description = description.ok_or(format!("{FILE} has no `description`"))?;
     check_name(&name)?;
     let length = description.chars().count();
-    if length == 0 || length > MAX_DESCRIPTION {
+    // It goes into the model's instructions as one line: nothing that could pass for another.
+    let breaks = |c: char| c.is_control() || c == '\u{2028}' || c == '\u{2029}';
+    if length == 0 || length > MAX_DESCRIPTION || description.contains(breaks) {
         return Err(format!(
-            "`description` must be 1 to {MAX_DESCRIPTION} characters"
+            "`description` must be one line of 1 to {MAX_DESCRIPTION} characters"
         ));
     }
     Ok(Skill { name, description })
@@ -78,6 +80,10 @@ mod tests {
 
     #[test]
     fn the_front_matter_gives_name_and_description() {
+        for line_break in ["\r", "\u{2028}", "\u{b}"] {
+            let text = format!("---\nname: a\ndescription: b{line_break}- c (x): d\n---\n");
+            assert!(parse(&text).is_err(), "{line_break:?}");
+        }
         let text = "---\nname: pdf-forms\ndescription: \"Fill in PDF forms: use for any .pdf with fields.\"\nlicense: MIT\n---\n# How\nname: not-this\n";
         assert_eq!(
             parse(text),

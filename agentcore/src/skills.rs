@@ -37,6 +37,7 @@ pub fn prompt(folder: &Path) -> String {
         return String::new();
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
+    let more = found.len().saturating_sub(MOST);
     found.truncate(MOST);
     let mut text = String::from(
         "\n\nYou have skills: instructions for kinds of task. Before you start a task that one \
@@ -46,6 +47,11 @@ pub fn prompt(folder: &Path) -> String {
         text.push_str(&format!(
             "\n- {} ({DIR}/{}/{FILE}): {}",
             skill.name, skill.name, skill.description
+        ));
+    }
+    if more > 0 {
+        text.push_str(&format!(
+            "\n({more} more are not listed; their folders are in {DIR}/.)"
         ));
     }
     text

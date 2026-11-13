@@ -66,6 +66,7 @@ fn serve() -> io::Result<()> {
     };
     // Only the instance that holds the lock owns (and rotates) the log file.
     log::init(&paths::logs())?;
+    skills::sweep();
     let store = store::Store::open(&paths::db()).map_err(io::Error::other)?;
     let socket = paths::socket();
     // The lock is ours, so a socket file left here is stale.

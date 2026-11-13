@@ -34,21 +34,33 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// The folder `name` in the bot's folder, held open; made first if `create`. `None`: there is
-/// none. An error if a link or a file has that name.
-pub fn folder(bot: &str, name: &str, create: bool) -> io::Result<Option<Dir>> {
-    match Dir::open(&paths::bot_dir(bot))?.subdir(name, create) {
+fn open(bot: &str, name: &str, create: bool) -> io::Result<Dir> {
+    Dir::open(&paths::bot_dir(bot))?
+        .subdir(name, create)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => e,
+            _ => io::Error::other(format!("`{name}` in the bot's folder is not a folder: {e}")),
+        })
+}
+
+/// The folder `name` in the bot's folder, held open. `None`: there is none. An error if a link
+/// or a file has that name.
+pub fn folder(bot: &str, name: &str) -> io::Result<Option<Dir>> {
+    match open(bot, name, false) {
         Ok(dir) => Ok(Some(dir)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io::Error::other(format!(
-            "`{name}` in the bot's folder is not a folder: {e}"
-        ))),
+        Err(e) => Err(e),
     }
+}
+
+/// The same, made first if missing. An error too if the bot takes it away in between.
+pub fn made(bot: &str, name: &str) -> io::Result<Dir> {
+    open(bot, name, true)
 }
 
 /// The notes, by name.
 pub fn list(bot: &str) -> io::Result<Vec<Note>> {
-    let Some(dir) = folder(bot, DIR, false)? else {
+    let Some(dir) = folder(bot, DIR)? else {
         return Ok(Vec::new());
     };
     let mut notes = Vec::new();
@@ -74,7 +86,7 @@ pub fn list(bot: &str) -> io::Result<Vec<Note>> {
 
 /// The note's text; `None` if there is no such note.
 pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(file) = folder(bot, DIR, false)?
+    let Some(file) = folder(bot, DIR)?
         .map(|dir| dir.read(name))
         .transpose()?
         .flatten()
@@ -89,7 +101,7 @@ pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
 /// Creates or replaces the note. The new file takes the name's place, so a link the bot left
 /// under that name is replaced, not followed.
 pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
-    let dir = folder(bot, DIR, true)?.expect("made if missing");
+    let dir = made(bot, DIR)?;
     let tmp = format!(".{}.{name}", crate::sys::random_hex(4));
     let written = dir
         .create(&tmp)
@@ -103,7 +115,7 @@ pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
 
 /// Removes the note (or the link under its name); false if there was none.
 pub fn delete(bot: &str, name: &str) -> io::Result<bool> {
-    match folder(bot, DIR, false)? {
+    match folder(bot, DIR)? {
         Some(dir) => dir.remove(name),
         None => Ok(false),
     }
