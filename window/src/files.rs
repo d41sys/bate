@@ -11,7 +11,8 @@ use tauri::http::{Response, StatusCode, header};
 /// `connect-src` and no remote source: nothing leaves the Mac.
 pub const POLICY: &str = "sandbox allow-scripts; default-src 'none'; \
     script-src 'unsafe-inline' 'unsafe-eval' botfile:; style-src 'unsafe-inline' botfile:; \
-    img-src botfile: data: blob:; font-src botfile: data:; media-src botfile: blob:";
+    img-src botfile: data: blob:; font-src botfile: data:; media-src botfile: blob:; \
+    form-action 'none'; base-uri 'none'";
 
 // shortcut: a file is read whole; stream it if bots make files larger than this to show.
 const MAX_BYTES: u64 = 50 << 20;

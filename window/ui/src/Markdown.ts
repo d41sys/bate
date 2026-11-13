@@ -28,7 +28,7 @@ export function Markdown({ text, open }: { text: string; open?: (path: string) =
       const file = open && inFolder(href);
       return file
         ? h("button", { type: "button", className: "file", title: file, onClick: () => open(file) }, children)
-        : h("a", { href: web(href), title: web(href) }, children);
+        : h("a", { href: web(href), title: web(href), target: "_blank", rel: "noreferrer" }, children);
     },
     // No image is fetched: a reply could use one to report what it saw.
     img: ({ alt }) => h("span", { className: "image" }, alt ? `[${alt}]` : "[image]"),

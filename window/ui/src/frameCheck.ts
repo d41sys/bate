@@ -1,6 +1,6 @@
 // Built in only by `window/check-frames.sh` (VITE_FRAME_CHECK): a bot's page tries every way it
 // could reach the service from its frame; the outcome goes to `frame-check.md` in its memory.
-import { listen, request } from "./service.ts";
+import { listen, openInBrowser, request } from "./service.ts";
 import { SANDBOX, fileUrl } from "./frame.ts";
 
 const ATTACK = `<!doctype html><script>
@@ -18,9 +18,17 @@ const attempt = async (name, f) => { try { tried[name] = "ran: " + String(await 
   await attempt("ipc fetch", () => fetch("ipc://localhost/send", { method: "POST", headers: { "Content-Type": "application/json", "Tauri-Callback": "1", "Tauri-Error": "2" }, body: JSON.stringify({ line }) }).then((r) => r.status));
   await attempt("web fetch", () => fetch("https://example.com/").then((r) => r.status));
   await attempt("web image", () => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok("loaded"); i.onerror = () => no(new Error("refused")); i.src = "https://example.com/favicon.ico"; }));
-  await attempt("top navigation", () => { top.location.href = "https://example.com/"; return "asked"; });
+  await attempt("top navigation", () => { top.location.href = "https://example.com/?leak=top"; return "asked"; });
+  await attempt("new window", () => String(window.open("https://example.com/?leak=popup")));
   await attempt("origin", () => origin);
   parent.postMessage({ frameCheck: tried }, "*");
+  // Last, as they could take this page away: the script checks that none of them got out.
+  const form = document.createElement("form");
+  form.action = "https://example.com/?leak=form";
+  form.method = "post";
+  document.body.append(form);
+  try { form.submit(); } catch {}
+  setTimeout(() => { location.href = "https://example.com/?leak=self"; }, 100);
 })();
 </script>`;
 
@@ -37,6 +45,8 @@ const off = listen(async (frame) => {
     iframe.src = fileUrl(bot.id, path.slice(path.indexOf("attachments/")));
     document.body.append(iframe);
   });
+  // The way out the page itself has: the script checks this one did get to the opener.
+  openInBrowser("https://example.com/?from=page");
   // Give anything that did get through time to arrive.
   await new Promise((r) => setTimeout(r, 1500));
   const { bots } = await request<{ bots: { name: string }[] }>("list_bots");

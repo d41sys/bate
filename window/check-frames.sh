@@ -19,7 +19,10 @@ bin=${CARGO_TARGET_DIR:-target}/debug
 APPD_HOME=$home APPD_HOOK_PORT=0 APPD_ENGINE=/usr/bin/false "$bin"/appd >/dev/null 2>&1 &
 app=$!
 sleep 1
-APPD_HOME=$home "$bin"/bate >/dev/null 2>&1 &
+# What the window would open in the browser is written down instead.
+printf '#!/bin/sh\necho "$1" >> %s/opened.txt\n' "$home" > "$home/opener"
+chmod +x "$home/opener"
+APPD_HOME=$home BATE_OPENER=$home/opener "$bin"/bate >/dev/null 2>&1 &
 win=$!
 for _ in $(seq 30); do
     found=$(ls "$home"/bots/*/memory/frame-check.md 2>/dev/null || true)
@@ -27,5 +30,9 @@ for _ in $(seq 30); do
     sleep 1
 done
 [ -n "$found" ] || { echo "FAIL: no result from the window"; exit 1; }
-cat "$found"
-[ "$(head -1 "$found")" = PASS ]
+sleep 1
+cat "$found"; echo
+echo "opened: $(tr '\n' ' ' < "$home/opened.txt" 2>/dev/null)"
+[ "$(head -1 "$found")" = PASS ] &&
+    grep -q 'from=page' "$home/opened.txt" &&
+    ! grep -q leak "$home/opened.txt"
