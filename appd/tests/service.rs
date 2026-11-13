@@ -3190,7 +3190,17 @@ fn provider_configuration_and_models_listing() {
         (&kept["url"], &kept["hasKey"]),
         (&json!(moved), &json!(true))
     );
-    // It does not follow the URL to another host.
+    // It does not follow the URL to another scheme, where it would go out unencrypted or to
+    // another server, nor to another host.
+    w.ok(
+        "set_provider",
+        json!({"url": format!("https://127.0.0.1:{port}/v2")}),
+    );
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], false);
+    w.ok(
+        "set_provider",
+        json!({"url": moved, "key": "sk-secret-token"}),
+    );
     let elsewhere = format!("http://localhost:{port}/v1");
     w.ok("set_provider", json!({"url": elsewhere}));
     assert_eq!(w.ok("get_provider", json!({}))["hasKey"], false);

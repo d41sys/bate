@@ -1092,7 +1092,7 @@ impl Core {
                         Some(Value::Null) => None,
                         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
                         // A key is for the server the user gave it for: it does not follow
-                        // the URL to another host.
+                        // the URL to another host, nor from https to http.
                         _ => old_key.filter(|_| old_url.as_deref().and_then(host_of) == Some(host)),
                     };
                     self.store
@@ -2391,13 +2391,13 @@ fn encode(frame: &Value) -> Arc<[u8]> {
     bytes.into()
 }
 
-/// The host and port of an `http://` or `https://` URL without a user or password; `None` for
-/// anything else.
+/// The scheme, host and port of an `http://` or `https://` URL without a user or password;
+/// `None` for anything else.
 fn host_of(url: &str) -> Option<String> {
     let uri: ureq::http::Uri = url.parse().ok()?;
-    let host = uri.authority()?.as_str();
-    (matches!(uri.scheme_str(), Some("http" | "https")) && !host.contains('@'))
-        .then(|| host.to_ascii_lowercase())
+    let (scheme, host) = (uri.scheme_str()?, uri.authority()?.as_str());
+    (matches!(scheme, "http" | "https") && !host.contains('@'))
+        .then(|| format!("{scheme}://{host}").to_ascii_lowercase())
 }
 
 fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {

@@ -145,7 +145,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 | `get_provider` | none | `{url?, hasKey, fromEnv?}`: the configured model server URL and whether an API key is saved |
-| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user or password. Without `key`, or with an empty one, the saved key stays if the host and port are the same; `key: null` removes it. |
+| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user or password. Without `key`, or with an empty one, the saved key stays if the scheme, host and port are the same; `key: null` removes it. |
 | `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable |
 | `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
