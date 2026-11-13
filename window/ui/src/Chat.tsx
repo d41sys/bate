@@ -12,7 +12,13 @@ type Opened = { history: Row[]; more: boolean; questions: Question[] };
 /** Entries asked for at a time; a reply is many of them (one per delta). */
 const PAGE = 2000;
 
-export function Chat({ bot }: { bot: Bot }) {
+type Hit = { seq: number };
+
+/**
+ * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
+ * `find`: bumped to open the find bar.
+ */
+export function Chat({ bot, jump, find = 0 }: { bot: Bot; jump?: { seq: number }; find?: number }) {
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
@@ -31,7 +37,16 @@ export function Chat({ bot }: { bot: Bot }) {
   const entries = useRef<Row[]>([]);
   const oldest = useRef<number>(undefined);
   const [more, setMore] = useState(false);
-  const older = useRef<() => void>(() => {});
+  const older = useRef<() => Promise<boolean>>(() => Promise.resolve(false));
+  // The first page, which a jump waits for.
+  const opened = useRef<Promise<unknown>>(Promise.resolve());
+  const hasMore = useRef(false);
+  // The item a jump showed.
+  const [marked, setMarked] = useState<number>();
+  const [finding, setFinding] = useState(false);
+  const [needle, setNeedle] = useState("");
+  const [hits, setHits] = useState<Hit[]>();
+  const [hit, setHit] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const rows = useVirtualizer({
@@ -57,6 +72,7 @@ export function Chat({ bot }: { bot: Bot }) {
         live = undefined;
         oldest.current = d.history[0]?.seq;
         atBottom.current = true;
+        hasMore.current = d.more;
         setMore(d.more);
         setItems(build(entries.current));
         setQuestions(d.questions);
@@ -66,14 +82,15 @@ export function Chat({ bot }: { bot: Bot }) {
       });
     };
     older.current = () => {
-      if (loading || oldest.current === undefined) return;
+      if (loading || oldest.current === undefined) return Promise.resolve(false);
       loading = true;
       const before = oldest.current;
-      request<Opened>("open_bot", { bot: bot.id, limit: PAGE, before }).then((d) => {
+      return request<Opened>("open_bot", { bot: bot.id, limit: PAGE, before }).then((d) => {
         loading = false;
-        if (gone || before !== oldest.current) return;
+        if (gone || before !== oldest.current) return false;
         entries.current = [...d.history, ...entries.current];
         oldest.current = d.history[0]?.seq ?? before;
+        hasMore.current = d.more;
         setMore(d.more);
         setItems((shown) => {
           const all = build(entries.current);
@@ -81,12 +98,14 @@ export function Chat({ bot }: { bot: Bot }) {
           requestAnimationFrame(() => rows.scrollToIndex(all.length - shown.length, { align: "start" }));
           return all;
         });
+        return true;
       }, (e) => {
         loading = false;
         setError(e.message);
+        return false;
       });
     };
-    open();
+    opened.current = open();
     const stop = listen((frame) => {
       if (frame.bot !== bot.id) return;
       if (frame.type === "transcript") {
@@ -110,6 +129,51 @@ export function Chat({ bot }: { bot: Bot }) {
       stop();
     };
   }, [bot.id]);
+
+  const show = async (seq: number) => {
+    await opened.current;
+    while (oldest.current !== undefined && oldest.current > seq && hasMore.current) {
+      if (!(await older.current())) break;
+    }
+    const all = build(entries.current);
+    // The item that begins at `seq`, or the one it is part of.
+    let index = all.findIndex((item) => item.id >= seq);
+    if (index < 0) index = all.length - 1;
+    else if (all[index].id > seq && index > 0) index -= 1;
+    if (index < 0) return;
+    atBottom.current = false;
+    setMarked(all[index].id);
+    requestAnimationFrame(() => requestAnimationFrame(() => rows.scrollToIndex(index, { align: "center" })));
+  };
+  useEffect(() => {
+    if (jump) void show(jump.seq);
+  }, [jump]);
+  useEffect(() => {
+    if (find) setFinding(true);
+  }, [find]);
+  // Searched once typing pauses; the newest hit is shown first.
+  useEffect(() => {
+    if (!finding || !needle.trim()) return setHits(undefined);
+    let stale = false;
+    const wait = setTimeout(() => {
+      request<{ hits: Hit[] }>("search", { bot: bot.id, text: needle, limit: 200 }).then((d) => {
+        if (stale) return;
+        setHits(d.hits);
+        setHit(0);
+        if (d.hits[0]) void show(d.hits[0].seq);
+      }, (e: Error) => stale || setError(e.message));
+    }, 200);
+    return () => {
+      stale = true;
+      clearTimeout(wait);
+    };
+  }, [needle, finding, bot.id]);
+  const step = (by: number) => {
+    if (!hits?.length) return;
+    const next = (hit + by + hits.length) % hits.length;
+    setHit(next);
+    void show(hits[next].seq);
+  };
 
   // A reply that grows keeps its end in view, unless the user scrolled up to read.
   useLayoutEffect(() => {
@@ -196,6 +260,29 @@ export function Chat({ bot }: { bot: Bot }) {
         attach(e.dataTransfer.files);
       }}
     >
+      {finding && (
+        <div className="find" role="search">
+          <input
+            autoFocus
+            aria-label="Find in this chat"
+            placeholder="Find in this chat"
+            value={needle}
+            onChange={(e) => setNeedle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") step(e.shiftKey ? -1 : 1);
+              else if (e.key === "Escape") setFinding(false);
+              else return;
+              e.preventDefault();
+            }}
+          />
+          <span className="note" aria-live="polite">
+            {hits === undefined ? "" : hits.length ? `${hit + 1} of ${hits.length}${hits.length === 200 ? "+" : ""}` : "Not found"}
+          </span>
+          <button type="button" aria-label="Newer" disabled={!hits?.length} onClick={() => step(-1)}>↓</button>
+          <button type="button" aria-label="Older" disabled={!hits?.length} onClick={() => step(1)}>↑</button>
+          <button type="button" onClick={() => setFinding(false)}>Done</button>
+        </div>
+      )}
       <div className="tools">
         <button type="button" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id }).then((d) => setSaved(d.path)))}>
           Export chat
@@ -217,7 +304,7 @@ export function Chat({ bot }: { bot: Bot }) {
               key={row.key}
               data-index={row.index}
               ref={rows.measureElement}
-              className={`item ${items[row.index].kind}`}
+              className={`item ${items[row.index].kind}${items[row.index].id === marked ? " marked" : ""}`}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
             >
               <Row

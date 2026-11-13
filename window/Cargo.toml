@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 proto = { path = "../proto" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

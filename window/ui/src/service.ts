@@ -6,6 +6,9 @@ type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unkno
 const invoke: Invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } })
   .__TAURI_INTERNALS__.invoke;
 
+/** Opens one more window, a page of its own with its own connection. */
+export const newWindow = () => invoke("new_window");
+
 export type Frame = { type: string; bot?: string; [field: string]: unknown };
 
 let next = 0;

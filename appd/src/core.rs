@@ -1016,6 +1016,26 @@ impl Core {
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
             }
+            "search" => {
+                let text = str_field(f, "text")?.trim();
+                if text.is_empty() || text.len() > 200 {
+                    return Err(bad("`text` must be 1 to 200 bytes"));
+                }
+                let bot = match f.get("bot") {
+                    Some(Value::Null) | None => None,
+                    Some(_) => Some(self.bot_of(f)?),
+                };
+                let limit = f
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .min(200);
+                let hits = self
+                    .store
+                    .search(bot.as_deref(), text, limit as usize)
+                    .map_err(internal)?;
+                Ok(Some(json!({"hits": hits})))
+            }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
                     .map_err(|e| ("export_failed", e.to_string()))?;

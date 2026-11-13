@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The page talks to the service through the shell's two calls, and nothing else.",
-  "windows": ["main"],
-  "permissions": ["allow-send", "allow-recv"]
+  "description": "The page talks to the service through the shell's two calls and may open another window; nothing else.",
+  "windows": ["bate-*"],
+  "permissions": ["allow-send", "allow-recv", "allow-new-window"]
 }
