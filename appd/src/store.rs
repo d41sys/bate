@@ -78,10 +78,11 @@ CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
+CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 13] = [
+const BOT_TABLES: [&str; 14] = [
     "transcript",
     "ledger",
     "questions",
@@ -94,6 +95,7 @@ const BOT_TABLES: [&str; 13] = [
     "oauth",
     "connectors",
     "profiles",
+    "models",
     "bots",
 ];
 
@@ -176,6 +178,27 @@ impl Store {
             )
             .optional()
             .map(Option::unwrap_or_default)
+    }
+
+    /// The model and thinking effort chosen for `bot`; `None`: the engine's default.
+    pub fn model(&self, bot: &str) -> Result<Option<(String, Option<String>)>> {
+        self.0
+            .query_row(
+                "SELECT model, effort FROM models WHERE bot = ?1",
+                [bot],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    pub fn set_model(&self, bot: &str, model: &str, effort: Option<&str>) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO models(bot, model, effort) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(bot) DO UPDATE SET model = ?2, effort = ?3",
+                params![bot, model, effort],
+            )
+            .map(drop)
     }
 
     pub fn set_profile(&self, bot: &str, p: &Profile) -> Result<()> {

@@ -38,3 +38,4 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .attached { list-style: none; padding: 0; margin: .25rem 0; }
 .attached li { display: inline-flex; gap: .25rem; align-items: center; margin-right: .75rem; }
 .fields textarea { display: block; width: 100%; box-sizing: border-box; }
+.model { display: flex; gap: 0.75em; align-items: center; padding: 0.25em 1em; font-size: 0.9em; }

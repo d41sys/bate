@@ -86,6 +86,7 @@ while IFS= read -r line; do
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
+    *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"reply"'*)
       said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
@@ -967,6 +968,52 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
     assert_eq!(
         fs::read_to_string(trashed.join("kept.txt")).unwrap(),
         "mine"
+    );
+}
+
+#[test]
+fn a_bots_model_and_effort_are_kept_and_given_to_its_engine_each_start() {
+    let home = home("model");
+    let set = |w: &mut Window, bot: &str| {
+        w.ok(
+            "set_model",
+            json!({"bot": bot, "model": "m1", "effort": "high"}),
+        );
+    };
+    let bot = {
+        let _service = Service::start(&home);
+        let mut w = Window::connect(&home);
+        let bot = w.create_bot();
+        set(&mut w, &bot);
+        let row = w.ok("list_bots", json!({}))["bots"][0].clone();
+        assert_eq!(
+            (&row["model"], &row["effort"]),
+            (&json!("m1"), &json!("high"))
+        );
+        for bad in [
+            json!({"bot": bot, "model": ""}),
+            json!({"bot": bot, "model": "m1", "effort": "max"}),
+        ] {
+            let id = w.send("set_model", bad);
+            let refusal = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+            assert_eq!(refusal["code"], "bad_request");
+        }
+        bot
+    };
+
+    // A new service, a new engine: it is told the bot's model before any prompt.
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let log = home.join("bots").join(&bot).join("models.log");
+    let told = || fs::read_to_string(&log).unwrap_or_default();
+    let before = told().lines().count();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    let last = told().lines().nth(before).unwrap_or_default().to_owned();
+    assert!(
+        last.contains(r#""model":"m1""#) && last.contains(r#""effort":"high""#),
+        "{}",
+        told()
     );
 }
 
