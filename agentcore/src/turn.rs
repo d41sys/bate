@@ -38,13 +38,37 @@ const SUMMARISE: &str = "Summarise the conversation so far for your own later us
     what was decided, what was found, which files changed, and what is left to do. \
     Answer with the summary only and do not call tools.";
 
-/// The engine's own tools, then the connectors'.
-fn tool_list(mcp: &Servers) -> Value {
+/// How deep sub-agents nest: one at this depth cannot start another.
+pub const MAX_DEPTH: usize = 5;
+/// The tool that starts a sub-agent.
+const AGENT: &str = "agent";
+const SUB_AGENT: &str = "\n\nYou are a sub-agent: another agent handed you the one task below and \
+    sees nothing but your last message. Do the task, then answer with the result alone.";
+
+/// The engine's own tools, then the connectors', then `agent` while `depth` allows one more.
+fn tool_list(mcp: &Servers, depth: usize) -> Value {
     let mut tools = tools::definitions();
     if let Value::Array(list) = &mut tools {
         list.extend(mcp.definitions().cloned());
+        if depth < MAX_DEPTH {
+            list.push(json!({"type": "function", "function": {"name": AGENT,
+                "description": "Hand one self-contained task to a sub-agent: a copy of you with the same tools and working folder that knows nothing of this conversation. It works alone; its final answer comes back as the result. Put everything it needs to know in `task`.",
+                "parameters": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]}}}));
+        }
     }
     tools
+}
+
+/// The message that records what the model said and which tools it called.
+fn assistant(text: &str, calls: &[crate::model::Call]) -> Value {
+    let mut message = json!({"role": "assistant", "content": text});
+    if !calls.is_empty() {
+        message["tool_calls"] = calls
+            .iter()
+            .map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}))
+            .collect();
+    }
+    message
 }
 
 fn saved(e: std::io::Error) -> String {
@@ -80,7 +104,7 @@ impl Turn {
         let mut unnamed = 0;
         let system = self.system();
         mcp.sync(&self.connectors, &self.dir, &self.control);
-        let tools = tool_list(mcp);
+        let tools = tool_list(mcp, 0);
         session
             .push(json!({"role": "user", "content": text}))
             .map_err(saved)?;
@@ -123,14 +147,7 @@ impl Turn {
                 unnamed += 1;
             }
             if !text.is_empty() || !calls.is_empty() {
-                let mut message = json!({"role": "assistant", "content": text});
-                if !calls.is_empty() {
-                    message["tool_calls"] = calls
-                        .iter()
-                        .map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}))
-                        .collect();
-                }
-                session.push(message).map_err(saved)?;
+                session.push(assistant(&text, &calls)).map_err(saved)?;
             }
             if aborted {
                 return Ok(TurnEnd::Aborted);
@@ -149,35 +166,92 @@ impl Turn {
             }
             // Every call gets a result, even after an abort: the conversation must stay well-formed.
             for call in &calls {
-                let args = match serde_json::from_str::<Value>(&call.arguments) {
-                    Ok(Value::Object(args)) => Ok(args),
-                    _ => Err(format!(
-                        "the arguments are not a JSON object: {}",
-                        call.arguments
-                    )),
-                };
-                self.out.send(&Event::ToolStart {
-                    call: call.id.clone(),
-                    tool: call.name.clone(),
-                    args: args.clone().unwrap_or_default(),
-                });
-                let result = if self.control.aborted() {
-                    Err("Not run: the turn was aborted.".into())
-                } else {
-                    args.and_then(|args| self.call(mcp, &call.name, &args))
-                };
-                let (output, is_error) = match result {
-                    Ok(out) => (out, false),
-                    Err(out) => (out, true),
-                };
-                self.out.send(&Event::ToolEnd {
-                    call: call.id.clone(),
-                    output: output.clone(),
-                    is_error,
-                });
                 session
-                    .push(json!({"role": "tool", "tool_call_id": call.id, "content": output}))
+                    .push(self.run_call(mcp, call, 0, ""))
                     .map_err(saved)?;
+            }
+        }
+    }
+
+    /// Runs one tool call and gives the message with its result. `shown` goes before the
+    /// call's id in the events, to tell a sub-agent's calls from the conversation's own.
+    fn run_call(
+        &self,
+        mcp: &mut Servers,
+        call: &crate::model::Call,
+        depth: usize,
+        shown: &str,
+    ) -> Value {
+        let args = match serde_json::from_str::<Value>(&call.arguments) {
+            Ok(Value::Object(args)) => Ok(args),
+            _ => Err(format!(
+                "the arguments are not a JSON object: {}",
+                call.arguments
+            )),
+        };
+        let id = format!("{shown}{}", call.id);
+        self.out.send(&Event::ToolStart {
+            call: id.clone(),
+            tool: call.name.clone(),
+            args: args.clone().unwrap_or_default(),
+        });
+        let result = if self.control.aborted() {
+            Err("Not run: the turn was aborted.".into())
+        } else {
+            args.and_then(|args| self.call(mcp, &call.name, &args, depth))
+        };
+        let (output, is_error) = match result {
+            Ok(out) => (out, false),
+            Err(out) => (out, true),
+        };
+        self.out.send(&Event::ToolEnd {
+            call: id,
+            output: output.clone(),
+            is_error,
+        });
+        json!({"role": "tool", "tool_call_id": call.id, "content": output})
+    }
+
+    /// A sub-agent at `depth`: the same model, tools and folder, and a conversation of its own
+    /// that starts with `task` and is not kept. Gives its last message. Its tool calls are
+    /// shown and asked about like any other; what it says in between is not.
+    // shortcut: no compaction and no steering in here, so a sub-agent that outgrows the
+    // context ends with the model server's error; share `turn`'s loop if one needs either.
+    fn sub_agent(&self, mcp: &mut Servers, task: &str, depth: usize) -> Result<String, String> {
+        static STARTED: AtomicU64 = AtomicU64::new(0);
+        let n = STARTED.fetch_add(1, Ordering::Relaxed) + 1;
+        let system = self.system() + SUB_AGENT;
+        let tools = tool_list(mcp, depth);
+        let mut messages = vec![json!({"role": "user", "content": task})];
+        let mut unnamed = 0;
+        loop {
+            if self.control.aborted() {
+                return Err("Aborted by the user".into());
+            }
+            let ask = self.ask_model(&system, &messages, None, &tools);
+            let Reply {
+                text,
+                mut calls,
+                aborted,
+            } = self
+                .provider
+                .stream(&ask, self.control.aborted_flag(), |_| {})?;
+            if aborted {
+                return Err("Aborted by the user".into());
+            }
+            for call in calls.iter_mut().filter(|c| c.id.is_empty()) {
+                call.id = format!("call_agent{n}_{unnamed}");
+                unnamed += 1;
+            }
+            if calls.is_empty() {
+                return match text.trim() {
+                    "" => Err("The sub-agent ended without an answer.".into()),
+                    answer => Ok(answer.to_owned()),
+                };
+            }
+            messages.push(assistant(&text, &calls));
+            for call in &calls {
+                messages.push(self.run_call(mcp, call, depth, &format!("agent{n}/")));
             }
         }
     }
@@ -210,7 +284,7 @@ impl Turn {
 
     /// `compact` on request.
     pub fn compact_now(&self, work: &mut Work) -> Result<(), String> {
-        self.compact(&mut work.session, &self.system(), &tool_list(&work.mcp))
+        self.compact(&mut work.session, &self.system(), &tool_list(&work.mcp, 0))
     }
 
     /// Asks the model to summarise all but the last `KEEP` messages and puts the summary in their
@@ -248,7 +322,19 @@ impl Turn {
         mcp: &mut Servers,
         tool: &str,
         args: &Map<String, Value>,
+        depth: usize,
     ) -> Result<String, String> {
+        if tool == AGENT {
+            if depth >= MAX_DEPTH {
+                return Err(format!(
+                    "Not started: sub-agents nest at most {MAX_DEPTH} deep."
+                ));
+            }
+            return match args.get("task").and_then(Value::as_str) {
+                Some(task) if !task.trim().is_empty() => self.sub_agent(mcp, task, depth + 1),
+                _ => Err("`task` must say what the sub-agent is to do.".into()),
+            };
+        }
         // Every action is asked about: the service decides from the bot's permissions, and
         // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);

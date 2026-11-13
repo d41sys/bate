@@ -1377,3 +1377,144 @@ fn the_model_is_told_which_skills_it_has_and_where_to_read_them() {
             .contains("never guess a field")
     );
 }
+
+/// The names of the tools a request offered the model.
+fn offered(request: &Value) -> Vec<&str> {
+    request["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect()
+}
+
+#[test]
+fn a_sub_agent_does_a_task_in_a_conversation_of_its_own_and_its_answer_comes_back() {
+    let dir = workdir("sub-agent");
+    fs::write(dir.join("a.txt"), "three\n").unwrap();
+    let model = Model::serve(vec![
+        vec![
+            text("I will hand that out."),
+            call(
+                "c1",
+                "agent",
+                json!({"task": "Read a.txt and say what it holds."}),
+            ),
+        ],
+        vec![
+            text("Reading."),
+            call("s1", "read", json!({"path": "a.txt"})),
+        ],
+        vec![text("It holds: three")],
+        vec![text("The file says three.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("what is in a.txt? my code word is tulip");
+    let mut events = answer(&mut engine, "Approve");
+    events.extend(engine.until(is_turn_end));
+
+    let requests = model.requests();
+    // The sub-agent starts from its task alone: nothing of the conversation.
+    let sub = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(sub.len(), 2, "{sub:?}");
+    assert!(
+        sub[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("You are a sub-agent")
+    );
+    assert_eq!(
+        sub[1],
+        json!({"role": "user", "content": "Read a.txt and say what it holds."})
+    );
+    assert!(!requests[2].to_string().contains("tulip"));
+    assert!(offered(&requests[0]).contains(&"agent") && offered(&requests[1]).contains(&"agent"));
+    // Its last message is the tool's result, and all the conversation keeps of it.
+    let last = requests[3]["messages"].as_array().unwrap();
+    assert_eq!(last.last().unwrap()["content"], "It holds: three");
+    assert!(!requests[3].to_string().contains("Reading."));
+
+    // The window sees the sub-agent's tool calls, not its words.
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, "I will hand that out.The file says three.");
+    let ended: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolEnd {
+                call,
+                output,
+                is_error,
+            } => Some((call.as_str(), output.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert!(
+        ended[0].0.ends_with("/s1") && ended[0].1.contains("three"),
+        "{ended:?}"
+    );
+    assert_eq!(ended[1], ("c1", "It holds: three", false));
+}
+
+#[test]
+fn sub_agents_nest_five_deep_and_no_deeper() {
+    let dir = workdir("sub-agent-depth");
+    let deeper = |id: &str| vec![call(id, "agent", json!({"task": "go deeper"}))];
+    let mut replies: Vec<Vec<Value>> = (0..6).map(|n| deeper(&format!("c{n}"))).collect();
+    // Level 5 was refused; then every level answers, innermost first.
+    replies.extend(
+        (0..6)
+            .rev()
+            .map(|n| vec![text(&format!("answer from level {n}"))]),
+    );
+    let model = Model::serve(replies);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("go");
+    let events = engine.until(is_turn_end);
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 12);
+    for (level, request) in requests[..6].iter().enumerate() {
+        assert_eq!(
+            offered(request).contains(&"agent"),
+            level < 5,
+            "level {level}"
+        );
+    }
+    // The model at level 5 asked anyway: told no, and it goes on.
+    let refused = requests[6]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert!(
+        refused["content"]
+            .as_str()
+            .unwrap()
+            .contains("at most 5 deep"),
+        "{refused}"
+    );
+    let main = requests[11]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(main["content"], "answer from level 1");
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd {
+            reason: TurnEnd::Done,
+            ..
+        })
+    ));
+}
