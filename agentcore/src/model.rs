@@ -158,6 +158,7 @@ impl Provider {
         let mut reply = Reply::default();
         // Where the call of each server-side `index` is in `reply.calls`.
         let mut at = HashMap::<u64, usize>::new();
+        let mut finished = false;
         loop {
             let received = lines.recv_timeout(POLL);
             if abort.load(Ordering::SeqCst) {
@@ -168,7 +169,11 @@ impl Provider {
             let line = match received {
                 Ok(line) => line?,
                 Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) if finished => break,
+                // A body that just ends (a crashed server, a dropped proxy) is not a whole reply.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("the model's reply was cut off".into());
+                }
             };
             let Some(data) = data(&line) else {
                 continue;
@@ -178,6 +183,8 @@ impl Provider {
             }
             let chunk: Value =
                 serde_json::from_str(data).map_err(|e| format!("the model sent bad data: {e}"))?;
+            // Some servers end the body after the last chunk, with no `[DONE]` line.
+            finished |= !chunk["choices"][0]["finish_reason"].is_null();
             if let Some(error) = chunk.get("error") {
                 return Err(format!(
                     "the model server failed: {}",
@@ -203,14 +210,20 @@ impl Provider {
                 let id = c["id"].as_str().filter(|id| !id.is_empty());
                 // The server's `index` only says which pieces belong together; calls are kept in
                 // the order they began, so a wild index cannot allocate or panic.
-                let known = at.get(&index).copied();
-                // Some servers number every call 0: another id under a known index is the next call.
+                // An id seen before names its call, whatever the index says.
+                let by_id = id.and_then(|id| reply.calls.iter().position(|call| call.id == id));
+                let known = by_id.or(at.get(&index).copied());
+                // Some servers number every call 0, or not at all: another id under a known
+                // index is the next call.
                 let other = known.is_some_and(|i| {
                     let had = &reply.calls[i].id;
                     !had.is_empty() && id.is_some_and(|id| id != had)
                 });
                 let i = match known {
-                    Some(i) if !other => i,
+                    Some(i) if !other => {
+                        at.insert(index, i);
+                        i
+                    }
                     _ => {
                         reply.calls.push(Call::default());
                         at.insert(index, reply.calls.len() - 1);
@@ -221,10 +234,9 @@ impl Provider {
                 if let Some(id) = id {
                     call.id = id.to_owned();
                 }
-                // Some servers send the whole name again with every piece of the arguments.
-                let name = c["function"]["name"].as_str().unwrap_or("");
-                if name != call.name {
-                    call.name.push_str(name);
+                // A name comes whole; some servers send it again with every piece of the arguments.
+                if call.name.is_empty() {
+                    call.name = c["function"]["name"].as_str().unwrap_or("").to_owned();
                 }
                 call.arguments
                     .push_str(c["function"]["arguments"].as_str().unwrap_or(""));

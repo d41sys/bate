@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1720000000,"model":"gemini-2.5-flash","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"},"id":"function-call-1001","type":"function"}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1720000000,"model":"gemini-2.5-flash","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"function":{"name":"read","arguments":"{\"path\":\"b.txt\"}"},"id":"function-call-1002","type":"function"}]},"finish_reason":"stop"}]}
+
+data: [DONE]
+

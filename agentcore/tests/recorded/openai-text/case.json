@@ -1,5 +1,5 @@
 {
-  "about": "Plain text, a role-only first chunk, a final chunk with usage and no choices.",
+  "about": "Plain text, a role-only first chunk, and the final chunk with usage and no choices that comes when usage is asked for.",
   "style": "OpenAI",
   "files": {},
   "prompts": [

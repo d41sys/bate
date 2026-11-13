@@ -1,5 +1,5 @@
 {
-  "about": "Thinking in `reasoning`, a whole tool call in one chunk, usage at the end.",
+  "about": "Thinking in `reasoning`, a whole tool call in one chunk, the finish reason in a chunk of its own.",
   "style": "Ollama",
   "files": {},
   "prompts": [
