@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { listen, request } from "./service.ts";
 import type { Bot } from "./types.ts";
+import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
@@ -118,6 +119,8 @@ function App() {
                 ))}
               </div>
             </header>
+            {/* An installed agent chooses its own model. */}
+            {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
             {tab === "chat" && <Chat key={`${bot.id}-${connection}`} bot={bot} />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}

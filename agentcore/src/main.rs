@@ -73,6 +73,11 @@ struct Engine {
     effort: Option<String>,
 }
 
+/// The model from the environment (`BATE_MODEL`), if any.
+fn default_model() -> Option<String> {
+    std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty())
+}
+
 fn main() {
     // Another engine in the same program: an installed agent in place of our own turns.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -119,7 +124,7 @@ fn main() {
         peers: (Vec::new(), false),
         instructions: String::new(),
         running: None,
-        model: std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()),
+        model: default_model(),
         effort: None,
     };
     while let Ok(input) = rx.recv() {
@@ -267,7 +272,8 @@ impl Engine {
                 }
             }
             Op::SetModel { model, effort } => {
-                self.model = Some(model);
+                // Empty: back to the default.
+                self.model = Some(model).filter(|m| !m.is_empty()).or_else(default_model);
                 self.effort = effort;
                 self.respond(id, Ok(()));
             }

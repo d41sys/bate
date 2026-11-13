@@ -33,7 +33,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `steer` | `text` | Add a message to the turn that is running. |
 | `abort` | none | End the running turn now. It ends with `turn_end` reason `aborted`. |
 | `answer` | `question`, `choice` | Answer an open `question`. `choice` is one of its `options`. |
-| `set_model` | `model`, `effort?` | Model and thinking effort for the following model calls. |
+| `set_model` | `model`, `effort?` | Model and thinking effort for the following model calls; an empty `model` goes back to `BATE_MODEL`. |
 | `rewind` | `entry`, `fork` | Go back to `entry`, the `nonce` of an earlier prompt: the conversation is as it was just before that prompt. In place, or as a new conversation when `fork` is true (the engine sends the new `session`; the old one is left as it was). |
 | `compact` | none | Summarise the working context now. The response comes when the summary is in place. |
 | `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
@@ -111,7 +111,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |
 | `steer` | `bot`, `text` | `{}` |
 | `abort`, `compact` | `bot` | `{}` |
-| `set_model` | `bot`, `model`, `effort?` | `{}` |
+| `set_model` | `bot`, `model` (empty: back to the engine's default, with no `effort`), `effort?` (`minimal`, `low`, `medium`, `high`) | `{}`; kept for the bot, so each new engine of it starts with them; `bots_changed` follows |
 | `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
 | `list_routines` | `bot` | `{routines:[Routine]}` |
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
@@ -142,7 +142,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
-`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color}` (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color, model, effort}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 

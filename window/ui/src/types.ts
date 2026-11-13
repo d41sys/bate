@@ -14,6 +14,9 @@ export type Bot = {
   avatar: string;
   /** `#rrggbb`; empty: none. */
   color: string;
+  /** Chosen with `set_model`; absent: the engine's default. */
+  model?: string;
+  effort?: string;
 };
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
