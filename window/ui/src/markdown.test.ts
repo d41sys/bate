@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown } from "./Markdown.ts";
+import { Markdown, inFolder } from "./Markdown.ts";
 
 const show = (text: string) => renderToStaticMarkup(createElement(Markdown, { text }));
 
@@ -20,6 +20,18 @@ test("a reply's HTML is left out, so nothing in it can run", () => {
     assert.ok(!html.includes(bad), `${bad} in ${html}`);
   }
   assert.match(html, /\[pixel\]/);
+});
+
+test("a link to a file in the bot's folder opens it in the page; any other path does not", () => {
+  const html = renderToStaticMarkup(
+    createElement(Markdown, { text: "[chart](out/chart%20one.html) [up](../b2/x.html) [abs](/etc/hosts)", open: () => {} }),
+  );
+  assert.match(html, /<button type="button" class="file" title="out\/chart one.html">chart<\/button>/);
+  assert.ok(!html.includes("b2") && !html.includes("/etc/hosts"), html);
+  assert.equal(inFolder("./a//b.svg?x=1#top"), "a/b.svg");
+  for (const bad of ["../x", "a/../../x", "a%2F..%2F..%2Fx", "/x", "\\x", "javascript:x", "botfile://localhost/b2/x", "#top", ""]) {
+    assert.equal(inFolder(bad), undefined, bad);
+  }
 });
 
 test("Markdown, tables, highlighted code and web links are shown", () => {

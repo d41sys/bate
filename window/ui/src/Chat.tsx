@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { listen, request } from "./service.ts";
 import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
+import { SANDBOX, fileUrl } from "./frame.ts";
 import { Markdown } from "./Markdown.ts";
 import { upload } from "./upload.ts";
 import type { Bot } from "./types.ts";
@@ -16,6 +17,8 @@ export function Chat({ bot }: { bot: Bot }) {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
+  // A file of the bot's, shown in a frame of its own.
+  const [shown, setShown] = useState<string>();
   const [sending, setSending] = useState(false);
   // State is only read again at the next render; a second click in the same moment must see it now.
   const inFlight = useRef(false);
@@ -222,6 +225,7 @@ export function Chat({ bot }: { bot: Bot }) {
                 busy={bot.busy || sending}
                 retry={retry}
                 fork={fork}
+                open={setShown}
                 edit={(item) => {
                   setEditing(item.nonce);
                   setText(item.text);
@@ -258,6 +262,14 @@ export function Chat({ bot }: { bot: Bot }) {
             </li>
           ))}
         </ul>
+      )}
+      {shown && (
+        <div className="shown">
+          <div className="tools">
+            <code>{shown}</code> <button type="button" onClick={() => setShown(undefined)}>Close</button>
+          </div>
+          <iframe title={shown} sandbox={SANDBOX} src={fileUrl(bot.id, shown)} />
+        </div>
       )}
       <form onSubmit={(e) => { e.preventDefault(); send(); }}>
         <input
@@ -299,9 +311,15 @@ export function Chat({ bot }: { bot: Bot }) {
 }
 
 type Prompt = { nonce: string; text: string };
-type Actions = { busy: boolean; retry: (p: Prompt) => void; edit: (p: Prompt) => void; fork: (p: Prompt) => void };
+type Actions = {
+  busy: boolean;
+  retry: (p: Prompt) => void;
+  edit: (p: Prompt) => void;
+  fork: (p: Prompt) => void;
+  open: (path: string) => void;
+};
 
-function Row({ item, busy, retry, edit, fork }: { item: Item } & Actions) {
+function Row({ item, busy, retry, edit, fork, open }: { item: Item } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -315,7 +333,7 @@ function Row({ item, busy, retry, edit, fork }: { item: Item } & Actions) {
         </>
       );
     case "reply":
-      return <Markdown text={item.text} />;
+      return <Markdown text={item.text} open={open} />;
     case "tool":
       return (
         <details>

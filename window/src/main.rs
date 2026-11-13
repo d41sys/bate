@@ -3,6 +3,7 @@
 //! it on its own local files.
 
 mod bridge;
+mod files;
 
 use bridge::Bridge;
 use std::sync::Arc;
@@ -34,7 +35,8 @@ enum Go {
 
 fn decide(url: &Url) -> Go {
     match (url.scheme(), url.host_str()) {
-        ("tauri", Some("localhost")) => Go::Stay,
+        // A bot's file, in a sandboxed frame (the page never goes there itself).
+        ("tauri" | "botfile", Some("localhost")) => Go::Stay,
         ("http" | "https", Some(_)) | ("mailto", _) => Go::Open,
         _ => Go::Refuse,
     }
@@ -58,6 +60,9 @@ fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Bridge::start(proto::paths::socket())))
         .invoke_handler(tauri::generate_handler![send, recv])
+        .register_uri_scheme_protocol("botfile", |_, request| {
+            files::serve(&proto::paths::home(), &request.uri().to_string())
+        })
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Bate")
@@ -85,6 +90,7 @@ mod tests {
     fn only_the_pages_own_files_load_and_links_go_to_the_browser() {
         let go = |url: &str| decide(&Url::parse(url).unwrap());
         assert_eq!(go("tauri://localhost/index.html"), Go::Stay);
+        assert_eq!(go("botfile://localhost/b1/chart.html"), Go::Stay);
         assert_eq!(go("https://example.com/a"), Go::Open);
         assert_eq!(go("http://example.com/"), Go::Open);
         assert_eq!(go("mailto:ada@example.com"), Go::Open);
