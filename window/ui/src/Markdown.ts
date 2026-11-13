@@ -8,13 +8,32 @@ import rehypeHighlight from "rehype-highlight";
 /** Addresses that may open, in the user's browser (the shell sends them there). */
 const web = (href?: string) => (href && /^(https?:|mailto:)/i.test(href) ? href : undefined);
 
-const components: Components = {
-  a: ({ href, children }) => h("a", { href: web(href), title: web(href) }, children),
-  // No image is fetched: a reply could use one to report what it saw.
-  img: ({ alt }) => h("span", { className: "image" }, alt ? `[${alt}]` : "[image]"),
-};
+/** A file in the bot's folder, by a relative path that stays inside it; `undefined` otherwise. */
+export function inFolder(href?: string): string | undefined {
+  if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href) || /^[/#?\\]/.test(href)) return undefined;
+  let path: string;
+  try {
+    path = decodeURIComponent(href.split(/[?#]/)[0]);
+  } catch {
+    return undefined;
+  }
+  const parts = path.split("/").filter((p) => p && p !== ".");
+  // Hidden files (the engine's own) are not shown.
+  return parts.length && !parts.some((p) => p.startsWith(".")) && !path.includes("\\") ? parts.join("/") : undefined;
+}
 
-export function Markdown({ text }: { text: string }) {
+/** `open`: shows a file the reply links to, from the bot's folder. */
+export function Markdown({ text, open }: { text: string; open?: (path: string) => void }) {
+  const components: Components = {
+    a: ({ href, children }) => {
+      const file = open && inFolder(href);
+      return file
+        ? h("button", { type: "button", className: "file", title: file, onClick: () => open(file) }, children)
+        : h("a", { href: web(href), title: web(href), target: "_blank", rel: "noreferrer" }, children);
+    },
+    // No image is fetched: a reply could use one to report what it saw.
+    img: ({ alt }) => h("span", { className: "image" }, alt ? `[${alt}]` : "[image]"),
+  };
   return h(
     ReactMarkdown,
     { remarkPlugins: [remarkGfm], rehypePlugins: [rehypeHighlight], skipHtml: true, components },

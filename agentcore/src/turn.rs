@@ -297,7 +297,7 @@ impl Turn {
             text => format!("\n\nThe user's instructions for you:\n{text}"),
         };
         format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.{instructions}{}{}{}",
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{instructions}{}{}{}",
             self.dir.display(),
             self.peers_prompt(),
             crate::skills::prompt(&self.dir),

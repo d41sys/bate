@@ -9,6 +9,9 @@ import { Connectors } from "./Connectors.tsx";
 import { Settings } from "./Settings.tsx";
 import "./style.css";
 
+// Only in the build `window/check-frames.sh` makes.
+if (import.meta.env.VITE_FRAME_CHECK) void import("./frameCheck.ts");
+
 const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", settings: "Settings" };
 type Tab = keyof typeof TABS;
 

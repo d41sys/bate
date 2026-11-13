@@ -75,4 +75,5 @@ async function pump() {
 pump().catch((e) => tell({ type: "failed", error: String(e) }));
 
 /** Opens an address in the user's browser: the shell turns the view's navigation into that. */
-export const openInBrowser = (url: string) => window.location.assign(url);
+// A new window is the one way out of the page: the shell sends it to the user's browser.
+export const openInBrowser = (url: string) => void window.open(url, "_blank");
