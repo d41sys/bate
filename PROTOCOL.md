@@ -344,7 +344,7 @@ When enabled in Settings, the service serves Bate's web client over HTTPS on por
 
 Secrets are removed from the logs, and from `settings.json`, in three ways:
 
-- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So is the service's `BATE_MODEL_API_KEY`.
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY` and the key saved with `set_provider`.
 - What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
 - PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
 

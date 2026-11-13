@@ -26,8 +26,6 @@ const POLL: Duration = Duration::from_millis(100);
 
 pub struct Provider {
     agent: ureq::Agent,
-    default_url: Option<String>,
-    default_key: Option<String>,
 }
 
 pub enum Delta<'a> {
@@ -88,17 +86,17 @@ impl Provider {
             .build();
         Provider {
             agent: ureq::Agent::new_with_config(config),
-            default_url: std::env::var("BATE_MODEL_BASE_URL")
-                .ok()
-                .filter(|u| !u.is_empty())
-                .map(|u| format!("{}/chat/completions", u.trim_end_matches('/'))),
-            default_key: std::env::var(KEY).ok().filter(|k| !k.is_empty()),
         }
     }
 
+    /// `base_url` and `key` are the service's answer to this call's `token` request, and the
+    /// only source: a key in the engine's own environment may belong to another server.
+    // shortcut: after an abort the reading thread and its connection stay until the server next
+    // sends or closes (ureq has no idle timeout and cannot be closed from here); switch HTTP
+    // client if servers keep generating into it.
     pub fn stream(
         &self,
-        base_url: Option<&str>,
+        base_url: &str,
         key: Option<&str>,
         ask: &Ask,
         abort: &AtomicBool,
@@ -113,13 +111,8 @@ impl Provider {
             reasoning_effort: ask.effort,
         };
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-        let url = match base_url {
-            Some(u) => format!("{}/chat/completions", u.trim_end_matches('/')),
-            None => self.default_url.clone().ok_or(
-                "no model server is set up: set one in Settings or set BATE_MODEL_BASE_URL",
-            )?,
-        };
-        let key = key.map(String::from).or_else(|| self.default_key.clone());
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let key = key.map(String::from);
         let agent = self.agent.clone();
         // The request is made and read on its own thread: a server that sends nothing must not
         // hold `abort` up. Bounded, so a fast server waits for us.

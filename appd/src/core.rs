@@ -1104,7 +1104,6 @@ impl Core {
                     let key = match f.get("key") {
                         Some(Value::Null) => None,
                         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
-                        _ if f.get("clearKey").and_then(Value::as_bool) == Some(true) => None,
                         _ => existing_key,
                     };
                     self.store

@@ -1905,3 +1905,49 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
         }
     );
 }
+
+#[test]
+fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment() {
+    let dir = workdir("engine-token-nokey");
+    let model = Model::serve(vec![vec![text("Hi")]]);
+    let mut engine = Engine::start_manual_token(
+        &dir,
+        &model,
+        &[("BATE_MODEL_API_KEY", "sk-for-another-host")],
+    );
+    engine.open_new();
+    engine.prompt("Hi");
+    let req = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        engine.request(Op::Token {
+            request: req,
+            url: Some(model.url.clone()),
+            key: None,
+            error: None,
+        }),
+        None
+    );
+    assert_eq!(engine.next(), Event::Text { delta: "Hi".into() });
+    assert_eq!(model.headers()[0].get("authorization"), None);
+}
+
+#[test]
+fn an_abort_while_the_engine_waits_for_the_token_ends_the_turn_as_aborted() {
+    let dir = workdir("engine-token-abort");
+    let model = Model::serve(vec![]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Hi");
+    assert!(matches!(engine.next(), Event::Token { .. }));
+    assert_eq!(engine.request(Op::Abort), None);
+    assert_eq!(
+        engine.next(),
+        Event::TurnEnd {
+            reason: TurnEnd::Aborted,
+            error: None
+        }
+    );
+}

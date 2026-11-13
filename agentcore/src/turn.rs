@@ -158,9 +158,13 @@ impl Turn {
                 }
             }
             let ask = self.ask_model(&system, &session.messages, None, &tools);
-            let (url, key) = self.get_token()?;
+            let (url, key) = match self.get_token() {
+                Ok(token) => token,
+                Err(_) if self.control.aborted() => return Ok(TurnEnd::Aborted),
+                Err(e) => return Err(e),
+            };
             let reply = self.provider.stream(
-                Some(&url),
+                &url,
                 key.as_deref(),
                 &ask,
                 self.control.aborted_flag(),
@@ -271,7 +275,7 @@ impl Turn {
                 mut calls,
                 aborted,
             } = self.provider.stream(
-                Some(&url),
+                &url,
                 key.as_deref(),
                 &ask,
                 self.control.aborted_flag(),
@@ -423,7 +427,7 @@ impl Turn {
         let ask = self.ask_model(system, &messages[..cut], Some(&instruction), tools);
         let (url, key) = self.get_token()?;
         let reply = self.provider.stream(
-            Some(&url),
+            &url,
             key.as_deref(),
             &ask,
             self.control.aborted_flag(),
@@ -534,10 +538,8 @@ impl Turn {
         }
     }
 
-    /// Marks a new question or message as what the turn waits on, and gives its id. Its own
-    /// id, never the model's call id: a model may repeat those, and an answer must not fit a
-    /// later question.
-    /// Asks the service for the current endpoint and token for the upcoming model call.
+    /// Asks the service for the model server and key of the coming model call. Its ids count
+    /// apart from questions', so a turn's question ids stay what they were without it.
     fn get_token(&self) -> Result<(String, Option<String>), String> {
         static TOK: AtomicU64 = AtomicU64::new(0);
         let id = format!("tok{}", TOK.fetch_add(1, Ordering::Relaxed) + 1);
@@ -560,6 +562,9 @@ impl Turn {
         }
     }
 
+    /// Marks a new question or message as what the turn waits on, and gives its id. Its own
+    /// id, never the model's call id: a model may repeat those, and an answer must not fit a
+    /// later question.
     fn wait_on(&self, prefix: &str) -> String {
         static ASKED: AtomicU64 = AtomicU64::new(0);
         let id = format!("{prefix}{}", ASKED.fetch_add(1, Ordering::Relaxed) + 1);
