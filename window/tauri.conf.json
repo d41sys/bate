@@ -3,7 +3,7 @@
   "productName": "Bate",
   "identifier": "com.oursnever.bate",
   "build": {
-    "frontendDist": "ui"
+    "frontendDist": "ui/dist"
   },
   "app": {
     "withGlobalTauri": false,

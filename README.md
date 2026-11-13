@@ -21,6 +21,8 @@ The plan is in the [issues](../../issues), grouped by release milestone.
 
 macOS 13 or later on Apple Silicon. The Rust version is pinned in `rust-toolchain.toml`.
 
+The window's page needs Node 24 or later: run `npm ci && npm run build` in `window/ui` before building the Rust workspace. `cargo run -p window` then opens the window.
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
