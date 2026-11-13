@@ -4,6 +4,7 @@
 
 mod clients;
 mod core;
+mod hooks;
 mod launch;
 mod limit;
 mod log;
@@ -77,6 +78,9 @@ fn serve() -> io::Result<()> {
     let accept_tx = tx.clone();
     thread::spawn(move || clients::accept_loop(listener, accept_tx));
     log!("serving {} (pid {})", home.display(), std::process::id());
-    core::Core::new(store, tx).run(rx);
+    let hook_port = hooks::start(tx.clone())
+        .inspect_err(|e| log!("webhooks are off: {e}"))
+        .ok();
+    core::Core::new(store, tx, hook_port).run(rx);
     Ok(())
 }
