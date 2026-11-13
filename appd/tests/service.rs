@@ -85,6 +85,7 @@ while IFS= read -r line; do
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
+    *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"reply"'*)
       said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
@@ -845,6 +846,127 @@ fn a_file_comes_in_parts_into_the_bots_folder_and_a_chat_exports_as_markdown() {
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "# Ada\n\n## You\n\n> hi\n\n## Bot\n\n> hello\n"
+    );
+}
+
+#[test]
+fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
+    let home = home("editor");
+    // This test's Trash, in place of the user's.
+    let bin = home.join("Trash");
+    fs::create_dir_all(&bin).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"));
+        c.env("APPD_TRASH", &bin);
+    });
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let refused = |w: &mut Window, command: &str, fields: Value| {
+        let id = w.send(command, fields);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+
+    w.ok(
+        "set_bot",
+        json!({"bot": a, "name": " Bea ", "instructions": "Answer in French.", "avatar": "🐝", "color": "#ffcc00"}),
+    );
+    let bots = w.ok("list_bots", json!({}))["bots"].clone();
+    // Both were made in the same moment: found by id, not place.
+    let bea = bots
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == a.as_str())
+        .unwrap();
+    assert_eq!(
+        (
+            &bea["name"],
+            &bea["instructions"],
+            &bea["avatar"],
+            &bea["color"]
+        ),
+        (
+            &json!("Bea"),
+            &json!("Answer in French."),
+            &json!("🐝"),
+            &json!("#ffcc00")
+        )
+    );
+    for bad in [
+        json!({"bot": a, "name": ""}),
+        json!({"bot": a, "color": "red"}),
+        json!({"bot": a, "avatar": "123456789"}),
+        json!({"bot": a, "instructions": "x".repeat(8001)}),
+    ] {
+        assert_eq!(refused(&mut w, "set_bot", bad), "bad_request");
+    }
+
+    // The engine has the instructions from its start, and each change.
+    let told = || {
+        fs::read_to_string(home.join("bots").join(&a).join("instructions.log")).unwrap_or_default()
+    };
+    w.ok("prompt", json!({"bot": a, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert!(told().contains("Answer in French."), "{}", told());
+    w.ok("set_bot", json!({"bot": a, "instructions": "Be brief."}));
+    eventually("the new instructions", || told().contains("Be brief."));
+
+    w.ok("order_bots", json!({"bots": [b, a]}));
+    let ids = |w: &mut Window| -> Vec<String> {
+        w.ok("list_bots", json!({}))["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(&mut w), [b.clone(), a.clone()]);
+    assert_eq!(
+        refused(&mut w, "order_bots", json!({"bots": [a]})),
+        "bad_request"
+    );
+    assert_eq!(
+        refused(&mut w, "order_bots", json!({"bots": [a, a]})),
+        "bad_request"
+    );
+
+    // Deleting: the bot is gone from Bate, its group with it, its folder in the Trash.
+    fs::write(home.join("bots").join(&a).join("kept.txt"), "mine").unwrap();
+    w.ok(
+        "set_group",
+        json!({"group": {"name": "Pair", "lead": b, "members": [a]}}),
+    );
+    // A Trash that takes nothing: the bot stays as it was.
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o500)).unwrap();
+    assert_eq!(
+        refused(&mut w, "delete_bot", json!({"bot": a})),
+        "trash_failed"
+    );
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(ids(&mut w), [b.clone(), a.clone()]);
+    assert_eq!(
+        fs::read_to_string(home.join("bots").join(&a).join("kept.txt")).unwrap(),
+        "mine"
+    );
+    assert_eq!(
+        w.ok("list_groups", json!({}))["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    w.ok("delete_bot", json!({"bot": a}));
+    assert_eq!(ids(&mut w), std::slice::from_ref(&b));
+    assert_eq!(
+        refused(&mut w, "open_bot", json!({"bot": a})),
+        "no_such_bot"
+    );
+    assert_eq!(w.ok("list_groups", json!({}))["groups"], json!([]));
+    assert!(!home.join("bots").join(&a).exists());
+    let trashed = bin.join(format!("Bea {a}"));
+    assert_eq!(
+        fs::read_to_string(trashed.join("kept.txt")).unwrap(),
+        "mine"
     );
 }
 

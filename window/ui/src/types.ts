@@ -9,6 +9,11 @@ export type Bot = {
   wholeDisk: boolean;
   agent?: string[];
   browserTaken?: boolean;
+  instructions: string;
+  /** A few characters, such as an emoji; empty: none. */
+  avatar: string;
+  /** `#rrggbb`; empty: none. */
+  color: string;
 };
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";

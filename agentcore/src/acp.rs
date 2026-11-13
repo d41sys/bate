@@ -269,7 +269,8 @@ impl Bridge {
                 respond(id, Ok(()));
             }
             // The agent has its own model, chosen in the agent; and no other bots to reach.
-            Op::SetModel { .. } | Op::Peers { .. } => respond(id, Ok(())),
+            // shortcut: an installed agent keeps its own instructions; Bate's are not passed on until ACP has a place for them.
+            Op::SetModel { .. } | Op::Peers { .. } | Op::Instructions { .. } => respond(id, Ok(())),
             Op::Steer { .. } => {
                 respond(id, Err("this agent takes no message while it works".into()))
             }

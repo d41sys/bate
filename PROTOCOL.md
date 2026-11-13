@@ -37,6 +37,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `rewind` | `entry`, `fork` | Go back to `entry`, the `nonce` of an earlier prompt: the conversation is as it was just before that prompt. In place, or as a new conversation when `fork` is true (the engine sends the new `session`; the old one is left as it was). |
 | `compact` | none | Summarise the working context now. The response comes when the summary is in place. |
 | `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
+| `instructions` | `text` | What the user told the bot to be and do, sent at start (when set) and on each change. The engine puts it first in its system prompt; empty: none. An installed agent (ACP) ignores it. |
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
@@ -95,13 +96,16 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
 | `hello` | `protocol` | `{protocol}` |
 | `list_bots` | none | `{bots:[Bot]}` |
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
+| `set_bot` | `bot`, `name?`, `instructions?` (at most 8000 characters), `avatar?` (at most 8 characters, such as an emoji), `color?` (`#rrggbb` or empty) | `{}`; what is given changes; `bots_changed` follows |
+| `order_bots` | `bots`: every bot's id once, in the new order | `{}`; `list_bots` lists them so from then on |
+| `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes), everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
 | `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` is `true` when there are older ones |
 | `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
 | `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |
@@ -138,7 +142,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
-`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken}` (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color}` (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 

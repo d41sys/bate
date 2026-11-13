@@ -25,6 +25,13 @@ pub struct BotRow {
     pub created_at: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Profile {
+    pub instructions: String,
+    pub avatar: String,
+    pub color: String,
+}
+
 /// A prompt's place in the ledger. A nonce is sent to the engine at most once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ledger {
@@ -70,7 +77,25 @@ CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 ";
+
+/// Every table that holds rows of a bot, in its `bot` column.
+const BOT_TABLES: [&str; 13] = [
+    "transcript",
+    "ledger",
+    "questions",
+    "access",
+    "agents",
+    "permissions",
+    "grants",
+    "routines",
+    "routine_runs",
+    "oauth",
+    "connectors",
+    "profiles",
+    "bots",
+];
 
 /// Past runs kept per routine.
 const MAX_RUNS: u32 = 50;
@@ -115,9 +140,10 @@ impl Store {
     }
 
     pub fn bots(&self) -> Result<Vec<BotRow>> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT id, name, created_at FROM bots ORDER BY created_at, id")?;
+        let mut stmt = self.0.prepare_cached(
+            "SELECT b.id, b.name, b.created_at FROM bots b LEFT JOIN profiles p ON p.bot = b.id \
+                 ORDER BY p.position IS NULL, p.position, b.created_at, b.id",
+        )?;
         stmt.query_map([], |r| {
             Ok(BotRow {
                 id: r.get(0)?,
@@ -126,6 +152,63 @@ impl Store {
             })
         })?
         .collect()
+    }
+
+    pub fn rename_bot(&self, bot: &str, name: &str) -> Result<()> {
+        self.0
+            .execute("UPDATE bots SET name = ?2 WHERE id = ?1", [bot, name])
+            .map(drop)
+    }
+
+    /// The bot's instructions, avatar and colour; empty when never set.
+    pub fn profile(&self, bot: &str) -> Result<Profile> {
+        self.0
+            .query_row(
+                "SELECT instructions, avatar, color FROM profiles WHERE bot = ?1",
+                [bot],
+                |r| {
+                    Ok(Profile {
+                        instructions: r.get(0)?,
+                        avatar: r.get(1)?,
+                        color: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub fn set_profile(&self, bot: &str, p: &Profile) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO profiles(bot, instructions, avatar, color) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(bot) DO UPDATE SET instructions = ?2, avatar = ?3, color = ?4",
+                params![bot, p.instructions, p.avatar, p.color],
+            )
+            .map(drop)
+    }
+
+    /// Puts the bots in this order.
+    pub fn order_bots(&mut self, bots: &[String]) -> Result<()> {
+        let tx = self.0.transaction()?;
+        for (i, bot) in bots.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO profiles(bot, position) VALUES (?1, ?2) \
+                 ON CONFLICT(bot) DO UPDATE SET position = ?2",
+                params![bot, i as i64],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Forgets the bot and everything stored for it.
+    pub fn delete_bot(&mut self, bot: &str) -> Result<()> {
+        let tx = self.0.transaction()?;
+        for table in BOT_TABLES {
+            let column = if table == "bots" { "id" } else { "bot" };
+            tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [bot])?;
+        }
+        tx.commit()
     }
 
     pub fn bot(&self, id: &str) -> Result<Option<BotRow>> {
