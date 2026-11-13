@@ -695,16 +695,16 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
     let stdio = json!({"name": "files", "enabled": true, "transport": {"type": "stdio",
-        "command": "npx", "args": ["--key", "arg-SECRET-777"], "env": {"API_TOKEN": "env-SECRET-12345"}}});
+        "command": "npx", "args": ["serve", "--key=arg-SECRET-777"], "env": {"API_TOKEN": "env-SECRET-12345"}}});
     let http = json!({"name": "web", "enabled": true, "transport": {"type": "http",
-        "url": "https://example.com/mcp?sig=url-SECRET-555",
+        "url": "https://someone:pass-SECRET-444@example.com/mcp/path-SECRET-333-long/mcp?sig=url-SECRET-555",
         "headers": {"Authorization": "Bearer hdr-SECRET-999"}}});
     for connector in [stdio, http] {
         w.ok("set_connector", json!({"bot": bot, "connector": connector}));
     }
     w.ok(
         "set_routine",
-        json!({"bot": bot, "routine": {"name": "Brief", "prompt": "prompt-SECRET-text", "enabled": true,
+        json!({"bot": bot, "routine": {"name": "name-SECRET", "prompt": "prompt-SECRET-text", "enabled": true,
             "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}}}),
     );
     // What an engine or a connector might print.
@@ -714,7 +714,8 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
         .unwrap();
     writeln!(
         log,
-        "bot x: connector web: cannot reach https://example.com/mcp?sig=url-SECRET-555\n\
+        "bot x: connector web: cannot reach https://someone:pass-SECRET-444@example.com/mcp/path-SECRET-333-long/mcp?sig=url-SECRET-555\n\
+         bot x: GET /mcp/path-SECRET-333-long/mcp as someone with pass-SECRET-444 and url-SECRET-555; serve ok\n\
          bot x: sent Authorization: Bearer hdr-SECRET-999 and env-SECRET-12345\n\
          bot x: the server says hdr-SECRET-999 expired; ran with arg-SECRET-777\n\
          bot x: access_token=unknown-SECRET-000 harmless-marker"
@@ -742,14 +743,16 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     }
     // What a bug report needs is still there.
     assert!(
-        log.contains("harmless-marker") && log.contains("serving"),
+        log.contains("harmless-marker") && log.contains("serving") && log.contains("serve ok"),
         "{log}"
     );
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
     let settings: Value = serde_json::from_str(&settings).unwrap();
     let connectors = &settings["bots"][0]["connectors"];
     assert_eq!(connectors[0]["name"], "files");
     assert_eq!(connectors[0]["transport"]["env"], json!(["API_TOKEN"]));
-    assert_eq!(connectors[1]["transport"]["url"], "https://example.com/mcp");
+    assert_eq!(connectors[1]["transport"]["url"], "https://example.com");
     assert_eq!(
         connectors[1]["transport"]["headers"],
         json!(["Authorization"])

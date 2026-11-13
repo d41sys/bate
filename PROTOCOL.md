@@ -155,9 +155,15 @@ Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-
 
 ### Bug report
 
-`export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines without name or prompt, and its connectors with only the names of `env` and header entries, the number of arguments, and the URL without its query. Conversations are not included.
+`export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines (schedule, next and last run; no name, no prompt), and its connectors: the command, the number of arguments, the names of `env` and header entries, and a URL's scheme and host only. Conversations are not included.
 
-Secrets are removed from the logs in two ways: every stored connector value (`env` values, header values and their words, arguments, URL query values) and the service's `BATE_MODEL_API_KEY` of 4 characters or more is replaced by `[removed]`; and so is whatever follows `authorization`, `password`, `passwd`, `secret`, `token` or a word ending in `key` and a `:` or `=`, and the word after `bearer`. A secret the service never stored, printed with none of those words, is not recognised.
+Secrets are removed from the logs, and from `settings.json`, in three ways:
+
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So is the service's `BATE_MODEL_API_KEY`.
+- What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
+- PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
+
+Not recognised: a secret the service never stored that is printed with none of those words, and a stored value printed in another form (percent-encoded, base64).
 
 ### Storage
 
