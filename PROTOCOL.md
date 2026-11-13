@@ -51,7 +51,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `thinking` | `delta` | Thinking text, appended to the current thinking. |
 | `tool_start` | `call`, `tool`, `args` | A tool call began. `args` is a JSON object. |
 | `tool_end` | `call`, `output`, `isError` | The call's result. |
-| `question` | `question`, `title`, `options` | The engine waits until the service sends `answer`. Every action that changes something (a file write, a command) is asked this way. |
+| `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
 A killed engine sends nothing more.
@@ -60,7 +60,7 @@ A killed engine sends nothing more.
 
 - **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
-- **Approval:** `write`, `edit` and `run` ask first: a `question` whose id is the tool call's id, options `Approve` and `Deny`. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
+- **Approval:** every tool call asks first: a `question` whose id is the tool call's id, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command, gives up a model call or connector call that is under way (within about 0.1 s, also when the server is sending nothing) and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
 - **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one line per chat message or marker (where a prompt starts, where a compaction happened), written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
 - **Compaction:** the engine asks the model for a summary of all but the 4 most recent messages and shows the model the summary in their place. It does this on `compact`, and by itself before a model call when the context is over four fifths of `BATE_MODEL_CONTEXT` (tokens, 32000 if unset; size is estimated at 4 bytes per token). The summary is not streamed as a reply. If the model gives no summary, an automatic compaction is skipped and the turn goes on; `compact` answers with an error, also when it was aborted (`aborted`). The conversation file keeps every message.
@@ -86,7 +86,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -95,7 +95,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
 | `open_bot` | `bot` | `{bot: Bot, history:[Entry], questions:[question event]}` |
 | `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
-| `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open |
+| `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |
 | `steer` | `bot`, `text` | `{}` |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model`, `effort?` | `{}` |
@@ -107,6 +107,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
+| `set_permission` | `bot`, `kind`, `level` | `{}` |
+| `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
 `Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
@@ -122,6 +125,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
+| `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
 
 ### Transcript
 
@@ -138,6 +142,17 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Permissions
+
+Same shapes as `proto::permissions`. For each bot and each kind of action (`read`, `write`, `run`, `connector`) there is a level: `always`, `ask` or `never`. A bot starts with `read` on `always` and the rest on `ask`.
+
+The service decides every engine `question` that has a `kind`, on the `target` the engine is about to run:
+
+- `always`: it answers `Approve` itself. `never`: it answers `Deny` itself, whatever was granted before. Neither is shown or stored as a question.
+- `ask`: if a grant has exactly this `kind` and `target`, it answers `Approve` itself. Otherwise the question goes to the windows with the options `Approve`, `Always`, `Deny`.
+
+`answer` with `Always` gives the engine `Approve` and, once the engine has taken it, stores a grant `{kind, target, atMs}` for that exact action. `Approve` is for this once. Grants are listed by `get_permissions` and removed by `delete_grant`; `permissions_changed` follows each change. `Always` on a question without a `kind` is refused (`bad_request`).
 
 ### Questions
 
@@ -167,4 +182,4 @@ Not recognised: a secret the service never stored that is printed with none of t
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, permission levels and grants, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.

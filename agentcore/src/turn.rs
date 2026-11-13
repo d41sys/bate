@@ -6,6 +6,7 @@ use crate::session::Session;
 use crate::tools::{self, Control, lock};
 use crate::{Out, Work};
 use proto::connectors::Connector;
+use proto::permissions::{APPROVE, DENY, Kind};
 use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
@@ -29,8 +30,6 @@ pub struct Turn {
     pub steer: Receiver<String>,
 }
 
-const APPROVE: &str = "Approve";
-const DENY: &str = "Deny";
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
 /// Most recent messages a compaction leaves as they are.
 const KEEP: usize = 4;
@@ -248,13 +247,15 @@ impl Turn {
         tool: &str,
         args: &Map<String, Value>,
     ) -> Result<String, String> {
-        // Every connector tool asks: the engine cannot know which of them change something.
+        // Every action is asked about: the service decides from the bot's permissions, and
+        // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);
-        if connector.is_some() || tools::needs_approval(tool) {
-            let title = connector
-                .clone()
-                .unwrap_or_else(|| tools::title(tool, args));
-            match self.ask(id, title) {
+        let action = match &connector {
+            Some(title) => Some((Kind::Connector, tool.to_owned(), title.clone())),
+            None => tools::action(tool, args),
+        };
+        if let Some((kind, target, title)) = action {
+            match self.ask(id, kind, target, title) {
                 Some(true) => {}
                 Some(false) => return Err("The user denied this action.".into()),
                 None => return Err("Aborted by the user".into()),
@@ -267,12 +268,14 @@ impl Turn {
     }
 
     /// `Some(approved)`, or `None` when the turn was aborted while waiting.
-    fn ask(&self, id: &str, title: String) -> Option<bool> {
+    fn ask(&self, id: &str, kind: Kind, target: String, title: String) -> Option<bool> {
         *lock(&self.control.question) = Some(id.to_owned());
         self.out.send(&Event::Question {
             question: id.to_owned(),
             title,
             options: OPTIONS.map(String::from).to_vec(),
+            kind: Some(kind),
+            target: Some(target),
         });
         let answer = loop {
             match self.answers.recv_timeout(Duration::from_millis(100)) {

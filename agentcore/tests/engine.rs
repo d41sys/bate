@@ -1,6 +1,7 @@
 //! `agentcore` over stdin/stdout against a mock OpenAI-compatible model server.
 
 use proto::connectors::{Connector, Transport};
+use proto::permissions::Kind;
 use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, TurnEnd};
 use serde_json::{Value, json};
 use std::fs;
@@ -296,7 +297,12 @@ fn a_turn_streams_thinking_and_text_reads_a_file_and_ends_done() {
     let mut engine = Engine::start(&dir, &model);
     engine.open_new();
     engine.prompt("what is in a.txt?");
-    let events = engine.until(is_turn_end);
+    // Reading is asked about too: whether it needs the user is the service's decision.
+    let mut events = answer(&mut engine, "Approve");
+    assert!(
+        matches!(events.pop(), Some(Event::Question { kind: Some(Kind::Read), target: Some(t), .. }) if t == "a.txt")
+    );
+    events.extend(engine.until(is_turn_end));
     assert_eq!(
         events[0],
         Event::Thinking {
@@ -385,7 +391,12 @@ fn a_changing_tool_asks_first_approve_writes_and_deny_does_not() {
     engine.open_new();
 
     engine.prompt("write yes.txt");
-    let q = question(&engine.until(is_question));
+    let asked = engine.until(is_question);
+    assert!(
+        matches!(asked.last(), Some(Event::Question { kind: Some(Kind::Write), target: Some(t), .. }) if t == "yes.txt"),
+        "{asked:?}"
+    );
+    let q = question(&asked);
     assert!(
         engine
             .request(Op::Answer {
@@ -779,7 +790,8 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
     engine.prompt_as("n1", "echo hi");
     let asked = answer(&mut engine, "Approve");
     assert!(
-        matches!(asked.last(), Some(Event::Question { title, .. }) if title == "Use fake: echo"),
+        matches!(asked.last(), Some(Event::Question { title, kind: Some(Kind::Connector), target: Some(t), .. })
+            if title == "Use fake: echo" && t == "fake__echo"),
         "{asked:?}"
     );
     let events = engine.until(is_turn_end);
@@ -968,7 +980,9 @@ fn compaction_keeps_a_tool_result_together_with_its_call() {
     ]);
     let mut engine = Engine::start(&dir, &model);
     engine.open_new();
-    engine.exchange("n1", "Q1");
+    engine.prompt_as("n1", "Q1");
+    answer(&mut engine, "Approve");
+    engine.until(is_turn_end);
     engine.exchange("n2", "Q2");
     // Six messages, the last four kept: the cut would fall on the tool result.
     assert_eq!(engine.request(Op::Compact), None);

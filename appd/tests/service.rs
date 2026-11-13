@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
-/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s.
+/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
+/// the turn then says which choice the engine was given.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
@@ -26,6 +27,11 @@ while IFS= read -r line; do
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
       case "$line" in
         *'"text":"hang"'*) ;;
+        *'"text":"do '*)
+          kind=$(printf '%s' "$line" | sed 's/.*"text":"do \([a-z]*\) .*/\1/')
+          target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z]* \([^"]*\)".*/\1/')
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"question\",\"question\":\"q-$nonce\",\"title\":\"$kind $target\",\"options\":[\"Approve\",\"Deny\"],\"kind\":\"$kind\",\"target\":\"$target\"}" ;;
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
@@ -764,4 +770,168 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     // Nothing is left behind next to the archive.
     let left: Vec<_> = fs::read_dir(home.join("reports")).unwrap().collect();
     assert_eq!(left.len(), 1, "{left:?}");
+}
+
+/// Makes the bot's engine ask whether it may do `target`, and returns what it was told. `answer`
+/// is the user's choice if the user gets asked; `None` fails the test if a question shows up.
+fn act(w: &mut Window, bot: &str, nonce: &str, action: &str, answer: Option<&str>) -> String {
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": nonce, "text": format!("do {action}")}),
+    );
+    loop {
+        let entry = w.wait_for(|f| f["type"] == "transcript")["entry"].clone();
+        match entry["type"].as_str().unwrap() {
+            "question" => {
+                let choice = answer.unwrap_or_else(|| panic!("the user was asked: {entry}"));
+                assert_eq!(entry["options"], json!(["Approve", "Always", "Deny"]));
+                w.ok(
+                    "answer",
+                    json!({"bot": bot, "question": entry["question"], "choice": choice}),
+                );
+            }
+            "text" => {
+                w.wait_for(|f| f["entry"]["type"] == "turn_end");
+                return entry["delta"].as_str().unwrap().to_owned();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() {
+    let home = home("grants");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let permissions = |w: &mut Window| w.ok("get_permissions", json!({"bot": bot}));
+    assert_eq!(
+        permissions(&mut w),
+        json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask"},
+            "grants": []})
+    );
+
+    assert_eq!(
+        act(&mut w, &bot, "n1", "run ls", Some("Always")),
+        "chose Approve"
+    );
+    let grants = permissions(&mut w)["grants"].clone();
+    assert_eq!(grants.as_array().unwrap().len(), 1, "{grants}");
+    assert_eq!(
+        (&grants[0]["kind"], &grants[0]["target"]),
+        (&json!("run"), &json!("ls"))
+    );
+
+    // The same action no longer asks; any other still does, and so does another kind.
+    assert_eq!(act(&mut w, &bot, "n2", "run ls", None), "chose Approve");
+    assert_eq!(
+        act(&mut w, &bot, "n3", "run ls -la", Some("Deny")),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4", "write ls", Some("Approve")),
+        "chose Approve"
+    );
+    // Approve is for once: nothing new is remembered.
+    assert_eq!(permissions(&mut w)["grants"].as_array().unwrap().len(), 1);
+
+    // Removed in the panel, it asks again.
+    w.send(
+        "delete_grant",
+        json!({"bot": bot, "kind": "run", "target": "ls"}),
+    );
+    w.wait_for(|f| f["type"] == "permissions_changed");
+    assert_eq!(permissions(&mut w)["grants"], json!([]));
+    assert_eq!(
+        act(&mut w, &bot, "n5", "run ls", Some("Approve")),
+        "chose Approve"
+    );
+
+    let gone = w.send(
+        "delete_grant",
+        json!({"bot": bot, "kind": "run", "target": "ls"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == gone.as_str());
+    assert_eq!(refused["code"], "no_such_grant", "{refused}");
+}
+
+#[test]
+fn a_level_of_always_or_never_is_answered_by_the_service_without_asking() {
+    let home = home("levels");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let set = |w: &mut Window, kind: &str, level: &str| {
+        w.ok(
+            "set_permission",
+            json!({"bot": bot, "kind": kind, "level": level}),
+        );
+    };
+    // Reading is free unless the user says otherwise.
+    assert_eq!(
+        act(&mut w, &bot, "n1", "read notes.txt", None),
+        "chose Approve"
+    );
+    set(&mut w, "read", "never");
+    assert_eq!(
+        act(&mut w, &bot, "n2", "read notes.txt", None),
+        "chose Deny"
+    );
+    set(&mut w, "run", "always");
+    assert_eq!(
+        act(&mut w, &bot, "n3", "run rm -rf x", None),
+        "chose Approve"
+    );
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["levels"],
+        json!({"read": "never", "write": "ask", "run": "always", "connector": "ask"})
+    );
+
+    // Never beats a remembered answer.
+    assert_eq!(
+        act(&mut w, &bot, "n4", "write a.txt", Some("Always")),
+        "chose Approve"
+    );
+    set(&mut w, "write", "never");
+    assert_eq!(act(&mut w, &bot, "n5", "write a.txt", None), "chose Deny");
+
+    // Nothing the service answered was left open or shown as a question.
+    let opened = w.ok("open_bot", json!({"bot": bot}));
+    assert_eq!(opened["questions"], json!([]));
+    let asked = opened["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["entry"]["type"] == "question")
+        .count();
+    assert_eq!(asked, 1);
+
+    let bad = w.send(
+        "set_permission",
+        json!({"bot": bot, "kind": "fly", "level": "always"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == bad.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+}
+
+#[test]
+fn always_is_refused_for_a_question_that_is_not_about_an_action() {
+    let home = home("always-plain");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "ask"}));
+    let asked = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    assert_eq!(asked["entry"]["options"], json!(["Approve", "Deny"]));
+    let id = w.send(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Always"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["grants"],
+        json!([])
+    );
 }

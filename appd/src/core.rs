@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use proto::connectors::{Connector, Transport};
+use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_program};
 use serde_json::{Value, json};
@@ -70,6 +71,20 @@ fn str_field<'a>(f: &'a Value, key: &str) -> Result<&'a str, Refusal> {
         .ok_or_else(|| bad(format!("`{key}` must be a string")))
 }
 
+/// A field with a fixed set of values (`kind`, `level`).
+fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refusal> {
+    serde_json::from_value(f.get(key).cloned().unwrap_or(Value::Null))
+        .map_err(|e| bad(format!("`{key}`: {e}")))
+}
+
+/// The protocol's word for a value that serializes as a string.
+fn word<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(word)) => word,
+        _ => unreachable!("only used for string-valued enums"),
+    }
+}
+
 struct Client {
     handle: ClientHandle,
     hello: bool,
@@ -98,6 +113,8 @@ enum Waiter {
     Service,
     /// The service's own `connectors`.
     Connectors,
+    /// The service's own `answer` to a question its permissions decided.
+    Decision,
 }
 
 /// What a window's request changes in the store once the engine has accepted it.
@@ -105,8 +122,8 @@ enum Settles {
     Nothing,
     /// The prompt enters the transcript and the ledger entry becomes `sent`.
     Prompt(Outgoing),
-    /// The answered question is closed.
-    Question(String),
+    /// The answered question is closed, and an "Always" answer is remembered as this grant.
+    Question(String, Option<(Kind, String)>),
     /// The transcript goes back to before the prompt with this nonce.
     Rewind(String),
     /// The bot stops counting as busy with this compaction.
@@ -347,15 +364,27 @@ impl Core {
                 let bot = self.bot_of(f)?;
                 let (question, choice) = (str_field(f, "question")?, str_field(f, "choice")?);
                 let open = self.store.questions(&bot).map_err(internal)?;
-                if !open.iter().any(|q| q["question"] == question) {
+                let Some(asked) = open.iter().find(|q| q["question"] == question) else {
                     return Err((
                         "no_such_question",
                         format!("question `{question}` is not open"),
                     ));
-                }
+                };
+                // "Always" is the service's own choice: the engine gets "Approve", and exactly
+                // the action the question named is remembered once the engine has taken it.
+                let grant = if choice == ALWAYS {
+                    let action = serde_json::from_value::<Kind>(asked["kind"].clone())
+                        .ok()
+                        .zip(asked["target"].as_str());
+                    let (kind, target) =
+                        action.ok_or(bad("`Always` is only for a question about an action"))?;
+                    Some((kind, target.to_owned()))
+                } else {
+                    None
+                };
                 let op = Op::Answer {
                     question: question.into(),
-                    choice: choice.into(),
+                    choice: if grant.is_some() { APPROVE } else { choice }.into(),
                 };
                 self.send_op(
                     &bot,
@@ -364,7 +393,7 @@ impl Core {
                         client,
                         id: id.clone(),
                         command: command.into(),
-                        settles: Settles::Question(question.into()),
+                        settles: Settles::Question(question.into(), grant),
                     },
                 )?;
                 Ok(None)
@@ -434,6 +463,37 @@ impl Core {
                 }
                 self.next_due = 0;
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+                Ok(Some(json!({})))
+            }
+            "get_permissions" => {
+                let bot = self.bot_of(f)?;
+                let mut levels = serde_json::Map::new();
+                for kind in Kind::ALL {
+                    let level = self.store.level(&bot, kind).map_err(internal)?;
+                    levels.insert(word(&kind), json!(level));
+                }
+                Ok(Some(
+                    json!({"levels": levels, "grants": self.store.grants(&bot).map_err(internal)?}),
+                ))
+            }
+            "set_permission" => {
+                let bot = self.bot_of(f)?;
+                let (kind, level) = (field::<Kind>(f, "kind")?, field::<Level>(f, "level")?);
+                self.store.set_level(&bot, kind, level).map_err(internal)?;
+                self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
+                Ok(Some(json!({})))
+            }
+            "delete_grant" => {
+                let bot = self.bot_of(f)?;
+                let kind = field::<Kind>(f, "kind")?;
+                if !self
+                    .store
+                    .delete_grant(&bot, kind, str_field(f, "target")?)
+                    .map_err(internal)?
+                {
+                    return Err(("no_such_grant", "no such grant".into()));
+                }
+                self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
             "export_report" => {
@@ -656,7 +716,28 @@ impl Core {
         self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
     }
 
-    fn on_event(&mut self, bot: &str, ev: Event) {
+    fn on_event(&mut self, bot: &str, mut ev: Event) {
+        if let Event::Question {
+            question,
+            options,
+            kind: Some(kind),
+            target: Some(target),
+            ..
+        } = &mut ev
+        {
+            // Decided here, on what the engine is about to run. Only what is left goes to the user.
+            if let Some(choice) = self.decide(bot, *kind, target) {
+                let op = Op::Answer {
+                    question: question.clone(),
+                    choice: choice.into(),
+                };
+                if let Err((_, e)) = self.send_op(bot, op, Waiter::Decision) {
+                    log!("bot {bot}: decision not sent: {e}");
+                }
+                return;
+            }
+            options.insert(1, ALWAYS.into());
+        }
         let r = self.engines.get_mut(bot).expect("checked by generation");
         match &ev {
             Event::Ready { protocol } => {
@@ -706,6 +787,23 @@ impl Core {
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
     }
 
+    /// The service's own answer to "may this action run", or `None` when the user must be asked.
+    fn decide(&self, bot: &str, kind: Kind, target: &str) -> Option<&'static str> {
+        let known = self.store.level(bot, kind).and_then(|level| {
+            Ok(match level {
+                Level::Always => Some(APPROVE),
+                Level::Never => Some(DENY),
+                Level::Ask if self.store.has_grant(bot, kind, target)? => Some(APPROVE),
+                Level::Ask => None,
+            })
+        });
+        // A store that cannot be read must not allow anything: the user is asked.
+        known.unwrap_or_else(|e| {
+            log!("bot {bot}: permissions not read: {e}");
+            None
+        })
+    }
+
     fn close_questions(&mut self, bot: &str) {
         let open = match self.store.questions(bot) {
             Ok(open) => open,
@@ -733,12 +831,26 @@ impl Core {
                 match (&settles, &error) {
                     (Settles::Prompt(p), _) => self.settle_prompt(bot, p, error.is_none()),
                     // A question is closed only once the engine took the answer.
-                    (Settles::Question(q), None) => match self.store.take_question(bot, q) {
-                        Ok(_) => self.broadcast(
-                            &json!({"type": "question_closed", "bot": bot, "question": q}),
-                        ),
-                        Err(e) => log!("bot {bot}: question not closed: {e}"),
-                    },
+                    (Settles::Question(q, grant), None) => {
+                        match self.store.take_question(bot, q) {
+                            Ok(_) => self.broadcast(
+                                &json!({"type": "question_closed", "bot": bot, "question": q}),
+                            ),
+                            Err(e) => log!("bot {bot}: question not closed: {e}"),
+                        }
+                        if let Some((kind, target)) = grant {
+                            let grant = Grant {
+                                kind: *kind,
+                                target: target.clone(),
+                                at_ms: now_ms(),
+                            };
+                            match self.store.put_grant(bot, &grant) {
+                                Ok(()) => self
+                                    .broadcast(&json!({"type": "permissions_changed", "bot": bot})),
+                                Err(e) => log!("bot {bot}: grant not stored: {e}"),
+                            }
+                        }
+                    }
                     // The engine's conversation no longer has these entries, so history must not show them.
                     (Settles::Rewind(nonce), None) => {
                         match self.store.rewind_transcript(bot, nonce) {
@@ -771,6 +883,11 @@ impl Core {
             Waiter::Connectors => {
                 if let Some(e) = error {
                     log!("bot {bot}: engine refused the connectors: {e}");
+                }
+            }
+            Waiter::Decision => {
+                if let Some(e) = error {
+                    log!("bot {bot}: engine refused the decision: {e}");
                 }
             }
             Waiter::Service => {
@@ -849,7 +966,7 @@ impl Core {
                 Waiter::Routine { routine, .. } => {
                     self.routine_failed(bot, &routine, "the engine stopped".into())
                 }
-                Waiter::Service | Waiter::Connectors => {}
+                Waiter::Service | Waiter::Connectors | Waiter::Decision => {}
             }
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));
