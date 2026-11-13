@@ -61,6 +61,7 @@ CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
 CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY, command TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
@@ -374,6 +375,29 @@ impl Store {
                 params![bot, whole_disk],
             )
             .map(drop)
+    }
+
+    /// The installed agent the bot runs on, as a program and its arguments. None: Bate's own
+    /// engine.
+    pub fn agent(&self, bot: &str) -> Result<Option<Vec<String>>> {
+        let stored: Option<String> = self
+            .0
+            .query_row("SELECT command FROM agents WHERE bot = ?1", [bot], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        stored.map(parse).transpose()
+    }
+
+    pub fn set_agent(&self, bot: &str, command: Option<&[String]>) -> Result<()> {
+        let done = match command {
+            Some(command) => self.0.execute(
+                "INSERT OR REPLACE INTO agents(bot, command) VALUES (?1, ?2)",
+                params![bot, json(&command)],
+            ),
+            None => self.0.execute("DELETE FROM agents WHERE bot = ?1", [bot]),
+        };
+        done.map(drop)
     }
 
     /// What the bot may do with actions of `kind`; the kind's default if the user never chose.

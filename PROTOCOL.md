@@ -6,6 +6,8 @@ The service (`appd`) runs one engine program per bot and talks to it over the pr
 
 `$APPD_ENGINE` if set, else `agentcore` next to the service's executable, else `agentcore` on `PATH` (`proto::engine_program`). A relative `APPD_ENGINE` path is resolved against the service's working directory, not the bot's folder. Set `APPD_ENGINE` to develop, test or swap an engine without changing the service.
 
+For a bot that runs on an installed agent (`set_agent`), the same program is started with the arguments `acp <agent program> [arguments]`: see Installed agents.
+
 The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`). The service copies each line of the engine's standard error into its log, tagged with the bot.
 
 ## Frames
@@ -125,12 +127,13 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
 | `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
 | `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
+| `set_agent` | `bot`, `command` | `{}`; `command` is a list (program, then arguments) or `null`; see Installed agents |
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}` |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
-`Bot` is `{id, name, createdAt, running, busy, wholeDisk}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent}` (`agent` only when set): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 
@@ -272,6 +275,18 @@ The bot never holds the token. Its engine is sent the connector with `url` repla
 An access token within 30 s of its end is renewed before use; an answer of 401 from the server renews it once and sends the request again. Without tokens, or when renewing fails, the proxy answers 401 and the server is not asked. When the sign-in server refuses to renew, the tokens are forgotten: the connector shows as signed out. Tokens are for one address: changing a connector's `url`, `headers` or `oauth`, or removing it, forgets them. A connector that is off is not served.
 
 Tokens are stored as plain text in `app.db`, like connector values. A bot limited to its folder cannot read that file.
+
+### Installed agents (ACP)
+
+A bot can run on an agent installed on this Mac that speaks the [Agent Client Protocol](https://agentclientprotocol.com) over its standard input and output, in place of Bate's own engine: `set_agent {bot, command: ["opencode", "acp"]}`. `null` goes back. The agent uses its own login, model and tools. A bare program name is looked up on the service's `PATH`.
+
+- `set_agent` stores the choice, forgets the bot's open conversation (the other engine could not reopen it; the transcript stays), and stops the bot's idle engine. `bots_changed` follows. During a turn it is refused with `busy`.
+- The agent's login is in the user's home, so such a bot runs only with `wholeDisk` true. Otherwise its engine does not start (`engine_failed`, saying so).
+- `agentcore acp` starts the agent in the bot's folder and translates: `start` is `session/new`, `open` is `session/load` (refused by an agent that cannot), `prompt` is `session/prompt`, `abort` is `session/cancel`. The agent's message and thought chunks become `text` and `thinking`; its tool calls become `tool_start` (`tool` is the agent's kind of tool; `args` holds `title`, `rawInput`, `locations`) and `tool_end`.
+- The agent's `session/request_permission` becomes a `question` with the options `Approve` and `Deny`. Its `kind` and `target` come from the agent's kind of tool (`read`, `search`: read; `edit`, `delete`, `move`: write; `execute`: run, with the command as target), so the bot's permission levels and grants apply; any other kind is asked of the user each time. The answer goes back as the agent's allow-once or reject-once option. What an agent does without asking, by its own settings, Bate does not see before it happens.
+- The bot's enabled connectors are given to the agent when a conversation starts or is reopened (those over http only to an agent that takes them). A connector that signs in is given with the service's local address, as to Bate's own engine.
+- Not offered to the agent: reading or writing files and running terminals through Bate (it does these itself). Refused by this engine: `steer`, `rewind`, `compact`. `set_model` is accepted and has no effect; choose the model in the agent. Memory, skills and messages between bots are Bate's own engine's and are not given to an agent.
+- If the agent fails to open a conversation, the error names the agent's own ways to sign in.
 
 ### Bug report
 
