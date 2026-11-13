@@ -1,0 +1,15 @@
+{
+  "about": "Two whole tool calls that both say `index` 0 and differ only by id.",
+  "style": "Gemini's OpenAI-compatible endpoint",
+  "files": {
+    "a.txt": "A\n",
+    "b.txt": "B\n"
+  },
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Approve",
+    "Approve"
+  ]
+}

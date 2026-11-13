@@ -1,0 +1,9 @@
+{
+  "about": "The body ends after the last chunk, with no `[DONE]` line.",
+  "style": "some local servers",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

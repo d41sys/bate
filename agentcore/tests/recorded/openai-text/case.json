@@ -1,0 +1,9 @@
+{
+  "about": "Plain text, a role-only first chunk, a final chunk with usage and no choices.",
+  "style": "OpenAI",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

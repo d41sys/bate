@@ -1,0 +1,9 @@
+{
+  "about": "The provider fails after part of the answer was sent.",
+  "style": "OpenRouter",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

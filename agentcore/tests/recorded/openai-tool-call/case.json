@@ -1,0 +1,13 @@
+{
+  "about": "A tool call whose arguments arrive in pieces, then the answer.",
+  "style": "OpenAI",
+  "files": {
+    "notes.txt": "buy milk\n"
+  },
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Approve"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "about": "The tool's name is sent again with every piece of the arguments.",
+  "style": "some proxies in front of a model server",
+  "files": {
+    "a.txt": "A\n"
+  },
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Approve"
+  ]
+}

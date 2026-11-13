@@ -1,0 +1,3 @@
+{"type":"text","delta":"Hello"}
+{"type":"text","delta":" there."}
+{"type":"turn_end","reason":"done"}

@@ -1,0 +1,9 @@
+{
+  "about": "The model stops at once: no text, no call.",
+  "style": "any server",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

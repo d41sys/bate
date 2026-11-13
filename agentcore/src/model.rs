@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -155,6 +156,8 @@ impl Provider {
             }
         });
         let mut reply = Reply::default();
+        // Where the call of each server-side `index` is in `reply.calls`.
+        let mut at = HashMap::<u64, usize>::new();
         loop {
             let received = lines.recv_timeout(POLL);
             if abort.load(Ordering::SeqCst) {
@@ -196,17 +199,33 @@ impl Provider {
                 on(Delta::Text(t));
             }
             for c in delta["tool_calls"].as_array().into_iter().flatten() {
-                // At most one past the last call: a wild index must not allocate or panic.
-                let i = (c["index"].as_u64().unwrap_or(0) as usize).min(reply.calls.len());
-                if reply.calls.len() <= i {
-                    reply.calls.resize_with(i + 1, Call::default);
-                }
+                let index = c["index"].as_u64().unwrap_or(0);
+                let id = c["id"].as_str().filter(|id| !id.is_empty());
+                // The server's `index` only says which pieces belong together; calls are kept in
+                // the order they began, so a wild index cannot allocate or panic.
+                let known = at.get(&index).copied();
+                // Some servers number every call 0: another id under a known index is the next call.
+                let other = known.is_some_and(|i| {
+                    let had = &reply.calls[i].id;
+                    !had.is_empty() && id.is_some_and(|id| id != had)
+                });
+                let i = match known {
+                    Some(i) if !other => i,
+                    _ => {
+                        reply.calls.push(Call::default());
+                        at.insert(index, reply.calls.len() - 1);
+                        reply.calls.len() - 1
+                    }
+                };
                 let call = &mut reply.calls[i];
-                if let Some(id) = c["id"].as_str() {
+                if let Some(id) = id {
                     call.id = id.to_owned();
                 }
-                call.name
-                    .push_str(c["function"]["name"].as_str().unwrap_or(""));
+                // Some servers send the whole name again with every piece of the arguments.
+                let name = c["function"]["name"].as_str().unwrap_or("");
+                if name != call.name {
+                    call.name.push_str(name);
+                }
                 call.arguments
                     .push_str(c["function"]["arguments"].as_str().unwrap_or(""));
             }

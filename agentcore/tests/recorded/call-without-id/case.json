@@ -1,0 +1,13 @@
+{
+  "about": "A tool call with no id.",
+  "style": "llama.cpp server (older builds)",
+  "files": {
+    "a.txt": "A\n"
+  },
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Approve"
+  ]
+}

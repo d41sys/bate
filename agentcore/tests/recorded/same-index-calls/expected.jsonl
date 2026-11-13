@@ -1,0 +1,8 @@
+{"type":"tool_start","call":"call_one","tool":"read","args":{"path":"a.txt"}}
+{"type":"question","question":"q1","title":"Read a.txt","options":["Approve","Deny"],"kind":"read","target":"a.txt"}
+{"type":"tool_end","call":"call_one","output":"     1\tA\n","isError":false}
+{"type":"tool_start","call":"call_two","tool":"read","args":{"path":"b.txt"}}
+{"type":"question","question":"q2","title":"Read b.txt","options":["Approve","Deny"],"kind":"read","target":"b.txt"}
+{"type":"tool_end","call":"call_two","output":"     1\tB\n","isError":false}
+{"type":"text","delta":"Both read."}
+{"type":"turn_end","reason":"done"}

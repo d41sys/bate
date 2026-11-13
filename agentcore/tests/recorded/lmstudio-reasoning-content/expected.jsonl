@@ -1,0 +1,5 @@
+{"type":"thinking","delta":"The user"}
+{"type":"thinking","delta":" greets me."}
+{"type":"text","delta":"Hi"}
+{"type":"text","delta":"!"}
+{"type":"turn_end","reason":"done"}

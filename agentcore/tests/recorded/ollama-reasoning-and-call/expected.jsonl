@@ -1,0 +1,6 @@
+{"type":"thinking","delta":"I should run it."}
+{"type":"tool_start","call":"call_k3x9","tool":"run","args":{"command":"echo hi"}}
+{"type":"question","question":"q1","title":"Run: echo hi","options":["Approve","Deny"],"kind":"run","target":"echo hi"}
+{"type":"tool_end","call":"call_k3x9","output":"hi\n","isError":false}
+{"type":"text","delta":"It printed hi."}
+{"type":"turn_end","reason":"done"}

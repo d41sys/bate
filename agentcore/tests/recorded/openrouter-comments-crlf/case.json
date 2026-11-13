@@ -1,0 +1,9 @@
+{
+  "about": "Comment lines while the provider warms up, and CRLF line ends.",
+  "style": "OpenRouter",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}
