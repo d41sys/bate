@@ -2339,7 +2339,7 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     )
     .unwrap();
     fs::set_permissions(&chrome, fs::Permissions::from_mode(0o755)).unwrap();
-    let _service = Service::start_with(&home, |c| {
+    let service = Service::start_with(&home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"))
             .env("APPD_CHROME", &chrome);
     });
@@ -2476,6 +2476,12 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
         // Going back took the page from Chrome's cache.
         ["/", "/two", "/sent?q=tea&pw=hunter2x"].map(String::from)
     );
+
+    // Chrome ends with the service, and leaves its profile so that the test's folder can go.
+    drop(service);
+    eventually("Chrome to end", || {
+        fs::symlink_metadata(profile.join("SingletonLock")).is_err()
+    });
 }
 
 #[test]

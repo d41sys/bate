@@ -12,6 +12,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 pub mod connectors;
 pub mod groups;
 pub mod memory;
+pub mod paths;
 pub mod permissions;
 pub mod routines;
 pub mod skills;
