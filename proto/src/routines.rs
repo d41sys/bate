@@ -10,6 +10,10 @@ fn one() -> u32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Frequency {
+    /// Every `interval` minutes of real time, from `time` on the anchor date.
+    Minutes,
+    /// Every `interval` hours of real time, from `time` on the anchor date.
+    Hourly,
     Daily,
     Weekly,
     Monthly,
@@ -35,7 +39,7 @@ pub enum Weekday {
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
     pub frequency: Frequency,
-    /// Every N days, weeks, months or years, 1 to 99.
+    /// Every N hours, days, weeks, months or years, 1 to 99; or every N minutes, 5 to 1440.
     #[serde(default = "one")]
     pub interval: u32,
     /// Weekly only. Empty: the weekday of the anchor.

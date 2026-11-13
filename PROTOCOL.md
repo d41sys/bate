@@ -102,7 +102,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
 | `list_routines` | `bot` | `{routines:[Routine]}` |
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
-| `delete_routine` | `bot`, `routineId` | `{}` |
+| `delete_routine` | `bot`, `routineId` | `{}`. Its past runs go with it. |
+| `list_routine_runs` | `bot`, `routineId` | `{runs:[RoutineRun]}`, newest first, at most the last 50 |
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
@@ -143,9 +144,9 @@ An engine `question` is stored until the engine takes an `answer` to it (an answ
 
 ### Routines
 
-Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly, monthly or yearly schedule at a wall time in an IANA zone, every `interval` periods counted from `anchor`. The service sets `id`, `anchor`, `nextRunMs` and `lastRun`. `name` is 1 to 80 characters, `prompt` 1 to 8000, and a bot has at most 50 routines.
+Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly, monthly or yearly schedule at a wall time in an IANA zone, every `interval` periods counted from `anchor`. Two more frequencies count real time, starting at `time` on the anchor date: `hourly` (every 1 to 99 hours) and `minutes` (every 5 to 1440 minutes); a clock change neither skips nor repeats their runs. The service sets `id`, `anchor`, `nextRunMs` and `lastRun`. `name` is 1 to 80 characters, `prompt` 1 to 8000, and a bot has at most 50 routines.
 
-At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-<id>-<slotMs>`, through the ledger, so a crash cannot send it twice. A slot missed while the service was down runs once if it is at most 6 h old; an older one is recorded as `missed`. A wall time that does not exist (clocks jump forward) runs when the gap ends; one that happens twice runs at the earlier instant.
+At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-<id>-<slotMs>`, through the ledger, so a crash cannot send it twice. A slot missed while the service was down runs once if it is at most 6 h old; an older one is recorded as `missed`. Every handled slot is kept as a `RoutineRun` (`atMs`, `outcome` `sent`, `failed` or `missed`, `error`); `routines_changed` is sent when one is added. A wall time that does not exist (clocks jump forward) runs when the gap ends; one that happens twice runs at the earlier instant.
 
 ### Connectors
 
@@ -153,4 +154,4 @@ Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, routines and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.

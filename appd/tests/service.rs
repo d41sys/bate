@@ -616,3 +616,74 @@ fn a_bot_is_busy_while_its_conversation_is_compacted() {
         assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], busy);
     }
 }
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+#[test]
+fn an_hourly_routine_lists_its_past_runs_newest_first() {
+    let home = home("routine-runs");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // Half an hour from now, so no real slot passes during the test.
+    let minute = (now_ms() / 60_000 + 30) % (24 * 60);
+    let time = format!("{:02}:{:02}", minute / 60, minute % 60);
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Check", "prompt": "hi", "enabled": true,
+            "schedule": {"frequency": "hourly", "interval": 2, "time": time, "timezone": "UTC"}}}),
+    )["routine"]
+        .clone();
+    let id = routine["id"].as_str().unwrap().to_owned();
+    let wait = routine["nextRunMs"].as_i64().unwrap() - now_ms();
+    assert!(wait > 0 && wait <= 2 * 3600 * 1000, "{wait}");
+    let runs = |w: &mut Window| {
+        w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(runs(&mut w).is_empty());
+
+    // Two slots pass, each while the service is down.
+    for n in 1..=2 {
+        service.kill();
+        let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+        db.execute(
+            "UPDATE routines SET routine = json_set(routine, '$.nextRunMs', ?1) WHERE id = ?2",
+            rusqlite::params![now_ms() - 1000 * n, id],
+        )
+        .unwrap();
+        drop(db);
+        service = Service::start(&home);
+        w = Window::connect(&home);
+        eventually("the run", || {
+            let log = fs::read_to_string(home.join("bots").join(&bot).join("prompts.log"));
+            log.unwrap_or_default().lines().count() == n as usize
+        });
+    }
+    let listed = runs(&mut w);
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed.iter().all(|r| r["outcome"] == "sent"), "{listed:?}");
+    assert!(listed[0]["atMs"].as_i64() > listed[1]["atMs"].as_i64());
+
+    let missing = w.send(
+        "list_routine_runs",
+        json!({"bot": bot, "routineId": "nope"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == missing.as_str());
+    assert_eq!(refused["code"], "no_such_routine", "{refused}");
+
+    // A deleted routine takes its runs with it.
+    w.ok("delete_routine", json!({"bot": bot, "routineId": id}));
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    let left: i64 = db
+        .query_row("SELECT count(*) FROM routine_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
