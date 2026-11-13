@@ -687,3 +687,81 @@ fn an_hourly_routine_lists_its_past_runs_newest_first() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+#[test]
+fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
+    let home = home("report");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let stdio = json!({"name": "files", "enabled": true, "transport": {"type": "stdio",
+        "command": "npx", "args": ["serve", "--key=arg-SECRET-777"], "env": {"API_TOKEN": "env-SECRET-12345"}}});
+    let http = json!({"name": "web", "enabled": true, "transport": {"type": "http",
+        "url": "https://someone:pass-SECRET-444@example.com/mcp/path-SECRET-333-long/mcp?sig=url-SECRET-555",
+        "headers": {"Authorization": "Bearer hdr-SECRET-999"}}});
+    for connector in [stdio, http] {
+        w.ok("set_connector", json!({"bot": bot, "connector": connector}));
+    }
+    w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "name-SECRET", "prompt": "prompt-SECRET-text", "enabled": true,
+            "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}}}),
+    );
+    // What an engine or a connector might print.
+    let mut log = fs::OpenOptions::new()
+        .append(true)
+        .open(home.join("logs/appd.log"))
+        .unwrap();
+    writeln!(
+        log,
+        "bot x: connector web: cannot reach https://someone:pass-SECRET-444@example.com/mcp/path-SECRET-333-long/mcp?sig=url-SECRET-555\n\
+         bot x: GET /mcp/path-SECRET-333-long/mcp as someone with pass-SECRET-444 and url-SECRET-555; serve ok\n\
+         bot x: sent Authorization: Bearer hdr-SECRET-999 and env-SECRET-12345\n\
+         bot x: the server says hdr-SECRET-999 expired; ran with arg-SECRET-777\n\
+         bot x: access_token=unknown-SECRET-000 harmless-marker"
+    )
+    .unwrap();
+
+    let path = w.ok("export_report", json!({}))["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(path.ends_with(".tar.gz"), "{path}");
+    let out = home.join("unpacked");
+    fs::create_dir(&out).unwrap();
+    let tar = Command::new("/usr/bin/tar")
+        .args(["-xzf", &path, "-C"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(tar.success());
+
+    let settings = fs::read_to_string(out.join("settings.json")).unwrap();
+    let log = fs::read_to_string(out.join("logs/appd.log")).unwrap();
+    for text in [&settings, &log] {
+        assert!(!text.contains("SECRET"), "{text}");
+    }
+    // What a bug report needs is still there.
+    assert!(
+        log.contains("harmless-marker") && log.contains("serving") && log.contains("serve ok"),
+        "{log}"
+    );
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let settings: Value = serde_json::from_str(&settings).unwrap();
+    let connectors = &settings["bots"][0]["connectors"];
+    assert_eq!(connectors[0]["name"], "files");
+    assert_eq!(connectors[0]["transport"]["env"], json!(["API_TOKEN"]));
+    assert_eq!(connectors[1]["transport"]["url"], "https://example.com");
+    assert_eq!(
+        connectors[1]["transport"]["headers"],
+        json!(["Authorization"])
+    );
+    assert_eq!(
+        settings["bots"][0]["routines"][0]["schedule"]["time"],
+        "09:00"
+    );
+    // Nothing is left behind next to the archive.
+    let left: Vec<_> = fs::read_dir(home.join("reports")).unwrap().collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+}

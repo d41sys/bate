@@ -107,6 +107,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
 `Bot` is `{id, name, createdAt, running, busy}`: `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
@@ -151,6 +152,18 @@ At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-
 ### Connectors
 
 Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. The service sends a bot's list to its engine when the engine starts and after every change (`connectors`).
+
+### Bug report
+
+`export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines (schedule, next and last run; no name, no prompt), and its connectors: the command, the number of arguments, the names of `env` and header entries, and a URL's scheme and host only. Conversations are not included.
+
+Secrets are removed from the logs, and from `settings.json`, in three ways:
+
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So is the service's `BATE_MODEL_API_KEY`.
+- What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
+- PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
+
+Not recognised: a secret the service never stored that is printed with none of those words, and a stored value printed in another form (percent-encoded, base64).
 
 ### Storage
 
