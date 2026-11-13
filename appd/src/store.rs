@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::oauth::Tokens;
 use proto::connectors::Connector;
 use proto::groups::Group;
 use proto::permissions::{Grant, Kind, Level};
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target 
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
+CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 ";
@@ -478,6 +480,59 @@ impl Store {
 
     pub fn delete_group(&self, id: &str) -> Result<bool> {
         Ok(self.0.execute("DELETE FROM groups WHERE id = ?1", [id])? > 0)
+    }
+
+    /// The key under which the engine reaches this connector through the service; `fresh` is
+    /// kept when there is none yet.
+    pub fn oauth_key(&self, bot: &str, name: &str, fresh: &str) -> Result<String> {
+        self.0.execute(
+            "INSERT OR IGNORE INTO oauth(bot, name, key) VALUES (?1, ?2, ?3)",
+            [bot, name, fresh],
+        )?;
+        self.0.query_row(
+            "SELECT key FROM oauth WHERE bot = ?1 AND name = ?2",
+            [bot, name],
+            |r| r.get(0),
+        )
+    }
+
+    /// The bot and connector a key is for.
+    pub fn oauth_by_key(&self, key: &str) -> Result<Option<(String, String)>> {
+        self.0
+            .query_row("SELECT bot, name FROM oauth WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+    }
+
+    /// The sign-in of a connector, if the user is signed in.
+    pub fn tokens(&self, bot: &str, name: &str) -> Result<Option<Tokens>> {
+        let text: Option<Option<String>> = self
+            .0
+            .query_row(
+                "SELECT tokens FROM oauth WHERE bot = ?1 AND name = ?2",
+                [bot, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        text.flatten().map(parse).transpose()
+    }
+
+    /// Keeps a sign-in, or forgets it (`None`). False if the connector has no key.
+    pub fn set_tokens(&self, bot: &str, name: &str, tokens: Option<&Tokens>) -> Result<bool> {
+        Ok(self.0.execute(
+            "UPDATE oauth SET tokens = ?3 WHERE bot = ?1 AND name = ?2",
+            params![bot, name, tokens.map(json)],
+        )? > 0)
+    }
+
+    pub fn delete_oauth(&self, bot: &str, name: &str) -> Result<()> {
+        self.0
+            .execute(
+                "DELETE FROM oauth WHERE bot = ?1 AND name = ?2",
+                [bot, name],
+            )
+            .map(drop)
     }
 
     pub fn delete_connector(&self, bot: &str, name: &str) -> Result<bool> {

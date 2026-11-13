@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
+use crate::oauth;
+use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{limit, memory, paths, schedule, skills};
@@ -38,6 +40,13 @@ pub enum Msg {
         id: u64,
     },
     Hook(Hit),
+    Proxy(proxy::Ask),
+    /// A sign-in's address is ready (or not) for the window that asked.
+    SignIn {
+        client: u64,
+        id: Value,
+        result: Result<(String, String, oauth::Pending), String>,
+    },
     /// `event: None`: the engine closed its output (it exited or broke the protocol).
     Engine {
         bot: String,
@@ -50,6 +59,8 @@ pub enum Msg {
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
 const MAX_GROUPS: usize = 50;
+/// How long the browser may take to come back from a sign-in.
+const SIGN_IN_MS: u64 = 10 * 60 * 1000;
 const MAX_MEMBERS: usize = 20;
 /// Most bytes of a bot's reply passed on to the bot that messaged it.
 const MAX_REPLY: usize = 100_000;
@@ -169,6 +180,8 @@ struct PeerCall {
 pub struct Core {
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
+    /// Sign-ins the browser has not come back from, by the `state` given to it.
+    sign_ins: HashMap<String, oauth::Pending>,
     store: Store,
     tx: Sender<Msg>,
     clients: HashMap<u64, Client>,
@@ -195,6 +208,7 @@ impl Core {
         }
         Core {
             hook_port,
+            sign_ins: HashMap::new(),
             store,
             tx,
             clients: HashMap::new(),
@@ -240,6 +254,19 @@ impl Core {
             Msg::Hook(hit) => {
                 let answer = self.run_hook(&hit.token, &hit.data);
                 let _ = hit.answer.send(answer);
+            }
+            Msg::Proxy(ask) => self.on_proxy(ask),
+            Msg::SignIn { client, id, result } => {
+                let reply = match result {
+                    Ok((url, state, pending)) => {
+                        let now = now_ms();
+                        self.sign_ins.retain(|_, p| p.started_ms + SIGN_IN_MS > now);
+                        self.sign_ins.insert(state, pending);
+                        Ok(json!({"url": url}))
+                    }
+                    Err(e) => Err(("sign_in_failed", e)),
+                };
+                self.reply(client, &id, "sign_in_connector", reply);
             }
             Msg::ClientFrame { id, frame } => {
                 let req_id = frame.get("id").cloned().unwrap_or(Value::Null);
@@ -646,16 +673,56 @@ impl Core {
             }
             "list_connectors" => {
                 let bot = self.bot_of(f)?;
-                Ok(Some(
-                    json!({"connectors": self.store.connectors(&bot).map_err(internal)?}),
-                ))
+                let mut connectors = self.store.connectors(&bot).map_err(internal)?;
+                for c in connectors.iter_mut().filter(|c| c.oauth) {
+                    let tokens = self.store.tokens(&bot, &c.name).map_err(internal)?;
+                    c.signed_in = Some(tokens.is_some());
+                }
+                Ok(Some(json!({"connectors": connectors})))
+            }
+            "sign_in_connector" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                let (c, url) = self.oauth_connector(&bot, name)?;
+                let port = self.hook_port.ok_or((
+                    "sign_in_failed",
+                    "the service's local port is not open, so the browser could not come back"
+                        .to_owned(),
+                ))?;
+                let redirect = format!("http://127.0.0.1:{port}/oauth/callback");
+                let (tx, id) = (self.tx.clone(), id.clone());
+                // The network, so not on this thread; the answer comes as a message.
+                std::thread::spawn(move || {
+                    let result =
+                        oauth::begin(&bot, &c.name, &url, c.client_id.as_deref(), &redirect);
+                    let _ = tx.send(Msg::SignIn { client, id, result });
+                });
+                Ok(None)
+            }
+            "sign_out_connector" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                self.oauth_connector(&bot, name)?;
+                self.store.set_tokens(&bot, name, None).map_err(internal)?;
+                self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                Ok(Some(json!({})))
             }
             "set_connector" => {
                 let bot = self.bot_of(f)?;
                 let c: Connector =
                     serde_json::from_value(f.get("connector").cloned().unwrap_or(Value::Null))
                         .map_err(|e| ("invalid_connector", e.to_string()))?;
+                let mut c = c;
+                c.signed_in = None;
                 check_connector(&c).map_err(|e| ("invalid_connector", e))?;
+                // A sign-in is for one server: it is not kept for another address.
+                let old = self.store.connectors(&bot).map_err(internal)?;
+                let same = old
+                    .iter()
+                    .any(|o| o.name == c.name && o.oauth && c.oauth && o.transport == c.transport);
+                if !same {
+                    self.store.delete_oauth(&bot, &c.name).map_err(internal)?;
+                }
                 self.store.put_connector(&bot, &c).map_err(internal)?;
                 self.forget_connector_grants(&bot, &c.name);
                 self.connectors_changed(&bot);
@@ -670,6 +737,9 @@ impl Core {
                 {
                     return Err(("no_such_connector", "no such connector".into()));
                 }
+                self.store
+                    .delete_oauth(&bot, str_field(f, "name")?)
+                    .map_err(internal)?;
                 self.forget_connector_grants(&bot, str_field(f, "name")?);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({})))
@@ -759,7 +829,7 @@ impl Core {
         let failed = |e: io::Error| ("engine_failed", format!("cannot start the engine: {e}"));
         sys::create_private_dir(&dir).map_err(failed)?;
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
-        let connectors = self.store.connectors(bot).map_err(internal)?;
+        let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let open = match self.store.session(bot).map_err(internal)? {
@@ -1024,12 +1094,106 @@ impl Core {
         }
     }
 
+    /// The bot's connectors as its engine is to see them: one that signs in is reached through
+    /// the service's local port, under a key, so the engine holds neither address nor token.
+    fn engine_connectors(&self, bot: &str) -> rusqlite::Result<Vec<Connector>> {
+        let mut connectors = self.store.connectors(bot)?;
+        for c in connectors.iter_mut().filter(|c| c.oauth) {
+            let key = self.store.oauth_key(bot, &c.name, &sys::random_hex(16))?;
+            c.oauth = false;
+            c.client_id = None;
+            match self.hook_port {
+                Some(port) => {
+                    c.transport = Transport::Http {
+                        url: format!("http://127.0.0.1:{port}/mcp/{key}"),
+                        headers: Default::default(),
+                    }
+                }
+                None => c.enabled = false,
+            }
+        }
+        Ok(connectors)
+    }
+
+    /// The connector `name` of `bot` and its address, if it is one that signs in.
+    fn oauth_connector(&self, bot: &str, name: &str) -> Result<(Connector, String), Refusal> {
+        let all = self.store.connectors(bot).map_err(internal)?;
+        let Some(c) = all.into_iter().find(|c| c.name == name) else {
+            return Err(("no_such_connector", "no such connector".into()));
+        };
+        match &c.transport {
+            Transport::Http { url, .. } if c.oauth => {
+                let url = url.clone();
+                Ok((c, url))
+            }
+            _ => Err(bad("this connector does not sign in (`oauth` is not set)")),
+        }
+    }
+
+    /// The local port's threads ask for what only this thread may read or keep.
+    fn on_proxy(&mut self, ask: proxy::Ask) {
+        match ask {
+            proxy::Ask::Upstream(key, answer) => {
+                let found = self
+                    .store
+                    .oauth_by_key(&key)
+                    .ok()
+                    .flatten()
+                    .and_then(|(bot, name)| {
+                        let (c, url) = self.oauth_connector(&bot, &name).ok()?;
+                        let Transport::Http { headers, .. } = c.transport else {
+                            return None;
+                        };
+                        Some(Upstream {
+                            tokens: self.store.tokens(&bot, &name).ok().flatten(),
+                            headers: headers.into_iter().collect(),
+                            bot,
+                            name,
+                            url,
+                        })
+                    });
+                let _ = answer.send(found.filter(|up| {
+                    // Only while the connector is on: turning it off stops the engine's use.
+                    self.store
+                        .connectors(&up.bot)
+                        .is_ok_and(|all| all.iter().any(|c| c.name == up.name && c.enabled))
+                }));
+            }
+            proxy::Ask::Take(state, answer) => {
+                let pending = self.sign_ins.remove(&state);
+                let _ = answer.send(pending.filter(|p| p.started_ms + SIGN_IN_MS > now_ms()));
+            }
+            proxy::Ask::Tokens {
+                bot,
+                name,
+                resource,
+                tokens,
+            } => {
+                // The connector may have changed while the browser or the server took their
+                // time: tokens made for one address are not kept for another.
+                let still = self
+                    .oauth_connector(&bot, &name)
+                    .is_ok_and(|(_, url)| url == resource);
+                if !still {
+                    return;
+                }
+                let kept = self
+                    .store
+                    .oauth_key(&bot, &name, &sys::random_hex(16))
+                    .and_then(|_| self.store.set_tokens(&bot, &name, tokens.as_ref()));
+                match kept {
+                    Ok(_) => self.broadcast(&json!({"type": "connectors_changed", "bot": bot})),
+                    Err(e) => log!("bot {bot}: sign-in of connector {name} not stored: {e}"),
+                }
+            }
+        }
+    }
+
     /// After a change to the list: a running engine gets it now, any other when it starts.
     fn connectors_changed(&mut self, bot: &str) {
         if self.engines.contains_key(bot) {
             let sent = self
-                .store
-                .connectors(bot)
+                .engine_connectors(bot)
                 .map_err(internal)
                 .and_then(|connectors| {
                     self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)
@@ -1619,6 +1783,20 @@ fn check_connector(c: &Connector) -> Result<(), String> {
             if !(url.starts_with("http://") || url.starts_with("https://")) =>
         {
             Err("`transport.url` must start with http:// or https://".into())
+        }
+        Transport::Stdio { .. } if c.oauth => {
+            Err("`oauth` is for a connector reached over http".into())
+        }
+        Transport::Http { url, .. } if c.oauth && !oauth::safe(url) => {
+            Err("with `oauth`, `transport.url` must be https (or http on this Mac)".into())
+        }
+        Transport::Http { headers, .. }
+            if c.oauth
+                && headers
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("authorization")) =>
+        {
+            Err("with `oauth`, leave out the `authorization` header: signing in sets it".into())
         }
         _ => Ok(()),
     }
