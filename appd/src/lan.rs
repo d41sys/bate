@@ -70,6 +70,7 @@ struct Code {
 struct Session {
     device: String,
     to: Mutex<UnixStream>,
+    tx: mpsc::Sender<String>,
     lines: Mutex<Receiver<String>>,
     seen: Mutex<Instant>,
 }
@@ -391,10 +392,11 @@ impl Lan {
             return Answer::error(500, "no connection");
         };
         let (tx, lines) = mpsc::channel();
+        let loop_tx = tx.clone();
         thread::spawn(move || {
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
+                if loop_tx.send(line).is_err() {
                     break;
                 }
             }
@@ -403,6 +405,7 @@ impl Lan {
         let session = Session {
             device: device.to_owned(),
             to: Mutex::new(stream),
+            tx,
             lines: Mutex::new(lines),
             seen: Mutex::new(Instant::now()),
         };
@@ -411,9 +414,28 @@ impl Lan {
     }
 }
 
+/// A paired device may do what the window does, but not change network settings or add devices.
+const FORBIDDEN_OVER_LAN: &[&str] = &["lan_status", "set_lan", "pair_device", "remove_device"];
+
 fn send(s: &Session, body: &[u8]) -> Answer {
     if body.contains(&b'\n') || body.contains(&b'\r') {
         return Answer::error(400, "one line, with no line break");
+    }
+    if let Ok(f) = serde_json::from_slice::<Value>(body)
+        && let Some(cmd) = f.get("type").and_then(Value::as_str)
+        && FORBIDDEN_OVER_LAN.contains(&cmd)
+    {
+        let id = f.get("id").cloned().unwrap_or(Value::Null);
+        let error = json!({
+            "type": "response",
+            "id": id,
+            "command": cmd,
+            "success": false,
+            "code": "forbidden",
+            "error": "manage other devices in Bate's window"
+        });
+        let _ = s.tx.send(error.to_string());
+        return Answer::json(200, &json!({}));
     }
     let mut to = lock(&s.to);
     match to.write_all(body).and_then(|()| to.write_all(b"\n")) {
@@ -662,7 +684,7 @@ fn read(stream: &mut impl Read) -> Result<Request, Answer> {
         }
         headers.push((name, value));
     }
-    if length > MAX_WINDOW_FRAME {
+    if length >= MAX_WINDOW_FRAME {
         return Err(Answer::error(413, "too long"));
     }
     let mut body = reader.buffer().to_vec();

@@ -1179,6 +1179,13 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     );
     let made = until(&device, &|v| v["type"] == "response" && v["id"] == "2");
     assert_eq!(made["data"]["bot"]["name"], "From the phone", "{made}");
+
+    // A device cannot manage other devices or turn off the network page.
+    send(&device, json!({"id": "3", "type": "pair_device"}));
+    let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "3");
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(refused["code"], "forbidden", "{refused}");
+
     // A line break would be two commands.
     assert_eq!(
         device

@@ -9,6 +9,7 @@ export const inShell = shell !== undefined;
 
 // On another device: the same lines, by HTTPS to the service that served this page.
 let session: Promise<string> | undefined;
+let unpaired = false;
 const lines: string[] = [];
 let paired: () => void = () => {};
 const api = (path: string, body?: string) =>
@@ -19,6 +20,7 @@ const openSession = (): Promise<string> =>
     session = undefined;
     if (r.status === 401) {
       // Asks to pair, then tries again once paired.
+      unpaired = true;
       tell({ type: "unpaired" });
       await new Promise<void>((done) => (paired = done));
       return openSession();
@@ -36,10 +38,15 @@ const overNetwork: Invoke = async (command, args) => {
   // recv: the next line, asking for more when there is none.
   while (!lines.length) {
     const r = await api(`/api/recv?session=${await openSession()}`).catch(() => undefined);
-    // Gone (the service restarted, or the device was removed): a new connection, a new hello.
-    if (r?.status === 410 || r?.status === 401) session = undefined;
-    else if (r?.ok) lines.push(...((await r.json()) as unknown[]).map((v) => JSON.stringify(v)));
-    else await new Promise((wait) => setTimeout(wait, 2000));
+    // Gone, dropped, or timed out: a new connection, a new hello.
+    if (!r || r.status === 410 || r.status === 401) {
+      session = undefined;
+      await new Promise((wait) => setTimeout(wait, 2000));
+    } else if (r.ok) {
+      lines.push(...((await r.json()) as unknown[]).map((v) => JSON.stringify(v)));
+    } else {
+      await new Promise((wait) => setTimeout(wait, 2000));
+    }
   }
   return lines.shift();
 };
@@ -79,8 +86,9 @@ export function request<T = unknown>(type: string, fields: Record<string, unknow
 /** Every frame that is not a reply, plus `{type: "connected"}` once each connection said hello. */
 export function listen(listener: (frame: Frame) => void): () => void {
   listeners.add(listener);
-  // One that comes later still learns that the service is there.
+  // One that comes later still learns that the service is there or asks to pair.
   if (connected) listener({ type: "connected" });
+  else if (unpaired) listener({ type: "unpaired" });
   return () => listeners.delete(listener);
 }
 
@@ -110,6 +118,7 @@ async function pump() {
       // Not awaited: its reply comes through this loop.
       request("hello", { protocol: 1 }).then(
         () => {
+          unpaired = false;
           connected = true;
           tell({ type: "connected" });
         },
