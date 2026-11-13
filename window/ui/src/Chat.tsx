@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { listen, request } from "./service.ts";
 import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
 import { Markdown } from "./Markdown.ts";
+import { upload } from "./upload.ts";
 import type { Bot } from "./types.ts";
 
 type Opened = { history: Row[]; more: boolean; questions: Question[] };
@@ -18,6 +19,11 @@ export function Chat({ bot }: { bot: Bot }) {
   const [sending, setSending] = useState(false);
   // State is only read again at the next render; a second click in the same moment must see it now.
   const inFlight = useRef(false);
+  const [files, setFiles] = useState<{ id: string; name: string; path?: string; error?: string }[]>([]);
+  const picker = useRef<HTMLInputElement>(null);
+  // The prompt being edited: sending goes back to just before it first.
+  const [editing, setEditing] = useState<string>();
+  const [saved, setSaved] = useState("");
   // Every entry loaded so far, oldest first; an older page goes in front and the chat is built anew.
   const entries = useRef<Row[]>([]);
   const oldest = useRef<number>(undefined);
@@ -108,15 +114,67 @@ export function Chat({ bot }: { bot: Bot }) {
   }, [items, rows]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
-  const send = async () => {
-    const words = text.trim();
-    // One prompt at a time; the text stays until the service has it.
-    if (!words || bot.busy || inFlight.current) return;
+  // One file at a time: the service takes only a few at once from a window.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const attach = (list: Iterable<File>) => {
+    for (const file of list) {
+      const id = crypto.randomUUID();
+      setFiles((fs) => [...fs, { id, name: file.name }]);
+      queue.current = queue.current.then(() => upload(bot.id, file)).then(
+        (path) => setFiles((fs) => fs.map((f) => (f.id === id ? { ...f, path } : f))),
+        (e: Error) => setFiles((fs) => fs.map((f) => (f.id === id ? { ...f, error: e.message } : f))),
+      );
+    }
+  };
+  const uploading = files.some((f) => !f.path && !f.error);
+  const attached = files.flatMap((f) => (f.path ? [`- ${f.path}`] : []));
+  const message = [text.trim(), attached.length ? `Attached:\n${attached.join("\n")}` : ""].filter(Boolean).join("\n\n");
+  /** One change to the chat at a time; what it was is kept if it fails. */
+  const once = async (work: () => Promise<unknown>) => {
+    if (bot.busy || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     try {
-      await request("prompt", { bot: bot.id, nonce: crypto.randomUUID(), text: words });
+      await work();
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
+  };
+  const prompt = (words: string) => request("prompt", { bot: bot.id, nonce: crypto.randomUUID(), text: words });
+  const retry = (item: { nonce: string; text: string }) =>
+    once(async () => {
+      await request("rewind", { bot: bot.id, entry: item.nonce, fork: false });
+      // The message is gone from the chat now: if it cannot be sent again, it is not lost.
+      await prompt(item.text).catch((e) => {
+        setText(item.text);
+        throw e;
+      });
+    });
+  const fork = (item: { nonce: string; text: string }) =>
+    once(async () => {
+      await request("rewind", { bot: bot.id, entry: item.nonce, fork: true });
+      setEditing(undefined);
+      setText(item.text);
+    });
+  const send = async () => {
+    // The text stays until the service has it.
+    if (!message || uploading || bot.busy || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    try {
+      if (editing) {
+        await request("rewind", { bot: bot.id, entry: editing, fork: false });
+        // Gone from the chat: a second try only sends.
+        setEditing(undefined);
+      }
+      await prompt(message);
       setText("");
+      setFiles([]);
+      setEditing(undefined);
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -127,7 +185,20 @@ export function Chat({ bot }: { bot: Bot }) {
   };
 
   return (
-    <section className="chat">
+    <section
+      className="chat"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        attach(e.dataTransfer.files);
+      }}
+    >
+      <div className="tools">
+        <button type="button" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id }).then((d) => setSaved(d.path)))}>
+          Export chat
+        </button>
+        {saved && <span className="note">Saved to <code>{saved}</code></span>}
+      </div>
       <div
         className="items"
         ref={scroller}
@@ -146,7 +217,16 @@ export function Chat({ bot }: { bot: Bot }) {
               className={`item ${items[row.index].kind}`}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
             >
-              <Row item={items[row.index]} />
+              <Row
+                item={items[row.index]}
+                busy={bot.busy || sending}
+                retry={retry}
+                fork={fork}
+                edit={(item) => {
+                  setEditing(item.nonce);
+                  setText(item.text);
+                }}
+              />
             </div>
           ))}
         </div>
@@ -163,11 +243,44 @@ export function Chat({ bot }: { bot: Bot }) {
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
+      {(files.length > 0 || editing) && (
+        <ul className="attached">
+          {editing && (
+            <li>
+              Editing a message: sending replaces it and what followed.{" "}
+              <button type="button" onClick={() => { setEditing(undefined); setText(""); }}>Cancel</button>
+            </li>
+          )}
+          {files.map((f) => (
+            <li key={f.id}>
+              {f.name} {f.error ? `: ${f.error}` : f.path ? "" : "…"}
+              <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles((fs) => fs.filter((x) => x.id !== f.id))}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
       <form onSubmit={(e) => { e.preventDefault(); send(); }}>
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            attach(e.target.files ?? []);
+            e.target.value = "";
+          }}
+        />
+        <button type="button" onClick={() => picker.current?.click()}>Attach</button>
         <textarea
           aria-label="Message"
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            if (e.clipboardData.files.length) {
+              e.preventDefault();
+              attach(e.clipboardData.files);
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -178,15 +291,29 @@ export function Chat({ bot }: { bot: Bot }) {
         {bot.busy ? (
           <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
         ) : (
-          <button disabled={!text.trim() || sending}>Send</button>
+          <button disabled={!message || uploading || sending}>Send</button>
         )}
       </form>
     </section>
   );
 }
 
-function Row({ item }: { item: Item }) {
+type Prompt = { nonce: string; text: string };
+type Actions = { busy: boolean; retry: (p: Prompt) => void; edit: (p: Prompt) => void; fork: (p: Prompt) => void };
+
+function Row({ item, busy, retry, edit, fork }: { item: Item } & Actions) {
   switch (item.kind) {
+    case "user":
+      return (
+        <>
+          <p>{item.text}</p>
+          <div className="actions">
+            <button disabled={busy} onClick={() => retry(item)}>Retry</button>
+            <button disabled={busy} onClick={() => edit(item)}>Edit</button>
+            <button disabled={busy} onClick={() => fork(item)} title="Go on from here in a copy; this chat stays as it is">Fork</button>
+          </div>
+        </>
+      );
     case "reply":
       return <Markdown text={item.text} />;
     case "tool":

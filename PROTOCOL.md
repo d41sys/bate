@@ -134,6 +134,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}` |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
+| `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
+| `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 
 `Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken}` (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.

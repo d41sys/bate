@@ -32,3 +32,8 @@ header { display: flex; align-items: center; gap: 1rem; }
 .rows { list-style: none; padding: 0; }
 .rows li { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .4rem 0; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tools { display: flex; gap: .75rem; align-items: center; padding: .25rem 0; }
+.item .actions { display: flex; gap: .25rem; opacity: .6; }
+.item .actions button { font-size: 12px; }
+.attached { list-style: none; padding: 0; margin: .25rem 0; }
+.attached li { display: inline-flex; gap: .25rem; align-items: center; margin-right: .75rem; }

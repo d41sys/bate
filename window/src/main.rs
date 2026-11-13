@@ -62,6 +62,8 @@ fn main() {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Bate")
                 .inner_size(1000.0, 700.0)
+                // Files dropped on the page reach the page (attachments), not the shell.
+                .disable_drag_drop_handler()
                 .on_navigation(follow)
                 // `target="_blank"` and `window.open`: no second view, ever.
                 .on_new_window(|url, _| {
