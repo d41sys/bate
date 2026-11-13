@@ -411,6 +411,15 @@ impl Store {
         )? > 0)
     }
 
+    /// Removes the grants for the tools of connector `name`; returns how many.
+    pub fn delete_connector_grants(&self, bot: &str, name: &str) -> Result<usize> {
+        let prefix = format!("{name}__");
+        self.0.execute(
+            "DELETE FROM grants WHERE bot = ?1 AND kind = ?2 AND substr(target, 1, length(?3)) = ?3",
+            params![bot, json(&Kind::Connector), prefix],
+        )
+    }
+
     pub fn connectors(&self, bot: &str) -> Result<Vec<Connector>> {
         let mut stmt = self
             .0

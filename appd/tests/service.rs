@@ -830,10 +830,18 @@ fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() 
         "chose Deny"
     );
     assert_eq!(
-        act(&mut w, &bot, "n4", "write ls", Some("Approve")),
-        "chose Approve"
+        act(&mut w, &bot, "n4", "write ls", Some("Deny")),
+        "chose Deny"
     );
     // Approve is for once: nothing new is remembered.
+    assert_eq!(
+        act(&mut w, &bot, "n4b", "run date", Some("Approve")),
+        "chose Approve"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4c", "run date", Some("Deny")),
+        "chose Deny"
+    );
     assert_eq!(permissions(&mut w)["grants"].as_array().unwrap().len(), 1);
 
     // Removed in the panel, it asks again.
@@ -844,8 +852,8 @@ fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() 
     w.wait_for(|f| f["type"] == "permissions_changed");
     assert_eq!(permissions(&mut w)["grants"], json!([]));
     assert_eq!(
-        act(&mut w, &bot, "n5", "run ls", Some("Approve")),
-        "chose Approve"
+        act(&mut w, &bot, "n5", "run ls", Some("Deny")),
+        "chose Deny"
     );
 
     let gone = w.send(
@@ -934,4 +942,63 @@ fn always_is_refused_for_a_question_that_is_not_about_an_action() {
         w.ok("get_permissions", json!({"bot": bot}))["grants"],
         json!([])
     );
+}
+
+#[test]
+fn a_connector_that_is_changed_or_removed_loses_its_grants() {
+    let home = home("connector-grants");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let set = |w: &mut Window, name: &str, command: &str| {
+        w.send(
+            "set_connector",
+            json!({"bot": bot, "connector": {"name": name, "enabled": true, "transport": {"type": "stdio", "command": command}}}),
+        )
+    };
+    let granted = |w: &mut Window| {
+        let grants = w.ok("get_permissions", json!({"bot": bot}))["grants"].clone();
+        let targets = grants.as_array().unwrap().iter();
+        targets
+            .map(|g| g["target"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (nonce, target) in [
+        ("n1", "web__search"),
+        ("n2", "web2__search"),
+        ("n3", "web__fetch"),
+    ] {
+        let action = format!("connector {target}");
+        assert_eq!(
+            act(&mut w, &bot, nonce, &action, Some("Always")),
+            "chose Approve"
+        );
+    }
+    // A file that happens to be called like a connector's tool is another kind of action.
+    assert_eq!(
+        act(&mut w, &bot, "n4", "write web__notes", Some("Always")),
+        "chose Approve"
+    );
+
+    // Another server under the same name: its tools ask again. Other connectors keep theirs.
+    set(&mut w, "web", "other-server");
+    w.wait_for(|f| f["type"] == "permissions_changed");
+    assert_eq!(granted(&mut w), ["web2__search", "web__notes"]);
+    assert_eq!(
+        act(&mut w, &bot, "n5", "connector web__search", Some("Deny")),
+        "chose Deny"
+    );
+
+    assert_eq!(
+        act(&mut w, &bot, "n6", "connector web__fetch", Some("Always")),
+        "chose Approve"
+    );
+    w.send("delete_connector", json!({"bot": bot, "name": "web"}));
+    w.wait_for(|f| f["type"] == "permissions_changed");
+    assert_eq!(granted(&mut w), ["web2__search", "web__notes"]);
+
+    // A name that could pass for another connector's tool is refused.
+    let id = set(&mut w, "web__search", "x");
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "invalid_connector", "{refused}");
 }

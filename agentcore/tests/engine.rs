@@ -381,7 +381,7 @@ fn a_changing_tool_asks_first_approve_writes_and_deny_does_not() {
         )],
         vec![text("Written.")],
         vec![call(
-            "w2",
+            "w1",
             "write",
             json!({"path": "no.txt", "content": "ok"}),
         )],
@@ -415,7 +415,7 @@ fn a_changing_tool_asks_first_approve_writes_and_deny_does_not() {
     );
     assert_eq!(
         engine.request(Op::Answer {
-            question: q,
+            question: q.clone(),
             choice: "Approve".into()
         }),
         None
@@ -434,15 +434,39 @@ fn a_changing_tool_asks_first_approve_writes_and_deny_does_not() {
     assert_eq!(fs::read_to_string(dir.join("yes.txt")).unwrap(), "ok");
 
     engine.prompt("write no.txt");
+    let first = q;
     let q = question(&engine.until(is_question));
+    // The model repeated its call id; the question has its own, so a late answer to the first
+    // question cannot approve this one.
+    assert_ne!(q, first);
+    assert!(
+        engine
+            .request(Op::Answer {
+                question: first,
+                choice: "Approve".into()
+            })
+            .is_some()
+    );
+    // One answer per question: an Approve sent right behind the Deny is refused, not taken
+    // and dropped.
+    let answer = |choice: &str| Op::Answer {
+        question: q.clone(),
+        choice: choice.into(),
+    };
+    let (deny, approve) = (engine.send(answer("Deny")), engine.send(answer("Approve")));
     assert_eq!(
-        engine.request(Op::Answer {
-            question: q,
-            choice: "Deny".into()
-        }),
-        None
+        engine.next(),
+        Event::Response {
+            id: deny,
+            error: None
+        }
     );
     let events = engine.until(is_turn_end);
+    let refused = events
+        .iter()
+        .position(|e| matches!(e, Event::Response { id, error: Some(_) } if *id == approve))
+        .expect("the second answer is refused");
+    let events = [&events[..refused], &events[refused + 1..]].concat();
     assert!(
         matches!(&events[0], Event::ToolEnd { is_error: true, output, .. } if output.contains("denied")),
         "{events:?}"

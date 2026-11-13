@@ -11,6 +11,7 @@ use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -163,7 +164,7 @@ impl Turn {
                 let result = if self.control.aborted() {
                     Err("Not run: the turn was aborted.".into())
                 } else {
-                    args.and_then(|args| self.call(mcp, &call.id, &call.name, &args))
+                    args.and_then(|args| self.call(mcp, &call.name, &args))
                 };
                 let (output, is_error) = match result {
                     Ok(out) => (out, false),
@@ -243,7 +244,6 @@ impl Turn {
     fn call(
         &self,
         mcp: &mut Servers,
-        id: &str,
         tool: &str,
         args: &Map<String, Value>,
     ) -> Result<String, String> {
@@ -255,7 +255,7 @@ impl Turn {
             None => tools::action(tool, args),
         };
         if let Some((kind, target, title)) = action {
-            match self.ask(id, kind, target, title) {
+            match self.ask(kind, target, title) {
                 Some(true) => {}
                 Some(false) => return Err("The user denied this action.".into()),
                 None => return Err("Aborted by the user".into()),
@@ -268,10 +268,14 @@ impl Turn {
     }
 
     /// `Some(approved)`, or `None` when the turn was aborted while waiting.
-    fn ask(&self, id: &str, kind: Kind, target: String, title: String) -> Option<bool> {
-        *lock(&self.control.question) = Some(id.to_owned());
+    fn ask(&self, kind: Kind, target: String, title: String) -> Option<bool> {
+        // Its own id, never the model's call id: a model may repeat those, and an answer must
+        // not fit a later question.
+        static ASKED: AtomicU64 = AtomicU64::new(0);
+        let id = &format!("q{}", ASKED.fetch_add(1, Ordering::Relaxed) + 1);
+        *lock(&self.control.question) = Some(id.clone());
         self.out.send(&Event::Question {
-            question: id.to_owned(),
+            question: id.clone(),
             title,
             options: OPTIONS.map(String::from).to_vec(),
             kind: Some(kind),
@@ -279,7 +283,7 @@ impl Turn {
         });
         let answer = loop {
             match self.answers.recv_timeout(Duration::from_millis(100)) {
-                Ok((question, choice)) if question == id => break Some(choice == APPROVE),
+                Ok((question, choice)) if question == *id => break Some(choice == APPROVE),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) if !self.control.aborted() => {}
                 Err(_) => break None,

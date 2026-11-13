@@ -77,14 +77,6 @@ fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refu
         .map_err(|e| bad(format!("`{key}`: {e}")))
 }
 
-/// The protocol's word for a value that serializes as a string.
-fn word<T: serde::Serialize>(value: &T) -> String {
-    match serde_json::to_value(value) {
-        Ok(Value::String(word)) => word,
-        _ => unreachable!("only used for string-valued enums"),
-    }
-}
-
 struct Client {
     handle: ClientHandle,
     hello: bool,
@@ -467,10 +459,9 @@ impl Core {
             }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;
-                let mut levels = serde_json::Map::new();
+                let mut levels = HashMap::new();
                 for kind in Kind::ALL {
-                    let level = self.store.level(&bot, kind).map_err(internal)?;
-                    levels.insert(word(&kind), json!(level));
+                    levels.insert(kind, self.store.level(&bot, kind).map_err(internal)?);
                 }
                 Ok(Some(
                     json!({"levels": levels, "grants": self.store.grants(&bot).map_err(internal)?}),
@@ -514,6 +505,7 @@ impl Core {
                         .map_err(|e| ("invalid_connector", e.to_string()))?;
                 check_connector(&c).map_err(|e| ("invalid_connector", e))?;
                 self.store.put_connector(&bot, &c).map_err(internal)?;
+                self.forget_connector_grants(&bot, &c.name);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({"connector": c})))
             }
@@ -526,6 +518,7 @@ impl Core {
                 {
                     return Err(("no_such_connector", "no such connector".into()));
                 }
+                self.forget_connector_grants(&bot, str_field(f, "name")?);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({})))
             }
@@ -721,11 +714,12 @@ impl Core {
             question,
             options,
             kind: Some(kind),
-            target: Some(target),
+            target,
             ..
         } = &mut ev
         {
             // Decided here, on what the engine is about to run. Only what is left goes to the user.
+            let target = target.get_or_insert_default();
             if let Some(choice) = self.decide(bot, *kind, target) {
                 let op = Op::Answer {
                     question: question.clone(),
@@ -736,7 +730,7 @@ impl Core {
                 }
                 return;
             }
-            options.insert(1, ALWAYS.into());
+            *options = [APPROVE, ALWAYS, DENY].map(String::from).to_vec();
         }
         let r = self.engines.get_mut(bot).expect("checked by generation");
         match &ev {
@@ -785,6 +779,16 @@ impl Core {
             _ => {}
         }
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
+    }
+
+    /// A grant is for the server the user saw: a connector that is changed or removed loses
+    /// its grants, so another server under the same name asks again.
+    fn forget_connector_grants(&mut self, bot: &str, name: &str) {
+        match self.store.delete_connector_grants(bot, name) {
+            Ok(0) => {}
+            Ok(_) => self.broadcast(&json!({"type": "permissions_changed", "bot": bot})),
+            Err(e) => log!("bot {bot}: grants of connector {name} not removed: {e}"),
+        }
     }
 
     /// The service's own answer to "may this action run", or `None` when the user must be asked.
@@ -1136,8 +1140,9 @@ fn check_connector(c: &Connector) -> Result<(), String> {
         && c.name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    if !name_ok {
-        return Err("`name` must be 1 to 40 characters of a-z, 0-9, _ and -".into());
+    // `<name>__<tool>` names a connector's tool: a name with `__` could pass for another's.
+    if !name_ok || c.name.contains("__") {
+        return Err("`name` must be 1 to 40 characters of a-z, 0-9, _ and -, without `__`".into());
     }
     match &c.transport {
         Transport::Stdio { command, .. } if command.trim().is_empty() => {
