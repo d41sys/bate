@@ -5,6 +5,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,6 +19,8 @@ const RETRY: Duration = Duration::from_millis(500);
 pub struct Bridge {
     /// The connection lines are sent on; `None` while there is none.
     to: Arc<Mutex<Option<UnixStream>>>,
+    /// Set when its window is gone: no connecting again.
+    stopped: Arc<AtomicBool>,
     lines: Mutex<Receiver<String>>,
 }
 
@@ -27,13 +30,22 @@ impl Bridge {
         let to = Arc::new(Mutex::new(None::<UnixStream>));
         let (tx, lines) = mpsc::channel();
         let writer = to.clone();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
         thread::spawn(move || {
-            loop {
+            while !stop.load(Ordering::Relaxed) {
                 let Ok(stream) = UnixStream::connect(&socket) else {
                     thread::sleep(RETRY);
                     continue;
                 };
-                *writer.lock().unwrap_or_else(|e| e.into_inner()) = stream.try_clone().ok();
+                {
+                    // Checked under the lock `stop` takes: a stop now is seen, or sees this stream.
+                    let mut to = writer.lock().unwrap_or_else(|e| e.into_inner());
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    *to = stream.try_clone().ok();
+                }
                 let mut reader = BufReader::new(stream);
                 let mut line = Vec::new();
                 loop {
@@ -59,7 +71,16 @@ impl Bridge {
         });
         Bridge {
             to,
+            stopped,
             lines: Mutex::new(lines),
+        }
+    }
+
+    /// Ends the connection for good; a `recv` waiting returns an error.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        if let Some(stream) = self.to.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
 
@@ -136,6 +157,13 @@ mod tests {
             .write_all(b"{\"type\":\"hello\",\"again\":true}\n")
             .unwrap();
         assert_eq!(bridge.recv().unwrap(), r#"{"type":"hello","again":true}"#);
+
+        // Its window closed: the connection ends for good, and a waiting `recv` returns.
+        bridge.stop();
+        assert!(bridge.recv().is_err());
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(RETRY * 3);
+        assert!(listener.accept().is_err(), "it connected again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

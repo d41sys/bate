@@ -1034,6 +1034,59 @@ fn a_bots_model_and_effort_are_kept_and_given_to_its_engine_each_start() {
 }
 
 #[test]
+fn search_finds_words_in_prompts_and_whole_replies_of_one_bot_or_all() {
+    let home = home("search");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    for (bot, text) in [(&a, "Find the Quarterly numbers"), (&b, "nothing here")] {
+        w.ok("prompt", json!({"bot": bot, "nonce": text, "text": text}));
+        w.wait_for(|f| {
+            f["type"] == "transcript"
+                && f["bot"] == bot.as_str()
+                && f["entry"]["type"] == "turn_end"
+        });
+    }
+    let search = |w: &mut Window, fields: Value| w.ok("search", fields)["hits"].clone();
+    let history = w.ok("open_bot", json!({"bot": a}))["history"].clone();
+    let seq_of = |kind: &str| {
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["entry"]["type"] == kind)
+            .unwrap()["seq"]
+            .clone()
+    };
+
+    let hits = search(&mut w, json!({"text": "quarterly"}));
+    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
+    assert_eq!(
+        (&hits[0]["bot"], &hits[0]["kind"], &hits[0]["seq"]),
+        (&json!(a), &json!("user"), &seq_of("prompt"))
+    );
+    assert!(
+        hits[0]["snippet"].as_str().unwrap().contains("Quarterly"),
+        "{hits}"
+    );
+
+    // "hel" and "lo" came as two pieces: the reply is searched whole, and found where it begins.
+    let hits = search(&mut w, json!({"text": "HELLO"}));
+    let bots: Vec<&Value> = hits.as_array().unwrap().iter().map(|h| &h["bot"]).collect();
+    assert_eq!(bots, [&json!(b), &json!(a)], "newest first: {hits}");
+    assert_eq!(
+        (&hits[1]["kind"], &hits[1]["seq"]),
+        (&json!("reply"), &seq_of("text"))
+    );
+
+    let hits = search(&mut w, json!({"text": "hello", "bot": b}));
+    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
+    let id = w.send("search", json!({"text": " "}));
+    let refusal = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refusal["code"], "bad_request");
+}
+
+#[test]
 fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     let home = home("report");
     let _service = Service::start(&home);

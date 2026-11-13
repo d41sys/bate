@@ -102,6 +102,42 @@ const BOT_TABLES: [&str; 14] = [
 /// Past runs kept per routine.
 const MAX_RUNS: u32 = 50;
 
+/// A place `search` found the words.
+#[derive(Debug, Serialize)]
+pub struct Hit {
+    pub bot: String,
+    pub seq: i64,
+    /// `user` (a prompt) or `reply`.
+    pub kind: &'static str,
+    pub snippet: String,
+}
+
+/// Up to 40 characters either side of the first `needle` (lower case) in `text`, if there is one.
+fn snippet(text: &str, needle: &str) -> Option<String> {
+    // Lower case can change lengths ('İ' is two characters): each lower-case byte keeps the
+    // place of the character it came from.
+    let chars: Vec<char> = text.chars().collect();
+    let mut lower = String::new();
+    let mut from_char = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        for l in c.to_lowercase() {
+            lower.push(l);
+            from_char.resize(lower.len(), i);
+        }
+    }
+    let at = lower.find(needle)?;
+    let (start, end) = (from_char[at], from_char[at + needle.len() - 1] + 1);
+    let (from, to) = (start.saturating_sub(40), (end + 40).min(chars.len()));
+    let mut shown: String = chars[from..to].iter().collect();
+    if from > 0 {
+        shown.insert(0, '…');
+    }
+    if to < chars.len() {
+        shown.push('…');
+    }
+    Some(shown.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 fn json<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).expect("serializable")
 }
@@ -286,6 +322,65 @@ impl Store {
             params![bot, at, json(entry)],
         )?;
         Ok(self.0.last_insert_rowid())
+    }
+
+    /// The newest `limit` prompts and replies holding `needle` (any case), of `bot` or of all
+    /// bots. A reply is searched whole, as the chat shows it: a run of text pieces, found at the
+    /// `seq` of its first.
+    // shortcut: reads every transcript entry per search; add an index (FTS5) when that gets slow.
+    pub fn search(&self, bot: Option<&str>, needle: &str, limit: usize) -> Result<Vec<Hit>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT seq, bot, entry FROM transcript WHERE ?1 IS NULL OR bot = ?1 ORDER BY bot, seq",
+        )?;
+        let mut rows = stmt.query([bot])?;
+        let needle = needle.to_lowercase();
+        let mut hits = Vec::new();
+        // The item being read, as `chat.ts` makes them: (bot, seq, kind, text).
+        let mut item: Option<(String, i64, &'static str, String)> = None;
+        let done = |item: Option<(String, i64, &'static str, String)>, hits: &mut Vec<Hit>| {
+            if let Some((bot, seq, kind, text)) = item
+                && let Some(snippet) = snippet(&text, &needle)
+            {
+                hits.push(Hit {
+                    bot,
+                    seq,
+                    kind,
+                    snippet,
+                });
+            }
+        };
+        while let Some(row) = rows.next()? {
+            let (seq, row_bot): (i64, String) = (row.get(0)?, row.get(1)?);
+            let entry: Value = parse(row.get(2)?)?;
+            let same_bot = item.as_ref().is_some_and(|(b, ..)| *b == row_bot);
+            let text = |key: &str| entry[key].as_str().unwrap_or("").to_owned();
+            let next = match entry["type"].as_str() {
+                Some("prompt") => Some((seq, "user", text("text"))),
+                Some("text") => {
+                    if let Some((_, _, "reply", so_far)) = item.as_mut().filter(|_| same_bot) {
+                        so_far.push_str(entry["delta"].as_str().unwrap_or(""));
+                        continue;
+                    }
+                    Some((seq, "reply", text("delta")))
+                }
+                // Items the chat shows that are not searched; they end a reply.
+                Some("thinking" | "tool_start") => Some((seq, "other", String::new())),
+                Some("turn_end") if entry["reason"] != "done" => {
+                    Some((seq, "other", String::new()))
+                }
+                _ => None,
+            };
+            if !same_bot {
+                done(item.take(), &mut hits);
+            }
+            if let Some((seq, kind, text)) = next {
+                done(item.replace((row_bot, seq, kind, text)), &mut hits);
+            }
+        }
+        done(item, &mut hits);
+        hits.sort_by_key(|h| std::cmp::Reverse(h.seq));
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     /// Removes the prompt entry with `nonce` and everything after it. Does nothing if there is none.
@@ -689,6 +784,20 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_snippet_is_cut_around_the_words_even_when_lower_case_is_longer() {
+        // 'İ' lower-cases to two characters: places must still be the text's own.
+        let text = format!("{}needle{}", "İ".repeat(50), "x".repeat(50));
+        let shown = super::snippet(&text, "needle").unwrap();
+        assert_eq!(
+            shown,
+            format!("…{}needle{}…", "İ".repeat(40), "x".repeat(40))
+        );
+        assert_eq!(super::snippet("Hello", "hello").unwrap(), "Hello");
+        assert_eq!(super::snippet("Hello", "bye"), None);
+    }
+
     use super::*;
     use proto::routines::RunOutcome;
 

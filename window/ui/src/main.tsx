@@ -1,12 +1,13 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { listen, request } from "./service.ts";
+import { listen, newWindow, request } from "./service.ts";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { Settings } from "./Settings.tsx";
+import { Palette, type Choice } from "./Palette.tsx";
 import "./style.css";
 
 // Only in the build `window/check-frames.sh` makes.
@@ -25,6 +26,10 @@ function App() {
   // Bumped on each new connection, so every screen loads again.
   const [connection, setConnection] = useState(0);
   const [dragged, setDragged] = useState<string>();
+  const [palette, setPalette] = useState(false);
+  const [jump, setJump] = useState<{ seq: number }>();
+  const [find, setFind] = useState(false);
+  const newName = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const load = () => request<{ bots: Bot[] }>("list_bots").then((d) => setBots(d.bots), (e) => setError(e.message));
@@ -69,6 +74,49 @@ function App() {
   };
 
   const bot = bots.find((b) => b.id === selected);
+  const open = (id: string, t: Tab = "chat") => {
+    setSelected(id);
+    setTab(t);
+  };
+  // What the menus, the keys and the palette can do, by the menu item's id.
+  const actions: Record<string, () => void> = {
+    palette: () => setPalette(true),
+    find: () => {
+      if (!bot) return;
+      setTab("chat");
+      setFind(true);
+    },
+    "new-bot": () => newName.current?.focus(),
+    "new-window": () => void newWindow().catch((e: Error) => setError(e.message)),
+  };
+  const act = useRef(actions);
+  act.current = actions;
+  useEffect(() => {
+    // By the key, not the letter it typed (Caps Lock).
+    const keys: Record<string, string> = { KeyK: "palette", KeyF: "find", KeyN: "new-bot", "Shift+KeyN": "new-window" };
+    const onKey = (e: KeyboardEvent) => {
+      const id = e.metaKey && !e.altKey && !e.ctrlKey ? keys[e.shiftKey ? `Shift+${e.code}` : e.code] : undefined;
+      if (!id) return;
+      e.preventDefault();
+      act.current[id]();
+    };
+    // The shell's menus send their items' ids.
+    const onMenu = (e: Event) => act.current[(e as CustomEvent<string>).detail]?.();
+    addEventListener("keydown", onKey);
+    addEventListener("bate-menu", onMenu);
+    return () => {
+      removeEventListener("keydown", onKey);
+      removeEventListener("bate-menu", onMenu);
+    };
+  }, []);
+  const choices: Choice[] = [
+    ...bots.map((b) => ({ label: `${b.avatar ? `${b.avatar} ` : ""}${b.name}`, hint: "bot", run: () => open(b.id) })),
+    ...(bot ? (Object.keys(TABS) as Tab[]).map((t) => ({ label: TABS[t], hint: bot.name, run: () => setTab(t) })) : []),
+    ...(bot ? [{ label: "Find in chat", hint: "⌘F", run: actions.find }] : []),
+    { label: "New bot", hint: "⌘N", run: actions["new-bot"] },
+    { label: "New window", hint: "⇧⌘N", run: actions["new-window"] },
+  ];
+
   return (
     <div className="app">
       <nav className="bots" aria-label="Bots">
@@ -105,7 +153,7 @@ function App() {
           ))}
         </ul>
         <form onSubmit={(e) => { e.preventDefault(); create(); }}>
-          <input aria-label="New bot's name" placeholder="New bot" maxLength={80} value={name} onChange={(e) => setName(e.target.value)} />
+          <input ref={newName} aria-label="New bot's name" placeholder="New bot" maxLength={80} value={name} onChange={(e) => setName(e.target.value)} />
           <button disabled={!name.trim()}>Create</button>
         </form>
       </nav>
@@ -124,7 +172,16 @@ function App() {
             </header>
             {/* An installed agent chooses its own model. */}
             {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
-            {tab === "chat" && <Chat key={`${bot.id}-${connection}`} bot={bot} />}
+            {tab === "chat" && <Chat
+                key={`${bot.id}-${connection}`}
+                bot={bot}
+                jump={jump}
+                find={find}
+                used={() => {
+                  setJump(undefined);
+                  setFind(false);
+                }}
+              />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setSelected(undefined)} />}
@@ -133,6 +190,17 @@ function App() {
           !state && <p className="note">{bots.length ? "Choose a bot." : "Create a bot to begin."}</p>
         )}
       </main>
+      {palette && (
+        <Palette
+          choices={choices}
+          bots={bots}
+          found={(id, seq) => {
+            open(id);
+            setJump({ seq });
+          }}
+          close={() => setPalette(false)}
+        />
+      )}
     </div>
   );
 }
