@@ -27,12 +27,13 @@ export function Routines({ bot }: { bot: string }) {
     });
   }, [bot]);
 
-  const run = (p: Promise<unknown>) => p.then(() => setError(""), (e: Error) => setError(e.message));
+  /** Whether it worked; if not, the error shows. */
+  const run = (p: Promise<unknown>) =>
+    p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
   const save = (routine: Routine) => run(request("set_routine", { bot, routine }));
   const create = async () => {
     const { frequency, interval, time } = form;
-    await save({ name: form.name, prompt: form.prompt, enabled: true, webhook: form.webhook, schedule: { frequency, interval, time } });
-    setForm(blank);
+    if (await save({ name: form.name, prompt: form.prompt, enabled: true, webhook: form.webhook, schedule: { frequency, interval, time } })) setForm(blank);
   };
 
   return (

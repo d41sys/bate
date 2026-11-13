@@ -11,6 +11,7 @@ export type Frame = { type: string; bot?: string; [field: string]: unknown };
 let next = 0;
 const pending = new Map<number, { resolve: (data: unknown) => void; reject: (e: Error) => void }>();
 const listeners = new Set<(frame: Frame) => void>();
+let connected = false;
 
 /** Sends a command; resolves with its `data`, rejects with the service's `error`. */
 /** `T` is the command's `data` as PROTOCOL.md gives it; the service is not checked against it. */
@@ -29,10 +30,20 @@ export function request<T = unknown>(type: string, fields: Record<string, unknow
 /** Every frame that is not a reply, plus `{type: "connected"}` once each connection said hello. */
 export function listen(listener: (frame: Frame) => void): () => void {
   listeners.add(listener);
+  // One that comes later still learns that the service is there.
+  if (connected) listener({ type: "connected" });
   return () => listeners.delete(listener);
 }
 
-const tell = (frame: Frame) => listeners.forEach((listener) => listener(frame));
+// One screen's mistake must not stop the others hearing the service.
+const tell = (frame: Frame) =>
+  listeners.forEach((listener) => {
+    try {
+      listener(frame);
+    } catch (e) {
+      console.error(e);
+    }
+  });
 
 async function pump() {
   for (;;) {
@@ -44,11 +55,15 @@ async function pump() {
       else waiting?.reject(new Error(frame.error ?? "failed"));
     } else if (frame.type === "hello") {
       // A new connection: what was asked on the old one gets no reply.
+      connected = false;
       for (const waiting of pending.values()) waiting.reject(new Error("the service restarted"));
       pending.clear();
       // Not awaited: its reply comes through this loop.
       request("hello", { protocol: 1 }).then(
-        () => tell({ type: "connected" }),
+        () => {
+          connected = true;
+          tell({ type: "connected" });
+        },
         (e) => tell({ type: "failed", error: String(e) }),
       );
     } else {

@@ -18,20 +18,22 @@ export function Connectors({ bot }: { bot: string }) {
     });
   }, [bot]);
 
-  const run = (p: Promise<unknown>) => p.then(() => setError(""), (e: Error) => setError(e.message));
+  /** Whether it worked; if not, the error shows. */
+  const run = (p: Promise<unknown>) =>
+    p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
   const save = (connector: Connector) => run(request("set_connector", { bot, connector }));
   const signIn = (name: string) =>
     run(request<{ url: string }>("sign_in_connector", { bot, name }).then((d) => openInBrowser(d.url)));
   const create = async () => {
     // shortcut: a command is split at spaces, so no argument may hold one; add an argument list when that matters.
     const [command, ...args] = form.command.trim().split(/\s+/);
-    await save({
+    const saved = await save({
       name: form.name,
       enabled: true,
       transport: form.type === "http" ? { type: "http", url: form.url.trim() } : { type: "stdio", command, args },
       oauth: form.type === "http" && form.oauth,
     });
-    setForm(blank);
+    if (saved) setForm(blank);
   };
 
   return (

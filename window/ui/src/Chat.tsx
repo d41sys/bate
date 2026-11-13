@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { add, type Entry, type Item, type Question } from "./chat.ts";
 import type { Bot } from "./types.ts";
@@ -10,15 +10,20 @@ export function Chat({ bot }: { bot: Bot }) {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
+  // State is only read again at the next render; a second click in the same moment must see it now.
+  const inFlight = useRef(false);
 
   useEffect(() => {
+    let gone = false;
     const open = () =>
       request<Opened>("open_bot", { bot: bot.id }).then((d) => {
+        if (gone) return;
         setItems(d.history.map((h) => h.entry).reduce(add, []));
         setQuestions(d.questions);
       }, (e) => setError(e.message));
     open();
-    return listen((frame) => {
+    const stop = listen((frame) => {
       if (frame.bot !== bot.id) return;
       if (frame.type === "transcript") {
         const entry = frame.entry as Entry;
@@ -33,15 +38,29 @@ export function Chat({ bot }: { bot: Bot }) {
         open();
       }
     });
+    return () => {
+      gone = true;
+      stop();
+    };
   }, [bot.id]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
-  const send = () => {
+  const send = async () => {
     const words = text.trim();
-    if (!words) return;
-    setText("");
-    setError("");
-    run(request("prompt", { bot: bot.id, nonce: crypto.randomUUID(), text: words }));
+    // One prompt at a time; the text stays until the service has it.
+    if (!words || bot.busy || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    try {
+      await request("prompt", { bot: bot.id, nonce: crypto.randomUUID(), text: words });
+      setText("");
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
   };
 
   return (
@@ -83,7 +102,7 @@ export function Chat({ bot }: { bot: Bot }) {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               send();
             }
@@ -92,7 +111,7 @@ export function Chat({ bot }: { bot: Bot }) {
         {bot.busy ? (
           <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
         ) : (
-          <button disabled={!text.trim()}>Send</button>
+          <button disabled={!text.trim() || sending}>Send</button>
         )}
       </form>
     </section>
