@@ -16,12 +16,22 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   );
   const [agent, setAgent] = useState((bot.agent ?? []).join(" "));
   const [report, setReport] = useState("");
+  const [serverUrl, setServerUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [hasKey, setHasKey] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const load = () =>
       request<Permissions>("get_permissions", { bot: bot.id }).then(setPermissions, (e) => setError(e.message));
     load();
+    request<{ url?: string; hasKey: boolean }>("get_provider").then(
+      (p) => {
+        setServerUrl(p.url ?? "");
+        setHasKey(p.hasKey);
+      },
+      () => {},
+    );
     return listen((frame) => {
       if (frame.type === "permissions_changed" && frame.bot === bot.id) load();
     });
@@ -79,6 +89,21 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           You have the bot's browser. <button onClick={() => run(request("hand_back_browser", { bot: bot.id }))}>Hand it back</button>
         </p>
       )}
+      <h2>Model server</h2>
+      <form onSubmit={(e) => {
+        e.preventDefault();
+        run(request("set_provider", { url: serverUrl.trim(), key: apiKey.trim() }).then(() => {
+          setApiKey("");
+          return request<{ url?: string; hasKey: boolean }>("get_provider").then((p) => {
+            setServerUrl(p.url ?? "");
+            setHasKey(p.hasKey);
+          });
+        }));
+      }}>
+        <label>URL <input placeholder="http://127.0.0.1:1234/v1" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} /></label>
+        <label>API key <input type="password" placeholder={hasKey ? "(key saved; enter new to change)" : "optional"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></label>
+        <button>Save</button>
+      </form>
       <h2>Engine</h2>
       <form onSubmit={(e) => { e.preventDefault(); run(request("set_agent", { bot: bot.id, command: words.length ? words : null })); }}>
         <label>Installed agent (empty: Bate's own) <input placeholder="opencode acp" value={agent} onChange={(e) => setAgent(e.target.value)} /></label>

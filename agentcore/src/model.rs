@@ -26,8 +26,8 @@ const POLL: Duration = Duration::from_millis(100);
 
 pub struct Provider {
     agent: ureq::Agent,
-    url: String,
-    key: Option<String>,
+    default_url: Option<String>,
+    default_key: Option<String>,
 }
 
 pub enum Delta<'a> {
@@ -82,20 +82,28 @@ pub struct Ask<'a> {
 }
 
 impl Provider {
-    /// shortcut: the server and key come from `BATE_MODEL_BASE_URL` / `BATE_MODEL_API_KEY`; #8 moves them into the service.
-    pub fn from_env() -> Result<Provider, String> {
-        let url = std::env::var("BATE_MODEL_BASE_URL")
-            .ok()
-            .filter(|u| !u.is_empty())
-            .ok_or("no model server is set up: set BATE_MODEL_BASE_URL (for example http://127.0.0.1:1234/v1)")?;
+    pub fn new() -> Provider {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build();
-        Ok(Provider {
+        Provider {
             agent: ureq::Agent::new_with_config(config),
-            url: format!("{}/chat/completions", url.trim_end_matches('/')),
-            key: std::env::var(KEY).ok().filter(|k| !k.is_empty()),
-        })
+            default_url: std::env::var("BATE_MODEL_BASE_URL")
+                .ok()
+                .filter(|u| !u.is_empty())
+                .map(|u| format!("{}/chat/completions", u.trim_end_matches('/'))),
+            default_key: std::env::var(KEY).ok().filter(|k| !k.is_empty()),
+        }
+    }
+
+    /// Backwards compatibility when started directly from the environment.
+    #[allow(dead_code)]
+    pub fn from_env() -> Result<Provider, String> {
+        let p = Self::new();
+        if p.default_url.is_none() {
+            return Err("no model server is set up: set BATE_MODEL_BASE_URL (for example http://127.0.0.1:1234/v1)".into());
+        }
+        Ok(p)
     }
 
     /// Streams one reply. `abort` ends it within `POLL`, whether or not the server is sending.
@@ -104,6 +112,8 @@ impl Provider {
     // client if servers keep generating into it.
     pub fn stream(
         &self,
+        base_url: Option<&str>,
+        key: Option<&str>,
         ask: &Ask,
         abort: &AtomicBool,
         mut on: impl FnMut(Delta),
@@ -117,7 +127,14 @@ impl Provider {
             reasoning_effort: ask.effort,
         };
         let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-        let (agent, url, key) = (self.agent.clone(), self.url.clone(), self.key.clone());
+        let url = match base_url {
+            Some(u) => format!("{}/chat/completions", u.trim_end_matches('/')),
+            None => self.default_url.clone().ok_or(
+                "no model server is set up: set one in Settings or set BATE_MODEL_BASE_URL",
+            )?,
+        };
+        let key = key.map(String::from).or_else(|| self.default_key.clone());
+        let agent = self.agent.clone();
         // The request is made and read on its own thread: a server that sends nothing must not
         // hold `abort` up. Bounded, so a fast server waits for us.
         let (tx, lines) = mpsc::sync_channel::<Result<String, String>>(64);

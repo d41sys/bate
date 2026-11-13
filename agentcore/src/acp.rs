@@ -286,6 +286,10 @@ impl Bridge {
             Op::BrowserResult { request, .. } => {
                 respond(id, Err(format!("request {request} is not open")))
             }
+            Op::Token { .. } => respond(
+                id,
+                Err("this agent manages its own models and tokens".into()),
+            ),
             Op::Stop => unreachable!("handled by the loop"),
         }
     }

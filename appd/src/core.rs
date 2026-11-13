@@ -1059,6 +1059,63 @@ impl Core {
                 self.lan.remove(device).map_err(|e| ("no_such_device", e))?;
                 Ok(Some(json!({})))
             }
+            "get_provider" => {
+                let (url, has_key, from_env) = match self.store.provider().map_err(internal)? {
+                    Some((u, k)) => (Some(u), k.is_some(), false),
+                    None => (
+                        std::env::var("BATE_MODEL_BASE_URL")
+                            .ok()
+                            .filter(|s| !s.is_empty()),
+                        std::env::var("BATE_MODEL_API_KEY")
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .is_some(),
+                        true,
+                    ),
+                };
+                Ok(Some(
+                    json!({"url": url, "hasKey": has_key, "fromEnv": from_env}),
+                ))
+            }
+            "set_provider" => {
+                let url = f
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if url.is_empty() {
+                    self.store.delete_provider().map_err(internal)?;
+                } else {
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        return Err(bad("`url` must start with http:// or https://"));
+                    }
+                    let key = f
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty());
+                    self.store.set_provider(url, key).map_err(internal)?;
+                }
+                Ok(Some(json!({})))
+            }
+            "list_models" => {
+                let (url, key) = match self.store.provider().map_err(internal)? {
+                    Some((u, k)) => (Some(u), k),
+                    None => (
+                        std::env::var("BATE_MODEL_BASE_URL")
+                            .ok()
+                            .filter(|s| !s.is_empty()),
+                        std::env::var("BATE_MODEL_API_KEY")
+                            .ok()
+                            .filter(|s| !s.is_empty()),
+                    ),
+                };
+                let models = match url {
+                    Some(u) => fetch_models(&u, key.as_deref()),
+                    None => Vec::new(),
+                };
+                Ok(Some(json!({"models": models})))
+            }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
                     .map_err(|e| ("export_failed", e.to_string()))?;
@@ -1690,6 +1747,40 @@ impl Core {
     }
 
     fn on_event(&mut self, bot: &str, mut ev: Event) {
+        if let Event::Token { request } = &ev {
+            let (url, key) = match self.store.provider() {
+                Ok(Some((u, k))) => (Some(u), k),
+                _ => (
+                    std::env::var("BATE_MODEL_BASE_URL")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                    std::env::var("BATE_MODEL_API_KEY")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                ),
+            };
+            let (url, key, error) = match url {
+                Some(u) => (Some(u), key, None),
+                None => (
+                    None,
+                    None,
+                    Some(
+                        "no model server is set up: set one in Settings or set BATE_MODEL_BASE_URL"
+                            .into(),
+                    ),
+                ),
+            };
+            let op = Op::Token {
+                request: request.clone(),
+                url,
+                key,
+                error,
+            };
+            if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                log!("bot {bot}: token response not sent: {e}");
+            }
+            return;
+        }
         if let Event::Question {
             question,
             options,
@@ -2300,4 +2391,41 @@ fn encode(frame: &Value) -> Arc<[u8]> {
     let mut bytes = serde_json::to_vec(frame).expect("serializable");
     bytes.push(b'\n');
     bytes.into()
+}
+
+fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .http_status_as_error(false)
+        .build();
+    let agent: ureq::Agent = config.into();
+    let mut req = ureq::http::Request::builder().method("GET").uri(&url);
+    if let Some(key) = key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let Ok(req) = req.body(Vec::<u8>::new()) else {
+        return Vec::new();
+    };
+    let Ok(mut resp) = agent.run(req) else {
+        return Vec::new();
+    };
+    if resp.status().as_u16() != 200 {
+        return Vec::new();
+    }
+    let Ok(text) = resp.body_mut().read_to_string() else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    val.get("data")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }

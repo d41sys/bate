@@ -41,6 +41,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
+| `token` | `request`, `url?`, `key?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -60,13 +61,14 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
 | `browser` | `request`, `action` | An action in the bot's browser (see Browser). The engine waits until the service sends `browser_result` for `request`. Not part of the transcript. |
+| `token` | `request` | The engine asks the service for the endpoint and token before a model call. The engine waits until the service sends `token` for `request`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
 A killed engine sends nothing more.
 
 ## `agentcore` (Bate's own engine)
 
-- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). `BATE_MODEL_BASE_URL` (for example `http://127.0.0.1:1234/v1` for LM Studio) and, if needed, `BATE_MODEL_API_KEY` come from the environment until #8. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** every tool call asks first: a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
@@ -142,6 +144,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
+| `get_provider` | none | `{url?, hasKey, fromEnv?}`: the configured model server URL and whether an API key is saved |
+| `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service |
+| `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable |
 | `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |

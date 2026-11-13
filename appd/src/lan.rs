@@ -415,7 +415,13 @@ impl Lan {
 }
 
 /// A paired device may do what the window does, but not change network settings or add devices.
-const FORBIDDEN_OVER_LAN: &[&str] = &["lan_status", "set_lan", "pair_device", "remove_device"];
+const FORBIDDEN_OVER_LAN: &[&str] = &[
+    "lan_status",
+    "set_lan",
+    "pair_device",
+    "remove_device",
+    "set_provider",
+];
 
 fn send(s: &Session, body: &[u8]) -> Answer {
     if body.contains(&b'\n') || body.contains(&b'\r') {

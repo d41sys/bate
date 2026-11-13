@@ -1186,6 +1186,13 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     assert_eq!(refused["success"], false, "{refused}");
     assert_eq!(refused["code"], "forbidden", "{refused}");
 
+    send(
+        &device,
+        json!({"id": "4", "type": "set_provider", "url": "http://evil.com"}),
+    );
+    let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "4");
+    assert_eq!(refused["code"], "forbidden", "{refused}");
+
     // A line break would be two commands.
     assert_eq!(
         device
@@ -1288,6 +1295,10 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
         w.ok("set_connector", json!({"bot": bot, "connector": connector}));
     }
     w.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:1234/v1", "key": "model-key-SECRET-888"}),
+    );
+    w.ok(
         "set_routine",
         json!({"bot": bot, "routine": {"name": "name-SECRET", "prompt": "prompt-SECRET-text", "enabled": true,
             "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}}}),
@@ -1303,7 +1314,7 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
          bot x: GET /mcp/path-SECRET-333-long/mcp as someone with pass-SECRET-444 and url-SECRET-555; serve ok\n\
          bot x: sent Authorization: Bearer hdr-SECRET-999 and env-SECRET-12345\n\
          bot x: the server says hdr-SECRET-999 expired; ran with arg-SECRET-777\n\
-         bot x: access_token=unknown-SECRET-000 harmless-marker"
+         bot x: access_token=unknown-SECRET-000 model-key-SECRET-888 harmless-marker"
     )
     .unwrap();
 
@@ -3040,4 +3051,78 @@ fn without_chrome_the_bot_is_told_so() {
         error.starts_with("cannot start /nonexistent/chrome"),
         "{error}"
     );
+}
+
+#[test]
+fn provider_configuration_and_models_listing() {
+    let home = home("provider-cfg");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+
+    let initial = w.ok("get_provider", json!({}));
+    assert_eq!(initial["url"], Value::Null);
+    assert_eq!(initial["hasKey"], false);
+
+    // Invalid URLs are refused.
+    let id = w.send("set_provider", json!({"url": "not-a-valid-url"}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
+    assert_eq!(reply["code"], "bad_request");
+
+    // Mock an OpenAI-compatible /models endpoint.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let auth_header = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let auth_seen = auth_header.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':')
+                    && k.trim().eq_ignore_ascii_case("authorization")
+                {
+                    *auth_seen.lock().unwrap() = Some(v.trim().to_owned());
+                }
+            }
+            let body = json!({
+                "data": [
+                    {"id": "model-alpha"},
+                    {"id": "model-beta"}
+                ]
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let mock_url = format!("http://127.0.0.1:{port}/v1");
+    w.ok(
+        "set_provider",
+        json!({"url": mock_url, "key": "sk-secret-token"}),
+    );
+
+    let updated = w.ok("get_provider", json!({}));
+    assert_eq!(updated["url"], mock_url);
+    assert_eq!(updated["hasKey"], true);
+
+    let models = w.ok("list_models", json!({}));
+    assert_eq!(models["models"], json!(["model-alpha", "model-beta"]));
+    assert_eq!(
+        *auth_header.lock().unwrap(),
+        Some("Bearer sk-secret-token".into())
+    );
+
+    // Clearing the provider deletes it.
+    w.ok("set_provider", json!({"url": ""}));
+    let cleared = w.ok("get_provider", json!({}));
+    assert_eq!(cleared["url"], Value::Null);
+    assert_eq!(cleared["hasKey"], false);
 }

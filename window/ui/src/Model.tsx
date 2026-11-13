@@ -8,14 +8,20 @@ const EFFORTS = ["minimal", "low", "medium", "high"];
 export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
   const [model, setModel] = useState(bot.model ?? "");
   const [effort, setEffort] = useState(bot.effort ?? "");
+  const [serverModels, setServerModels] = useState<string[]>([]);
   const [error, setError] = useState("");
   const list = useId();
   useEffect(() => {
     setModel(bot.model ?? "");
     setEffort(bot.effort ?? "");
   }, [bot.model, bot.effort]);
-  // shortcut: offers the models other bots use; list the server's models once #8 moves its address into the service.
-  const known = [...new Set(bots.flatMap((b) => (b.model ? [b.model] : [])))];
+  useEffect(() => {
+    void request<{ models: string[] }>("list_models").then(
+      (d) => setServerModels(d.models),
+      () => {},
+    );
+  }, []);
+  const known = [...new Set([...serverModels, ...bots.flatMap((b) => (b.model ? [b.model] : []))])];
   // An empty model: back to the engine's default, effort with it.
   const save = (m: string, e: string) => {
     request("set_model", { bot: bot.id, model: m.trim(), ...(m.trim() && e && { effort: e }) }).then(
