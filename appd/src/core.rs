@@ -951,7 +951,10 @@ impl Core {
                 }
                 command
             })
-            .and_then(Engine::run)
+            .and_then(|command| {
+                let _spawning = sys::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                Engine::run(command)
+            })
             .map_err(failed)?;
         let name = bot.to_owned();
         // Engine diagnostics go through the service log, so they are rotated with it.
@@ -1268,7 +1271,7 @@ impl Core {
         let tx = self.tx.clone();
         let handle = self.browsers.entry(bot.to_owned()).or_insert_with(|| {
             let profile = browser::profile(&paths::home(), bot);
-            browser::Handle::start(bot, profile, paths::bot_dir(bot).join("downloads"), tx)
+            browser::Handle::start(bot, profile, tx)
         });
         handle.act(browser::Job {
             request,

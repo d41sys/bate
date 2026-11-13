@@ -37,7 +37,7 @@ const BINDING: &str = "bateUser";
 const WORLD: &str = "bate";
 /// Runs in the isolated world of every page: input that a person made (not a script) is
 /// the user taking over.
-const WATCH: &str = "for (const t of ['mousedown', 'keydown', 'touchstart']) \
+const WATCH: &str = "for (const t of ['pointerdown', 'mousedown', 'keydown', 'touchstart']) \
     addEventListener(t, e => { if (e.isTrusted) bateUser(t) }, true);";
 
 /// What the bot may do. Checked here: the engine is the bot's.
@@ -132,13 +132,12 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn start(bot: &str, profile: PathBuf, downloads: PathBuf, tx: Sender<Msg>) -> Handle {
+    pub fn start(bot: &str, profile: PathBuf, tx: Sender<Msg>) -> Handle {
         let (work, jobs) = mpsc::channel();
         let taken = Arc::new(AtomicBool::new(false));
         let mut browser = Browser {
             bot: bot.to_owned(),
             profile,
-            downloads,
             tx,
             taken: taken.clone(),
             chrome: None,
@@ -179,7 +178,6 @@ struct Chrome {
 struct Browser {
     bot: String,
     profile: PathBuf,
-    downloads: PathBuf,
     tx: Sender<Msg>,
     taken: Arc<AtomicBool>,
     chrome: Option<Chrome>,
@@ -252,8 +250,10 @@ impl Browser {
             "No Chrome or Chromium is installed in /Applications, so there is no browser. Bate does not install one.",
         )?;
         std::fs::create_dir_all(&self.profile)
-            .and_then(|()| std::fs::create_dir_all(&self.downloads))
-            .map_err(|e| format!("cannot make the browser's folders: {e}"))?;
+            .map_err(|e| format!("cannot make the browser's folder: {e}"))?;
+        // Until Chrome has its ends and they are closed here, no other program may start:
+        // it would keep them, and with them the whole browser.
+        let spawning = crate::sys::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let (chrome_in, to_chrome) = pipe().map_err(|e| e.to_string())?;
         let (from_chrome, chrome_out) = pipe().map_err(|e| e.to_string())?;
         let mut command = Command::new(&program);
@@ -281,6 +281,8 @@ impl Browser {
                 if a < 0 || b < 0 || libc::dup2(a, 3) < 0 || libc::dup2(b, 4) < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                libc::close(a);
+                libc::close(b);
                 Ok(())
             });
         }
@@ -290,6 +292,7 @@ impl Browser {
             libc::close(fd_in);
             libc::close(fd_out);
         }
+        drop(spawning);
         let child = spawned.map_err(|e| format!("cannot start {}: {e}", program.display()))?;
         // SAFETY: fresh descriptors from `pipe`, owned from here on.
         let (to, from) = unsafe { (File::from_raw_fd(to_chrome), File::from_raw_fd(from_chrome)) };
@@ -309,9 +312,20 @@ impl Browser {
                 let read = (&mut reader)
                     .take(MAX_MESSAGE as u64)
                     .read_until(0, &mut message);
-                if !matches!(read, Ok(n) if n > 0 && message.last() == Some(&0)) {
-                    ended.store(true, Ordering::SeqCst);
-                    return;
+                match read {
+                    Ok(n) if n > 0 && message.last() == Some(&0) => {}
+                    // Too long (a page may log anything): passed over, not the end.
+                    Ok(n) if n == MAX_MESSAGE => {
+                        if reader.skip_until(0).is_ok_and(|n| n > 0) {
+                            continue;
+                        }
+                        ended.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    _ => {
+                        ended.store(true, Ordering::SeqCst);
+                        return;
+                    }
                 }
                 let Ok(message) = serde_json::from_slice::<Value>(&message[..message.len() - 1])
                 else {
@@ -336,12 +350,12 @@ impl Browser {
             next: 0,
             page: None,
         };
-        // Downloads stay in the bot's folder.
-        let downloads = self.downloads.to_string_lossy().into_owned();
+        // No downloads: Chrome is not kept to the bot's folder, and would write wherever the
+        // folder's links point.
         let kept = chrome.call(
             None,
             "Browser.setDownloadBehavior",
-            json!({"behavior": "allow", "downloadPath": downloads}),
+            json!({"behavior": "deny"}),
         );
         if let Err(e) = kept {
             let _ = chrome.child.kill();
@@ -483,7 +497,8 @@ impl Chrome {
             let why = e["exception"]["description"]
                 .as_str()
                 .or(e["text"].as_str());
-            return Err(format!("the page refused: {}", why.unwrap_or("an error")));
+            let why: String = why.unwrap_or("an error").chars().take(300).collect();
+            return Err(format!("the page refused: {why}"));
         }
         Ok(result["result"]["value"].clone())
     }
@@ -550,10 +565,11 @@ impl Chrome {
             const all = [...document.querySelectorAll('a[href], button, input, textarea, select, summary, [role=button], [role=link], [contenteditable=true]')];
             const shown = all.filter(e => {{ const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !e.disabled && e.type !== 'hidden'; }}).slice(0, {MAX_ELEMENTS});
             window.__bate = shown;
-            const name = e => (e.getAttribute('aria-label') || e.innerText || e.value || e.placeholder || e.title || e.name || e.getAttribute('href') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
-            const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : 'field') : 'button';
+            const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code';
+            const name = e => (e.getAttribute('aria-label') || e.innerText || (secret(e) ? '' : e.value) || e.placeholder || e.title || e.name || e.getAttribute('href') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+            const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : secret(e) ? 'password field' : 'field') : 'button';
             const text = (document.body ? document.body.innerText : '').replace(/\\n{{3,}}/g, '\\n\\n');
-            return {{title: document.title, url: location.href, text: text.slice(0, {MAX_TEXT}), cut: text.length > {MAX_TEXT},
+            return {{title: document.title.slice(0, 300), url: location.href.slice(0, 2000), text: text.slice(0, {MAX_TEXT}), cut: text.length > {MAX_TEXT},
                 elements: shown.map((e, i) => `[${{i + 1}}] ${{kind(e)}} \"${{name(e)}}\"`).join('\\n')}};
         }})()"))?;
         if seen.is_null() {

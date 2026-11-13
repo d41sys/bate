@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
-/// `browse open <url>` (or `look`, `click <n>`, `type <n> <word>`, which submits) asks the
+/// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
@@ -62,7 +62,8 @@ while IFS= read -r line; do
           case "$1" in
             open) action="{\"action\":\"open\",\"url\":\"$2\"}" ;;
             click) action="{\"action\":\"click\",\"element\":$2}" ;;
-            type) action="{\"action\":\"type\",\"element\":$2,\"text\":\"$3\",\"submit\":true}" ;;
+            type) submit=false; [ "$4" = go ] && submit=true
+              action="{\"action\":\"type\",\"element\":$2,\"text\":\"$3\",\"submit\":$submit}" ;;
             *) action="{\"action\":\"$1\"}" ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -2312,7 +2313,7 @@ fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             }
             log.lock().unwrap().push(path.clone());
             let page = match path.as_str() {
-                "/" => "<title>Front</title><h1>Hello there</h1><a href='/two'>Next page</a><form action='/sent'><input name='q' placeholder='Query'><button>Go</button></form>".to_owned(),
+                "/" => "<title>Front</title><h1>Hello there</h1><a href='/two'>Next page</a><form action='/sent'><input name='q' placeholder='Query'><input type='password' name='pw'><button>Go</button></form>".to_owned(),
                 // The page's own script plays at being the user: that is not taking over.
                 other => format!("<title>Other</title><p>You are at {other}</p><script>window.dispatchEvent(new MouseEvent('mousedown'))</script>"),
             };
@@ -2374,7 +2375,7 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     );
     assert!(
         output
-            .ends_with("Elements:\n[1] link \"Next page\"\n[2] field \"Query\"\n[3] button \"Go\""),
+            .ends_with("Elements:\n[1] link \"Next page\"\n[2] field \"Query\"\n[3] password field \"pw\"\n[4] button \"Go\""),
         "{output}"
     );
 
@@ -2388,7 +2389,14 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
         page["output"].as_str().unwrap().starts_with("Title: Front"),
         "{page}"
     );
-    let page = browse(&mut w, "n4", "type 2 tea");
+    // What is typed in a password field is not read back to the bot.
+    let page = browse(&mut w, "n3b", "type 3 hunter2x");
+    let output = page["output"].as_str().unwrap();
+    assert!(
+        output.contains("[3] password field \"pw\"") && !output.contains("hunter2x"),
+        "{output}"
+    );
+    let page = browse(&mut w, "n4", "type 2 tea go");
     assert!(
         page["output"]
             .as_str()
@@ -2466,7 +2474,7 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     assert_eq!(
         *seen.lock().unwrap(),
         // Going back took the page from Chrome's cache.
-        ["/", "/two", "/sent?q=tea"].map(String::from)
+        ["/", "/two", "/sent?q=tea&pw=hunter2x"].map(String::from)
     );
 }
 

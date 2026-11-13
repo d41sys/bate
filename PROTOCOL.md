@@ -293,9 +293,9 @@ Bate's engine has a `browser` tool, asked about as kind `connector`, target `bro
 | `type` | `element`, `text`, `submit?` | Puts `text` (at most 10 000 characters) in the field; with `submit`, sends its form. |
 | `back` | none | Goes back. |
 
-Every result is the page as it is after the action, once loaded (at most 15 s): `Title:`, `Address:`, the page's text (at most 20 000 characters) and `Elements:`, the numbered links, buttons and fields (at most 200) that `click` and `type` refer to. A page that is not a web page (one the user opened) is not read. Downloads go to `downloads/` in the bot's folder.
+Every result is the page as it is after the action, once loaded (at most 15 s): `Title:`, `Address:`, the page's text (at most 20 000 characters) and `Elements:`, the numbered links, buttons and fields (at most 200) that `click` and `type` refer to; what is in a password field is not shown. A page that is not a web page (one the user opened) is not read. Downloads are refused: Chrome is not kept to the bot's folder.
 
-The user watches in the browser's window. Clicking, tapping or typing in a page there takes the browser over: `browserTaken` becomes true (`bots_changed`), and the bot's next browser action waits, its turn with it, until `hand_back_browser`. An action that waited for a turn which has ended meanwhile (an abort) is not done. Scrolling does not take the browser over.
+The user watches in the browser's window. Clicking, tapping or typing in a page there takes the browser over (in the page's own frame; not in a frame from another site, the address bar or another tab): `browserTaken` becomes true (`bots_changed`), and the bot's next browser action waits, its turn with it, until `hand_back_browser`. An action that waited for a turn which has ended meanwhile (an abort) is not done. Scrolling does not take the browser over. An action already under way when the user takes over finishes.
 
 The browser stays open while the service runs; a browser the user quit is started again by the next action.
 
