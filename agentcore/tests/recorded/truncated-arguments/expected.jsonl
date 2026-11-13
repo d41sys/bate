@@ -1,0 +1,4 @@
+{"type":"tool_start","call":"call_t","tool":"write","args":{}}
+{"type":"tool_end","call":"call_t","output":"the arguments are not a JSON object: {\"path\":\"out.txt\",\"content\":\"long te","isError":true}
+{"type":"text","delta":"I will try a shorter one."}
+{"type":"turn_end","reason":"done"}

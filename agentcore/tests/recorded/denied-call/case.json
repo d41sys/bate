@@ -1,0 +1,11 @@
+{
+  "about": "The user refuses a tool call; the model is told and answers.",
+  "style": "OpenAI",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Deny"
+  ]
+}

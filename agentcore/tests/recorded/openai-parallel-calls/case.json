@@ -1,0 +1,15 @@
+{
+  "about": "Two tool calls in one reply, told apart by `index`.",
+  "style": "OpenAI",
+  "files": {
+    "a.txt": "A\n",
+    "b.txt": "B\n"
+  },
+  "prompts": [
+    "Go."
+  ],
+  "answers": [
+    "Approve",
+    "Approve"
+  ]
+}

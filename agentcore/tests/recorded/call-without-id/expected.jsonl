@@ -1,0 +1,5 @@
+{"type":"tool_start","call":"call_n1_0","tool":"read","args":{"path":"a.txt"}}
+{"type":"question","question":"q1","title":"Read a.txt","options":["Approve","Deny"],"kind":"read","target":"a.txt"}
+{"type":"tool_end","call":"call_n1_0","output":"     1\tA\n","isError":false}
+{"type":"text","delta":"Read."}
+{"type":"turn_end","reason":"done"}

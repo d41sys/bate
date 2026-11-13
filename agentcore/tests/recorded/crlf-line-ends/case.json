@@ -1,0 +1,9 @@
+{
+  "about": "Every line ends in CRLF.",
+  "style": "servers and proxies that follow the event-stream standard's other line end",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

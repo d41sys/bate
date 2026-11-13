@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -155,6 +156,9 @@ impl Provider {
             }
         });
         let mut reply = Reply::default();
+        // Where the call of each server-side `index` is in `reply.calls`.
+        let mut at = HashMap::<u64, usize>::new();
+        let mut finished = false;
         loop {
             let received = lines.recv_timeout(POLL);
             if abort.load(Ordering::SeqCst) {
@@ -165,7 +169,11 @@ impl Provider {
             let line = match received {
                 Ok(line) => line?,
                 Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Disconnected) if finished => break,
+                // A body that just ends (a crashed server, a dropped proxy) is not a whole reply.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("the model's reply was cut off".into());
+                }
             };
             let Some(data) = data(&line) else {
                 continue;
@@ -175,6 +183,8 @@ impl Provider {
             }
             let chunk: Value =
                 serde_json::from_str(data).map_err(|e| format!("the model sent bad data: {e}"))?;
+            // Some servers end the body after the last chunk, with no `[DONE]` line.
+            finished |= !chunk["choices"][0]["finish_reason"].is_null();
             if let Some(error) = chunk.get("error") {
                 return Err(format!(
                     "the model server failed: {}",
@@ -196,17 +206,38 @@ impl Provider {
                 on(Delta::Text(t));
             }
             for c in delta["tool_calls"].as_array().into_iter().flatten() {
-                // At most one past the last call: a wild index must not allocate or panic.
-                let i = (c["index"].as_u64().unwrap_or(0) as usize).min(reply.calls.len());
-                if reply.calls.len() <= i {
-                    reply.calls.resize_with(i + 1, Call::default);
-                }
+                let index = c["index"].as_u64().unwrap_or(0);
+                let id = c["id"].as_str().filter(|id| !id.is_empty());
+                // The server's `index` only says which pieces belong together; calls are kept in
+                // the order they began, so a wild index cannot allocate or panic.
+                // An id seen before names its call, whatever the index says.
+                let by_id = id.and_then(|id| reply.calls.iter().position(|call| call.id == id));
+                let known = by_id.or(at.get(&index).copied());
+                // Some servers number every call 0, or not at all: another id under a known
+                // index is the next call.
+                let other = known.is_some_and(|i| {
+                    let had = &reply.calls[i].id;
+                    !had.is_empty() && id.is_some_and(|id| id != had)
+                });
+                let i = match known {
+                    Some(i) if !other => {
+                        at.insert(index, i);
+                        i
+                    }
+                    _ => {
+                        reply.calls.push(Call::default());
+                        at.insert(index, reply.calls.len() - 1);
+                        reply.calls.len() - 1
+                    }
+                };
                 let call = &mut reply.calls[i];
-                if let Some(id) = c["id"].as_str() {
+                if let Some(id) = id {
                     call.id = id.to_owned();
                 }
-                call.name
-                    .push_str(c["function"]["name"].as_str().unwrap_or(""));
+                // A name comes whole; some servers send it again with every piece of the arguments.
+                if call.name.is_empty() {
+                    call.name = c["function"]["name"].as_str().unwrap_or("").to_owned();
+                }
                 call.arguments
                     .push_str(c["function"]["arguments"].as_str().unwrap_or(""));
             }

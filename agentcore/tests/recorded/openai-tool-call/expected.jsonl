@@ -1,0 +1,5 @@
+{"type":"tool_start","call":"call_a1","tool":"read","args":{"path":"notes.txt"}}
+{"type":"question","question":"q1","title":"Read notes.txt","options":["Approve","Deny"],"kind":"read","target":"notes.txt"}
+{"type":"tool_end","call":"call_a1","output":"     1\tbuy milk\n","isError":false}
+{"type":"text","delta":"It says: buy milk."}
+{"type":"turn_end","reason":"done"}

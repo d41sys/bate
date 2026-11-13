@@ -1,0 +1,5 @@
+{"type":"tool_start","call":"call_d","tool":"run","args":{"command":"rm -rf build"}}
+{"type":"question","question":"q1","title":"Run: rm -rf build","options":["Approve","Deny"],"kind":"run","target":"rm -rf build"}
+{"type":"tool_end","call":"call_d","output":"The user denied this action.","isError":true}
+{"type":"text","delta":"Understood, I left it."}
+{"type":"turn_end","reason":"done"}

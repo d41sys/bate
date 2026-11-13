@@ -25,12 +25,34 @@ struct Model {
 
 impl Model {
     fn serve(replies: Vec<Vec<Value>>) -> Model {
+        let body = |chunks: Vec<Value>| {
+            let mut body = String::new();
+            for chunk in chunks {
+                // `null` holds the reply open until the engine hangs up.
+                if chunk.is_null() {
+                    return body.into_bytes();
+                }
+                body.push_str(&format!("data: {chunk}\n\n"));
+            }
+            (body + "data: [DONE]\n\n").into_bytes()
+        };
+        // Like a server that keeps the body open: the engine must hang up by itself, or the
+        // next request is never served.
+        Model::send(replies.into_iter().map(body).collect(), true)
+    }
+
+    /// Sends recorded reply bodies byte for byte, one per request, and closes after each.
+    fn replay(bodies: Vec<Vec<u8>>) -> Model {
+        Model::send(bodies, false)
+    }
+
+    fn send(bodies: Vec<Vec<u8>>, keep_open: bool) -> Model {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
         thread::spawn(move || {
-            for (stream, chunks) in listener.incoming().zip(replies) {
+            for (stream, reply) in listener.incoming().zip(bodies) {
                 let mut stream = stream.unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut length = 0;
@@ -49,23 +71,12 @@ impl Model {
                 seen.lock()
                     .unwrap()
                     .push(serde_json::from_slice(&body).unwrap());
-                let mut reply = String::from(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
-                );
-                for chunk in chunks {
-                    // `null` holds the reply open until the engine hangs up.
-                    if chunk.is_null() {
-                        let _ = stream.write_all(reply.as_bytes());
-                        let _ = reader.read(&mut [0]);
-                        break;
-                    }
-                    reply.push_str(&format!("data: {chunk}\n\n"));
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&reply);
+                if keep_open {
+                    let _ = reader.read(&mut [0]);
                 }
-                reply.push_str("data: [DONE]\n\n");
-                let _ = stream.write_all(reply.as_bytes());
-                // Like a server that keeps the body open: the engine must hang up by itself, or
-                // the next request is never served.
-                let _ = reader.read(&mut [0]);
             }
         });
         Model { url, requests }
@@ -1188,4 +1199,83 @@ fn abort_during_a_compaction_ends_it_with_an_error() {
         Event::Response { id, error: Some(e) } if id == compact => assert_eq!(e, "aborted"),
         other => panic!("expected the refused compact, got {other:?}"),
     }
+}
+
+/// What `tests/recorded/<case>/case.json` holds; see the README there.
+#[derive(serde::Deserialize)]
+struct Recorded {
+    files: std::collections::BTreeMap<String, String>,
+    prompts: Vec<String>,
+    answers: Vec<String>,
+}
+
+/// Replays one recorded conversation and returns the engine's events as JSON lines.
+fn replay(case: &Path) -> String {
+    let recorded: Recorded =
+        serde_json::from_slice(&fs::read(case.join("case.json")).unwrap()).unwrap();
+    let replies = (1..)
+        .map_while(|n| fs::read(case.join(format!("reply-{n}.sse"))).ok())
+        .collect();
+    let name = case.file_name().unwrap().to_str().unwrap();
+    let dir = workdir(&format!("recorded-{name}"));
+    for (path, content) in &recorded.files {
+        fs::write(dir.join(path), content).unwrap();
+    }
+    let model = Model::replay(replies);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let mut answers = recorded.answers.iter();
+    let mut lines = String::new();
+    for (n, prompt) in recorded.prompts.iter().enumerate() {
+        engine.prompt_as(&format!("n{}", n + 1), prompt);
+        loop {
+            let event = engine.next();
+            lines.push_str(&serde_json::to_string(&event).unwrap());
+            lines.push('\n');
+            match event {
+                Event::Question { question, .. } => {
+                    let choice = answers.next().expect("an answer for each question");
+                    let answer = Op::Answer {
+                        question,
+                        choice: choice.clone(),
+                    };
+                    assert_eq!(engine.request(answer), None);
+                }
+                Event::TurnEnd { .. } => break,
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        answers.next().is_none(),
+        "{name}: an answer was never asked for"
+    );
+    lines
+}
+
+#[test]
+fn recorded_conversations_replay_to_their_expected_transcripts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded");
+    let mut cases: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    cases.sort();
+    assert!(!cases.is_empty());
+    let mut different = Vec::new();
+    for case in &cases {
+        let got = replay(case);
+        let expected = case.join("expected.jsonl");
+        if std::env::var_os("BATE_RECORD").is_some() {
+            fs::write(&expected, &got).unwrap();
+        } else if fs::read_to_string(&expected).ok().as_deref() != Some(got.as_str()) {
+            different.push(format!("{}:\n{got}", case.display()));
+        }
+    }
+    assert!(
+        different.is_empty(),
+        "the engine's events differ from expected.jsonl (BATE_RECORD=1 rewrites it):\n{}",
+        different.join("\n")
+    );
 }

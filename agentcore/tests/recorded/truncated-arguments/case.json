@@ -1,0 +1,9 @@
+{
+  "about": "The reply hits the length limit in the middle of a tool call's arguments.",
+  "style": "any server",
+  "files": {},
+  "prompts": [
+    "Go."
+  ],
+  "answers": []
+}

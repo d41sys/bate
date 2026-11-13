@@ -1,0 +1,5 @@
+{"type":"text","delta":"<think>"}
+{"type":"text","delta":"Short answer."}
+{"type":"text","delta":"</think>"}
+{"type":"text","delta":"\n\nYes."}
+{"type":"turn_end","reason":"done"}
