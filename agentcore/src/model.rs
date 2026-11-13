@@ -8,6 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
+/// The stream's last line.
+const DONE: &str = "[DONE]";
+
+/// What a `data:` line of the stream carries.
+fn data(line: &str) -> Option<&str> {
+    line.trim_end().strip_prefix("data:").map(str::trim_start)
+}
+
 /// How often a wait for the server looks for `abort`.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -134,8 +142,10 @@ impl Provider {
                     let n = reader
                         .read_line(&mut line)
                         .map_err(|e| format!("the model stream broke: {e}"))?;
-                    // The end of the stream, or nobody listens any more.
-                    if n == 0 || tx.send(Ok(line)).is_err() {
+                    let done = n == 0 || data(&line) == Some(DONE);
+                    // The end of the reply (a server may keep the body open after it), or nobody
+                    // listens any more. Returning closes the connection.
+                    if tx.send(Ok(line)).is_err() || done {
                         return Ok(());
                     }
                 }
@@ -157,10 +167,10 @@ impl Provider {
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-            let Some(data) = line.trim_end().strip_prefix("data:").map(str::trim_start) else {
+            let Some(data) = data(&line) else {
                 continue;
             };
-            if data == "[DONE]" {
+            if data == DONE {
                 break;
             }
             let chunk: Value =

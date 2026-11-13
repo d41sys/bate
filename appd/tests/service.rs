@@ -595,12 +595,10 @@ fn rewind_removes_the_prompt_and_what_followed_from_history() {
         1
     );
 
-    // The engine no longer has that prompt, so its nonce can be sent again.
-    let again = w.ok("prompt", json!({"bot": bot, "nonce": "n2", "text": "hi"}));
-    assert_eq!(again.get("duplicate"), None, "{again}");
-    eventually("the prompt to reach the engine again", || {
-        prompts_received(&home, &bot, "n2") == 2
-    });
+    // A late retry of the rewound prompt must not bring it back.
+    let retry = w.ok("prompt", json!({"bot": bot, "nonce": "n2", "text": "hi"}));
+    assert_eq!(retry["duplicate"], true, "{retry}");
+    assert_eq!(prompts_received(&home, &bot, "n2"), 1);
 }
 
 #[test]

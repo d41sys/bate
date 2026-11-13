@@ -62,6 +62,9 @@ impl Model {
                 }
                 reply.push_str("data: [DONE]\n\n");
                 let _ = stream.write_all(reply.as_bytes());
+                // Like a server that keeps the body open: the engine must hang up by itself, or
+                // the next request is never served.
+                let _ = reader.read(&mut [0]);
             }
         });
         Model { url, requests }

@@ -99,7 +99,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `steer` | `bot`, `text` | `{}` |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model`, `effort?` | `{}` |
-| `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. The removed prompts are forgotten in the ledger, so their nonces can be sent again. |
+| `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
 | `list_routines` | `bot` | `{routines:[Routine]}` |
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
 | `delete_routine` | `bot`, `routineId` | `{}` |
