@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod connectors;
+pub mod memory;
 pub mod permissions;
 pub mod routines;
 

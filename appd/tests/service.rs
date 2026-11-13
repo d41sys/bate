@@ -1200,7 +1200,10 @@ fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
     fs::write(&secret, "outside").unwrap();
     std::os::unix::fs::symlink(&secret, folder.join("link.md")).unwrap();
     let link = json!({"bot": bot, "name": "link.md"});
+    fs::hard_link(&secret, folder.join("hard.md")).unwrap();
     assert_eq!(names_of(&mut w, &bot), ["Likes tea.md"]);
+    let hard = json!({"bot": bot, "name": "hard.md"});
+    assert_eq!(refused(&mut w, "read_memory", hard), "no_such_note");
     assert_eq!(refused(&mut w, "read_memory", link), "no_such_note");
     w.ok(
         "write_memory",

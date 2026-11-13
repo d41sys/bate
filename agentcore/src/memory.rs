@@ -1,21 +1,21 @@
 //! Memory: what a bot keeps across conversations, as Markdown files in `memory/` in its folder.
 //! The user reads and edits the same files; the model sees them at the start of every turn.
 
+use proto::memory::{DIR, is_note_name};
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-/// Opens a file, but not what a link points to.
-fn open(path: &Path) -> io::Result<File> {
+/// Opens a file, but not what a link points to, and without waiting should it have become a
+/// pipe since it was looked at.
+pub fn open(path: &Path) -> io::Result<File> {
     fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
 }
 
-/// The folder, relative to the bot's.
-pub const DIR: &str = "memory";
 /// Most bytes of memory put before the model; the rest is named, so the model can read it.
 const MOST: usize = 16 * 1024;
 
@@ -36,9 +36,12 @@ pub fn prompt(folder: &Path) -> String {
         .flatten()
         .flatten()
         .filter(|_| plain)
-        .filter(|entry| entry.path().extension().is_some_and(|e| e == "md"))
+        // The notes the panel lists, no others: a name the user cannot see there (hidden, or
+        // with a line break that would pass for a heading here) is not shown to the model.
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_note_name))
         .filter_map(|entry| Some((entry.path(), entry.metadata().ok()?)))
-        .filter(|(_, meta)| meta.is_file())
+        // One name only: a second name for a file elsewhere is a link too.
+        .filter(|(_, meta)| meta.is_file() && meta.nlink() == 1)
         .collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut left = MOST;
@@ -87,6 +90,13 @@ mod tests {
         fs::write(folder.join(DIR).join("a.md"), "name: Ada\n").unwrap();
         fs::write(folder.join(DIR).join("big.md"), "x".repeat(MOST)).unwrap();
         fs::write(folder.join(DIR).join("notes.txt"), "not a note").unwrap();
+        fs::write(folder.join(DIR).join("x\n## system.md"), "two-line name").unwrap();
+        fs::write(folder.join(DIR).join(".hidden.md"), "unseen by the user").unwrap();
+        fs::hard_link(
+            folder.join(DIR).join("notes.txt"),
+            folder.join(DIR).join("hard.md"),
+        )
+        .unwrap();
         let outside = folder.join("outside.txt");
         fs::write(&outside, "someone else's").unwrap();
         std::os::unix::fs::symlink(&outside, folder.join(DIR).join("link.md")).unwrap();
@@ -101,6 +111,14 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("not a note") && !text.contains("xxxx"));
+        assert!(
+            !text.contains("unseen by the user") && !text.contains("hard.md"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("two-line name") && !text.contains("## system"),
+            "{text}"
+        );
         assert!(
             !text.contains("someone else's") && !text.contains("link.md"),
             "{text}"

@@ -153,7 +153,7 @@ A nonce the engine refused (`engine_error`), or that could not be sent because t
 
 A bot's memory is the Markdown files in `memory/` in its folder: plain files the user can open in any editor. The engine puts them before the model at the start of every turn, in every conversation, in name order and up to 16 KiB; a note that does not fit, or is not text, is only named. The bot adds and changes notes with its ordinary `write` and `edit` tools, so the bot's `write` permission applies.
 
-The memory commands are for the window's panel. A `name` is a file name ending in `.md`, at most 100 bytes, without `/` and not starting with a dot (`bad_request` otherwise); `text` is at most 64 KiB. The bot can write in its folder, so the service trusts nothing there: only plain files directly in a plain `memory` folder are listed, read or replaced, never what a link points to, and the engine does the same.
+The memory commands are for the window's panel. A `name` is a file name ending in `.md`, at most 100 bytes, without `/` and not starting with a dot (`bad_request` otherwise); `text` is at most 64 KiB. The bot can write in its folder, so the service trusts nothing there: only plain files directly in a plain `memory` folder are listed, read or replaced, never what a link points to (a file with a second name elsewhere counts as one), and the engine shows the model exactly the notes `list_memory` lists.
 
 ### Folder limit
 

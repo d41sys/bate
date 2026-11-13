@@ -3,9 +3,10 @@
 //! a plain `memory` folder are listed, read or replaced, never what a link points to.
 
 use crate::{paths, sys};
+use proto::memory::{DIR, is_note_name};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use std::{fs, io};
@@ -25,12 +26,7 @@ pub struct Note {
 
 /// A file name ending in `.md`, with nothing that could leave the folder or hide the file.
 pub fn check_name(name: &str) -> Result<(), String> {
-    let ok = name.len() <= 100
-        && name.len() > ".md".len()
-        && name.ends_with(".md")
-        && !name.starts_with('.')
-        && !name.chars().any(|c| c == '/' || c.is_control());
-    if ok {
+    if is_note_name(name) {
         Ok(())
     } else {
         Err(
@@ -40,9 +36,14 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// A file with one name: a second name for a file elsewhere is a link too.
+fn plain(meta: &fs::Metadata) -> bool {
+    meta.is_file() && meta.nlink() == 1
+}
+
 /// The memory folder, if it is a real folder. `None`: there is none yet.
 fn dir(bot: &str) -> io::Result<Option<PathBuf>> {
-    let dir = paths::bot_dir(bot).join("memory");
+    let dir = paths::bot_dir(bot).join(DIR);
     match fs::symlink_metadata(&dir) {
         Ok(meta) if meta.is_dir() => Ok(Some(dir)),
         Ok(_) => Err(io::Error::other(
@@ -64,9 +65,11 @@ pub fn list(bot: &str) -> io::Result<Vec<Note>> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        // `DirEntry::metadata` does not follow links.
-        let meta = entry.metadata()?;
-        if meta.is_file() && check_name(&name).is_ok() {
+        // `DirEntry::metadata` does not follow links. A note the bot removes meanwhile is skipped.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if plain(&meta) && is_note_name(&name) {
             let modified = meta.modified()?.duration_since(UNIX_EPOCH);
             notes.push(Note {
                 name,
@@ -86,11 +89,11 @@ pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
     };
     let path = dir.join(name);
     match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_file() => {
+        Ok(meta) if plain(&meta) => {
             // Not through a link put there since the check, and no more than the panel shows.
             let file = fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(path)?;
             let mut bytes = Vec::new();
             file.take(MAX_READ).read_to_end(&mut bytes)?;
@@ -108,7 +111,7 @@ pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
     let dir = match dir(bot)? {
         Some(dir) => dir,
         None => {
-            let dir = paths::bot_dir(bot).join("memory");
+            let dir = paths::bot_dir(bot).join(DIR);
             sys::create_private_dir(&dir)?;
             dir
         }
