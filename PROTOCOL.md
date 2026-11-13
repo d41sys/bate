@@ -91,7 +91,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -112,6 +112,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `sign_in_connector` | `bot`, `name` | `{url}`: open it in the browser. `sign_in_failed` when the server cannot be reached or does not say how to sign in |
+| `sign_out_connector` | `bot`, `name` | `{}`; the service forgets the tokens |
 | `list_groups` | none | `{groups:[Group]}` |
 | `set_group` | `group` | `{group}`; creates when `group.id` is missing. `invalid_group`, `no_such_group` |
 | `delete_group` | `groupId` | `{}`, or `no_such_group` |
@@ -259,6 +261,18 @@ Not built yet: starting a routine from a message on a connected channel. There a
 
 Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. The service sends a bot's list to its engine when the engine starts and after every change (`connectors`).
 
+#### Signing in (OAuth)
+
+A connector reached over http may set `oauth: true`: the server signs its users in. Its `url` must then be `https` (or `http` on this Mac) and its `headers` may not hold `authorization`. `list_connectors` adds `signedIn` to such a connector. `clientId` is this app's id at a server that does not register apps by itself.
+
+The bot never holds the token. Its engine is sent the connector with `url` replaced by `http://127.0.0.1:<port>/mcp/<key>` (the service's local port, see Webhooks; `key` is 32 random hex characters, made per bot and connector), with no headers, and with `enabled` false until the user is signed in. Signing in or out sends the engine the list anew. The service's proxy there passes each `POST` on to the real `url` with the connector's own headers, `Authorization: Bearer <access token>`, and of the engine's headers only `content-type`, `accept`, `mcp-protocol-version`, `mcp-session-id` and `last-event-id`. The answer's status, `content-type`, `mcp-session-id` and body come back as they arrive (so a stream stays a stream). Redirects are not followed. A request body may be 1 MiB.
+
+`sign_in_connector` finds the sign-in server (`/.well-known/oauth-protected-resource`, then `/.well-known/oauth-authorization-server` or `/.well-known/openid-configuration`; every address must be https; one on this Mac is taken only when the connector's own `url` is on this Mac; none may hold a user name), registers this app there unless `clientId` is set, and answers with the address to open: an authorization request with PKCE (`S256`), a random `state` and `resource` set to the connector's `url`. The browser comes back to `http://127.0.0.1:<port>/oauth/callback`; the service trades the code for tokens, stores them and sends `connectors_changed`. A `state` works once, for 10 minutes.
+
+An access token within 30 s of its end is renewed before use; an answer of 401 from the server renews it once and sends the request again. Without tokens, or when renewing fails, the proxy answers 401 and the server is not asked. When the sign-in server refuses to renew, the tokens are forgotten: the connector shows as signed out. Tokens are for one address: changing a connector's `url`, `headers` or `oauth`, or removing it, forgets them. A connector that is off is not served.
+
+Tokens are stored as plain text in `app.db`, like connector values. A bot limited to its folder cannot read that file.
+
 ### Bug report
 
 `export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines (schedule, next and last run; no name, no prompt), and its connectors: the command, the number of arguments, the names of `env` and header entries, and a URL's scheme and host only. Conversations are not included.
@@ -273,4 +287,4 @@ Not recognised: a secret the service never stored that is printed with none of t
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, sign-ins of connectors, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.

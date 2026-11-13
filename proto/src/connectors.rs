@@ -29,4 +29,14 @@ pub struct Connector {
     pub name: String,
     pub enabled: bool,
     pub transport: Transport,
+    /// The server signs its users in with OAuth. HTTP only. The service keeps the tokens and
+    /// gives the engine a local address in place of `url`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oauth: bool,
+    /// With `oauth`: this app's id at a server that does not register apps by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Output only, with `oauth`: whether the user is signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
 }

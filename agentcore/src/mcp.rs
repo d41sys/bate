@@ -331,7 +331,7 @@ impl Server {
                         }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => {
-                            return Err(format!("the request to {url} was lost"));
+                            return Err(format!("the request to {} was lost", origin(url)));
                         }
                     }
                 }
@@ -437,10 +437,12 @@ impl Post {
         message: &Value,
         want: Option<u64>,
     ) -> Result<(Option<String>, Option<Value>), String> {
-        let url = &self.url;
+        // In errors, which the model reads, the server is named without its path: that may
+        // hold a secret (a key in the address).
+        let url = origin(&self.url);
         let mut request = self
             .agent
-            .post(url.as_str())
+            .post(self.url.as_str())
             .config()
             .timeout_global(Some(self.timeout))
             .build()
@@ -506,7 +508,34 @@ impl Post {
     }
 }
 
+/// `scheme://host[:port]` of an address.
+fn origin(url: &str) -> &str {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..].find(['/', '?', '#']);
+    &url[..end.map_or(url.len(), |i| start + i)]
+}
+
 /// A response to our request `id` (a request from the server has `method`).
 fn is_reply(message: &Value, id: u64) -> bool {
     message["id"] == id && message.get("method").is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_error_names_the_server_without_the_path_of_its_address() {
+        let post = Post {
+            agent: ureq::Agent::new_with_defaults(),
+            // Nothing listens on port 1.
+            url: "http://127.0.0.1:1/mcp/s3cret?key=s3cret".into(),
+            headers: Vec::new(),
+            session: None,
+            timeout: Duration::from_secs(5),
+        };
+        let error = post.send(&serde_json::json!({}), None).unwrap_err();
+        assert!(error.contains("http://127.0.0.1:1:"), "{error}");
+        assert!(!error.contains("s3cret"), "{error}");
+    }
 }

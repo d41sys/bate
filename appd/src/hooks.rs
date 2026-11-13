@@ -1,7 +1,10 @@
-//! Local webhooks: `POST http://127.0.0.1:<port>/hooks/<token>` starts a routine. Only this
-//! Mac can connect, and only who knows a routine's token can start it.
+//! The service's local HTTP port, `127.0.0.1` only. Three things arrive here:
+//! - webhooks: `POST /hooks/<token>` starts a routine, for whoever knows its token;
+//! - a bot's engine reaching a signed-in MCP server: `POST /mcp/<key>` (see `proxy`);
+//! - the browser coming back from a sign-in: `GET /oauth/callback` (see `proxy`).
 
 use crate::core::Msg;
+use crate::proxy;
 use crate::sys::log;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -12,15 +15,18 @@ use std::time::{Duration, Instant};
 
 /// The port when `APPD_HOOK_PORT` does not name another (0: any free one).
 const DEFAULT_PORT: u16 = 47821;
-/// Most bytes of data a request may carry; they go into the routine's prompt.
+/// Most bytes of data a webhook request may carry; they go into the routine's prompt.
 pub const MAX_BODY: usize = 64 * 1024;
+/// Most bytes of one message from an engine to an MCP server.
+const MAX_MCP_BODY: usize = 1024 * 1024;
 const MAX_HEAD: u64 = 8 * 1024;
 /// How long a request may take to arrive, and the service to answer.
 const WAIT: Duration = Duration::from_secs(5);
 /// How long a connection is read on after its answer was sent.
 const LINGER: Duration = Duration::from_secs(1);
-/// Requests served at once; more are dropped unanswered.
-const MAX_OPEN: usize = 16;
+/// Requests served at once; more are dropped unanswered. A call to an MCP server holds one
+/// for as long as the server takes.
+const MAX_OPEN: usize = 64;
 
 /// What the service answers a webhook: the status and a line for whoever called.
 pub type Answer = (u16, String);
@@ -30,6 +36,24 @@ pub struct Hit {
     pub token: String,
     pub data: String,
     pub answer: Sender<Answer>,
+}
+
+/// One request, read whole.
+pub struct Request {
+    pub method: String,
+    /// Without the query.
+    pub path: String,
+    pub query: String,
+    /// Names in lower case.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Request {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let found = self.headers.iter().find(|(n, _)| n == name);
+        found.map(|(_, value)| value.as_str())
+    }
 }
 
 /// Starts listening and returns the port.
@@ -51,18 +75,47 @@ pub fn start(tx: Sender<Msg>) -> io::Result<u16> {
             }
             let tx = tx.clone();
             thread::spawn(move || {
-                let (status, line) = match request(&stream) {
-                    Ok(Some((token, data))) => ask(&tx, token, data),
-                    Ok(None) => (404, "not found".into()),
-                    Err(answer) => answer,
-                };
-                let _ = respond(&stream, status, &line);
+                if let Err((status, line)) = serve(&stream, &tx) {
+                    let _ = respond(&stream, status, &line);
+                }
                 finish(&stream);
                 OPEN.fetch_sub(1, Ordering::SeqCst);
             });
         }
     });
     Ok(port)
+}
+
+/// Answers one request. An error is the answer still to be sent.
+fn serve(stream: &TcpStream, tx: &Sender<Msg>) -> Result<(), Answer> {
+    let request = request(stream)?;
+    let only = |method: &str| match request.method == method {
+        true => Ok(()),
+        false => Err((405, format!("use {method}"))),
+    };
+    if let Some(token) = request.path.strip_prefix("/hooks/") {
+        only("POST")?;
+        let data = String::from_utf8_lossy(&request.body).into_owned();
+        Err(ask(tx, token.to_owned(), data))
+    } else if let Some(key) = request.path.strip_prefix("/mcp/") {
+        only("POST")?;
+        proxy::forward(tx, key, &request, stream)
+    } else if request.path == "/oauth/callback" {
+        only("GET")?;
+        let (status, text) = proxy::callback(tx, &request.query);
+        let page = format!(
+            "<!doctype html><meta charset=utf-8><title>Bate</title><p>{}</p>",
+            text.replace('&', "&amp;").replace('<', "&lt;")
+        );
+        let _ = write!(
+            &*stream,
+            "HTTP/1.1 {status} -\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
+            page.len()
+        );
+        Ok(())
+    } else {
+        Err((404, "not found".into()))
+    }
 }
 
 /// Ends the connection so that the answer arrives. Whoever called may still be sending (a
@@ -105,8 +158,8 @@ impl Read for Until<'_> {
     }
 }
 
-/// Reads one request. `Ok(None)`: not a webhook path.
-fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
+/// Reads one request.
+fn request(stream: &TcpStream) -> Result<Request, Answer> {
     let bad = |line: &str| (400, line.to_owned());
     stream
         .set_write_timeout(Some(WAIT))
@@ -118,8 +171,10 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
         .read_line(&mut line)
         .map_err(|_| bad("bad request"))?;
     let mut parts = line.split_whitespace();
-    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let mut length = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         let n = reader
@@ -134,28 +189,25 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
         let Some((name, value)) = header.split_once(':') else {
             return Err(bad("bad header"));
         };
-        match name.trim().to_ascii_lowercase().as_str() {
+        let (name, value) = (name.trim().to_ascii_lowercase(), value.trim());
+        match name.as_str() {
             "content-length" => {
-                length = value
-                    .trim()
-                    .parse()
-                    .map_err(|_| bad("bad content-length"))?;
+                length = value.parse().map_err(|_| bad("bad content-length"))?;
             }
             "transfer-encoding" => return Err((411, "send a content-length".into())),
-            // A web page that learnt a URL must not be able to use it: browsers say where a
-            // request comes from, other callers have no reason to.
+            // A web page that learnt an address here must not be able to use it: browsers say
+            // where a request comes from, other callers have no reason to.
             "origin" => return Err((403, "not from a web page".into())),
             _ => {}
         }
+        headers.push((name, value.to_owned()));
     }
-    let Some(token) = path.strip_prefix("/hooks/") else {
-        return Ok(None);
+    let most = match path.starts_with("/mcp/") {
+        true => MAX_MCP_BODY,
+        false => MAX_BODY,
     };
-    if method != "POST" {
-        return Err((405, "use POST".into()));
-    }
-    if length > MAX_BODY {
-        return Err((413, format!("more than {MAX_BODY} bytes of data")));
+    if length > most {
+        return Err((413, format!("more than {most} bytes of data")));
     }
     // What the head's reader already took in comes first.
     let mut body = reader.buffer().to_vec();
@@ -165,13 +217,18 @@ fn request(stream: &TcpStream) -> Result<Option<(String, String)>, Answer> {
         .read_exact(&mut rest)
         .map_err(|_| bad("the data is shorter than its content-length"))?;
     body.extend(rest);
-    Ok(Some((
-        token.to_owned(),
-        String::from_utf8_lossy(&body).into_owned(),
-    )))
+    Ok(Request {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        query: query.to_owned(),
+        headers,
+        body,
+    })
 }
 
-fn respond(mut stream: &TcpStream, status: u16, line: &str) -> io::Result<()> {
+pub fn respond(mut stream: &TcpStream, status: u16, line: &str) -> io::Result<()> {
+    // The words may be another server's: none of them may end the status line.
+    let line = &line.replace(char::is_control, " ");
     let body = if status < 300 {
         serde_json::json!({"ok": true})
     } else {
@@ -179,7 +236,7 @@ fn respond(mut stream: &TcpStream, status: u16, line: &str) -> io::Result<()> {
     }
     .to_string();
     if status >= 500 {
-        log!("webhook answered {status}: {line}");
+        log!("local port answered {status}: {line}");
     }
     write!(
         stream,

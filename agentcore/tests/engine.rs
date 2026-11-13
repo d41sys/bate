@@ -765,6 +765,9 @@ fn connector(name: &str, transport: Transport) -> Connector {
         name: name.into(),
         enabled: true,
         transport,
+        oauth: false,
+        client_id: None,
+        signed_in: None,
     }
 }
 

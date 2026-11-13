@@ -1660,3 +1660,421 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
         "error: that bot is not in a group with you"
     );
 }
+
+/// One HTTP request, sent as written; gives the whole reply.
+fn raw_http(host: &str, request: &str) -> String {
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut reply = String::new();
+    let _ = stream.read_to_string(&mut reply);
+    reply
+}
+
+/// A server on this Mac that signs users in (OAuth) and serves MCP to whoever holds its newest
+/// access token. `seen` is what it was sent: one line per request to `/register`, `/token`
+/// and `/mcp`.
+struct Remote {
+    host: String,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// What the next token's `expires_in` will be.
+    lifetime: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The next call to `/mcp` is told its token has ended, whatever the token.
+    ends: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `/token` gives no tokens.
+    refuses: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Remote {
+    fn start() -> Remote {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let lifetime = Arc::new(AtomicU64::new(3600));
+        let (ends, refuses) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (base, log, life) = (format!("http://{host}"), seen.clone(), lifetime.clone());
+        let (end, refuse) = (ends.clone(), refuses.clone());
+        std::thread::spawn(move || {
+            let mut tokens = 0;
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let (mut first, mut auth, mut session, mut length) =
+                    (String::new(), String::new(), String::new(), 0);
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let lower = line.to_ascii_lowercase();
+                    let value = line
+                        .split_once(':')
+                        .map_or("", |(_, v)| v.trim())
+                        .to_owned();
+                    if lower.starts_with("content-length:") {
+                        length = value.parse().unwrap();
+                    } else if lower.starts_with("authorization:") {
+                        auth = value;
+                    } else if lower.starts_with("mcp-session-id:") {
+                        session = value;
+                    } else if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let body = String::from_utf8(body).unwrap();
+                let path = first.split(' ').nth(1).unwrap_or("");
+                let (status, extra, answer) = match path {
+                    "/.well-known/oauth-protected-resource/mcp" => {
+                        (200, "", json!({"authorization_servers": [base]}))
+                    }
+                    "/.well-known/oauth-authorization-server" => (
+                        200,
+                        "",
+                        json!({"authorization_endpoint": format!("{base}/authorize"),
+                            "token_endpoint": format!("{base}/token"),
+                            "registration_endpoint": format!("{base}/register")}),
+                    ),
+                    "/register" => {
+                        log.lock().unwrap().push(format!("register {body}"));
+                        (201, "", json!({"client_id": "client-1"}))
+                    }
+                    "/token" if refuse.load(Ordering::SeqCst) => {
+                        (400, "", json!({"error": "invalid_grant"}))
+                    }
+                    "/token" => {
+                        log.lock().unwrap().push(format!("token {body}"));
+                        tokens += 1;
+                        (
+                            200,
+                            "",
+                            json!({"access_token": format!("access-{tokens}"),
+                                "refresh_token": format!("refresh-{tokens}"),
+                                "expires_in": life.load(Ordering::SeqCst)}),
+                        )
+                    }
+                    "/mcp" => {
+                        log.lock()
+                            .unwrap()
+                            .push(format!("mcp [{auth}] [{session}] {body}"));
+                        let ended = end.swap(false, Ordering::SeqCst);
+                        if auth == format!("Bearer access-{tokens}") && !ended {
+                            (
+                                200,
+                                "mcp-session-id: s1\r\n",
+                                json!({"jsonrpc": "2.0", "id": 1, "result": {"got": body}}),
+                            )
+                        } else {
+                            (401, "", json!({"error": "invalid_token"}))
+                        }
+                    }
+                    _ => (404, "", json!({})),
+                };
+                let answer = answer.to_string();
+                let _ = write!(
+                    &stream,
+                    "HTTP/1.1 {status} -\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Remote {
+            host,
+            seen,
+            lifetime,
+            ends,
+            refuses,
+        }
+    }
+
+    fn seen(&self, start: &str) -> Vec<String> {
+        let seen = self.seen.lock().unwrap();
+        seen.iter()
+            .filter(|line| line.starts_with(start))
+            .cloned()
+            .collect()
+    }
+}
+
+#[test]
+fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token() {
+    let home = home("oauth");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let remote = Remote::start();
+    let url = format!("http://{}/mcp", remote.host);
+    let connector = |url: &str| {
+        json!({"name": "notes", "enabled": true, "oauth": true,
+            "transport": {"type": "http", "url": url, "headers": {"x-team": "blue"}}})
+    };
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    let signed_in = |w: &mut Window| {
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"][0]["signedIn"].clone()
+    };
+
+    // Secrets go to https only (this Mac aside), and signing in sets the authorization itself.
+    let plain = connector("http://mcp.example.com/mcp");
+    assert_eq!(
+        refused(
+            &mut w,
+            "set_connector",
+            json!({"bot": bot, "connector": plain})
+        ),
+        "invalid_connector"
+    );
+    let mut own = connector(&url);
+    own["transport"]["headers"]["Authorization"] = json!("Bearer mine");
+    assert_eq!(
+        refused(
+            &mut w,
+            "set_connector",
+            json!({"bot": bot, "connector": own})
+        ),
+        "invalid_connector"
+    );
+
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": connector(&url)}),
+    );
+    assert_eq!(signed_in(&mut w), false);
+
+    // The engine is given an address of the service's, not the server's.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    let log = home.join("bots").join(&bot).join("connectors.log");
+    let last_told = || {
+        let all = fs::read_to_string(&log).unwrap();
+        all.lines().last().unwrap().to_owned()
+    };
+    let told = last_told();
+    assert!(
+        !told.contains(&remote.host) && !told.contains("x-team"),
+        "{told}"
+    );
+    // And as off: there is nothing to reach until the user is signed in.
+    assert!(told.contains("\"enabled\":false"), "{told}");
+    let local = told
+        .split("\"url\":\"http://")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let (local_host, local_path) = local.split_once('/').unwrap();
+    assert!(
+        local_host.starts_with("127.0.0.1:") && local_path.starts_with("mcp/"),
+        "{local}"
+    );
+    let post = |local_path: &str, body: &str| {
+        raw_http(
+            local_host,
+            &format!(
+                "POST /{local_path} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\nmcp-session-id: s0\r\ncookie: no\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let call = |body: &str| post(local_path, body);
+
+    // Not signed in: the server is not even asked.
+    assert!(call("{}").starts_with("HTTP/1.1 401"), "{}", call("{}"));
+    assert!(remote.seen("mcp").is_empty());
+
+    // Signing in: the window gets an address for the browser.
+    let address = w.ok("sign_in_connector", json!({"bot": bot, "name": "notes"}))["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let field = |name: &str| {
+        let query = address.split_once('?').unwrap().1;
+        let found = query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(&format!("{name}=")));
+        found
+            .unwrap_or_else(|| panic!("no {name} in {address}"))
+            .to_owned()
+    };
+    assert!(
+        address.starts_with(&format!("http://{}/authorize?", remote.host)),
+        "{address}"
+    );
+    assert_eq!(field("client_id"), "client-1");
+    assert_eq!(field("code_challenge_method"), "S256");
+    assert_eq!(field("code_challenge").len(), 43);
+    assert_eq!(
+        field("resource"),
+        url.replace(':', "%3A").replace('/', "%2F")
+    );
+    let back = format!(
+        "http%3A%2F%2F{}%2Foauth%2Fcallback",
+        local_host.replace(':', "%3A")
+    );
+    assert_eq!(field("redirect_uri"), back);
+    assert!(remote.seen("register")[0].contains("/oauth/callback"));
+
+    // The browser comes back. Not with a made-up state, and with the real one only once.
+    let come_back = |state: &str| {
+        raw_http(
+            local_host,
+            &format!("GET /oauth/callback?code=the-code&state={state} HTTP/1.1\r\nhost: x\r\n\r\n"),
+        )
+    };
+    assert!(come_back("0000").starts_with("HTTP/1.1 400"));
+    assert!(remote.seen("token").is_empty());
+    let page = come_back(&field("state"));
+    assert!(
+        page.starts_with("HTTP/1.1 200") && page.contains("Signed in"),
+        "{page}"
+    );
+    assert!(come_back(&field("state")).starts_with("HTTP/1.1 400"));
+    let traded = remote.seen("token");
+    assert_eq!(traded.len(), 1, "{traded:?}");
+    assert!(
+        traded[0].contains("grant_type=authorization_code") && traded[0].contains("code=the-code"),
+        "{traded:?}"
+    );
+    let verifier = traded[0]
+        .split("code_verifier=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    assert_eq!(verifier.len(), 64, "{traded:?}");
+    w.wait_for(|f| f["type"] == "connectors_changed");
+    assert_eq!(signed_in(&mut w), true);
+
+    // The engine learns that the connector is there now.
+    eventually("the engine to be told", || {
+        last_told().contains("\"enabled\":true")
+    });
+
+    // Now the engine's message goes through, with the token and the connector's own header
+    // added and nothing else of the engine's; the answer comes back whole.
+    let answer = call("{\"id\":1}");
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(
+        answer.contains("mcp-session-id: s1") && answer.contains("content-type: application/json"),
+        "{answer}"
+    );
+    assert!(
+        answer.ends_with("{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"got\":\"{\\\"id\\\":1}\"}}"),
+        "{answer}"
+    );
+    assert_eq!(
+        remote.seen("mcp"),
+        ["mcp [Bearer access-1] [s0] {\"id\":1}"]
+    );
+
+    // No token reaches a window, the engine or the bot's folder.
+    let everything = format!(
+        "{} {}",
+        w.ok("list_connectors", json!({"bot": bot})),
+        fs::read_to_string(home.join("bots").join(&bot).join("connectors.log")).unwrap()
+    );
+    assert!(
+        !everything.contains("access-") && !everything.contains("refresh-"),
+        "{everything}"
+    );
+
+    // The server ends the token early: renewed, and sent again.
+    let set = std::sync::atomic::Ordering::SeqCst;
+    remote.lifetime.store(0, set);
+    remote.ends.store(true, set);
+    assert!(call("{\"id\":2}").starts_with("HTTP/1.1 200"));
+    let asked = remote.seen("mcp");
+    assert!(
+        asked[1].starts_with("mcp [Bearer access-1]")
+            && asked[2].starts_with("mcp [Bearer access-2]"),
+        "{asked:?}"
+    );
+    assert!(remote.seen("token")[1].contains("grant_type=refresh_token&refresh_token=refresh-1"));
+    // That token is at its end already (`expires_in` 0): renewed before it is used.
+    assert!(call("{\"id\":3}").starts_with("HTTP/1.1 200"));
+    assert!(
+        remote.seen("mcp")[3].starts_with("mcp [Bearer access-3]"),
+        "{:?}",
+        remote.seen("mcp")
+    );
+
+    // Another address is another server: the sign-in is not carried over to it.
+    let moved = format!("http://{}/mcp?v=2", remote.host);
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": connector(&moved)}),
+    );
+    assert_eq!(signed_in(&mut w), false);
+    let before = remote.seen("mcp").len();
+    assert!(call("{}").starts_with("HTTP/1.1 4"));
+    assert_eq!(remote.seen("mcp").len(), before);
+    assert_eq!(
+        refused(
+            &mut w,
+            "sign_in_connector",
+            json!({"bot": bot, "name": "nope"})
+        ),
+        "no_such_connector"
+    );
+
+    // A sign-in begun for one address is not kept when the connector has moved on meanwhile.
+    let begun = w.ok("sign_in_connector", json!({"bot": bot, "name": "notes"}))["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let state = begun
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": connector(&url)}),
+    );
+    assert!(come_back(state).starts_with("HTTP/1.1 200"));
+    assert_eq!(signed_in(&mut w), false);
+    // Signed in once more, where the connector is now; then out: the engine loses it.
+    let sign_in = |w: &mut Window| {
+        let address = w.ok("sign_in_connector", json!({"bot": bot, "name": "notes"}))["url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let state = address.split("state=").nth(1).unwrap();
+        let state = state.split('&').next().unwrap();
+        assert!(come_back(state).starts_with("HTTP/1.1 200"));
+        assert_eq!(signed_in(w), true);
+        eventually("the engine to be told", || {
+            last_told().contains("\"enabled\":true")
+        });
+    };
+    sign_in(&mut w);
+    let told = last_told();
+    let path = told.split("\"url\":\"http://").nth(1).unwrap();
+    let path = path.split('"').next().unwrap().split_once('/').unwrap().1;
+    assert_ne!(path, local_path);
+    assert!(post(path, "{}").starts_with("HTTP/1.1 200"));
+    w.ok("sign_out_connector", json!({"bot": bot, "name": "notes"}));
+    assert_eq!(signed_in(&mut w), false);
+    eventually("the engine to be told", || {
+        last_told().contains("\"enabled\":false")
+    });
+    let before = remote.seen("mcp").len();
+    assert!(post(path, "{}").starts_with("HTTP/1.1 401"));
+    assert_eq!(remote.seen("mcp").len(), before);
+
+    // A sign-in that the server will not renew is over: the user is shown as signed out.
+    sign_in(&mut w);
+    remote.refuses.store(true, set);
+    assert!(post(path, "{}").starts_with("HTTP/1.1 401"));
+    assert_eq!(remote.seen("mcp").len(), before);
+    assert_eq!(signed_in(&mut w), false);
+}
