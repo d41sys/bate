@@ -136,6 +136,9 @@ fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
     moved
 }
 
+/// Thinking efforts a model server takes (`reasoning_effort`).
+const EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
+
 /// A field with a fixed set of values (`kind`, `level`).
 fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refusal> {
     serde_json::from_value(f.get(key).cloned().unwrap_or(Value::Null))
@@ -565,12 +568,33 @@ impl Core {
                     "compact" => Op::Compact,
                     _ => serde_json::from_value(f.clone()).map_err(|e| bad(e.to_string()))?,
                 };
+                if let Op::SetModel { model, effort } = &op {
+                    if model.trim() != model
+                        || model.len() > 200
+                        || model.chars().any(char::is_control)
+                    {
+                        return Err(bad("`model` must be a model's name"));
+                    }
+                    if effort.as_deref().is_some_and(|e| !EFFORTS.contains(&e)) {
+                        return Err(bad(format!(
+                            "`effort` must be one of {}",
+                            EFFORTS.join(", ")
+                        )));
+                    }
+                    if model.is_empty() && effort.is_some() {
+                        return Err(bad("an empty `model` (the default) takes no `effort`"));
+                    }
+                }
                 let settles = match &op {
                     Op::Rewind { entry, .. } => Settles::Rewind(entry.clone()),
                     Op::Compact => Settles::Compact,
                     _ => Settles::Nothing,
                 };
                 let compact = matches!(settles, Settles::Compact);
+                let chosen = match &op {
+                    Op::SetModel { model, effort } => Some((model.clone(), effort.clone())),
+                    _ => None,
+                };
                 self.send_op(
                     &bot,
                     op,
@@ -581,6 +605,13 @@ impl Core {
                         settles,
                     },
                 )?;
+                // Kept once sent, so the bot's next engine starts with it too.
+                if let Some((model, effort)) = chosen {
+                    self.store
+                        .set_model(&bot, &model, effort.as_deref())
+                        .map_err(internal)?;
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                }
                 if compact && let Some(r) = self.engines.get_mut(&bot) {
                     r.compacting += 1;
                     self.broadcast(&json!({"type": "bots_changed"}));
@@ -1092,6 +1123,10 @@ impl Core {
         row["instructions"] = json!(profile.instructions);
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
+        if let Ok(Some((model, effort))) = self.store.model(bot) {
+            row["model"] = json!(model);
+            row["effort"] = json!(effort);
+        }
         row
     }
 
@@ -1161,6 +1196,7 @@ impl Core {
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.store.profile(bot).map_err(internal)?.instructions;
+        let model = self.store.model(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
         if agent.is_some() && !whole_disk {
@@ -1271,6 +1307,9 @@ impl Core {
         if !instructions.is_empty() {
             let text = instructions;
             self.send_op(bot, Op::Instructions { text }, Waiter::Quiet)?;
+        }
+        if let Some((model, effort)) = model {
+            self.send_op(bot, Op::SetModel { model, effort }, Waiter::Quiet)?;
         }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
