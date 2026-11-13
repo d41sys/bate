@@ -39,6 +39,7 @@ pub fn serve(home: &Path, url: &str) -> Response<Vec<u8>> {
             .header(header::CONTENT_TYPE, kind(&file))
             .header(header::CONTENT_SECURITY_POLICY, POLICY)
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header("X-DNS-Prefetch-Control", "off")
             .body(body)
             .expect("a plain answer"),
         Err(_) => refuse(StatusCode::NOT_FOUND),
@@ -59,6 +60,13 @@ fn locate(home: &Path, url: &str) -> Option<PathBuf> {
     let mut parts = path.strip_prefix("/").ok()?.components();
     let bot = parts.next()?.as_os_str().to_str()?;
     if bot.is_empty() || !bot.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    // Hidden files (the engine's own, such as its sessions) are not shown.
+    if parts
+        .clone()
+        .any(|p| p.as_os_str().as_encoded_bytes().starts_with(b"."))
+    {
         return None;
     }
     let dir = home.join("bots").join(bot).canonicalize().ok()?;
@@ -93,6 +101,8 @@ mod tests {
         let home = std::env::temp_dir().join(format!("bate-files-{}", std::process::id()));
         let bot = home.join("bots").join("b1");
         fs::create_dir_all(bot.join("out")).unwrap();
+        fs::create_dir_all(bot.join(".agentcore")).unwrap();
+        fs::write(bot.join(".agentcore").join("s.html"), "chat").unwrap();
         fs::create_dir_all(home.join("bots").join("b2")).unwrap();
         fs::write(bot.join("out").join("chart one.html"), "<p>hi</p>").unwrap();
         fs::write(home.join("bots").join("b2").join("secret.txt"), "no").unwrap();
@@ -115,6 +125,7 @@ mod tests {
         for refused in [
             "botfile://localhost/b1/..%2fb2%2fsecret.txt",
             "botfile://localhost/b1/db.html",
+            "botfile://localhost/b1/.agentcore/s.html",
             "botfile://localhost/../app.db",
             "botfile://localhost/b1/out",
             "botfile://elsewhere/b1/out/chart%20one.html",

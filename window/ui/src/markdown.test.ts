@@ -29,7 +29,7 @@ test("a link to a file in the bot's folder opens it in the page; any other path 
   assert.match(html, /<button type="button" class="file" title="out\/chart one.html">chart<\/button>/);
   assert.ok(!html.includes("b2") && !html.includes("/etc/hosts"), html);
   assert.equal(inFolder("./a//b.svg?x=1#top"), "a/b.svg");
-  for (const bad of ["../x", "a/../../x", "a%2F..%2F..%2Fx", "/x", "\\x", "javascript:x", "botfile://localhost/b2/x", "#top", ""]) {
+  for (const bad of [".agentcore/s.jsonl", "a/.hidden", "../x", "a/../../x", "a%2F..%2F..%2Fx", "/x", "\\x", "javascript:x", "botfile://localhost/b2/x", "#top", ""]) {
     assert.equal(inFolder(bad), undefined, bad);
   }
 });

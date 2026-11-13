@@ -7,12 +7,17 @@ cd "$(dirname "$0")/.."
 home=$(mktemp -d)
 app= win=
 done_() {
+    rc=$?
     kill $app $win 2>/dev/null || true
     wait 2>/dev/null || true
+    # Back to the normal page, in the files and in the window built from them.
     (cd window/ui && npm run build >/dev/null)
+    cargo build -q -p window
     rm -rf "$home"
+    exit $rc
 }
 trap done_ EXIT
+trap 'exit 130' INT TERM
 (cd window/ui && VITE_FRAME_CHECK=1 npm run build >/dev/null)
 cargo build -q -p appd -p window
 bin=${CARGO_TARGET_DIR:-target}/debug

@@ -18,7 +18,8 @@ export function inFolder(href?: string): string | undefined {
     return undefined;
   }
   const parts = path.split("/").filter((p) => p && p !== ".");
-  return parts.length && !parts.includes("..") && !path.includes("\\") ? parts.join("/") : undefined;
+  // Hidden files (the engine's own) are not shown.
+  return parts.length && !parts.some((p) => p.startsWith(".")) && !path.includes("\\") ? parts.join("/") : undefined;
 }
 
 /** `open`: shows a file the reply links to, from the bot's folder. */
