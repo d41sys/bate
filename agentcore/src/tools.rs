@@ -1,5 +1,6 @@
 //! The engine's tools: `read`, `write`, `edit`, `run`, `search`.
 
+use proto::permissions::Kind;
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::{self, Read};
@@ -95,20 +96,26 @@ pub fn definitions() -> Value {
     ])
 }
 
-/// Tools that change something; the user approves each call.
-pub fn needs_approval(tool: &str) -> bool {
-    matches!(tool, "write" | "edit" | "run")
-}
-
-/// One line for the approval question.
-pub fn title(tool: &str, args: &Map<String, Value>) -> String {
+/// What a call would do, for the permission question: the kind of action, its exact target
+/// (the path or the command) and one line for the user. `None`: not one of these tools.
+pub fn action(tool: &str, args: &Map<String, Value>) -> Option<(Kind, String, String)> {
     let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?");
-    match tool {
-        "write" => format!("Write {}", arg("path")),
-        "edit" => format!("Edit {}", arg("path")),
-        "run" => format!("Run: {}", arg("command")),
-        _ => format!("Use {tool}"),
-    }
+    let path = arg("path");
+    Some(match tool {
+        "read" => (Kind::Read, path.to_owned(), format!("Read {path}")),
+        "search" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+            let title = format!("Search {path} for {}", arg("pattern"));
+            (Kind::Read, path.to_owned(), title)
+        }
+        "write" => (Kind::Write, path.to_owned(), format!("Write {path}")),
+        "edit" => (Kind::Write, path.to_owned(), format!("Edit {path}")),
+        "run" => {
+            let command = arg("command");
+            (Kind::Run, command.to_owned(), format!("Run: {command}"))
+        }
+        _ => return None,
+    })
 }
 
 /// Runs one tool call in `dir`. `Err` is a result the model sees as failed.
@@ -389,8 +396,35 @@ mod tests {
     }
 
     #[test]
-    fn only_changing_tools_need_approval() {
-        assert!(needs_approval("write") && needs_approval("edit") && needs_approval("run"));
-        assert!(!needs_approval("read") && !needs_approval("search"));
+    fn each_tool_names_its_kind_of_action_and_its_exact_target() {
+        let of = |tool: &str, args: Value| {
+            let (kind, target, _) = action(tool, args.as_object().unwrap()).unwrap();
+            (kind, target)
+        };
+        assert_eq!(
+            of("read", json!({"path": "a.txt"})),
+            (Kind::Read, "a.txt".into())
+        );
+        assert_eq!(
+            of("search", json!({"pattern": "x"})),
+            (Kind::Read, ".".into())
+        );
+        assert_eq!(
+            of("search", json!({"pattern": "x", "path": "src"})),
+            (Kind::Read, "src".into())
+        );
+        assert_eq!(
+            of("write", json!({"path": "a.txt", "content": ""})),
+            (Kind::Write, "a.txt".into())
+        );
+        assert_eq!(
+            of("edit", json!({"path": "a.txt"})),
+            (Kind::Write, "a.txt".into())
+        );
+        assert_eq!(
+            of("run", json!({"command": "ls -la"})),
+            (Kind::Run, "ls -la".into())
+        );
+        assert!(action("fly", &Map::new()).is_none());
     }
 }

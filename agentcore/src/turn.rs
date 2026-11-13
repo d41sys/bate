@@ -6,10 +6,12 @@ use crate::session::Session;
 use crate::tools::{self, Control, lock};
 use crate::{Out, Work};
 use proto::connectors::Connector;
+use proto::permissions::{APPROVE, DENY, Kind};
 use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -29,8 +31,6 @@ pub struct Turn {
     pub steer: Receiver<String>,
 }
 
-const APPROVE: &str = "Approve";
-const DENY: &str = "Deny";
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
 /// Most recent messages a compaction leaves as they are.
 const KEEP: usize = 4;
@@ -164,7 +164,7 @@ impl Turn {
                 let result = if self.control.aborted() {
                     Err("Not run: the turn was aborted.".into())
                 } else {
-                    args.and_then(|args| self.call(mcp, &call.id, &call.name, &args))
+                    args.and_then(|args| self.call(mcp, &call.name, &args))
                 };
                 let (output, is_error) = match result {
                     Ok(out) => (out, false),
@@ -244,17 +244,18 @@ impl Turn {
     fn call(
         &self,
         mcp: &mut Servers,
-        id: &str,
         tool: &str,
         args: &Map<String, Value>,
     ) -> Result<String, String> {
-        // Every connector tool asks: the engine cannot know which of them change something.
+        // Every action is asked about: the service decides from the bot's permissions, and
+        // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);
-        if connector.is_some() || tools::needs_approval(tool) {
-            let title = connector
-                .clone()
-                .unwrap_or_else(|| tools::title(tool, args));
-            match self.ask(id, title) {
+        let action = match &connector {
+            Some(title) => Some((Kind::Connector, tool.to_owned(), title.clone())),
+            None => tools::action(tool, args),
+        };
+        if let Some((kind, target, title)) = action {
+            match self.ask(kind, target, title) {
                 Some(true) => {}
                 Some(false) => return Err("The user denied this action.".into()),
                 None => return Err("Aborted by the user".into()),
@@ -267,16 +268,22 @@ impl Turn {
     }
 
     /// `Some(approved)`, or `None` when the turn was aborted while waiting.
-    fn ask(&self, id: &str, title: String) -> Option<bool> {
-        *lock(&self.control.question) = Some(id.to_owned());
+    fn ask(&self, kind: Kind, target: String, title: String) -> Option<bool> {
+        // Its own id, never the model's call id: a model may repeat those, and an answer must
+        // not fit a later question.
+        static ASKED: AtomicU64 = AtomicU64::new(0);
+        let id = &format!("q{}", ASKED.fetch_add(1, Ordering::Relaxed) + 1);
+        *lock(&self.control.question) = Some(id.clone());
         self.out.send(&Event::Question {
-            question: id.to_owned(),
+            question: id.clone(),
             title,
             options: OPTIONS.map(String::from).to_vec(),
+            kind: Some(kind),
+            target: Some(target),
         });
         let answer = loop {
             match self.answers.recv_timeout(Duration::from_millis(100)) {
-                Ok((question, choice)) if question == id => break Some(choice == APPROVE),
+                Ok((question, choice)) if question == *id => break Some(choice == APPROVE),
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) if !self.control.aborted() => {}
                 Err(_) => break None,

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod connectors;
+pub mod permissions;
 pub mod routines;
 
 /// Engine protocol version this build speaks; an engine announces it in `ready`.
@@ -114,6 +115,13 @@ pub enum Event {
         question: String,
         title: String,
         options: Vec<String>,
+        /// Set when the question is whether an action may run: the service decides, and asks
+        /// the user only where the bot's permissions say so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<permissions::Kind>,
+        /// With `kind`: the exact action (the command, the path, the connector tool).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     TurnEnd {
         reason: TurnEnd,

@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use proto::connectors::Connector;
+use proto::permissions::{Grant, Kind, Level};
 use proto::routines::{Routine, RoutineRun};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot
 CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
@@ -346,6 +349,75 @@ impl Store {
         )?;
         stmt.query_map([bot, routine], |r| parse(r.get(0)?))?
             .collect()
+    }
+
+    /// What the bot may do with actions of `kind`; the kind's default if the user never chose.
+    pub fn level(&self, bot: &str, kind: Kind) -> Result<Level> {
+        let stored = self
+            .0
+            .query_row(
+                "SELECT level FROM permissions WHERE bot = ?1 AND kind = ?2",
+                params![bot, json(&kind)],
+                |r| parse(r.get(0)?),
+            )
+            .optional()?;
+        Ok(stored.unwrap_or(kind.default_level()))
+    }
+
+    pub fn set_level(&self, bot: &str, kind: Kind, level: Level) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO permissions(bot, kind, level) VALUES (?1, ?2, ?3)",
+                params![bot, json(&kind), json(&level)],
+            )
+            .map(drop)
+    }
+
+    /// Whether an "Always" answer covers exactly this action.
+    pub fn has_grant(&self, bot: &str, kind: Kind, target: &str) -> Result<bool> {
+        self.0
+            .prepare_cached("SELECT 1 FROM grants WHERE bot = ?1 AND kind = ?2 AND target = ?3")?
+            .exists(params![bot, json(&kind), target])
+    }
+
+    pub fn put_grant(&self, bot: &str, grant: &Grant) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO grants(bot, kind, target, at) VALUES (?1, ?2, ?3, ?4)",
+                params![bot, json(&grant.kind), grant.target, grant.at_ms],
+            )
+            .map(drop)
+    }
+
+    /// A bot's grants, oldest first.
+    pub fn grants(&self, bot: &str) -> Result<Vec<Grant>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT kind, target, at FROM grants WHERE bot = ?1 ORDER BY at, target",
+        )?;
+        stmt.query_map([bot], |r| {
+            Ok(Grant {
+                kind: parse(r.get(0)?)?,
+                target: r.get(1)?,
+                at_ms: r.get(2)?,
+            })
+        })?
+        .collect()
+    }
+
+    pub fn delete_grant(&self, bot: &str, kind: Kind, target: &str) -> Result<bool> {
+        Ok(self.0.execute(
+            "DELETE FROM grants WHERE bot = ?1 AND kind = ?2 AND target = ?3",
+            params![bot, json(&kind), target],
+        )? > 0)
+    }
+
+    /// Removes the grants for the tools of connector `name`; returns how many.
+    pub fn delete_connector_grants(&self, bot: &str, name: &str) -> Result<usize> {
+        let prefix = format!("{name}__");
+        self.0.execute(
+            "DELETE FROM grants WHERE bot = ?1 AND kind = ?2 AND substr(target, 1, length(?3)) = ?3",
+            params![bot, json(&Kind::Connector), prefix],
+        )
     }
 
     pub fn connectors(&self, bot: &str) -> Result<Vec<Connector>> {

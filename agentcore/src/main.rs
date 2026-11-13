@@ -215,21 +215,33 @@ impl Engine {
                     r.control.abort();
                 }
             }
-            Op::Answer { question, choice } => match &self.running {
-                Some(r) if lock(&r.control.question).as_deref() == Some(question.as_str()) => {
-                    if turn::OPTIONS.contains(&choice.as_str()) {
-                        // Respond before the turn thread wakes, so the response precedes the tool's events.
-                        self.respond(id, Ok(()));
-                        let _ = r.answers.send((question, choice));
-                    } else {
-                        self.respond(
-                            id,
-                            Err(format!("`{choice}` is not one of {:?}", turn::OPTIONS)),
-                        );
+            Op::Answer { question, choice } => {
+                let open = self.running.as_ref().map(|r| lock(&r.control.question));
+                match open {
+                    Some(mut open) if open.as_deref() == Some(question.as_str()) => {
+                        if turn::OPTIONS.contains(&choice.as_str()) {
+                            // A question takes one answer: a second one is refused, not accepted
+                            // and dropped.
+                            *open = None;
+                            drop(open);
+                            // Respond before the turn thread wakes, so the response precedes the tool's events.
+                            self.respond(id, Ok(()));
+                            let r = self.running.as_ref().expect("checked above");
+                            let _ = r.answers.send((question, choice));
+                        } else {
+                            drop(open);
+                            self.respond(
+                                id,
+                                Err(format!("`{choice}` is not one of {:?}", turn::OPTIONS)),
+                            );
+                        }
+                    }
+                    open => {
+                        drop(open);
+                        self.respond(id, Err(format!("question {question} is not open")));
                     }
                 }
-                _ => self.respond(id, Err(format!("question {question} is not open"))),
-            },
+            }
             Op::SetModel { model, effort } => {
                 self.model = Some(model);
                 self.effort = effort;
