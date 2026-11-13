@@ -54,6 +54,8 @@ function App() {
     ids.splice(ids.indexOf(moved), 1);
     // Down: after `onto`; up: before it. Both are `onto`'s old place.
     ids.splice(bots.findIndex((b) => b.id === onto), 0, moved);
+    // At once, so a quick second move starts from this order.
+    setBots(ids.map((id) => bots.find((b) => b.id === id)!));
     request("order_bots", { bots: ids }).catch((e: Error) => setError(e.message));
   };
   const move = (id: string, by: number) => {

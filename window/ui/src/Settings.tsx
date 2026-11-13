@@ -8,6 +8,11 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [permissions, setPermissions] = useState<Permissions>();
   const [look, setLook] = useState({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color });
   const [deleting, setDeleting] = useState(false);
+  // Saved here or elsewhere: show what the service has.
+  useEffect(
+    () => setLook({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color }),
+    [bot.name, bot.instructions, bot.avatar, bot.color],
+  );
   const [agent, setAgent] = useState((bot.agent ?? []).join(" "));
   const [report, setReport] = useState("");
   const [error, setError] = useState("");

@@ -105,7 +105,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
 | `set_bot` | `bot`, `name?`, `instructions?` (at most 8000 characters), `avatar?` (at most 8 characters, such as an emoji), `color?` (`#rrggbb` or empty) | `{}`; what is given changes; `bots_changed` follows |
 | `order_bots` | `bots`: every bot's id once, in the new order | `{}`; `list_bots` lists them so from then on |
-| `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes), everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When they cannot be moved, nothing is deleted: `trash_failed` |
+| `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes), everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
 | `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` is `true` when there are older ones |
 | `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
 | `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |

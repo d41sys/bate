@@ -944,24 +944,24 @@ impl Core {
                     .map_err(internal)?
                     .expect("checked")
                     .name;
+                // Its folder to the Trash first: if that fails, the bot stays as it was.
+                let label = format!("{} {bot}", name.replace('/', "-"));
+                let dir = paths::bot_dir(&bot);
+                trash(&dir, &label).map_err(|e| {
+                    (
+                        "trash_failed",
+                        format!("{} was not moved to the Trash: {e}", dir.display()),
+                    )
+                })?;
                 self.on_engine_gone(&bot);
                 // Its Chrome closes with the handle.
                 self.browsers.remove(&bot);
-                // To the Trash first: if that fails, the bot stays as it was.
-                let label = format!("{} {bot}", name.replace('/', "-"));
-                for (from, what) in [
-                    (
-                        paths::home().join("browsers").join(&bot),
-                        format!("{label} browser"),
-                    ),
-                    (paths::bot_dir(&bot), label),
-                ] {
-                    trash(&from, &what).map_err(|e| {
-                        (
-                            "trash_failed",
-                            format!("{} was not moved to the Trash: {e}", from.display()),
-                        )
-                    })?;
+                let profile = paths::home().join("browsers").join(&bot);
+                if let Err(e) = trash(&profile, &format!("{label} browser")) {
+                    log!(
+                        "bot {bot}: {} not moved to the Trash: {e}",
+                        profile.display()
+                    );
                 }
                 let mut groups_changed = false;
                 for mut g in self.store.groups().map_err(internal)? {
@@ -1160,6 +1160,7 @@ impl Core {
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
+        let instructions = self.store.profile(bot).map_err(internal)?.instructions;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
         if agent.is_some() && !whole_disk {
@@ -1267,8 +1268,8 @@ impl Core {
         );
         self.send_op(bot, open, Waiter::Service)?;
         self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)?;
-        let text = self.store.profile(bot).map_err(internal)?.instructions;
-        if !text.is_empty() {
+        if !instructions.is_empty() {
+            let text = instructions;
             self.send_op(bot, Op::Instructions { text }, Waiter::Quiet)?;
         }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
