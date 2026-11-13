@@ -2,6 +2,7 @@
 //! stdin/stdout in the bot's folder; one turn at a time runs on its own thread.
 
 mod mcp;
+mod memory;
 mod model;
 mod session;
 mod tools;

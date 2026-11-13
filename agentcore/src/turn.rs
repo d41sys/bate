@@ -184,8 +184,9 @@ impl Turn {
 
     fn system(&self) -> String {
         format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.",
-            self.dir.display()
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.{}",
+            self.dir.display(),
+            crate::memory::prompt(&self.dir)
         )
     }
 
