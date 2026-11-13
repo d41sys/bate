@@ -66,6 +66,8 @@ struct Engine {
     connectors: Vec<proto::connectors::Connector>,
     /// The bots this one may message, and whether it leads a group.
     peers: (Vec<proto::groups::Peer>, bool),
+    /// From the user, through the service; first in the system prompt.
+    instructions: String,
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -115,6 +117,7 @@ fn main() {
         mcp: mcp::Servers::default(),
         connectors: Vec::new(),
         peers: (Vec::new(), false),
+        instructions: String::new(),
         running: None,
         model: std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()),
         effort: None,
@@ -303,6 +306,10 @@ impl Engine {
                 self.peers = (peers, leads);
                 self.respond(id, Ok(()));
             }
+            Op::Instructions { text } => {
+                self.instructions = text;
+                self.respond(id, Ok(()));
+            }
             Op::Reply {
                 message,
                 text,
@@ -387,6 +394,7 @@ impl Engine {
             connectors: self.connectors.clone(),
             peers: self.peers.0.clone(),
             leads: self.peers.1,
+            instructions: self.instructions.clone(),
             control,
             answers: answers_rx,
             steer: steer_rx,

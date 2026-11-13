@@ -1660,6 +1660,38 @@ fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
 }
 
 #[test]
+fn the_users_instructions_come_first_in_the_system_prompt() {
+    let dir = workdir("instructions");
+    let model = Model::serve(vec![vec![text("ok")], vec![text("ok")]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("hi");
+    engine.until(is_turn_end);
+    let text = "Answer in French.".to_owned();
+    assert_eq!(engine.request(Op::Instructions { text }), None);
+    engine.prompt_as("n2", "hi again");
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    let system = |i: usize| {
+        requests[i]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(
+        !system(0).contains("The user's instructions"),
+        "{}",
+        system(0)
+    );
+    assert!(
+        system(1).contains("The user's instructions for you:\nAnswer in French."),
+        "{}",
+        system(1)
+    );
+}
+
+#[test]
 fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did() {
     let dir = workdir("browser");
     let model = Model::serve(vec![

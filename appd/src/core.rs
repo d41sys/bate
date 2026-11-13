@@ -2,6 +2,7 @@
 //! and one engine per active bot. Everything reaches it as a `Msg`.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, BufRead, Read};
 use std::process::Child;
 use std::sync::Arc;
@@ -100,6 +101,22 @@ fn str_field<'a>(f: &'a Value, key: &str) -> Result<&'a str, Refusal> {
     f.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| bad(format!("`{key}` must be a string")))
+}
+
+/// Moves `from` to the user's Trash as `name` (with the time added if that is taken). Nothing
+/// to move is no error.
+fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
+    if fs::symlink_metadata(from).is_err() {
+        return Ok(());
+    }
+    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("no HOME"))?;
+    let bin = std::path::Path::new(&home).join(".Trash");
+    fs::create_dir_all(&bin)?;
+    let mut to = bin.join(name);
+    if fs::symlink_metadata(&to).is_ok() {
+        to = bin.join(format!("{name} {}", now_ms()));
+    }
+    fs::rename(from, to)
 }
 
 /// A field with a fixed set of values (`kind`, `level`).
@@ -834,6 +851,119 @@ impl Core {
                     .map_err(|e| ("export_failed", e.to_string()))?;
                 Ok(Some(json!({"path": path})))
             }
+            "set_bot" => {
+                let bot = self.bot_of(f)?;
+                let mut profile = self.store.profile(&bot).map_err(internal)?;
+                let text = |key: &str| {
+                    f.get(key).filter(|v| !v.is_null()).map(|v| {
+                        v.as_str()
+                            .ok_or_else(|| bad(format!("`{key}` must be a string")))
+                    })
+                };
+                if let Some(name) = text("name").transpose()? {
+                    let name = name.trim();
+                    if name.is_empty() || name.chars().count() > 80 {
+                        return Err(bad("`name` must be 1 to 80 characters"));
+                    }
+                    self.store.rename_bot(&bot, name).map_err(internal)?;
+                }
+                let instructions = text("instructions").transpose()?;
+                if let Some(t) = instructions {
+                    if t.chars().count() > 8000 {
+                        return Err(bad("`instructions` may be at most 8000 characters"));
+                    }
+                    profile.instructions = t.to_owned();
+                }
+                if let Some(a) = text("avatar").transpose()? {
+                    // shortcut: an avatar is a few characters (an emoji or initials), not a picture; add images when asked.
+                    if a.chars().count() > 8 || a.chars().any(char::is_control) {
+                        return Err(bad(
+                            "`avatar` must be at most 8 characters, such as an emoji",
+                        ));
+                    }
+                    profile.avatar = a.to_owned();
+                }
+                if let Some(c) = text("color").transpose()? {
+                    let hex = c.len() == 7
+                        && c.starts_with('#')
+                        && c[1..].bytes().all(|b| b.is_ascii_hexdigit());
+                    if !(c.is_empty() || hex) {
+                        return Err(bad("`color` must be #rrggbb or empty"));
+                    }
+                    profile.color = c.to_owned();
+                }
+                self.store.set_profile(&bot, &profile).map_err(internal)?;
+                if instructions.is_some() && self.engines.contains_key(&bot) {
+                    let text = profile.instructions.clone();
+                    self.send_op(&bot, Op::Instructions { text }, Waiter::Quiet)?;
+                }
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
+            }
+            "order_bots" => {
+                let order: Vec<String> = field(f, "bots")?;
+                let mut all: Vec<String> = self
+                    .store
+                    .bots()
+                    .map_err(internal)?
+                    .into_iter()
+                    .map(|b| b.id)
+                    .collect();
+                let mut given = order.clone();
+                all.sort();
+                given.sort();
+                if all != given {
+                    return Err(bad("`bots` must list every bot once"));
+                }
+                self.store.order_bots(&order).map_err(internal)?;
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
+            }
+            "delete_bot" => {
+                let bot = self.bot_of(f)?;
+                let name = self
+                    .store
+                    .bot(&bot)
+                    .map_err(internal)?
+                    .expect("checked")
+                    .name;
+                self.on_engine_gone(&bot);
+                // Its Chrome closes with the handle.
+                self.browsers.remove(&bot);
+                let mut groups_changed = false;
+                for mut g in self.store.groups().map_err(internal)? {
+                    if g.lead != bot && !g.members.contains(&bot) {
+                        continue;
+                    }
+                    groups_changed = true;
+                    g.members.retain(|m| *m != bot);
+                    let id = g.id.clone().unwrap_or_default();
+                    // A group without its lead, or with no one to lead, is no group.
+                    if g.lead == bot || g.members.is_empty() {
+                        self.store.delete_group(&id).map_err(internal)?;
+                    } else {
+                        self.store.put_group(&g).map_err(internal)?;
+                    }
+                }
+                self.store.delete_bot(&bot).map_err(internal)?;
+                let label = format!("{} {bot}", name.replace('/', "-"));
+                for (from, what) in [
+                    (paths::bot_dir(&bot), label.clone()),
+                    (
+                        paths::home().join("browsers").join(&bot),
+                        format!("{label} browser"),
+                    ),
+                ] {
+                    if let Err(e) = trash(&from, &what) {
+                        log!("bot {bot}: {} not moved to the Trash: {e}", from.display());
+                    }
+                }
+                if groups_changed {
+                    self.groups_changed();
+                }
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
+            }
             "export_report" => {
                 let path = crate::report::export(&self.store, now_ms())
                     .map_err(|e| ("export_failed", e.to_string()))?;
@@ -937,6 +1067,10 @@ impl Core {
         if let Ok(Some(agent)) = self.store.agent(bot) {
             row["agent"] = json!(agent);
         }
+        let profile = self.store.profile(bot).unwrap_or_default();
+        row["instructions"] = json!(profile.instructions);
+        row["avatar"] = json!(profile.avatar);
+        row["color"] = json!(profile.color);
         row
     }
 
@@ -1112,6 +1246,10 @@ impl Core {
         );
         self.send_op(bot, open, Waiter::Service)?;
         self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)?;
+        let text = self.store.profile(bot).map_err(internal)?.instructions;
+        if !text.is_empty() {
+            self.send_op(bot, Op::Instructions { text }, Waiter::Quiet)?;
+        }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
 

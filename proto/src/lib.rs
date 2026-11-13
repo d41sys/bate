@@ -69,6 +69,8 @@ pub enum Op {
     Connectors {
         connectors: Vec<connectors::Connector>,
     },
+    /// What the user told the bot to be and do, put first in its system prompt; empty: nothing.
+    Instructions { text: String },
     /// The bots this one may message: the whole list each time. `leads`: it leads a group.
     Peers {
         peers: Vec<groups::Peer>,

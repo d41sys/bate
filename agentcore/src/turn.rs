@@ -30,6 +30,8 @@ pub struct Turn {
     /// The bots this one may message, and whether it leads a group.
     pub peers: Vec<Peer>,
     pub leads: bool,
+    /// What the user told this bot to be and do.
+    pub instructions: String,
     /// From `answer` and `reply`, already checked against what the turn waits on.
     pub answers: Receiver<Answer>,
     pub steer: Receiver<String>,
@@ -290,8 +292,12 @@ impl Turn {
     }
 
     fn system(&self) -> String {
+        let instructions = match self.instructions.trim() {
+            "" => String::new(),
+            text => format!("\n\nThe user's instructions for you:\n{text}"),
+        };
         format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.{}{}{}",
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there.{instructions}{}{}{}",
             self.dir.display(),
             self.peers_prompt(),
             crate::skills::prompt(&self.dir),

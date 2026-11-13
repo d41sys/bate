@@ -37,3 +37,4 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .item .actions button { font-size: 12px; }
 .attached { list-style: none; padding: 0; margin: .25rem 0; }
 .attached li { display: inline-flex; gap: .25rem; align-items: center; margin-right: .75rem; }
+.fields textarea { display: block; width: 100%; box-sizing: border-box; }
