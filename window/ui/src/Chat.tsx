@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { listen, request } from "./service.ts";
-import { add, build, type Entry, type Item, type Question } from "./chat.ts";
+import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
 import { Markdown } from "./Markdown.ts";
 import type { Bot } from "./types.ts";
 
-type Opened = { history: { seq: number; entry: Entry }[]; more: boolean; questions: Question[] };
+type Opened = { history: Row[]; more: boolean; questions: Question[] };
 
 /** Entries asked for at a time; a reply is many of them (one per delta). */
 const PAGE = 2000;
@@ -19,7 +19,7 @@ export function Chat({ bot }: { bot: Bot }) {
   // State is only read again at the next render; a second click in the same moment must see it now.
   const inFlight = useRef(false);
   // Every entry loaded so far, oldest first; an older page goes in front and the chat is built anew.
-  const entries = useRef<Entry[]>([]);
+  const entries = useRef<Row[]>([]);
   const oldest = useRef<number>(undefined);
   const [more, setMore] = useState(false);
   const older = useRef<() => void>(() => {});
@@ -30,21 +30,32 @@ export function Chat({ bot }: { bot: Bot }) {
     getScrollElement: () => scroller.current,
     estimateSize: () => 48,
     overscan: 8,
+    // By item, not place: rows measured stay measured when older ones come in front.
+    getItemKey: (index) => items[index].id,
   });
 
   useEffect(() => {
     let gone = false;
     let loading = false;
-    const open = () =>
-      request<Opened>("open_bot", { bot: bot.id, limit: PAGE }).then((d) => {
+    // What arrives while a page is asked for: the page may or may not hold it.
+    let live: Row[] | undefined;
+    const open = () => {
+      live = [];
+      return request<Opened>("open_bot", { bot: bot.id, limit: PAGE }).then((d) => {
         if (gone) return;
-        entries.current = d.history.map((h) => h.entry);
+        const last = d.history[d.history.length - 1]?.seq ?? 0;
+        entries.current = [...d.history, ...(live ?? []).filter((row) => row.seq > last)];
+        live = undefined;
         oldest.current = d.history[0]?.seq;
         atBottom.current = true;
         setMore(d.more);
         setItems(build(entries.current));
         setQuestions(d.questions);
-      }, (e) => setError(e.message));
+      }, (e) => {
+        live = undefined;
+        setError(e.message);
+      });
+    };
     older.current = () => {
       if (loading || oldest.current === undefined) return;
       loading = true;
@@ -52,7 +63,7 @@ export function Chat({ bot }: { bot: Bot }) {
       request<Opened>("open_bot", { bot: bot.id, limit: PAGE, before }).then((d) => {
         loading = false;
         if (gone || before !== oldest.current) return;
-        entries.current = [...d.history.map((h) => h.entry), ...entries.current];
+        entries.current = [...d.history, ...entries.current];
         oldest.current = d.history[0]?.seq ?? before;
         setMore(d.more);
         setItems((shown) => {
@@ -71,8 +82,10 @@ export function Chat({ bot }: { bot: Bot }) {
       if (frame.bot !== bot.id) return;
       if (frame.type === "transcript") {
         const entry = frame.entry as Entry;
-        entries.current.push(entry);
-        setItems((items) => add(items, entry));
+        const row = { seq: frame.seq as number, entry };
+        live?.push(row);
+        entries.current.push(row);
+        setItems((items) => add(items, row));
         // History holds every question ever asked; only one asked now is still open.
         if (entry.type === "question") setQuestions((qs) => [...qs, entry]);
       } else if (frame.type === "question_closed") {
