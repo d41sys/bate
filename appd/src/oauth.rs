@@ -38,14 +38,36 @@ pub struct Pending {
     resource: String,
 }
 
-/// An address is fit to send secrets to: `https`, or `http` to this Mac only.
-pub fn safe(url: &str) -> bool {
-    let local = |rest: &str| {
-        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-        let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
-        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+/// The scheme and the host (no port) of an address. None for one with a user name in it, or
+/// with anything else that could make it read as another host than it goes to.
+fn host(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let odd = |c: char| c == '@' || c == '\\' || c.is_whitespace() || c.is_control();
+    if authority.is_empty() || authority.contains(odd) {
+        return None;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(_) => &authority[..=authority.find(']')?],
+        None => authority.split(':').next()?,
     };
-    url.starts_with("https://") || url.strip_prefix("http://").is_some_and(local)
+    matches!(scheme, "http" | "https").then_some((scheme, host))
+}
+
+/// An address on this Mac.
+pub fn local(url: &str) -> bool {
+    host(url).is_some_and(|(_, host)| matches!(host, "127.0.0.1" | "localhost" | "[::1]"))
+}
+
+/// An address is fit to send secrets to: `https`, or this Mac.
+pub fn safe(url: &str) -> bool {
+    local(url) || host(url).is_some_and(|(scheme, _)| scheme == "https")
+}
+
+/// As `safe`, for an address that the server at `url` named: a server elsewhere may not
+/// point the service at this Mac.
+fn fit(named: &str, url: &str) -> bool {
+    safe(named) && (local(url) || !local(named))
 }
 
 /// `scheme://host[:port]` of a URL, and the path after it (no query).
@@ -93,9 +115,9 @@ fn get(url: &str) -> Result<Value, String> {
 }
 
 /// A field that must be an address fit for secrets.
-fn endpoint(meta: &Value, key: &str) -> Result<String, String> {
+fn endpoint(meta: &Value, key: &str, url: &str) -> Result<String, String> {
     match meta[key].as_str() {
-        Some(url) if safe(url) => Ok(url.to_owned()),
+        Some(named) if fit(named, url) => Ok(named.to_owned()),
         Some(url) => Err(format!("`{key}` is not https: {url}")),
         None => Err(format!("the sign-in server names no `{key}`")),
     }
@@ -124,7 +146,7 @@ pub fn begin(
         .ok()
         .and_then(|meta| meta["authorization_servers"][0].as_str().map(str::to_owned))
         .unwrap_or_else(|| origin.to_owned());
-    if !safe(&issuer) {
+    if !fit(&issuer, url) {
         return Err(format!("the sign-in server is not https: {issuer}"));
     }
     let (as_origin, as_path) = split(&issuer).ok_or("the sign-in server is not a URL")?;
@@ -133,12 +155,12 @@ pub fn begin(
     ))
     .or_else(|_| get(&format!("{issuer}/.well-known/openid-configuration")))
     .map_err(|e| format!("this server does not say how to sign in: {e}"))?;
-    let authorize = endpoint(&meta, "authorization_endpoint")?;
-    let token_endpoint = endpoint(&meta, "token_endpoint")?;
+    let authorize = endpoint(&meta, "authorization_endpoint", url)?;
+    let token_endpoint = endpoint(&meta, "token_endpoint", url)?;
     let client_id = match client_id {
         Some(id) => id.to_owned(),
         None => {
-            let register = endpoint(&meta, "registration_endpoint").map_err(|_| {
+            let register = endpoint(&meta, "registration_endpoint", url).map_err(|_| {
                 "this server does not register apps by itself: give the connector a `clientId`"
                     .to_owned()
             })?;
@@ -186,9 +208,16 @@ pub fn begin(
     Ok((address, state, pending))
 }
 
+/// Why there are no new tokens. `refused`: the sign-in server said no, so the same request
+/// will not do better later.
+pub struct Failed {
+    pub refused: bool,
+    pub why: String,
+}
+
 /// Trades the code the browser came back with for tokens.
 pub fn finish(pending: &Pending, code: &str) -> Result<Tokens, String> {
-    grant(
+    let granted = grant(
         &pending.token_endpoint,
         &pending.client_id,
         &pending.resource,
@@ -199,12 +228,16 @@ pub fn finish(pending: &Pending, code: &str) -> Result<Tokens, String> {
             ("redirect_uri", &pending.redirect),
             ("code_verifier", &pending.verifier),
         ],
-    )
+    );
+    granted.map_err(|failed| failed.why)
 }
 
 /// New tokens for old, when the server gave a way to renew.
-pub fn renew(old: &Tokens) -> Result<Tokens, String> {
-    let refresh = old.refresh.as_deref().ok_or("sign in again")?;
+pub fn renew(old: &Tokens) -> Result<Tokens, Failed> {
+    let refresh = old.refresh.as_deref().ok_or(Failed {
+        refused: true,
+        why: "sign in again".into(),
+    })?;
     grant(
         &old.token_endpoint,
         &old.client_id,
@@ -220,7 +253,7 @@ fn grant(
     resource: &str,
     old_refresh: Option<&str>,
     fields: &[(&str, &str)],
-) -> Result<Tokens, String> {
+) -> Result<Tokens, Failed> {
     let mut all = fields.to_vec();
     all.extend([("client_id", client_id), ("resource", resource)]);
     let response = agent()
@@ -228,11 +261,16 @@ fn grant(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
         .send(form(&all).as_bytes())
-        .map_err(|e| format!("cannot reach {token_endpoint}: {e}"))?;
-    let answer = json_of(response, "the sign-in server")?;
-    let access = answer["access_token"]
-        .as_str()
-        .ok_or("the sign-in server gave no access token")?;
+        .map_err(|e| Failed {
+            refused: false,
+            why: format!("cannot reach {token_endpoint}: {e}"),
+        })?;
+    let refused = response.status().is_client_error();
+    let answer = json_of(response, "the sign-in server").map_err(|why| Failed { refused, why })?;
+    let access = answer["access_token"].as_str().ok_or(Failed {
+        refused: true,
+        why: "the sign-in server gave no access token".into(),
+    })?;
     Ok(Tokens {
         access: access.to_owned(),
         // A server may keep the old one valid and send none.
@@ -339,6 +377,8 @@ mod tests {
             "https://mcp.example.com/x",
             "http://127.0.0.1:9/x",
             "http://localhost/x",
+            "http://[::1]/x",
+            "http://[::1]:8080/x",
         ] {
             assert!(safe(ok), "{ok}");
         }
@@ -347,9 +387,23 @@ mod tests {
             "http://127.0.0.1.evil.com/x",
             "ftp://x",
             "http://localhost.evil.com",
+            "http://localhost:1@192.168.1.1/x",
+            "https://localhost@evil.com/x",
+            "http://127.0.0.1\\@evil.com/x",
+            "http://[::1/x",
+            "HTTP://evil.com/x",
+            "javascript://localhost/x",
         ] {
             assert!(!safe(bad), "{bad}");
         }
+        // What a server elsewhere names may not be on this Mac.
+        assert!(fit(
+            "https://auth.example.com/x",
+            "https://mcp.example.com/"
+        ));
+        assert!(fit("http://127.0.0.1:1/x", "http://localhost:2/mcp"));
+        assert!(!fit("http://127.0.0.1:1/x", "https://mcp.example.com/"));
+        assert!(!fit("https://localhost/x", "https://mcp.example.com/"));
         assert_eq!(
             split("https://a.com:8/mcp/v1/?x=1"),
             Some(("https://a.com:8", "/mcp/v1"))

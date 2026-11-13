@@ -1678,17 +1678,26 @@ struct Remote {
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// What the next token's `expires_in` will be.
     lifetime: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The next call to `/mcp` is told its token has ended, whatever the token.
+    ends: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// `/token` gives no tokens.
+    refuses: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Remote {
     fn start() -> Remote {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Mutex};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let host = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let lifetime = Arc::new(AtomicU64::new(3600));
+        let (ends, refuses) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
         let (base, log, life) = (format!("http://{host}"), seen.clone(), lifetime.clone());
+        let (end, refuse) = (ends.clone(), refuses.clone());
         std::thread::spawn(move || {
             let mut tokens = 0;
             for stream in listener.incoming().flatten() {
@@ -1733,6 +1742,9 @@ impl Remote {
                         log.lock().unwrap().push(format!("register {body}"));
                         (201, "", json!({"client_id": "client-1"}))
                     }
+                    "/token" if refuse.load(Ordering::SeqCst) => {
+                        (400, "", json!({"error": "invalid_grant"}))
+                    }
                     "/token" => {
                         log.lock().unwrap().push(format!("token {body}"));
                         tokens += 1;
@@ -1748,7 +1760,8 @@ impl Remote {
                         log.lock()
                             .unwrap()
                             .push(format!("mcp [{auth}] [{session}] {body}"));
-                        if auth == format!("Bearer access-{tokens}") {
+                        let ended = end.swap(false, Ordering::SeqCst);
+                        if auth == format!("Bearer access-{tokens}") && !ended {
                             (
                                 200,
                                 "mcp-session-id: s1\r\n",
@@ -1772,6 +1785,8 @@ impl Remote {
             host,
             seen,
             lifetime,
+            ends,
+            refuses,
         }
     }
 
@@ -1834,12 +1849,18 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
     // The engine is given an address of the service's, not the server's.
     w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
     w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
-    let told = fs::read_to_string(home.join("bots").join(&bot).join("connectors.log")).unwrap();
-    let told = told.lines().last().unwrap();
+    let log = home.join("bots").join(&bot).join("connectors.log");
+    let last_told = || {
+        let all = fs::read_to_string(&log).unwrap();
+        all.lines().last().unwrap().to_owned()
+    };
+    let told = last_told();
     assert!(
         !told.contains(&remote.host) && !told.contains("x-team"),
         "{told}"
     );
+    // And as off: there is nothing to reach until the user is signed in.
+    assert!(told.contains("\"enabled\":false"), "{told}");
     let local = told
         .split("\"url\":\"http://")
         .nth(1)
@@ -1852,7 +1873,7 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
         local_host.starts_with("127.0.0.1:") && local_path.starts_with("mcp/"),
         "{local}"
     );
-    let call = |body: &str| {
+    let post = |local_path: &str, body: &str| {
         raw_http(
             local_host,
             &format!(
@@ -1861,6 +1882,7 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
             ),
         )
     };
+    let call = |body: &str| post(local_path, body);
 
     // Not signed in: the server is not even asked.
     assert!(call("{}").starts_with("HTTP/1.1 401"), "{}", call("{}"));
@@ -1930,6 +1952,11 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
     w.wait_for(|f| f["type"] == "connectors_changed");
     assert_eq!(signed_in(&mut w), true);
 
+    // The engine learns that the connector is there now.
+    eventually("the engine to be told", || {
+        last_told().contains("\"enabled\":true")
+    });
+
     // Now the engine's message goes through, with the token and the connector's own header
     // added and nothing else of the engine's; the answer comes back whole.
     let answer = call("{\"id\":1}");
@@ -1958,26 +1985,22 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
         "{everything}"
     );
 
-    // The server ends the token early (it has given out a newer one): renewed, and sent again.
-    remote
-        .lifetime
-        .store(0, std::sync::atomic::Ordering::SeqCst);
-    raw_http(
-        &remote.host,
-        "POST /token HTTP/1.1\r\ncontent-length: 0\r\n\r\n",
-    );
+    // The server ends the token early: renewed, and sent again.
+    let set = std::sync::atomic::Ordering::SeqCst;
+    remote.lifetime.store(0, set);
+    remote.ends.store(true, set);
     assert!(call("{\"id\":2}").starts_with("HTTP/1.1 200"));
     let asked = remote.seen("mcp");
     assert!(
         asked[1].starts_with("mcp [Bearer access-1]")
-            && asked[2].starts_with("mcp [Bearer access-3]"),
+            && asked[2].starts_with("mcp [Bearer access-2]"),
         "{asked:?}"
     );
-    assert!(remote.seen("token")[2].contains("grant_type=refresh_token&refresh_token=refresh-1"));
+    assert!(remote.seen("token")[1].contains("grant_type=refresh_token&refresh_token=refresh-1"));
     // That token is at its end already (`expires_in` 0): renewed before it is used.
     assert!(call("{\"id\":3}").starts_with("HTTP/1.1 200"));
     assert!(
-        remote.seen("mcp")[3].starts_with("mcp [Bearer access-4]"),
+        remote.seen("mcp")[3].starts_with("mcp [Bearer access-3]"),
         "{:?}",
         remote.seen("mcp")
     );
@@ -2018,5 +2041,40 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
         json!({"bot": bot, "connector": connector(&url)}),
     );
     assert!(come_back(state).starts_with("HTTP/1.1 200"));
+    assert_eq!(signed_in(&mut w), false);
+    // Signed in once more, where the connector is now; then out: the engine loses it.
+    let sign_in = |w: &mut Window| {
+        let address = w.ok("sign_in_connector", json!({"bot": bot, "name": "notes"}))["url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let state = address.split("state=").nth(1).unwrap();
+        let state = state.split('&').next().unwrap();
+        assert!(come_back(state).starts_with("HTTP/1.1 200"));
+        assert_eq!(signed_in(w), true);
+        eventually("the engine to be told", || {
+            last_told().contains("\"enabled\":true")
+        });
+    };
+    sign_in(&mut w);
+    let told = last_told();
+    let path = told.split("\"url\":\"http://").nth(1).unwrap();
+    let path = path.split('"').next().unwrap().split_once('/').unwrap().1;
+    assert_ne!(path, local_path);
+    assert!(post(path, "{}").starts_with("HTTP/1.1 200"));
+    w.ok("sign_out_connector", json!({"bot": bot, "name": "notes"}));
+    assert_eq!(signed_in(&mut w), false);
+    eventually("the engine to be told", || {
+        last_told().contains("\"enabled\":false")
+    });
+    let before = remote.seen("mcp").len();
+    assert!(post(path, "{}").starts_with("HTTP/1.1 401"));
+    assert_eq!(remote.seen("mcp").len(), before);
+
+    // A sign-in that the server will not renew is over: the user is shown as signed out.
+    sign_in(&mut w);
+    remote.refuses.store(true, set);
+    assert!(post(path, "{}").starts_with("HTTP/1.1 401"));
+    assert_eq!(remote.seen("mcp").len(), before);
     assert_eq!(signed_in(&mut w), false);
 }

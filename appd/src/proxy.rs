@@ -46,11 +46,13 @@ pub enum Ask {
     /// The sign-in that was given `state`; it is taken, and cannot come back twice.
     Take(String, Sender<Option<Pending>>),
     /// New tokens for the connector `name` of `bot`, made for the server at `resource`.
-    /// `None`: the sign-in is no longer good.
+    /// `None`: the sign-in is no longer good. `after`: the access token they were renewed
+    /// from; they take that one's place and no other's.
     Tokens {
         bot: String,
         name: String,
         resource: String,
+        after: Option<String>,
         tokens: Option<Tokens>,
     },
 }
@@ -61,11 +63,12 @@ fn ask<T>(tx: &Sender<Msg>, make: impl FnOnce(Sender<Option<T>>) -> Ask) -> Opti
     answered.recv_timeout(WAIT).ok().flatten()
 }
 
-fn keep(tx: &Sender<Msg>, up: &Upstream, tokens: Option<Tokens>) {
+fn keep(tx: &Sender<Msg>, up: &Upstream, old: &Tokens, tokens: Option<Tokens>) {
     let _ = tx.send(Msg::Proxy(Ask::Tokens {
         bot: up.bot.clone(),
         name: up.name.clone(),
         resource: up.url.clone(),
+        after: Some(old.access.clone()),
         tokens,
     }));
 }
@@ -104,6 +107,7 @@ pub fn callback(tx: &Sender<Msg>, query: &str) -> (u16, String) {
                 bot: pending.bot.clone(),
                 name: pending.name.clone(),
                 resource: tokens.resource.clone(),
+                after: None,
                 tokens: Some(tokens),
             }));
             (
@@ -130,15 +134,19 @@ pub fn forward(
     let mut tokens = up.tokens.take().ok_or_else(signed_out)?;
     let renewed = |up: &Upstream, old: &Tokens| match oauth::renew(old) {
         Ok(new) => {
-            keep(tx, up, Some(new.clone()));
+            keep(tx, up, old, Some(new.clone()));
             Ok(new)
         }
-        Err(e) => {
+        Err(failed) => {
             // Not a reason to forget the sign-in when the server merely cannot be reached.
-            if old.refresh.is_none() {
-                keep(tx, up, None);
+            if failed.refused {
+                keep(tx, up, old, None);
             }
-            Err((401, format!("the sign-in ran out and was not renewed: {e}")))
+            let why = failed.why;
+            Err((
+                401,
+                format!("the sign-in ran out and was not renewed: {why}"),
+            ))
         }
     };
     if tokens.expires_ms.is_some_and(|at| at < now_ms() + EARLY_MS) {

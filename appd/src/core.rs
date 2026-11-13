@@ -704,7 +704,7 @@ impl Core {
                 let name = str_field(f, "name")?;
                 self.oauth_connector(&bot, name)?;
                 self.store.set_tokens(&bot, name, None).map_err(internal)?;
-                self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                self.connectors_changed(&bot);
                 Ok(Some(json!({})))
             }
             "set_connector" => {
@@ -1100,6 +1100,9 @@ impl Core {
         let mut connectors = self.store.connectors(bot)?;
         for c in connectors.iter_mut().filter(|c| c.oauth) {
             let key = self.store.oauth_key(bot, &c.name, &sys::random_hex(16))?;
+            // Until the user is signed in there is nothing to reach: an engine does not try,
+            // and tries anew once the connector comes on.
+            c.enabled &= self.store.tokens(bot, &c.name)?.is_some();
             c.oauth = false;
             c.client_id = None;
             match self.hook_port {
@@ -1167,6 +1170,7 @@ impl Core {
                 bot,
                 name,
                 resource,
+                after,
                 tokens,
             } => {
                 // The connector may have changed while the browser or the server took their
@@ -1174,7 +1178,12 @@ impl Core {
                 let still = self
                     .oauth_connector(&bot, &name)
                     .is_ok_and(|(_, url)| url == resource);
-                if !still {
+                let had = self.store.tokens(&bot, &name).ok().flatten();
+                // A renewal takes the place of the tokens it began with only: the user may
+                // have signed out, or in again, since.
+                let current =
+                    after.is_none_or(|after| had.as_ref().is_some_and(|had| had.access == after));
+                if !still || !current {
                     return;
                 }
                 let kept = self
@@ -1182,7 +1191,9 @@ impl Core {
                     .oauth_key(&bot, &name, &sys::random_hex(16))
                     .and_then(|_| self.store.set_tokens(&bot, &name, tokens.as_ref()));
                 match kept {
-                    Ok(_) => self.broadcast(&json!({"type": "connectors_changed", "bot": bot})),
+                    // Signed in or out: the engine gains or loses the connector.
+                    Ok(_) if had.is_some() != tokens.is_some() => self.connectors_changed(&bot),
+                    Ok(_) => {}
                     Err(e) => log!("bot {bot}: sign-in of connector {name} not stored: {e}"),
                 }
             }

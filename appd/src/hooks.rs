@@ -227,6 +227,8 @@ fn request(stream: &TcpStream) -> Result<Request, Answer> {
 }
 
 pub fn respond(mut stream: &TcpStream, status: u16, line: &str) -> io::Result<()> {
+    // The words may be another server's: none of them may end the status line.
+    let line = &line.replace(char::is_control, " ");
     let body = if status < 300 {
         serde_json::json!({"ok": true})
     } else {
