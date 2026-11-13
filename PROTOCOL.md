@@ -215,6 +215,27 @@ Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly,
 
 At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-<id>-<slotMs>`, through the ledger, so a crash cannot send it twice. A slot missed while the service was down runs once if it is at most 6 h old; an older one is recorded as `missed`. Every handled slot is kept as a `RoutineRun` (`atMs`, `outcome` `sent`, `failed` or `missed`, `error`); `routines_changed` is sent when one is added. A wall time that does not exist (clocks jump forward) runs when the gap ends; one that happens twice runs at the earlier instant.
 
+A routine may leave out `schedule` when `webhook` is true, and may have both; one with neither is refused (`invalid_routine`). `enabled: false` turns off both.
+
+#### Webhooks
+
+The service listens on `127.0.0.1` only, port 47821 unless `APPD_HOOK_PORT` names another (`0`: any free one). If the port cannot be opened, the service logs it, runs without webhooks, and makes a new token for every routine that had one: whatever holds the port instead is being sent the old ones. A whole request must arrive within 5 s; 16 are served at once.
+
+For a routine with `webhook: true` the service makes `hookToken` (32 hex characters, kept until `webhook` is turned off) and reports `hookUrl`, `http://127.0.0.1:<port>/hooks/<token>`. The token is the only secret: whoever on this Mac knows the URL can start the routine.
+
+`POST <hookUrl>` with an optional body of at most 64 KiB (`content-length` required when there is one; chunked bodies get 411) sends `"[Routine: <name>]\n<prompt>"` with nonce `hook-<id>-<random>`. A body that is not blank follows the prompt, between two copies of a line `--- data <random> ---` made for that request, under a sentence that tells the model it is data from outside and not instructions. The body cannot know the line, so it cannot close its own section. The run is recorded like a scheduled one.
+
+| Status | Meaning |
+|---|---|
+| 202 | Handed to the bot's engine. Whether the engine took it (it refuses while a turn runs) shows in the routine's runs. |
+| 404 | No enabled routine has this token, or the path is not `/hooks/<token>`. |
+| 409 | The bot is in a turn, or has a prompt its engine has not answered. Nothing is recorded; call again later. |
+| 403 | The request has an `Origin` header: web pages may not call webhooks. |
+| 405, 411, 413, 400 | Not `POST`; a chunked body; more than 64 KiB; a malformed request. |
+| 503 | The bot's engine could not be started, or the service did not answer in 5 s. |
+
+Not built yet: starting a routine from a message on a connected channel. There are no channels to receive one until Telegram or Discord is connected.
+
 ### Connectors
 
 Stored per bot (`proto::connectors`): `name` is 1 to 40 characters of `a-z`, `0-9`, `_`, `-`; `transport` is `stdio` (`command`, `args`, `env`) or `http` (`url` starting with `http://` or `https://`, `headers`). Values are stored as plain text. The service sends a bot's list to its engine when the engine starts and after every change (`connectors`).

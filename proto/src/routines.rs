@@ -1,4 +1,4 @@
-//! Routines: prompts the service sends a bot on a schedule. Shapes of
+//! Routines: prompts the service sends a bot on a schedule or when a local webhook is called. Shapes of
 //! `list_routines` and `set_routine`; the rules are in `PROTOCOL.md`.
 
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,7 @@ pub struct RoutineRun {
     pub error: Option<String>,
 }
 
-/// A routine. The fields after `schedule` are output only: the service
+/// A routine. `hook_token`, `hook_url` and the fields after them are output only: the service
 /// ignores them in `set_routine`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,8 +87,21 @@ pub struct Routine {
     pub id: Option<String>,
     pub name: String,
     pub prompt: String,
+    /// Off: neither the schedule nor the webhook starts it.
     pub enabled: bool,
-    pub schedule: Schedule,
+    /// Missing: only the webhook starts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
+    /// Whether a request to `hook_url` starts it too.
+    #[serde(default)]
+    pub webhook: bool,
+    /// Daemon-made secret, kept while `webhook` stays on; turn it off and on for a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_token: Option<String>,
+    /// Output only: where to `POST`. Missing when `webhook` is off or the service's webhook
+    /// port could not be opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_url: Option<String>,
     /// `YYYY-MM-DD` in the schedule's zone: the date the interval counts from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
