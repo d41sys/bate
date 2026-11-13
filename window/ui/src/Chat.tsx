@@ -16,9 +16,14 @@ type Hit = { seq: number };
 
 /**
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
- * `find`: bumped to open the find bar.
+ * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, jump, find = 0 }: { bot: Bot; jump?: { seq: number }; find?: number }) {
+export function Chat({ bot, jump, find = false, used = () => {} }: {
+  bot: Bot;
+  jump?: { seq: number };
+  find?: boolean;
+  used?: () => void;
+}) {
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
@@ -146,10 +151,14 @@ export function Chat({ bot, jump, find = 0 }: { bot: Bot; jump?: { seq: number }
     requestAnimationFrame(() => requestAnimationFrame(() => rows.scrollToIndex(index, { align: "center" })));
   };
   useEffect(() => {
-    if (jump) void show(jump.seq);
+    if (!jump) return;
+    used();
+    void show(jump.seq);
   }, [jump]);
   useEffect(() => {
-    if (find) setFinding(true);
+    if (!find) return;
+    used();
+    setFinding(true);
   }, [find]);
   // Searched once typing pauses; the newest hit is shown first.
   useEffect(() => {

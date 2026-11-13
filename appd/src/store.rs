@@ -114,13 +114,20 @@ pub struct Hit {
 
 /// Up to 40 characters either side of the first `needle` (lower case) in `text`, if there is one.
 fn snippet(text: &str, needle: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let at = lower.find(needle)?;
-    // Lower case can change lengths: count characters, not bytes.
-    let start = lower[..at].chars().count();
+    // Lower case can change lengths ('İ' is two characters): each lower-case byte keeps the
+    // place of the character it came from.
     let chars: Vec<char> = text.chars().collect();
-    let from = start.saturating_sub(40);
-    let to = (start + needle.chars().count() + 40).min(chars.len());
+    let mut lower = String::new();
+    let mut from_char = Vec::new();
+    for (i, c) in chars.iter().enumerate() {
+        for l in c.to_lowercase() {
+            lower.push(l);
+            from_char.resize(lower.len(), i);
+        }
+    }
+    let at = lower.find(needle)?;
+    let (start, end) = (from_char[at], from_char[at + needle.len() - 1] + 1);
+    let (from, to) = (start.saturating_sub(40), (end + 40).min(chars.len()));
     let mut shown: String = chars[from..to].iter().collect();
     if from > 0 {
         shown.insert(0, '…');
@@ -777,6 +784,20 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_snippet_is_cut_around_the_words_even_when_lower_case_is_longer() {
+        // 'İ' lower-cases to two characters: places must still be the text's own.
+        let text = format!("{}needle{}", "İ".repeat(50), "x".repeat(50));
+        let shown = super::snippet(&text, "needle").unwrap();
+        assert_eq!(
+            shown,
+            format!("…{}needle{}…", "İ".repeat(40), "x".repeat(40))
+        );
+        assert_eq!(super::snippet("Hello", "hello").unwrap(), "Hello");
+        assert_eq!(super::snippet("Hello", "bye"), None);
+    }
+
     use super::*;
     use proto::routines::RunOutcome;
 

@@ -19,7 +19,12 @@ export function Palette({ choices, bots, found, close }: {
   const [hits, setHits] = useState<Hit[]>([]);
   const [at, setAt] = useState(0);
   const input = useRef<HTMLInputElement>(null);
-  useEffect(() => input.current?.focus(), []);
+  useEffect(() => {
+    // Focus comes back where it was when the palette closes.
+    const before = document.activeElement as HTMLElement | null;
+    input.current?.focus();
+    return () => before?.focus();
+  }, []);
   useEffect(() => {
     if (query.trim().length < 2) return setHits([]);
     // Searched once typing pauses; an answer to an older query is dropped.
@@ -51,7 +56,7 @@ export function Palette({ choices, bots, found, close }: {
   };
 
   return (
-    <div className="palette" role="dialog" aria-label="Command palette" onClick={close}>
+    <div className="palette" role="dialog" aria-modal="true" aria-label="Command palette" onClick={close}>
       <div onClick={(e) => e.stopPropagation()}>
         <input
           ref={input}
@@ -70,6 +75,8 @@ export function Palette({ choices, bots, found, close }: {
             else if (e.key === "ArrowUp") setAt((a) => Math.max(a - 1, 0));
             else if (e.key === "Enter") pick(shown[chosen]);
             else if (e.key === "Escape") close();
+            // The input is all there is to focus here: Tab stays in the palette.
+            else if (e.key === "Tab") {}
             else return;
             e.preventDefault();
           }}

@@ -38,7 +38,14 @@ impl Bridge {
                     thread::sleep(RETRY);
                     continue;
                 };
-                *writer.lock().unwrap_or_else(|e| e.into_inner()) = stream.try_clone().ok();
+                {
+                    // Checked under the lock `stop` takes: a stop now is seen, or sees this stream.
+                    let mut to = writer.lock().unwrap_or_else(|e| e.into_inner());
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    *to = stream.try_clone().ok();
+                }
                 let mut reader = BufReader::new(stream);
                 let mut line = Vec::new();
                 loop {

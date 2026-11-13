@@ -28,7 +28,7 @@ function App() {
   const [dragged, setDragged] = useState<string>();
   const [palette, setPalette] = useState(false);
   const [jump, setJump] = useState<{ seq: number }>();
-  const [find, setFind] = useState(0);
+  const [find, setFind] = useState(false);
   const newName = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -84,7 +84,7 @@ function App() {
     find: () => {
       if (!bot) return;
       setTab("chat");
-      setFind((n) => n + 1);
+      setFind(true);
     },
     "new-bot": () => newName.current?.focus(),
     "new-window": () => void newWindow().catch((e: Error) => setError(e.message)),
@@ -92,9 +92,10 @@ function App() {
   const act = useRef(actions);
   act.current = actions;
   useEffect(() => {
-    const keys: Record<string, string> = { k: "palette", f: "find", n: "new-bot", N: "new-window" };
+    // By the key, not the letter it typed (Caps Lock).
+    const keys: Record<string, string> = { KeyK: "palette", KeyF: "find", KeyN: "new-bot", "Shift+KeyN": "new-window" };
     const onKey = (e: KeyboardEvent) => {
-      const id = e.metaKey && !e.altKey && !e.ctrlKey ? keys[e.shiftKey ? e.key.toUpperCase() : e.key] : undefined;
+      const id = e.metaKey && !e.altKey && !e.ctrlKey ? keys[e.shiftKey ? `Shift+${e.code}` : e.code] : undefined;
       if (!id) return;
       e.preventDefault();
       act.current[id]();
@@ -171,7 +172,16 @@ function App() {
             </header>
             {/* An installed agent chooses its own model. */}
             {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
-            {tab === "chat" && <Chat key={`${bot.id}-${connection}`} bot={bot} jump={jump} find={find} />}
+            {tab === "chat" && <Chat
+                key={`${bot.id}-${connection}`}
+                bot={bot}
+                jump={jump}
+                find={find}
+                used={() => {
+                  setJump(undefined);
+                  setFind(false);
+                }}
+              />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setSelected(undefined)} />}
