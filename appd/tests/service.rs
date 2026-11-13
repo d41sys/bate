@@ -36,6 +36,7 @@ while IFS= read -r line; do
             connect) nc -U -w 2 "$path" </dev/null >/dev/null 2>&1 && r=ok || r=refused ;;
             keychain) security list-keychains >/dev/null 2>&1 && r=ok || r=refused ;;
             signal) kill -0 "$path" 2>/dev/null && r=ok || r=refused ;;
+            prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
             env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
@@ -1056,6 +1057,21 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     assert_eq!(probe(&mut w, &bot, "n4d", "keychain x"), "refused");
     let signal = format!("signal {}", std::process::id());
     assert_eq!(probe(&mut w, &bot, "n4e", &signal), "refused");
+    // Preferences are written by a system service into the user's real home, for whoever
+    // asks: an app's startup settings would be a way out.
+    let domain = format!("com.bate.probe-{}", std::process::id());
+    let wrote = probe(&mut w, &bot, "n4j", &format!("prefs {domain}"));
+    let read = Command::new("/usr/bin/defaults")
+        .args(["read", &domain])
+        .output();
+    let _ = Command::new("/usr/bin/defaults")
+        .args(["delete", &domain])
+        .output();
+    assert_eq!(wrote, "refused");
+    assert!(
+        !read.unwrap().status.success(),
+        "the preference was written"
+    );
     // Other programs' temporary files.
     let tmp = PathBuf::from(format!("/private/tmp/appd-probe-{}", std::process::id()));
     fs::write(&tmp, "x").unwrap();
@@ -1102,10 +1118,15 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     fs::remove_file(&tmp).unwrap();
 
     // And back: the limit holds again from the next thing the bot does.
+    // A link the bot left where the service makes its temporary folder is not followed.
+    let tmp_dir = home.join("bots").join(&bot).join(".tmp");
+    let _ = fs::remove_dir_all(&tmp_dir);
+    std::os::unix::fs::symlink(&home.0, &tmp_dir).unwrap();
     stopped(&mut w, false);
     fs::remove_file(&outside).unwrap();
     assert_eq!(probe(&mut w, &bot, "n8", &write_outside), "refused");
     assert!(!outside.exists());
+    assert!(fs::symlink_metadata(&tmp_dir).unwrap().is_dir());
 
     // Not in the middle of a turn: it would go on under the old rule.
     w.ok("prompt", json!({"bot": bot, "nonce": "n9", "text": "hi"}));

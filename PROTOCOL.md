@@ -149,8 +149,8 @@ A nonce the engine refused (`engine_error`), or that could not be sent because t
 A bot is kept inside its folder (`bots/<id>` under the service's home) by the operating system unless `wholeDisk` is true; a new bot is limited. The service starts a limited bot's engine under macOS `sandbox-exec`, so the rule holds for the engine and for every program it starts, whatever was approved:
 
 - **Writing:** only inside the folder.
-- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores` or the service's home, except the folder and the engine's program. System files stay readable.
-- **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to processes outside, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), and only the system services needed to look up names, check certificates and read preferences (so not the keychain, the clipboard or the file index).
+- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder and the engine's program. System files stay readable.
+- **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to or looks at processes outside (so no `pgrep`), no drivers, no shared memory, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), no preferences (`defaults` would write into the user's home), and only the system services needed to look up names and check certificates (so not the keychain, the clipboard or the file index).
 - **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
 - **Network:** open, local ports included: the engine has to reach its model.
 

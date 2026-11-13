@@ -3,19 +3,20 @@
 
 use crate::{paths, sys};
 use std::ffi::OsString;
-use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::{fs, io};
 
 /// Everything is allowed except what is named here. Later rules win.
 /// - Writing: only inside the folder.
-/// - Reading: not the users' files, other disks, temporary files, or the service's own data
-///   (other bots, stored connector secrets); the folder and the engine's program are let
-///   through again.
+/// - Reading: not the users' files, other disks, temporary files, logs, Homebrew's data, other
+///   terminals' input, or the service's own data (other bots, stored connector secrets); the folder and
+///   the engine's program are let through again.
 /// - No way round through another program: no Apple events, no opening apps, no launchd jobs,
-///   no signals to processes outside, and only the system services a command-line program
-///   needs to look up names, check certificates and read preferences (so not the keychain,
-///   the clipboard or the file index).
+///   no signals to or looks at processes outside, no drivers, no shared memory, no preferences (the preferences service writes into the
+///   user's home for whoever asks: an app's startup settings are a way out), and only the
+///   system services a command-line program needs to look up names and check certificates
+///   (so not the keychain, the clipboard or the file index).
 /// - No local sockets outside the folder but the system's name lookup and log. Connecting is
 ///   not reading: the service's own socket would take the engine for a window and lift the
 ///   limit on request, and the user's key agent would sign for it.
@@ -25,14 +26,20 @@ const PROFILE: &str = r#"(version 1)
 (allow default)
 (deny file-write*)
 (deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/var/folders")
-  (subpath "/private/tmp") (subpath "/cores") (subpath (param "APP")))
+  (subpath "/private/tmp") (subpath "/cores") (subpath "/opt/homebrew/var")
+  (subpath "/usr/local/var") (subpath "/private/var/log")
+  (subpath "/private/var/db/diagnostics") (subpath (param "APP")))
+(deny file-read-data (regex #"^/dev/ttys[0-9]+$"))
 (allow file-read-metadata)
 (allow file-read* (literal (param "ENGINE")))
 (allow file-read* file-write* (subpath (param "FOLDER")))
 (allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))
 (deny appleevent-send lsopen job-creation)
-(deny signal)
-(allow signal (target same-sandbox))
+(deny user-preference*)
+(deny signal process-info*)
+(allow signal process-info* (target same-sandbox))
+(deny iokit-open ipc-posix-shm*)
+(allow ipc-posix-shm-read* (ipc-posix-name "apple.shm.notification_center"))
 (deny mach-lookup)
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.libinfo")
@@ -40,14 +47,11 @@ const PROFILE: &str = r#"(version 1)
   (global-name "com.apple.system.notification_center")
   (global-name "com.apple.system.logger")
   (global-name "com.apple.logd")
-  (global-name "com.apple.diagnosticd")
   (global-name "com.apple.trustd.agent")
   (global-name "com.apple.trustd")
   (global-name "com.apple.SystemConfiguration.configd")
   (global-name "com.apple.SystemConfiguration.DNSConfiguration")
   (global-name "com.apple.dnssd.service")
-  (global-name "com.apple.cfprefsd.daemon")
-  (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.bsd.dirhelper")
   (global-name "com.apple.networkd")
   (global-name "com.apple.nehelper")
@@ -76,6 +80,10 @@ pub fn command(program: &Path, folder: &Path, whole_disk: bool) -> io::Result<Co
     let (program, folder) = (program.canonicalize()?, folder.canonicalize()?);
     let app = paths::home().canonicalize()?;
     let tmp = folder.join(".tmp");
+    // The bot may have left a link there; the service must not follow it out of the folder.
+    if fs::symlink_metadata(&tmp).is_ok_and(|meta| !meta.is_dir()) {
+        fs::remove_file(&tmp)?;
+    }
     sys::create_private_dir(&tmp)?;
     let param = |name: &str, path: &Path| {
         let mut param = OsString::from(format!("{name}="));
