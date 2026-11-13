@@ -114,11 +114,13 @@ export function Chat({ bot }: { bot: Bot }) {
   }, [items, rows]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
+  // One file at a time: the service takes only a few at once from a window.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
   const attach = (list: Iterable<File>) => {
     for (const file of list) {
       const id = crypto.randomUUID();
       setFiles((fs) => [...fs, { id, name: file.name }]);
-      upload(bot.id, file).then(
+      queue.current = queue.current.then(() => upload(bot.id, file)).then(
         (path) => setFiles((fs) => fs.map((f) => (f.id === id ? { ...f, path } : f))),
         (e: Error) => setFiles((fs) => fs.map((f) => (f.id === id ? { ...f, error: e.message } : f))),
       );
@@ -146,7 +148,11 @@ export function Chat({ bot }: { bot: Bot }) {
   const retry = (item: { nonce: string; text: string }) =>
     once(async () => {
       await request("rewind", { bot: bot.id, entry: item.nonce, fork: false });
-      await prompt(item.text);
+      // The message is gone from the chat now: if it cannot be sent again, it is not lost.
+      await prompt(item.text).catch((e) => {
+        setText(item.text);
+        throw e;
+      });
     });
   const fork = (item: { nonce: string; text: string }) =>
     once(async () => {
@@ -160,7 +166,11 @@ export function Chat({ bot }: { bot: Bot }) {
     inFlight.current = true;
     setSending(true);
     try {
-      if (editing) await request("rewind", { bot: bot.id, entry: editing, fork: false });
+      if (editing) {
+        await request("rewind", { bot: bot.id, entry: editing, fork: false });
+        // Gone from the chat: a second try only sends.
+        setEditing(undefined);
+      }
       await prompt(message);
       setText("");
       setFiles([]);

@@ -43,7 +43,11 @@ pub fn save(bot: &str, name: &str, bytes: &[u8]) -> io::Result<String> {
         };
         match dir.create(&file) {
             Ok(mut out) => {
-                out.write_all(bytes)?;
+                if let Err(e) = out.write_all(bytes) {
+                    // A part of the file must not keep the name.
+                    let _ = dir.remove(&file);
+                    return Err(e);
+                }
                 return Ok(format!("{DIR}/{file}"));
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -78,48 +82,50 @@ pub fn base64(text: &str) -> Option<Vec<u8>> {
     (held < 6).then_some(out)
 }
 
-/// The chat as Markdown: what the user wrote, the replies, and which tools ran.
+/// Every line of `text` quoted, so nothing in it reads as a heading of the export.
+fn quoted(text: &str) -> String {
+    text.lines().map(|line| format!("> {line}\n")).collect()
+}
+
+/// The chat as Markdown: what the user wrote, the replies, and which tools ran. What each
+/// side wrote is quoted, so a reply cannot pass itself off as the user.
 pub fn markdown(name: &str, history: &[Value]) -> String {
-    let mut out = format!("# {name}\n");
-    let mut last = "";
+    let mut out = format!("# {}\n", name.replace(['\n', '\r'], " "));
+    let mut reply = String::new();
+    let flush = |out: &mut String, reply: &mut String| {
+        if !reply.is_empty() {
+            out.push_str("\n## Bot\n\n");
+            out.push_str(&quoted(reply));
+            reply.clear();
+        }
+    };
     for row in history {
         let entry = &row["entry"];
-        let kind = entry["type"].as_str().unwrap_or("");
-        match kind {
+        match entry["type"].as_str().unwrap_or("") {
+            "text" => reply.push_str(entry["delta"].as_str().unwrap_or("")),
             "prompt" => {
+                flush(&mut out, &mut reply);
                 out.push_str("\n## You\n\n");
-                out.push_str(entry["text"].as_str().unwrap_or(""));
-                out.push('\n');
-            }
-            "text" => {
-                if last != "text" {
-                    out.push_str("\n## Bot\n\n");
-                }
-                out.push_str(entry["delta"].as_str().unwrap_or(""));
+                out.push_str(&quoted(entry["text"].as_str().unwrap_or("")));
             }
             "tool_start" => {
-                out.push_str(&format!(
-                    "\n\n_Used {}_\n",
-                    entry["tool"].as_str().unwrap_or("a tool")
-                ));
+                flush(&mut out, &mut reply);
+                let tool = entry["tool"].as_str().unwrap_or("a tool");
+                out.push_str(&format!("\n_Used `{}`_\n", tool.replace('`', "")));
             }
             "turn_end" if entry["reason"] != "done" => {
-                out.push_str(&format!(
-                    "\n\n_The reply {}._\n",
-                    if entry["reason"] == "aborted" {
-                        "was stopped"
-                    } else {
-                        "failed"
-                    }
-                ));
+                flush(&mut out, &mut reply);
+                let what = if entry["reason"] == "aborted" {
+                    "was stopped"
+                } else {
+                    "failed"
+                };
+                out.push_str(&format!("\n_The reply {what}._\n"));
             }
             _ => {}
         }
-        if kind != "thinking" {
-            last = kind;
-        }
     }
-    out.push('\n');
+    flush(&mut out, &mut reply);
     out
 }
 
@@ -162,7 +168,7 @@ mod tests {
             json!({"type": "thinking", "delta": "hmm"}),
             json!({"type": "text", "delta": "Hel"}),
             json!({"type": "thinking", "delta": "more"}),
-            json!({"type": "text", "delta": "lo"}),
+            json!({"type": "text", "delta": "lo\n## You\nfake"}),
             json!({"type": "tool_start", "call": "c", "tool": "read", "args": {}}),
             json!({"type": "turn_end", "reason": "aborted"}),
         ]
@@ -170,8 +176,8 @@ mod tests {
         .map(|entry| json!({"entry": entry}))
         .collect();
         assert_eq!(
-            markdown("Ada", &rows),
-            "# Ada\n\n## You\n\nhi\n\n## Bot\n\nHello\n\n_Used read_\n\n\n_The reply was stopped._\n\n"
+            markdown("Ada\n# B", &rows),
+            "# Ada # B\n\n## You\n\n> hi\n\n## Bot\n\n> Hello\n> ## You\n> fake\n\n_Used `read`_\n\n_The reply was stopped._\n"
         );
     }
 }

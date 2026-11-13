@@ -2,9 +2,12 @@ import { request } from "./service.ts";
 
 /** Bytes per part: as base64 they stay well under the service's 1 MiB line. */
 const PART = 512 * 1024;
+/** The service's limit for one file (PROTOCOL.md, `attach`); a larger one is not even read. */
+const MAX = 25 * 1024 * 1024;
 
 /** Sends the file to the bot's `attachments/` folder and gives its path there. */
 export async function upload(bot: string, file: File): Promise<string> {
+  if (file.size > MAX) throw new Error("a file may be at most 25 MiB");
   const bytes = new Uint8Array(await file.arrayBuffer());
   let id: string | undefined;
   for (let at = 0; ; at += PART) {

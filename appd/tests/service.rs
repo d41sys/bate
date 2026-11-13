@@ -844,7 +844,7 @@ fn a_file_comes_in_parts_into_the_bots_folder_and_a_chat_exports_as_markdown() {
     );
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
-        "# Ada\n\n## You\n\nhi\n\n## Bot\n\nhello\n"
+        "# Ada\n\n## You\n\n> hi\n\n## Bot\n\n> hello\n"
     );
 }
 
