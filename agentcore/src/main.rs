@@ -5,6 +5,7 @@ mod mcp;
 mod memory;
 mod model;
 mod session;
+mod skills;
 mod tools;
 mod turn;
 

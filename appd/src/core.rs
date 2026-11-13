@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::clients::ClientHandle;
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{limit, memory, paths, schedule};
+use crate::{limit, memory, paths, schedule, skills};
 
 pub enum Msg {
     ClientConnected {
@@ -455,6 +455,29 @@ impl Core {
                 }
                 self.next_due = 0;
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+                Ok(Some(json!({})))
+            }
+            "list_skills" => {
+                let bot = self.bot_of(f)?;
+                Ok(Some(
+                    json!({"skills": skills::list(&bot).map_err(|e| ("internal", e.to_string()))?}),
+                ))
+            }
+            "install_skill" => {
+                let bot = self.bot_of(f)?;
+                let skill = skills::install(&bot, std::path::Path::new(str_field(f, "path")?))
+                    .map_err(|e| ("invalid_skill", e))?;
+                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+                Ok(Some(json!({"skill": skill})))
+            }
+            "delete_skill" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                proto::skills::check_name(name).map_err(bad)?;
+                if !skills::delete(&bot, name).map_err(|e| ("internal", e.to_string()))? {
+                    return Err(("no_such_skill", format!("no skill `{name}`")));
+                }
+                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
             "list_memory" => {

@@ -86,7 +86,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `busy`, `export_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -107,6 +107,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_connectors` | `bot` | `{connectors:[Connector]}` |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
+| `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
+| `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
+| `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
 | `list_memory` | `bot` | `{notes:[{name, bytes, modifiedMs}]}`, by name |
 | `read_memory` | `bot`, `name` | `{text}`, or `no_such_note` |
 | `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
@@ -131,6 +134,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
+| `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
 
 ### Transcript
@@ -148,6 +152,25 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Skills
+
+Same shapes as `proto::skills`. A skill is a folder with a `SKILL.md` that begins with a front matter:
+
+```
+---
+name: pdf-forms
+description: Fill in PDF forms. Use for any .pdf with fields.
+---
+```
+
+`name` is 1 to 64 characters of a-z, 0-9 and `-`; `description` is one line of 1 to 1024 characters. Other keys are ignored. The rest of the file, and any other files in the folder, are the instructions and what they need.
+
+`install_skill` copies the folder at `path` into `skills/<name>/` in the bot's folder, in place of a skill of the same name. It is refused (`invalid_skill`) when `path` is not a folder, has no valid `SKILL.md`, holds a link or a special file, or is larger than 500 files, 20 MiB or 12 folders deep. The copy is made in the service's own `staging/` folder and moved in whole.
+
+The engine tells the model, at the start of every turn, each skill's name, description and file (`skills/<name>/SKILL.md`), at most 50, and to read that file before a task the skill is for. The instructions themselves are read with the ordinary `read` tool, so the bot's `read` permission applies. A folder whose name is not its skill's `name` is not a skill.
+
+As with memory, the service never follows a link in the bot's folder: it holds the folder open and works on plain names in it.
 
 ### Memory
 

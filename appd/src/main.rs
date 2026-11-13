@@ -11,6 +11,7 @@ mod memory;
 mod paths;
 mod report;
 mod schedule;
+mod skills;
 mod store;
 mod sys;
 
