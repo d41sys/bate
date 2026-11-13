@@ -636,6 +636,37 @@ impl Core {
                 }
                 Ok(Some(json!({})))
             }
+            "set_agent" => {
+                let bot = self.bot_of(f)?;
+                let command: Option<Vec<String>> = serde_json::from_value(f["command"].clone())
+                    .map_err(|_| bad("`command` must be a list of strings, or null"))?;
+                let fits = |c: &Vec<String>| {
+                    let long = c
+                        .iter()
+                        .any(|part| part.len() > 4096 || part.contains('\0'));
+                    !c.is_empty() && !c[0].is_empty() && c.len() <= 64 && !long
+                };
+                if !command.as_ref().is_none_or(fits) {
+                    return Err(bad(
+                        "`command` is a program and up to 63 arguments, or null for Bate's own engine",
+                    ));
+                }
+                if self.store.agent(&bot).map_err(internal)? != command {
+                    if self.engines.get(&bot).is_some_and(|r| r.busy) {
+                        return Err(("busy", "the bot is in a turn; stop it first".into()));
+                    }
+                    self.store
+                        .set_agent(&bot, command.as_deref())
+                        .map_err(internal)?;
+                    // The conversation is the other engine's: this one could not reopen it.
+                    self.store.clear_session(&bot).map_err(internal)?;
+                    if let Some(r) = self.engines.get_mut(&bot) {
+                        let _ = r.child.kill();
+                    }
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                }
+                Ok(Some(json!({})))
+            }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;
                 let mut levels = HashMap::new();
@@ -763,6 +794,9 @@ impl Core {
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
+        if let Ok(Some(agent)) = self.store.agent(bot) {
+            row["agent"] = json!(agent);
+        }
         row
     }
 
@@ -832,6 +866,14 @@ impl Core {
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
+        let agent = self.store.agent(bot).map_err(internal)?;
+        if agent.is_some() && !whole_disk {
+            return Err((
+                "engine_failed",
+                "an installed agent keeps its login outside the bot's folder: give this bot the whole disk to run it"
+                    .into(),
+            ));
+        }
         let open = match self.store.session(bot).map_err(internal)? {
             Some(session) => Op::Open {
                 bot: bot.into(),
@@ -845,6 +887,13 @@ impl Core {
             mut output,
             stderr,
         } = limit::command(&engine_program(), &dir, whole_disk)
+            .map(|mut command| {
+                // The engine program's other half: it runs the agent and translates.
+                if let Some(agent) = &agent {
+                    command.arg("acp").args(agent);
+                }
+                command
+            })
             .and_then(Engine::run)
             .map_err(failed)?;
         let name = bot.to_owned();

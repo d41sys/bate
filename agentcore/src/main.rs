@@ -1,6 +1,7 @@
 //! `agentcore`: Bate's own engine. Speaks the engine protocol (`PROTOCOL.md`) on
 //! stdin/stdout in the bot's folder; one turn at a time runs on its own thread.
 
+mod acp;
 mod mcp;
 mod memory;
 mod model;
@@ -71,6 +72,11 @@ struct Engine {
 }
 
 fn main() {
+    // Another engine in the same program: an installed agent in place of our own turns.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "acp") {
+        std::process::exit(acp::run(&args[1..]));
+    }
     let out = Out(Arc::new(Mutex::new(io::stdout())));
     out.send(&Event::Ready {
         protocol: proto::PROTOCOL,

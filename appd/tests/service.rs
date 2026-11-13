@@ -16,13 +16,16 @@ use serde_json::{Value, json};
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
+/// The arguments it was started with are logged to `args.log`, one line per start; each `start`
+/// operation adds a line to `starts.log`.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> args.log
 echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
   ok="{\"type\":\"response\",\"id\":\"$id\"}"
   case "$line" in
-    *'"type":"start"'*) printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
+    *'"type":"start"'*) echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
@@ -2077,4 +2080,83 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
     assert!(post(path, "{}").starts_with("HTTP/1.1 401"));
     assert_eq!(remote.seen("mcp").len(), before);
     assert_eq!(signed_in(&mut w), false);
+}
+
+#[test]
+fn a_bot_runs_on_an_installed_agent_once_it_has_the_whole_disk() {
+    let home = home("agent");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let started_with = || {
+        let log = fs::read_to_string(home.join("bots").join(&bot).join("args.log")).unwrap();
+        log.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        let response = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        (response["code"].clone(), response["error"].to_string())
+    };
+    let turn = |w: &mut Window, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    };
+
+    // The engine that ran is stopped by a change; the next one starts when that is done.
+    let stopped = |w: &mut Window| {
+        while w.ok("list_bots", json!({}))["bots"][0]["running"] == true {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    // Bate's own engine, and a conversation with it.
+    turn(&mut w, "n1");
+    assert_eq!(started_with(), [""]);
+
+    let none = refused(&mut w, "set_agent", json!({"bot": bot, "command": []}));
+    assert_eq!(none.0, "bad_request");
+    let id = w.send(
+        "set_agent",
+        json!({"bot": bot, "command": ["opencode", "acp"]}),
+    );
+    w.wait_for(|f| f["type"] == "bots_changed");
+    w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str() && f["success"] == true);
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0]["agent"],
+        json!(["opencode", "acp"])
+    );
+
+    stopped(&mut w);
+
+    // The agent's login is in the user's home, where a bot kept to its folder cannot look.
+    let (code, why) = refused(
+        &mut w,
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "hi"}),
+    );
+    assert_eq!(code, "engine_failed");
+    assert!(why.contains("whole disk"), "{why}");
+    assert_eq!(started_with().len(), 1);
+
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    turn(&mut w, "n2");
+    // The engine program is asked to run the agent, and to begin a conversation of its own:
+    // the earlier one was the other engine's.
+    assert_eq!(started_with(), ["", "acp opencode acp"]);
+    let conversations = || {
+        let log = fs::read_to_string(home.join("bots").join(&bot).join("starts.log")).unwrap();
+        log.lines().count()
+    };
+    assert_eq!(conversations(), 2);
+
+    // And back.
+    w.ok("set_agent", json!({"bot": bot, "command": null}));
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0]["agent"],
+        Value::Null
+    );
+    stopped(&mut w);
+    turn(&mut w, "n3");
+    assert_eq!(started_with(), ["", "acp opencode acp", ""]);
+    assert_eq!(conversations(), 3);
 }
