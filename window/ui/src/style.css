@@ -1,0 +1,27 @@
+:root { color-scheme: light dark; font: 14px -apple-system, system-ui, sans-serif; }
+body { margin: 0; }
+.app { display: grid; grid-template-columns: 14rem 1fr; height: 100vh; }
+.bots { border-right: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding: .5rem; overflow: auto; }
+.bots ul { list-style: none; margin: 0; padding: 0; }
+.bots li button { width: 100%; text-align: left; background: none; border: 0; padding: .4rem; border-radius: 6px; color: inherit; font: inherit; }
+.bots li button.current { background: color-mix(in srgb, Highlight 30%, transparent); }
+.bots form { display: flex; gap: .25rem; margin-top: .5rem; }
+.bots input { min-width: 0; flex: 1; }
+main { overflow: auto; padding: 0 1rem 1rem; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 1rem; }
+[role=tab][aria-selected=true] { font-weight: 600; }
+.note { opacity: .7; }
+.error { color: #d33; }
+.chat { display: flex; flex-direction: column; flex: 1; }
+.items { list-style: none; padding: 0; flex: 1; }
+.items li { margin: .5rem 0; white-space: pre-wrap; user-select: text; }
+.items .user p { background: color-mix(in srgb, Highlight 20%, transparent); padding: .5rem; border-radius: 8px; }
+.items .thinking { opacity: .6; font-style: italic; }
+.question { border: 1px solid color-mix(in srgb, currentColor 30%, transparent); border-radius: 8px; padding: .5rem; margin: .5rem 0; }
+.question button { margin-right: .5rem; }
+.chat form { display: flex; gap: .5rem; }
+.chat textarea { flex: 1; min-height: 3rem; }
+.fields label { display: block; margin: .5rem 0; }
+.rows { list-style: none; padding: 0; }
+.rows li { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: .4rem 0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
