@@ -1804,7 +1804,9 @@ impl Core {
         // `/run <routine>`: the lines after the first go along as data.
         let (first, data) = text.split_once('\n').unwrap_or((text, ""));
         let run = first.strip_prefix("/run");
-        if let Some(name) = run.filter(|rest| rest.is_empty() || rest.starts_with(' ')) {
+        if let Some(name) =
+            run.filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
             return self.run_from_chat(bot, kind, chat, name.trim(), data);
         }
         let prompt = Outgoing {
