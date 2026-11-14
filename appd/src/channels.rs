@@ -4,11 +4,12 @@
 //! service's one thread.
 
 use crate::core::Msg;
-use crate::sys::log;
+use crate::sys::{log, now_ms};
 use serde_json::{Value, json};
 use std::io::{ErrorKind, Read};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,8 +27,23 @@ const DISCORD_INTENTS: u64 = 1 << 12;
 
 /// How long Telegram may hold a request for news, in seconds.
 const POLL_S: u64 = 25;
-/// Most bytes read of any answer.
-const MAX_ANSWER: u64 = 1 << 20;
+/// Updates asked for at a time; Telegram lets one be 256 KB at most.
+const UPDATES: u64 = 10;
+/// Most bytes read of any answer: more than `UPDATES` of them can be.
+const MAX_ANSWER: u64 = 4 << 20;
+/// A Telegram message older than this is not run: it was written while the service was
+/// off, and whoever wrote it no longer waits. (Discord keeps none.)
+const STALE_S: u64 = 120;
+/// How long connecting to Discord's gateway, and its first word, may take.
+const GATEWAY_WAIT: Duration = Duration::from_secs(30);
+/// Messages on their way out.
+static SENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether so many messages are on their way out that one nobody waits for should not be
+/// sent: every one is a thread and a request.
+pub fn crowded() -> bool {
+    SENDING.load(Ordering::SeqCst) >= 8
+}
 
 /// How long a code lets a chat in, and how many wrong guesses end it sooner.
 pub const CODE_LIFE: Duration = Duration::from_secs(5 * 60);
@@ -52,7 +68,8 @@ impl Code {
 
 /// What a channel's reader tells the service.
 pub enum Note {
-    /// Someone wrote to the bot. `chat` is where the answer goes; `name` is who wrote.
+    /// Someone wrote to the bot. `chat` is where the answer goes; `name` is who wrote; `text`
+    /// is empty for what is no text (a photo, a file).
     Message {
         chat: String,
         name: String,
@@ -101,6 +118,13 @@ impl Reader {
             }
             self.note(Note::State(error.clone()));
             self.told = Some(error);
+        }
+    }
+
+    /// Waits until the reader is stopped: there is nothing to try again.
+    fn wait_for_stop(&self) {
+        while !self.stopped() {
+            thread::sleep(Duration::from_millis(200));
         }
     }
 
@@ -162,7 +186,7 @@ fn answer(
     body.read_to_string(&mut text)
         .map_err(|e| clean(format!("no answer: {e}")))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    if status.is_success() && json["ok"] != false {
+    if status.is_success() && !json.is_null() && json["ok"] != false {
         return Ok(json);
     }
     // Telegram says why in `description`, Discord in `message`.
@@ -176,7 +200,7 @@ fn telegram(mut r: Reader) {
     let mut offset = 0;
     while !r.stopped() {
         let url = format!(
-            "{api}/bot{}/getUpdates?timeout={POLL_S}&offset={offset}&allowed_updates=%5B%22message%22%5D",
+            "{api}/bot{}/getUpdates?timeout={POLL_S}&limit={UPDATES}&offset={offset}&allowed_updates=%5B%22message%22%5D",
             r.token
         );
         let updates = match answer(agent.get(&url).call(), &r.token) {
@@ -189,15 +213,19 @@ fn telegram(mut r: Reader) {
         };
         r.state(None);
         for update in updates["result"].as_array().into_iter().flatten() {
-            offset = offset.max(update["update_id"].as_i64().unwrap_or(0) + 1);
+            offset = update["update_id"].as_i64().map_or(offset, |id| id + 1);
             let message = &update["message"];
-            // shortcut: one-to-one chats and text only; groups, photos and files are passed
-            // over. Add them when a bot is to sit in a group.
-            if let (Some(chat), Some("private"), Some(text)) = (
+            let age_s =
+                (now_ms() / 1000).saturating_sub(message["date"].as_u64().unwrap_or(u64::MAX));
+            // shortcut: one-to-one chats and text only; groups are passed over, and of a
+            // photo or a file only that it came is told. Add them when a bot is to sit in
+            // a group or to be sent files.
+            if let (Some(chat), Some("private"), true) = (
                 message["chat"]["id"].as_i64(),
                 message["chat"]["type"].as_str(),
-                message["text"].as_str(),
+                age_s <= STALE_S,
             ) {
+                let text = message["text"].as_str().unwrap_or("");
                 let from = &message["from"];
                 let name = from["first_name"].as_str().or(from["username"].as_str());
                 r.note(Note::Message {
@@ -232,8 +260,25 @@ fn discord_session(r: &mut Reader, api: &str, agent: &ureq::Agent) -> Result<(),
         .call();
     let gateway = answer(asked, &r.token)?;
     let url = gateway["url"].as_str().ok_or("Discord named no gateway")?;
-    let (mut socket, _) = tungstenite::connect(format!("{url}/?v=10&encoding=json"))
-        .map_err(|e| format!("no connection to the gateway: {e}"))?;
+    // Connected by hand, for the time limits `tungstenite::connect` does not set.
+    let no_gateway = |e: &dyn std::fmt::Display| format!("no connection to the gateway: {e}");
+    let uri: tungstenite::http::Uri = format!("{url}/?v=10&encoding=json")
+        .parse()
+        .map_err(|e| no_gateway(&e))?;
+    let port = uri.port_u16();
+    let port = port.unwrap_or(if uri.scheme_str() == Some("ws") {
+        80
+    } else {
+        443
+    });
+    let found = (uri.host().unwrap_or_default(), port).to_socket_addrs();
+    let address = found.map_err(|e| no_gateway(&e))?.next();
+    let address = address.ok_or_else(|| no_gateway(&"its name names no address"))?;
+    let stream = TcpStream::connect_timeout(&address, GATEWAY_WAIT).map_err(|e| no_gateway(&e))?;
+    let _ = stream.set_read_timeout(Some(GATEWAY_WAIT));
+    let _ = stream.set_write_timeout(Some(GATEWAY_WAIT));
+    let (mut socket, _) = tungstenite::client_tls(uri, stream).map_err(|e| no_gateway(&e))?;
+    let connected = Instant::now();
     // Short waits for news, so that heartbeats go out and a stop is noticed.
     let wait = Some(Duration::from_secs(1));
     let _ = match socket.get_mut() {
@@ -250,6 +295,9 @@ fn discord_session(r: &mut Reader, api: &str, agent: &ureq::Agent) -> Result<(),
             let _ = socket.close(None);
             return Ok(());
         }
+        if every.is_none() && connected.elapsed() >= GATEWAY_WAIT {
+            return Err("the gateway did not say hello".into());
+        }
         if every.is_some_and(|every| last.elapsed() >= every) {
             if !answered {
                 return Err("the gateway stopped answering".into());
@@ -263,8 +311,17 @@ fn discord_session(r: &mut Reader, api: &str, agent: &ureq::Agent) -> Result<(),
         let text = match socket.read() {
             Ok(Message::Text(text)) => text,
             Ok(Message::Close(frame)) => {
-                let why = frame.map(|f| format!("{} {}", u16::from(f.code), f.reason));
-                return Err(format!("the gateway closed: {}", why.unwrap_or_default()));
+                let code = frame.as_ref().map_or(0, |f| u16::from(f.code));
+                let reason = frame.map(|f| f.reason.to_string()).unwrap_or_default();
+                let why = format!("the gateway closed: {code} {reason}");
+                // What this token is refused for it is refused for again, and Discord counts
+                // the tries: none until the token is set anew.
+                if matches!(code, 4004 | 4010..=4014) {
+                    r.state(Some(why));
+                    r.wait_for_stop();
+                    return Ok(());
+                }
+                return Err(why);
             }
             Ok(_) => continue,
             Err(tungstenite::Error::Io(e))
@@ -295,7 +352,12 @@ fn discord_session(r: &mut Reader, api: &str, agent: &ureq::Agent) -> Result<(),
             }
             (Some(11), _) => answered = true,
             // Asked for a heartbeat now.
-            (Some(1), _) => every = every.map(|_| Duration::ZERO),
+            (Some(1), _) => {
+                let beat = json!({"op": 1, "d": sequence});
+                socket
+                    .send(Message::text(beat.to_string()))
+                    .map_err(broke)?;
+            }
             (Some(7 | 9), _) => return Err("the gateway asked for a new connection".into()),
             (Some(0), Some("READY")) => r.state(None),
             (Some(0), Some("MESSAGE_CREATE")) => {
@@ -303,7 +365,7 @@ fn discord_session(r: &mut Reader, api: &str, agent: &ureq::Agent) -> Result<(),
                 // shortcut: direct messages only, as for Telegram; a bot's own are not news.
                 if let (Some(chat), Some(text), true) = (
                     data["channel_id"].as_str(),
-                    data["content"].as_str().filter(|text| !text.is_empty()),
+                    data["content"].as_str(),
                     data["guild_id"].is_null() && author["bot"] != true,
                 ) {
                     let name = author["global_name"]
@@ -331,9 +393,21 @@ pub fn send(kind: &'static str, token: &str, chat: &str, text: &str) {
         .chunks(1900)
         .map(|piece| piece.iter().collect())
         .collect();
+    SENDING.fetch_add(1, Ordering::SeqCst);
     thread::spawn(move || {
+        deliver(kind, &token, &chat, pieces);
+        SENDING.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
+fn deliver(kind: &str, token: &str, chat: &str, pieces: Vec<String>) {
+    {
         let agent = agent(Duration::from_secs(30));
-        for piece in pieces {
+        for (n, piece) in pieces.into_iter().enumerate() {
+            // Both let a bot write about once a second to one chat.
+            if n > 0 {
+                thread::sleep(Duration::from_secs(1));
+            }
             let sent = if kind == "telegram" {
                 let chat_id = chat.parse::<i64>().map_or(json!(chat), Value::from);
                 agent
@@ -356,10 +430,10 @@ pub fn send(kind: &'static str, token: &str, chat: &str, text: &str) {
                     .header("Content-Type", "application/json")
                     .send(json!({"content": piece}).to_string().as_bytes())
             };
-            if let Err(e) = answer(sent, &token) {
+            if let Err(e) = answer(sent, token) {
                 log!("{kind}: a message was not sent: {e}");
                 return;
             }
         }
-    });
+    }
 }

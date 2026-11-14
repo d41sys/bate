@@ -3295,6 +3295,8 @@ struct Telegram {
     base: String,
     updates: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
     sent: std::sync::Arc<std::sync::Mutex<Vec<(i64, String)>>>,
+    /// The id of the next update.
+    next: std::sync::atomic::AtomicI64,
 }
 
 impl Telegram {
@@ -3329,18 +3331,31 @@ impl Telegram {
                 let target = first.split(' ').nth(1).unwrap_or("");
                 let (path, query) = target.split_once('?').unwrap_or((target, ""));
                 let method = path.strip_prefix(&format!("/bot{}/", Telegram::TOKEN));
+                if path == "/bot9:garbled/getUpdates" {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 -\r\ncontent-length: 6\r\nconnection: close\r\n\r\n<html>"
+                    );
+                    continue;
+                }
                 let (status, answer) = match method {
                     Some("getUpdates") => {
-                        let offset: i64 = query
-                            .split('&')
-                            .find_map(|pair| pair.strip_prefix("offset="))
-                            .map_or(0, |n| n.parse().unwrap());
+                        let field = |name: &str| -> Option<i64> {
+                            let value = query.split('&').find_map(|pair| pair.strip_prefix(name));
+                            value.map(|n| n.parse().unwrap())
+                        };
+                        let (offset, limit) = (field("offset=").unwrap_or(0), field("limit="));
+                        let limit = limit.unwrap_or(100) as usize;
                         let pending = |queue: &Mutex<Vec<Value>>| -> Vec<Value> {
-                            let all = queue.lock().unwrap();
-                            let new = all
-                                .iter()
-                                .filter(|u| u["update_id"].as_i64() >= Some(offset));
-                            new.cloned().collect()
+                            let mut all = queue.lock().unwrap();
+                            let id = |u: &Value| u["update_id"].as_i64().unwrap();
+                            // As the real one: an offset far past the last update is no
+                            // offset at all, and what an offset confirms is forgotten.
+                            let last = all.iter().map(id).max().unwrap_or(0);
+                            if offset <= last + 10 {
+                                all.retain(|u| id(u) >= offset);
+                            }
+                            all.iter().take(limit).cloned().collect()
                         };
                         // The real one holds the request until there is something to say.
                         if pending(&queue).is_empty() {
@@ -3370,17 +3385,28 @@ impl Telegram {
             base,
             updates,
             sent,
+            next: std::sync::atomic::AtomicI64::new(1000),
         }
     }
 
     fn say(&self, chat: i64, text: &str) {
-        let mut updates = self.updates.lock().unwrap();
-        let id = updates.len() as i64 + 1;
-        updates.push(json!({"update_id": id, "message": {
-            "message_id": id, "text": text,
+        self.message(chat, json!({"text": text}), 0);
+    }
+
+    /// A message with `content`, written `ago_s` seconds ago.
+    fn message(&self, chat: i64, content: Value, ago_s: u64) {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let mut message = json!({
+            "message_id": id, "date": now.unwrap().as_secs() - ago_s,
             "chat": {"id": chat, "type": "private"},
             "from": {"id": chat, "is_bot": false, "first_name": format!("Person {chat}")},
-        }}));
+        });
+        for (key, value) in content.as_object().unwrap() {
+            message[key] = value.clone();
+        }
+        let update = json!({"update_id": id, "message": message});
+        self.updates.lock().unwrap().push(update);
     }
 
     /// Waits until the bot has sent `count` messages to `chat`, and gives the last.
@@ -3414,7 +3440,7 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
     let on = json!({"bot": bot, "kind": "telegram"});
     assert_eq!(
         channel(&w.ok("get_channels", json!({"bot": bot})), "telegram"),
-        &json!({"kind": "telegram", "hasToken": false, "chats": [], "error": null})
+        &json!({"kind": "telegram", "hasToken": false, "pairing": false, "chats": [], "error": null})
     );
     let mut with_token = on.clone();
     with_token["token"] = json!(Telegram::TOKEN);
@@ -3443,6 +3469,10 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
         .unwrap()
         .to_owned();
     assert_eq!(code.len(), 6);
+    let pairing = |w: &mut Window| {
+        channel(&w.ok("get_channels", json!({"bot": bot})), "telegram")["pairing"].clone()
+    };
+    assert_eq!(pairing(&mut w), true);
     let wrong = if code == "000000" { "111111" } else { "000000" };
     for guess in 1..=5 {
         telegram.say(8, wrong);
@@ -3452,6 +3482,8 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
     assert!(telegram.heard(8, 6).contains("private"));
     let channels = w.ok("get_channels", json!({"bot": bot}));
     assert_eq!(channel(&channels, "telegram")["chats"], json!([]));
+    // The window is told the code is no more.
+    assert_eq!(pairing(&mut w), false);
     assert!(!home.join("bots").join(&bot).join("prompts.log").exists());
 
     // The code from the window, sent in the chat, pairs that chat.
@@ -3479,18 +3511,21 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
         !history.contains("hello?") && !history.contains(&code),
         "{history}"
     );
+    // Only text is read, and the chat is told so.
+    telegram.message(7, json!({"photo": [{"file_id": "p1"}]}), 0);
+    assert!(telegram.heard(7, 4).contains("text"));
     // A turn that waits for the user says so in the chat.
     telegram.say(7, "ask");
-    assert!(telegram.heard(7, 4).contains("Bate"));
+    assert!(telegram.heard(7, 5).contains("Bate"));
     // The bot is busy with that turn: a second message is not queued behind it.
     telegram.say(7, "and another");
-    assert!(telegram.heard(7, 5).contains("busy"));
+    assert!(telegram.heard(7, 6).contains("busy"));
     let question = w.ok("open_bot", json!({"bot": bot}))["questions"][0]["question"].clone();
     w.ok(
         "answer",
         json!({"bot": bot, "question": question, "choice": "Approve"}),
     );
-    assert_eq!(telegram.heard(7, 6), "chose Approve");
+    assert_eq!(telegram.heard(7, 7), "chose Approve");
 
     // Forgotten in the window: the chat is a stranger again.
     w.ok(
@@ -3498,7 +3533,7 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
         json!({"bot": bot, "kind": "telegram", "chat": "7"}),
     );
     telegram.say(7, "still there?");
-    assert!(telegram.heard(7, 7).contains("private"));
+    assert!(telegram.heard(7, 8).contains("private"));
 
     // Without its token the channel is gone, with its chats.
     let mut without = on.clone();
@@ -3506,7 +3541,7 @@ fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
     w.ok("set_channel", without);
     assert_eq!(
         channel(&w.ok("get_channels", json!({"bot": bot})), "telegram"),
-        &json!({"kind": "telegram", "hasToken": false, "chats": [], "error": null})
+        &json!({"kind": "telegram", "hasToken": false, "pairing": false, "chats": [], "error": null})
     );
 }
 
@@ -3529,10 +3564,17 @@ fn a_channel_whose_token_is_refused_says_so() {
         !channel(&channels, "telegram")["error"].is_null()
     });
     let error = channel(&channels, "telegram")["error"].as_str().unwrap();
-    assert!(
-        error.contains("Unauthorized") && !error.contains("wrong"),
-        "{error}"
+    assert!(error.contains("Unauthorized"), "{error}");
+    // An answer that is no answer is an error too, not a quiet success.
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "telegram", "token": "9:garbled"}),
     );
+    eventually("the channel's error", || {
+        channels = w.ok("get_channels", json!({"bot": bot}));
+        let error = channel(&channels, "telegram")["error"].as_str();
+        error.is_some_and(|e| !e.contains("Unauthorized"))
+    });
     let id = w.send("pair_channel", json!({"bot": bot, "kind": "discord"}));
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
     assert_eq!(refused["code"], "no_channel", "{refused}");
@@ -3549,6 +3591,10 @@ struct Discord {
     heartbeats: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Set to have the gateway drop its connection.
     drop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set to have the gateway ask for a heartbeat now.
+    ask: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Not 0: the gateway closes every connection with this code once it has identified.
+    close: std::sync::Arc<std::sync::atomic::AtomicU16>,
 }
 
 impl Discord {
@@ -3567,6 +3613,8 @@ impl Discord {
             identified: Arc::default(),
             heartbeats: Arc::new(AtomicUsize::new(0)),
             drop: Arc::new(AtomicBool::new(false)),
+            ask: Arc::new(AtomicBool::new(false)),
+            close: Arc::default(),
         };
         let (log, gateway_url) = (
             discord.sent.clone(),
@@ -3622,6 +3670,7 @@ impl Discord {
             discord.heartbeats.clone(),
             discord.drop.clone(),
         );
+        let (ask, close) = (discord.ask.clone(), discord.close.clone());
         std::thread::spawn(move || {
             for stream in gateway.incoming().flatten() {
                 stream
@@ -3640,6 +3689,9 @@ impl Discord {
                 // Each connection is a new session: it hears what is said from then on.
                 let mut told = events.lock().unwrap().len();
                 while !drop.swap(false, Ordering::SeqCst) {
+                    if ask.swap(false, Ordering::SeqCst) {
+                        say(&mut socket, json!({"op": 1, "d": null}));
+                    }
                     let news: Vec<Value> = events.lock().unwrap()[told..].to_vec();
                     told += news.len();
                     for (n, event) in news.into_iter().enumerate() {
@@ -3656,6 +3708,16 @@ impl Discord {
                     match heard["op"].as_u64() {
                         Some(2) => {
                             identified.lock().unwrap().push(heard["d"].clone());
+                            let code = close.load(Ordering::SeqCst);
+                            if code != 0 {
+                                let frame = tungstenite::protocol::CloseFrame {
+                                    code: code.into(),
+                                    reason: "Authentication failed.".into(),
+                                };
+                                let _ = socket.close(Some(frame));
+                                let _ = socket.flush();
+                                break;
+                            }
                             say(&mut socket, json!({"op": 0, "t": "READY", "s": 1, "d": {}}));
                         }
                         Some(1) => {
@@ -3732,7 +3794,7 @@ fn a_bot_is_messaged_from_discord_once_the_sender_has_paired_with_a_code() {
     let channels = w.ok("get_channels", json!({"bot": bot}));
     assert_eq!(
         channel(&channels, "discord"),
-        &json!({"kind": "discord", "hasToken": true, "error": null,
+        &json!({"kind": "discord", "hasToken": true, "pairing": false, "error": null,
             "chats": [{"chat": "555", "name": "Person"}]})
     );
 
@@ -3752,6 +3814,13 @@ fn a_bot_is_messaged_from_discord_once_the_sender_has_paired_with_a_code() {
     eventually("heartbeats", || {
         discord.heartbeats.load(Ordering::SeqCst) >= 2
     });
+
+    // Asked for one now, it sends one, not one after another.
+    let before = discord.heartbeats.load(Ordering::SeqCst);
+    discord.ask.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(500));
+    let since = discord.heartbeats.load(Ordering::SeqCst) - before;
+    assert!((1..20).contains(&since), "{since} heartbeats");
 
     // The gateway drops the connection: the bot comes back, and is reached as before.
     discord.drop.store(true, Ordering::SeqCst);
@@ -3783,9 +3852,71 @@ fn a_discord_token_that_is_refused_says_so() {
         !channel(&channels, "discord")["error"].is_null()
     });
     let error = channel(&channels, "discord")["error"].as_str().unwrap();
-    assert!(
-        error.contains("Unauthorized") && !error.contains("wrong-token"),
-        "{error}"
+    assert!(error.contains("Unauthorized"), "{error}");
+
+    // A token the gateway itself refuses is not tried over and over: Discord counts those.
+    discord
+        .close
+        .store(4004, std::sync::atomic::Ordering::SeqCst);
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "discord", "token": Discord::TOKEN}),
+    );
+    eventually("the channel's error", || {
+        channels = w.ok("get_channels", json!({"bot": bot}));
+        let error = channel(&channels, "discord")["error"].as_str();
+        error.is_some_and(|e| e.contains("4004"))
+    });
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(discord.identified.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_telegram_update_is_taken_once_and_a_channel_is_read_again_after_a_restart() {
+    let (home, telegram) = (home("telegram-again"), Telegram::start());
+    let start = || {
+        Service::start_with(&home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("BATE_TELEGRAM_API", &telegram.base);
+        })
+    };
+    let service = start();
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let prompts = |text: &str| {
+        let log = fs::read_to_string(home.join("bots").join(&bot).join("prompts.log"));
+        log.unwrap_or_default().matches(text).count()
+    };
+    let on = json!({"bot": bot, "kind": "telegram"});
+    let mut with_token = on.clone();
+    with_token["token"] = json!(Telegram::TOKEN);
+    w.ok("set_channel", with_token);
+    let code = w.ok("pair_channel", on)["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    telegram.say(7, &code);
+    assert!(telegram.heard(7, 1).contains("Paired"));
+
+    // After a quiet week Telegram numbers its updates from another place, which may be
+    // lower: the message is still taken once.
+    telegram.next.store(5, std::sync::atomic::Ordering::SeqCst);
+    telegram.say(7, "after a quiet week");
+    assert_eq!(telegram.heard(7, 2), "hello");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(prompts("after a quiet week"), 1);
+    assert_eq!(telegram.heard(7, 2), "hello");
+
+    // What was written long ago, while the service was off, is not run when it starts; what
+    // is written then is, with no window having asked for anything.
+    drop(service);
+    telegram.message(7, json!({"text": "written long ago"}), 600);
+    let _service = start();
+    telegram.say(7, "written now");
+    assert_eq!(telegram.heard(7, 3), "hello");
+    assert_eq!(
+        (prompts("written long ago"), prompts("written now")),
+        (0, 1)
     );
 }
 

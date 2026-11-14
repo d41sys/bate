@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { request } from "./service.ts";
+import { listen, request } from "./service.ts";
 
-type Channel = { kind: string; hasToken: boolean; chats: { chat: string; name: string }[]; error: string | null };
+type Channel = { kind: string; hasToken: boolean; pairing: boolean; chats: { chat: string; name: string }[]; error: string | null };
 type Code = { kind: string; code: string; expiresAt: number };
 
 const NAMES: Record<string, string> = { telegram: "Telegram", discord: "Discord" };
@@ -14,15 +14,16 @@ export function Channels({ bot }: { bot: string }) {
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState("");
   const load = () =>
-    request<{ channels: Channel[] }>("get_channels", { bot }).then((r) => setChannels(r.channels), (e: Error) => setError(e.message));
+    request<{ channels: Channel[] }>("get_channels", { bot }).then((r) => (setError(""), setChannels(r.channels)), (e: Error) => setError(e.message));
   useEffect(() => {
     void load();
-    // Chats pair from their side: look again now and then, and count the code down.
-    const timer = setInterval(() => {
-      setNow(Date.now());
-      void load();
-    }, 2000);
-    return () => clearInterval(timer);
+    // Chats pair from their side, and a channel connects or fails on its own: the service says when.
+    const stop = listen((frame) => {
+      if (frame.type === "channels_changed" && frame.bot === bot) void load();
+    });
+    // Counts the code down.
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => (stop(), clearInterval(timer));
   }, [bot]);
   const run = (p: Promise<unknown>) => p.then(() => (setError(""), load()), (e: Error) => setError(e.message));
   const left = code ? Math.max(0, Math.round((code.expiresAt - now) / 1000)) : 0;
@@ -60,7 +61,7 @@ export function Channels({ bot }: { bot: string }) {
               </button>
             )}{" "}
             {c.hasToken &&
-              (code?.kind === c.kind && left > 0 ? (
+              (code?.kind === c.kind && c.pairing && left > 0 ? (
                 <span>
                   Send <strong className="code">{code.code}</strong> to the bot in {NAMES[c.kind]} ({Math.floor(left / 60)}:
                   {String(left % 60).padStart(2, "0")} left)
@@ -70,7 +71,7 @@ export function Channels({ bot }: { bot: string }) {
                   type="button"
                   onClick={() =>
                     request<Omit<Code, "kind">>("pair_channel", { bot, kind: c.kind }).then(
-                      (r) => setCode({ ...r, kind: c.kind }),
+                      (r) => (setCode({ ...r, kind: c.kind }), setNow(Date.now()), load()),
                       (e: Error) => setError(e.message),
                     )
                   }
