@@ -308,7 +308,11 @@ impl Core {
             }
         }
         let mut readers = HashMap::new();
-        for (bot, kind, token) in store.channels().unwrap_or_default() {
+        let stored = store.channels().unwrap_or_else(|e| {
+            log!("channels not read: {e}");
+            Vec::new()
+        });
+        for (bot, kind, token) in stored {
             if let Some(kind) = channels::KINDS.into_iter().find(|k| *k == kind) {
                 let reader = channels::start(&bot, kind, &token, tx.clone());
                 readers.insert((bot, kind), reader);
@@ -1261,8 +1265,16 @@ impl Core {
                         .into_iter()
                         .map(|(chat, name)| json!({"chat": chat, "name": name}))
                         .collect();
-                    let error = self.channel_errors.get(&(bot.clone(), kind));
-                    all.push(json!({"kind": kind, "hasToken": token.is_some(), "chats": chats, "error": error}));
+                    let key = (bot.clone(), kind);
+                    let pairing = self.chat_codes.get(&key);
+                    all.push(json!({
+                        "kind": kind,
+                        "hasToken": token.is_some(),
+                        // Whether the code last given still lets a chat in.
+                        "pairing": pairing.is_some_and(|code| Instant::now() < code.until),
+                        "chats": chats,
+                        "error": self.channel_errors.get(&key),
+                    }));
                 }
                 Ok(Some(json!({"channels": all})))
             }
@@ -1284,11 +1296,13 @@ impl Core {
                 {
                     return Err(("token_in_use", "another bot uses that token".into()));
                 }
-                self.stop_channel(&key);
+                // Stored first: should that fail, the reader there is goes on.
                 if token.is_empty() {
                     self.store.delete_channel(bot, kind).map_err(internal)?;
+                    self.stop_channel(&key);
                 } else {
                     self.store.set_channel(bot, kind, token).map_err(internal)?;
+                    self.stop_channel(&key);
                     let reader = channels::start(bot, kind, token, self.tx.clone());
                     self.channels.insert(key.clone(), reader);
                 }
@@ -1758,12 +1772,21 @@ impl Core {
                     self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
                     "Paired. What you write here now goes to the bot."
                 }
-                Some(false) => "That is not the code.",
+                Some(false) => {
+                    // The fifth has ended the code: the window should not go on showing it.
+                    self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
+                    "That is not the code."
+                }
+                // Nobody waits for this one: it is not worth a place in a crowd.
+                None if channels::crowded() => return,
                 None => {
-                    "This bot is private. To write to it, open its Settings in Bate, press Pair under Channels, and send the 6-digit code here."
+                    "This bot is private. To write to it, open its Settings in Bate, press Pair a chat under Channels, and send the 6-digit code here."
                 }
             };
             return self.say(bot, kind, chat, reply);
+        }
+        if text.trim().is_empty() {
+            return self.say(bot, kind, chat, "Only text is read here.");
         }
         // One at a time, as for a webhook: whoever wrote should hear it now.
         if self.occupied(bot) {
@@ -1801,7 +1824,15 @@ impl Core {
                 message,
             } => self.send_reply(&from, generation, message, reply),
             Caller::Chat { kind, chat } => {
-                let text = reply.unwrap_or_else(|e| format!("No reply: {e}."));
+                // The reasons are worded for another bot: `it` and `its` are this bot.
+                let text = reply.unwrap_or_else(|e| {
+                    let e = match (e.strip_prefix("its "), e.strip_prefix("it ")) {
+                        (Some(rest), _) => format!("the bot's {rest}"),
+                        (_, Some(rest)) => format!("the bot {rest}"),
+                        _ => e,
+                    };
+                    format!("No reply: {e}.")
+                });
                 self.say(bot, kind, &chat, &text);
             }
         }

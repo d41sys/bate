@@ -151,7 +151,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
 | `remove_device` | `device` (an id) | `{}`: forgets the device, ending its active sessions immediately |
-| `get_channels` | `bot` | `{channels: [{kind, hasToken, chats: [{chat, name}], error}]}`: one entry for `telegram` and one for `discord`. The token itself is never sent back. `error` says why the channel is not connected, else `null` |
+| `get_channels` | `bot` | `{channels: [{kind, hasToken, pairing, chats: [{chat, name}], error}]}`: one entry for `telegram` and one for `discord`. The token itself is never sent back. `pairing` says whether the code last given by `pair_channel` still lets a chat in. `error` says why the channel is not connected, else `null` |
 | `set_channel` | `bot`, `kind`, `token` (empty: remove) | `{}`: saves the bot token of the channel and connects, or removes the channel and its paired chats. Code `token_in_use` when another bot has the same token |
 | `pair_channel` | `bot`, `kind` | `{code, expiresAt}`: a 6-digit code that lets one chat in; it lasts 5 minutes or 5 wrong guesses. Code `no_channel` without a token |
 | `remove_chat` | `bot`, `kind`, `chat` | `{}`: the chat is no longer let in. Code `no_such_chat` |
@@ -170,7 +170,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
-| `{"type":"channels_changed","bot"}` | Re-run `get_channels`. |
+| `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
@@ -359,15 +359,16 @@ Not recognised: a secret the service never stored that is printed with none of t
 
 A bot can be written to from a chat app. The user makes a bot there (Telegram: BotFather; Discord: the developer portal) and gives Bate its token with `set_channel`. The service connects out from the Mac; nothing in between relays messages.
 
-- **Telegram:** long polling, `GET <api>/bot<token>/getUpdates`; replies with `sendMessage`. `<api>` is `https://api.telegram.org` (`BATE_TELEGRAM_API`).
-- **Discord:** `GET <api>/gateway/bot`, then the gateway WebSocket (Identify with the direct-messages intent only, heartbeats; a broken connection starts a new session, without resume); replies with `POST <api>/channels/<id>/messages`. `<api>` is `https://discord.com/api/v10` (`BATE_DISCORD_API`).
-- Only one-to-one chats with text are read: Telegram private chats, Discord direct messages from people. Groups, servers, other bots, photos and files are passed over.
-- **Pairing:** a chat that is not paired gets a note on how to pair, and the bot hears nothing of it. The chat is let in by sending the code from `pair_channel`. A wrong 6-digit guess is answered and counted; a code is used up by the chat it lets in.
-- A paired chat's message is sent to the bot as a prompt, as written. When the turn ends, the text the bot wrote since its last tool call goes back to the chat, in pieces of at most 1900 characters. A turn that ends otherwise is answered `No reply: <why>.`
+- **Telegram:** long polling, `GET <api>/bot<token>/getUpdates`, 10 updates at a time; replies with `sendMessage`. `<api>` is `https://api.telegram.org` (`BATE_TELEGRAM_API`). A message more than 2 minutes old is not run: Telegram keeps for a day what was written while the service was off.
+- **Discord:** `GET <api>/gateway/bot`, then the gateway WebSocket (Identify with the direct-messages intent only, heartbeats; a broken connection starts a new session, without resume, so what was written meanwhile is lost; after a close the same token would get again, codes 4004 and 4010 to 4014, it is not tried again until the token is set anew); replies with `POST <api>/channels/<id>/messages`. `<api>` is `https://discord.com/api/v10` (`BATE_DISCORD_API`).
+- Only one-to-one chats with text are read: Telegram private chats, Discord direct messages from people. Groups, servers and other bots are passed over; a paired chat that sends a photo or a file is told that only text is read.
+- **Pairing:** a chat that is not paired gets a note on how to pair (unless 8 messages are already on their way out), and the bot hears nothing of it. The chat is let in by sending the code from `pair_channel`. A wrong 6-digit guess is answered and counted; a code is used up by the chat it lets in.
+- A paired chat's message is sent to the bot as a prompt, as written. When the turn ends, the text the bot wrote since its last tool call goes back to the chat, in pieces of at most 1900 characters, a second apart. A turn that ends otherwise is answered `No reply: <why>.`
 - While the bot is occupied, a message is answered that the bot is busy; it is not queued.
 - Questions and approvals are answered in Bate's window only; the chat gets a note that one is waiting.
+- A new token for a channel keeps its paired chats (a Telegram chat is the same person for any bot; a Discord one is of no use to another bot and can be removed).
 - Tokens are stored in `app.db` as given, are never sent to a window or an engine, are replaced in bug reports, and the four commands are refused to devices on the LAN.
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, sign-ins of connectors, routines, their past runs, and connectors. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
