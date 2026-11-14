@@ -28,6 +28,7 @@ export type Routine = {
   enabled: boolean;
   schedule?: { frequency: Frequency; interval: number; time: string; timezone?: string };
   webhook: boolean;
+  chat?: boolean;
   hookUrl?: string;
   nextRunMs?: number;
   lastRun?: { atMs: number; outcome: "sent" | "failed" | "missed"; error?: string };

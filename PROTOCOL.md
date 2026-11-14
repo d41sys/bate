@@ -263,7 +263,9 @@ Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly,
 
 At a slot the service sends `"[Routine: <name>]\n<prompt>"` with nonce `routine-<id>-<slotMs>`, through the ledger, so a crash cannot send it twice. A slot missed while the service was down runs once if it is at most 6 h old; an older one is recorded as `missed`. Every handled slot is kept as a `RoutineRun` (`atMs`, `outcome` `sent`, `failed` or `missed`, `error`); `routines_changed` is sent when one is added. A wall time that does not exist (clocks jump forward) runs when the gap ends; one that happens twice runs at the earlier instant.
 
-A routine may leave out `schedule` when `webhook` is true, and may have both; one with neither is refused (`invalid_routine`). `enabled: false` turns off both.
+A routine may leave out `schedule` when `webhook` or `chat` is true, and may have all three; one with none is refused (`invalid_routine`). `enabled: false` turns off all of them.
+
+With `chat: true`, a chat paired on one of the bot's channels starts the routine by writing `/run <name>` (the name in any case). The lines after the first go below the prompt as data, fenced like a webhook's; the nonce is `chat-<id>-<random>`; the run is recorded like a webhook's, and the bot's last words go back to the chat. `/run` with a name that is not such a routine is answered with the names that are.
 
 #### Webhooks
 
@@ -365,6 +367,7 @@ A bot can be written to from a chat app. The user makes a bot there (Telegram: B
 - **Pairing:** a chat that is not paired gets a note on how to pair, and the bot hears nothing of it. The chat is let in by sending the code from `pair_channel`. A wrong 6-digit guess is answered and counted; a code is used up by the chat it lets in.
 - A paired chat's message is sent to the bot as a prompt, as written. When the turn ends, the text the bot wrote since its last tool call goes back to the chat, in pieces of at most 1900 characters. A turn that ends otherwise is answered `No reply: <why>.`
 - While the bot is occupied, a message is answered that the bot is busy; it is not queued.
+- `/run <name>` starts a routine that has `chat: true` (see Routines); any other message is a prompt.
 - Questions and approvals are answered in Bate's window only; the chat gets a note that one is waiting.
 - Tokens are stored in `app.db` as given, are never sent to a window or an engine, are replaced in bug reports, and the four commands are refused to devices on the LAN.
 

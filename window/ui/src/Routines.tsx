@@ -11,7 +11,7 @@ const EVERY: Record<Frequency, string> = {
   yearly: "years",
 };
 
-const blank = { name: "", prompt: "", frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false };
+const blank = { name: "", prompt: "", frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
 
 export function Routines({ bot }: { bot: string }) {
   const [routines, setRoutines] = useState<Routine[]>([]);
@@ -33,7 +33,7 @@ export function Routines({ bot }: { bot: string }) {
   const save = (routine: Routine) => run(request("set_routine", { bot, routine }));
   const create = async () => {
     const { frequency, interval, time } = form;
-    if (await save({ name: form.name, prompt: form.prompt, enabled: true, webhook: form.webhook, schedule: { frequency, interval, time } })) setForm(blank);
+    if (await save({ name: form.name, prompt: form.prompt, enabled: true, webhook: form.webhook, chat: form.chat, schedule: { frequency, interval, time } })) setForm(blank);
   };
 
   return (
@@ -48,6 +48,7 @@ export function Routines({ bot }: { bot: string }) {
               {r.schedule && `every ${r.schedule.interval} ${EVERY[r.schedule.frequency]} from ${r.schedule.time}`}
               {r.nextRunMs !== undefined && ` · next ${new Date(r.nextRunMs).toLocaleString()}`}
               {r.lastRun && ` · last ${r.lastRun.outcome}${r.lastRun.error ? `: ${r.lastRun.error}` : ""}`}
+              {r.chat && ` · from a paired chat: /run ${r.name}`}
             </span>
             {r.hookUrl && <code>{r.hookUrl}</code>}
             <button onClick={() => run(request("delete_routine", { bot, routineId: r.id }))}>Delete</button>
@@ -67,6 +68,7 @@ export function Routines({ bot }: { bot: string }) {
         </label>
         <label>From <input type="time" required value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} /></label>
         <label><input type="checkbox" checked={form.webhook} onChange={(e) => setForm({ ...form, webhook: e.target.checked })} /> Also run from a web address</label>
+        <label><input type="checkbox" checked={form.chat} onChange={(e) => setForm({ ...form, chat: e.target.checked })} /> Also run from a paired chat (Telegram, Discord), by writing /run and its name</label>
         <button>Add</button>
       </form>
       {error && <p className="error" role="alert">{error}</p>}
