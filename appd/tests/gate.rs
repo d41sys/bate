@@ -92,15 +92,18 @@ impl OpenAi {
                         (200, "application/json", tokens.to_string())
                     }
                     "GET /v1/models" => {
-                        let models = json!({"models": [
-                            {"slug": "hidden", "visibility": "hide"},
-                            {"slug": "gpt-test", "display_name": "GPT Test", "visibility": "list"},
-                        ]});
+                        // As long as the real list: some hundred KiB before the first shown.
+                        let mut models = vec![json!({"slug": "hidden", "visibility": "hide",
+                            "base_instructions": "x".repeat(300_000)})];
+                        models.push(json!({"slug": "gpt-test", "display_name": "GPT Test", "visibility": "list"}));
+                        let models = json!({"models": models});
                         (200, "application/json", models.to_string())
                     }
-                    "POST /v1/responses" if refuse.load(Ordering::SeqCst) => {
-                        (403, "application/json", REFUSAL.to_owned())
-                    }
+                    "POST /v1/responses" if refuse.load(Ordering::SeqCst) => (
+                        403,
+                        "application/json\r\nx-request-id: req_77",
+                        REFUSAL.to_owned(),
+                    ),
                     "POST /v1/responses" => {
                         let events = [
                             json!({"type": "response.created"}),
@@ -245,9 +248,14 @@ fn the_gate_registers_signs_in_and_prints_a_streamed_reply_or_the_exact_refusal(
         p("scope"),
         "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
     );
+    // A random (version 4) UUID.
     let host_id = p("ext_agent_host_id");
+    let (version, variant) = (&host_id[23..24], &host_id[28..29]);
     assert!(
-        host_id.starts_with("urn:uuid:") && host_id.len() == 45,
+        host_id.starts_with("urn:uuid:")
+            && host_id.len() == 45
+            && version == "4"
+            && "89ab".contains(variant),
         "{host_id}"
     );
     let redirect = p("redirect_uri");
@@ -271,10 +279,24 @@ fn the_gate_registers_signs_in_and_prints_a_streamed_reply_or_the_exact_refusal(
         "grant_type=authorization_code",
         "code=c0de",
         "client_id=oaiapp_1",
-        "code_verifier=",
         "redirect_uri=http%3A%2F%2F127.0.0.1",
     ] {
         assert!(token.contains(field), "{field}: {token}");
+    }
+    // The verifier is the one whose hash the browser was sent with.
+    let verifier = param(
+        &format!("?{}", token.rsplit(" | ").next().unwrap()),
+        "code_verifier",
+    )
+    .unwrap();
+    let hash = ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes());
+    assert_eq!(p("code_challenge"), base64url(hash.as_ref()));
+    // Nothing printed is a secret: it is pasted into the issue.
+    for secret in ["at-1", "rt-1", "c0de", verifier.as_str(), "user-1"] {
+        assert!(
+            !url.contains(secret) && !rest.contains(secret),
+            "{secret}: {rest}"
+        );
     }
     let asked = &openai.seen("POST /v1/responses")[0];
     let (head, body) = asked.rsplit_once(" | ").unwrap();
@@ -301,8 +323,42 @@ fn the_gate_registers_signs_in_and_prints_a_streamed_reply_or_the_exact_refusal(
     let (child, out) = gate(&home, &openai);
     let (ok, rest) = finish(child, out);
     assert!(!ok, "{rest}");
-    assert!(rest.contains("403") && rest.contains(REFUSAL), "{rest}");
+    assert!(
+        rest.contains("403") && rest.contains("req_77") && rest.contains(REFUSAL),
+        "{rest}"
+    );
     assert_eq!(openai.seen("POST /api/accounts/oauth/token").len(), 1);
+
+    // The token has ended: the same registration and the same Mac sign in again, and the
+    // address, which is printed, names nobody.
+    let mut ended = kept.clone();
+    ended["expires_ms"] = json!(0);
+    std::fs::write(&file, ended.to_string()).unwrap();
+    let (child, mut out) = gate(&home, &openai);
+    let url = address(&mut out, &openai);
+    let p = |name| param(&url, name);
+    assert_eq!(p("client_id").as_deref(), Some("oaiapp_1"));
+    assert_eq!(p("ext_agent_host_id"), Some(host_id));
+    assert_eq!((p("agent_name_hint"), p("id_token_hint")), (None, None));
+    // An answer for another registration is not this one's.
+    let query = format!("code=c0de&state={}&client_id=oaiapp_2", p("state").unwrap());
+    come_back(&url, &query);
+    let (ok, rest) = finish(child, out);
+    assert!(!ok && rest.contains("another client id"), "{rest}");
+    assert_eq!(openai.seen("POST /api/accounts/oauth/token").len(), 1);
+    // It may come back without the client id.
+    let (child, mut out) = gate(&home, &openai);
+    let url = address(&mut out, &openai);
+    *openai.nonce.lock().unwrap() = param(&url, "nonce").unwrap();
+    let state = param(&url, "state").unwrap();
+    come_back(&url, &format!("code=c0de2&state={state}"));
+    let (_, rest) = finish(child, out);
+    assert!(rest.contains("signed in: client oaiapp_1"), "{rest}");
+    let token = &openai.seen("POST /api/accounts/oauth/token")[1];
+    assert!(
+        token.contains("client_id=oaiapp_1") && token.contains("code=c0de2"),
+        "{token}"
+    );
 }
 
 #[test]
@@ -345,5 +401,26 @@ fn the_gate_takes_no_code_from_an_answer_that_is_not_to_its_own_request() {
     let (ok, rest) = finish(child, out);
     assert!(!ok && rest.contains("was not granted"), "{rest}");
     assert_eq!(openai.seen("POST /v1/responses").len(), 0, "{rest}");
-    assert!(!home.0.join("gate-chatgpt.json").exists());
+    // What was registered is kept, without a token: the next try does not register again.
+    let kept = std::fs::read(home.0.join("gate-chatgpt.json")).unwrap();
+    let kept: Value = serde_json::from_slice(&kept).unwrap();
+    assert_eq!(
+        (
+            &kept["client_id"],
+            &kept["access_token"],
+            &kept["expires_ms"]
+        ),
+        (&json!("oaiapp_1"), &json!(""), &json!(0))
+    );
+    let (child, mut out) = gate(&home, &openai);
+    let url = address(&mut out, &openai);
+    assert_eq!(param(&url, "client_id").as_deref(), Some("oaiapp_1"));
+    // A refusal is shown, also one that names no state; a code in it is not.
+    come_back(
+        &url,
+        "error=access_denied&error_description=No+plan&code=c0de9",
+    );
+    let (ok, rest) = finish(child, out);
+    assert!(!ok && rest.contains("access_denied No plan"), "{rest}");
+    assert!(!rest.contains("c0de9"), "{rest}");
 }
