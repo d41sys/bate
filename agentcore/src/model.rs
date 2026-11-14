@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
-/// The variable with the model server's key. It is the engine's alone: what the model starts
-/// (commands, connectors) does not get it.
+/// The variable with the model server's key. The service keeps it from its engines; should an
+/// engine run by hand have it, what the model starts (commands, connectors) does not get it.
 pub const KEY: &str = "BATE_MODEL_API_KEY";
 
 /// The stream's last line.

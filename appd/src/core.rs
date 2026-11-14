@@ -1084,16 +1084,23 @@ impl Core {
                 } else {
                     let Some(host) = host_of(url) else {
                         return Err(bad(
-                            "`url` must be an http:// or https:// URL with a host and no user or password",
+                            "`url` must be an http:// or https:// URL with a host and no user, password, query or fragment",
                         ));
                     };
-                    let (old_url, old_key, _) = self.provider().map_err(internal)?;
+                    // The saved one only: a key from the environment stays there.
+                    let (old_url, old_key) = self.store.provider().map_err(internal)?.unzip();
                     let key = match f.get("key") {
                         Some(Value::Null) => None,
+                        Some(Value::String(s)) if s.contains(char::is_control) => {
+                            return Err(bad("`key` must be one line"));
+                        }
                         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
                         // A key is for the server the user gave it for: it does not follow
                         // the URL to another host, nor from https to http.
-                        _ => old_key.filter(|_| old_url.as_deref().and_then(host_of) == Some(host)),
+                        Some(Value::String(_)) | None => old_key
+                            .flatten()
+                            .filter(|_| old_url.as_deref().and_then(host_of) == Some(host)),
+                        Some(_) => return Err(bad("`key` must be a string or null")),
                     };
                     self.store
                         .set_provider(url, key.as_deref())
@@ -2391,13 +2398,19 @@ fn encode(frame: &Value) -> Arc<[u8]> {
     bytes.into()
 }
 
-/// The scheme, host and port of an `http://` or `https://` URL without a user or password;
-/// `None` for anything else.
+/// The scheme, host and port of an `http://` or `https://` URL without a user, password,
+/// query or fragment (each request's path is added to the URL); `None` for anything else.
 fn host_of(url: &str) -> Option<String> {
     let uri: ureq::http::Uri = url.parse().ok()?;
-    let (scheme, host) = (uri.scheme_str()?, uri.authority()?.as_str());
-    (matches!(scheme, "http" | "https") && !host.contains('@'))
-        .then(|| format!("{scheme}://{host}").to_ascii_lowercase())
+    let (scheme, authority) = (uri.scheme_str()?, uri.authority()?);
+    let host = authority.as_str();
+    let port_ok = host.len() == authority.host().len() || authority.port_u16().is_some();
+    (matches!(scheme, "http" | "https")
+        && !authority.host().is_empty()
+        && port_ok
+        && !host.contains('@')
+        && !url.contains(['?', '#']))
+    .then(|| format!("{scheme}://{host}").to_ascii_lowercase())
 }
 
 fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {

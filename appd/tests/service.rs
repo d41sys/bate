@@ -634,8 +634,42 @@ fn the_saved_model_server_and_its_key_reach_the_real_engine_before_the_environme
         !history.contains("sk-saved") && !history.contains("\"token\""),
         "{history}"
     );
-    let log = fs::read_to_string(home.join("appd.log")).unwrap();
-    assert!(!log.contains("sk-saved"), "{log}");
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+    assert!(
+        log.contains("serving") && !log.contains("sk-saved"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_key_from_the_environment_is_not_written_to_disk() {
+    let home = home("provider-env");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_MODEL_BASE_URL", "http://127.0.0.1:9/v1")
+            .env("BATE_MODEL_API_KEY", "sk-only-in-the-environment");
+    });
+    let mut w = Window::connect(&home);
+    assert_eq!(
+        w.ok("get_provider", json!({})),
+        json!({"url": "http://127.0.0.1:9/v1", "hasKey": true, "fromEnv": true})
+    );
+    // Saved as the form sends it: the same server, no key typed.
+    w.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:9/v1", "key": ""}),
+    );
+    assert_eq!(
+        w.ok("get_provider", json!({})),
+        json!({"url": "http://127.0.0.1:9/v1", "hasKey": false, "fromEnv": false})
+    );
+    for file in ["app.db", "app.db-wal"] {
+        let bytes = fs::read(home.join(file)).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("sk-only-in-the-environment"),
+            "{file}"
+        );
+    }
 }
 
 #[test]
@@ -3117,13 +3151,18 @@ fn provider_configuration_and_models_listing() {
     assert_eq!(initial["url"], Value::Null);
     assert_eq!(initial["hasKey"], false);
 
-    // Invalid URLs are refused: no scheme, no host, a user and password, a line break.
+    // Invalid URLs are refused: no scheme, no host, a bad port, a user and password, a line
+    // break, a query or a fragment (the path of each request is added to the URL).
     for url in [
         "not-a-valid-url",
         "http://",
+        "http://:80/v1",
+        "http://example.com:abc/v1",
         "ftp://example.com/v1",
         "http://user:pw@example.com/v1",
         "http://example.com/v1\nsk-x",
+        "http://example.com/v1#\nsk-x",
+        "http://example.com/v1?a=b",
     ] {
         let id = w.send("set_provider", json!({"url": url}));
         let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
@@ -3205,8 +3244,15 @@ fn provider_configuration_and_models_listing() {
     w.ok("set_provider", json!({"url": elsewhere}));
     assert_eq!(w.ok("get_provider", json!({}))["hasKey"], false);
     *auth_header.lock().unwrap() = None;
-    w.ok("list_models", json!({}));
+    let models = w.ok("list_models", json!({}));
+    assert_eq!(models["models"], json!(["model-alpha", "model-beta"]));
     assert_eq!(*auth_header.lock().unwrap(), None);
+    // A key is a line of text, or `null`.
+    for key in [json!(123), json!("sk\n2")] {
+        let id = w.send("set_provider", json!({"url": elsewhere, "key": key}));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
+        assert_eq!(reply["code"], "bad_request", "{key}");
+    }
     // `null` removes it.
     w.ok("set_provider", json!({"url": elsewhere, "key": "sk-2"}));
     assert_eq!(w.ok("get_provider", json!({}))["hasKey"], true);
