@@ -1237,6 +1237,20 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     send(&device, json!({"id": "5", "type": "get_provider"}));
     let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "5");
     assert_eq!(refused["code"], "forbidden", "{refused}");
+    // Nor let itself, or anyone, in through a chat.
+    for (id, command) in [
+        ("6", "set_channel"),
+        ("7", "pair_channel"),
+        ("8", "get_channels"),
+        ("9", "remove_chat"),
+    ] {
+        send(
+            &device,
+            json!({"id": id, "type": command, "bot": "x", "kind": "telegram"}),
+        );
+        let refused = until(&device, &|v| v["type"] == "response" && v["id"] == id);
+        assert_eq!(refused["code"], "forbidden", "{refused}");
+    }
 
     // A line break would be two commands.
     assert_eq!(
@@ -1328,7 +1342,11 @@ fn search_finds_words_in_prompts_and_whole_replies_of_one_bot_or_all() {
 #[test]
 fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     let home = home("report");
-    let _service = Service::start(&home);
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            // Nothing listens there: the token below goes nowhere.
+            .env("BATE_TELEGRAM_API", "http://127.0.0.1:9");
+    });
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
     let stdio = json!({"name": "files", "enabled": true, "transport": {"type": "stdio",
@@ -1342,6 +1360,10 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
     w.ok(
         "set_provider",
         json!({"url": "http://127.0.0.1:1234/v1", "key": "model-key-SECRET-888"}),
+    );
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "telegram", "token": "1234:chat-SECRET-222"}),
     );
     w.ok(
         "set_routine",
@@ -1359,7 +1381,8 @@ fn a_bug_report_archive_has_logs_and_settings_and_no_secret() {
          bot x: GET /mcp/path-SECRET-333-long/mcp as someone with pass-SECRET-444 and url-SECRET-555; serve ok\n\
          bot x: sent Authorization: Bearer hdr-SECRET-999 and env-SECRET-12345\n\
          bot x: the server says hdr-SECRET-999 expired; ran with arg-SECRET-777\n\
-         bot x: access_token=unknown-SECRET-000 model-key-SECRET-888 harmless-marker"
+         bot x: access_token=unknown-SECRET-000 model-key-SECRET-888 harmless-marker\n\
+         bot x: telegram: GET /bot1234:chat-SECRET-222/getUpdates"
     )
     .unwrap();
 
@@ -3218,4 +3241,504 @@ fn provider_configuration_and_models_listing() {
     let cleared = w.ok("get_provider", json!({}));
     assert_eq!(cleared["url"], Value::Null);
     assert_eq!(cleared["hasKey"], false);
+}
+
+/// Telegram's part: the Bot API for the bot with `TOKEN`. `say` is a person writing to the
+/// bot; `sent` is what the bot was made to send, as `(chat, text)`.
+struct Telegram {
+    base: String,
+    updates: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    sent: std::sync::Arc<std::sync::Mutex<Vec<(i64, String)>>>,
+}
+
+impl Telegram {
+    const TOKEN: &str = "4242:telegram-token";
+
+    fn start() -> Telegram {
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (updates, sent) = (
+            Arc::new(Mutex::new(Vec::<Value>::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let (queue, log) = (updates.clone(), sent.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut first, mut length) = (String::new(), 0);
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let target = first.split(' ').nth(1).unwrap_or("");
+                let (path, query) = target.split_once('?').unwrap_or((target, ""));
+                let method = path.strip_prefix(&format!("/bot{}/", Telegram::TOKEN));
+                let (status, answer) = match method {
+                    Some("getUpdates") => {
+                        let offset: i64 = query
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("offset="))
+                            .map_or(0, |n| n.parse().unwrap());
+                        let pending = |queue: &Mutex<Vec<Value>>| -> Vec<Value> {
+                            let all = queue.lock().unwrap();
+                            let new = all
+                                .iter()
+                                .filter(|u| u["update_id"].as_i64() >= Some(offset));
+                            new.cloned().collect()
+                        };
+                        // The real one holds the request until there is something to say.
+                        if pending(&queue).is_empty() {
+                            std::thread::sleep(Duration::from_millis(30));
+                        }
+                        (200, json!({"ok": true, "result": pending(&queue)}))
+                    }
+                    Some("sendMessage") => {
+                        let message: Value = serde_json::from_slice(&body).unwrap();
+                        let text = message["text"].as_str().unwrap().to_owned();
+                        log.lock()
+                            .unwrap()
+                            .push((message["chat_id"].as_i64().unwrap(), text));
+                        (200, json!({"ok": true, "result": {}}))
+                    }
+                    _ => (401, json!({"ok": false, "description": "Unauthorized"})),
+                };
+                let answer = answer.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} -\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        Telegram {
+            base,
+            updates,
+            sent,
+        }
+    }
+
+    fn say(&self, chat: i64, text: &str) {
+        let mut updates = self.updates.lock().unwrap();
+        let id = updates.len() as i64 + 1;
+        updates.push(json!({"update_id": id, "message": {
+            "message_id": id, "text": text,
+            "chat": {"id": chat, "type": "private"},
+            "from": {"id": chat, "is_bot": false, "first_name": format!("Person {chat}")},
+        }}));
+    }
+
+    /// Waits until the bot has sent `count` messages to `chat`, and gives the last.
+    fn heard(&self, chat: i64, count: usize) -> String {
+        let to_chat = || -> Vec<String> {
+            let sent = self.sent.lock().unwrap();
+            let to = sent.iter().filter(|(to, _)| *to == chat);
+            to.map(|(_, text)| text.clone()).collect()
+        };
+        eventually("a message from the bot", || to_chat().len() >= count);
+        let all = to_chat();
+        assert_eq!(all.len(), count, "{all:?}");
+        all[count - 1].clone()
+    }
+}
+
+fn channel<'a>(channels: &'a Value, kind: &str) -> &'a Value {
+    let all = channels["channels"].as_array().unwrap();
+    all.iter().find(|c| c["kind"] == kind).unwrap()
+}
+
+#[test]
+fn a_bot_is_messaged_from_telegram_once_the_sender_has_paired_with_a_code() {
+    let (home, telegram) = (home("telegram"), Telegram::start());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_TELEGRAM_API", &telegram.base);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let on = json!({"bot": bot, "kind": "telegram"});
+    assert_eq!(
+        channel(&w.ok("get_channels", json!({"bot": bot})), "telegram"),
+        &json!({"kind": "telegram", "hasToken": false, "chats": [], "error": null})
+    );
+    let mut with_token = on.clone();
+    with_token["token"] = json!(Telegram::TOKEN);
+    w.ok("set_channel", with_token.clone());
+    // The window is told there is a token, not the token.
+    let channels = w.ok("get_channels", json!({"bot": bot}));
+    assert_eq!(channel(&channels, "telegram")["hasToken"], true);
+    assert!(
+        !channels.to_string().contains("telegram-token"),
+        "{channels}"
+    );
+    // One Telegram bot is one Bate bot's: two readers would take each other's messages.
+    let other = w.create_bot();
+    let mut taken = with_token.clone();
+    taken["bot"] = json!(other);
+    let id = w.send("set_channel", taken);
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
+    assert_eq!(refused["code"], "token_in_use", "{refused}");
+
+    // A stranger is told how to get in, and the bot hears nothing.
+    telegram.say(7, "hello?");
+    assert!(telegram.heard(7, 1).contains("private"));
+    // A guess is counted; five end the code.
+    let code = w.ok("pair_channel", on.clone())["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(code.len(), 6);
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    for guess in 1..=5 {
+        telegram.say(8, wrong);
+        assert!(telegram.heard(8, guess).contains("not the code"));
+    }
+    telegram.say(8, &code);
+    assert!(telegram.heard(8, 6).contains("private"));
+    let channels = w.ok("get_channels", json!({"bot": bot}));
+    assert_eq!(channel(&channels, "telegram")["chats"], json!([]));
+    assert!(!home.join("bots").join(&bot).join("prompts.log").exists());
+
+    // The code from the window, sent in the chat, pairs that chat.
+    let code = w.ok("pair_channel", on.clone())["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    telegram.say(7, &format!(" {code} "));
+    assert!(telegram.heard(7, 2).contains("Paired"));
+    let channels = w.ok("get_channels", json!({"bot": bot}));
+    assert_eq!(
+        channel(&channels, "telegram")["chats"],
+        json!([{"chat": "7", "name": "Person 7"}])
+    );
+    // It is used up: nobody else gets in with it.
+    telegram.say(8, &code);
+    assert!(telegram.heard(8, 7).contains("private"));
+
+    // What the paired chat says is a prompt, and what the bot says last goes back.
+    telegram.say(7, "what is new");
+    assert_eq!(telegram.heard(7, 3), "hello");
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
+    assert!(history.contains("what is new"), "{history}");
+    assert!(
+        !history.contains("hello?") && !history.contains(&code),
+        "{history}"
+    );
+    // A turn that waits for the user says so in the chat.
+    telegram.say(7, "ask");
+    assert!(telegram.heard(7, 4).contains("Bate"));
+    // The bot is busy with that turn: a second message is not queued behind it.
+    telegram.say(7, "and another");
+    assert!(telegram.heard(7, 5).contains("busy"));
+    let question = w.ok("open_bot", json!({"bot": bot}))["questions"][0]["question"].clone();
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": question, "choice": "Approve"}),
+    );
+    assert_eq!(telegram.heard(7, 6), "chose Approve");
+
+    // Forgotten in the window: the chat is a stranger again.
+    w.ok(
+        "remove_chat",
+        json!({"bot": bot, "kind": "telegram", "chat": "7"}),
+    );
+    telegram.say(7, "still there?");
+    assert!(telegram.heard(7, 7).contains("private"));
+
+    // Without its token the channel is gone, with its chats.
+    let mut without = on.clone();
+    without["token"] = json!("");
+    w.ok("set_channel", without);
+    assert_eq!(
+        channel(&w.ok("get_channels", json!({"bot": bot})), "telegram"),
+        &json!({"kind": "telegram", "hasToken": false, "chats": [], "error": null})
+    );
+}
+
+#[test]
+fn a_channel_whose_token_is_refused_says_so() {
+    let (home, telegram) = (home("telegram-refused"), Telegram::start());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_TELEGRAM_API", &telegram.base);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "telegram", "token": "1:wrong"}),
+    );
+    let mut channels = Value::Null;
+    eventually("the channel's error", || {
+        channels = w.ok("get_channels", json!({"bot": bot}));
+        !channel(&channels, "telegram")["error"].is_null()
+    });
+    let error = channel(&channels, "telegram")["error"].as_str().unwrap();
+    assert!(
+        error.contains("Unauthorized") && !error.contains("wrong"),
+        "{error}"
+    );
+    let id = w.send("pair_channel", json!({"bot": bot, "kind": "discord"}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id);
+    assert_eq!(refused["code"], "no_channel", "{refused}");
+}
+
+/// Discord's part, for the bot with `TOKEN`: its HTTP API, and the gateway the API points to.
+/// `say` is a message event; `sent` is what the bot was made to send, as `(channel, text)`.
+struct Discord {
+    base: String,
+    events: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    sent: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// What each connection to the gateway identified with.
+    identified: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    heartbeats: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Set to have the gateway drop its connection.
+    drop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Discord {
+    const TOKEN: &str = "discord-token-9";
+
+    fn start() -> Discord {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tungstenite::Message;
+        let api = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let gateway = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let discord = Discord {
+            base: format!("http://{}", api.local_addr().unwrap()),
+            events: Arc::default(),
+            sent: Arc::default(),
+            identified: Arc::default(),
+            heartbeats: Arc::new(AtomicUsize::new(0)),
+            drop: Arc::new(AtomicBool::new(false)),
+        };
+        let (log, gateway_url) = (
+            discord.sent.clone(),
+            format!("ws://{}", gateway.local_addr().unwrap()),
+        );
+        std::thread::spawn(move || {
+            for mut stream in api.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut first, mut length, mut allowed, mut named) =
+                    (String::new(), 0, false, false);
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    let line = line.to_ascii_lowercase();
+                    if let Some(v) = line.strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    allowed |= line.trim() == format!("authorization: bot {}", Discord::TOKEN);
+                    named |= line.starts_with("user-agent: discordbot (");
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let target = first.split(' ').take(2).collect::<Vec<_>>().join(" ");
+                let message = target
+                    .strip_prefix("POST /channels/")
+                    .and_then(|rest| rest.strip_suffix("/messages"));
+                let (status, answer) = match (allowed && named, target.as_str(), message) {
+                    (false, _, _) => (401, json!({"message": "401: Unauthorized", "code": 0})),
+                    (_, "GET /gateway/bot", _) => (200, json!({"url": gateway_url, "shards": 1})),
+                    (_, _, Some(channel)) => {
+                        let message: Value = serde_json::from_slice(&body).unwrap();
+                        let text = message["content"].as_str().unwrap().to_owned();
+                        log.lock().unwrap().push((channel.to_owned(), text));
+                        (200, json!({"id": "1"}))
+                    }
+                    _ => (404, json!({"message": "404: Not Found", "code": 0})),
+                };
+                let answer = answer.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} -\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        let (events, identified, heartbeats, drop) = (
+            discord.events.clone(),
+            discord.identified.clone(),
+            discord.heartbeats.clone(),
+            discord.drop.clone(),
+        );
+        std::thread::spawn(move || {
+            for stream in gateway.incoming().flatten() {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .unwrap();
+                let Ok(mut socket) = tungstenite::accept(stream) else {
+                    continue;
+                };
+                let say = |socket: &mut tungstenite::WebSocket<_>, event: Value| {
+                    socket.send(Message::text(event.to_string())).is_ok()
+                };
+                say(
+                    &mut socket,
+                    json!({"op": 10, "d": {"heartbeat_interval": 100}}),
+                );
+                // Each connection is a new session: it hears what is said from then on.
+                let mut told = events.lock().unwrap().len();
+                while !drop.swap(false, Ordering::SeqCst) {
+                    let news: Vec<Value> = events.lock().unwrap()[told..].to_vec();
+                    told += news.len();
+                    for (n, event) in news.into_iter().enumerate() {
+                        say(
+                            &mut socket,
+                            json!({"op": 0, "t": "MESSAGE_CREATE", "s": told + n, "d": event}),
+                        );
+                    }
+                    let heard = match socket.read() {
+                        Ok(Message::Text(text)) => serde_json::from_str::<Value>(&text).unwrap(),
+                        Ok(_) | Err(tungstenite::Error::Io(_)) => continue,
+                        Err(_) => break,
+                    };
+                    match heard["op"].as_u64() {
+                        Some(2) => {
+                            identified.lock().unwrap().push(heard["d"].clone());
+                            say(&mut socket, json!({"op": 0, "t": "READY", "s": 1, "d": {}}));
+                        }
+                        Some(1) => {
+                            heartbeats.fetch_add(1, Ordering::SeqCst);
+                            say(&mut socket, json!({"op": 11}));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+        discord
+    }
+
+    /// A message event; `more` is what sets it apart from a person's direct message.
+    fn say(&self, channel: &str, text: &str, more: Value) {
+        let mut event = json!({
+            "id": "1", "channel_id": channel, "content": text,
+            "author": {"id": "77", "username": "person", "global_name": "Person"},
+        });
+        for (key, value) in more.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        self.events.lock().unwrap().push(event);
+    }
+
+    /// Waits until the bot has sent `count` messages to `channel`, and gives the last.
+    fn heard(&self, channel: &str, count: usize) -> String {
+        let to_channel = || -> Vec<String> {
+            let sent = self.sent.lock().unwrap();
+            let to = sent.iter().filter(|(to, _)| to == channel);
+            to.map(|(_, text)| text.clone()).collect()
+        };
+        eventually("a message from the bot", || to_channel().len() >= count);
+        let all = to_channel();
+        assert_eq!(all.len(), count, "{all:?}");
+        all[count - 1].clone()
+    }
+}
+
+#[test]
+fn a_bot_is_messaged_from_discord_once_the_sender_has_paired_with_a_code() {
+    use std::sync::atomic::Ordering;
+    let (home, discord) = (home("discord"), Discord::start());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_DISCORD_API", &discord.base);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let on = json!({"bot": bot, "kind": "discord"});
+    let mut with_token = on.clone();
+    with_token["token"] = json!(Discord::TOKEN);
+    w.ok("set_channel", with_token);
+    // It says who it is, and asks for direct messages only.
+    eventually("the bot at the gateway", || {
+        discord.identified.lock().unwrap().len() == 1
+    });
+    let identified = discord.identified.lock().unwrap()[0].clone();
+    assert_eq!(
+        (&identified["token"], &identified["intents"]),
+        (&json!(Discord::TOKEN), &json!(1 << 12))
+    );
+
+    // A stranger is told how to get in; the code from the window pairs the chat.
+    discord.say("555", "hello?", json!({}));
+    assert!(discord.heard("555", 1).contains("private"));
+    let code = w.ok("pair_channel", on.clone())["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    discord.say("555", &code, json!({}));
+    assert!(discord.heard("555", 2).contains("Paired"));
+    let channels = w.ok("get_channels", json!({"bot": bot}));
+    assert_eq!(
+        channel(&channels, "discord"),
+        &json!({"kind": "discord", "hasToken": true, "error": null,
+            "chats": [{"chat": "555", "name": "Person"}]})
+    );
+
+    // Only a person's direct message is a prompt: not what is said in a server, nor by a bot.
+    discord.say("555", "from a server", json!({"guild_id": "1"}));
+    let a_bot = json!({"author": {"id": "78", "username": "other", "bot": true}});
+    discord.say("555", "from a bot", a_bot);
+    discord.say("555", "what is new", json!({}));
+    assert_eq!(discord.heard("555", 3), "hello");
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
+    assert!(history.contains("what is new"), "{history}");
+    assert!(
+        !history.contains("from a server") && !history.contains("from a bot"),
+        "{history}"
+    );
+    // The connection is kept alive.
+    eventually("heartbeats", || {
+        discord.heartbeats.load(Ordering::SeqCst) >= 2
+    });
+
+    // The gateway drops the connection: the bot comes back, and is reached as before.
+    discord.drop.store(true, Ordering::SeqCst);
+    eventually("the bot back at the gateway", || {
+        discord.identified.lock().unwrap().len() == 2
+    });
+    discord.say("555", "still there?", json!({}));
+    assert_eq!(discord.heard("555", 4), "hello");
+    let channels = w.ok("get_channels", json!({"bot": bot}));
+    assert_eq!(channel(&channels, "discord")["error"], Value::Null);
+}
+
+#[test]
+fn a_discord_token_that_is_refused_says_so() {
+    let (home, discord) = (home("discord-refused"), Discord::start());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_DISCORD_API", &discord.base);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "discord", "token": "wrong-token"}),
+    );
+    let mut channels = Value::Null;
+    eventually("the channel's error", || {
+        channels = w.ok("get_channels", json!({"bot": bot}));
+        !channel(&channels, "discord")["error"].is_null()
+    });
+    let error = channel(&channels, "discord")["error"].as_str().unwrap();
+    assert!(
+        error.contains("Unauthorized") && !error.contains("wrong-token"),
+        "{error}"
+    );
 }

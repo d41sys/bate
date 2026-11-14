@@ -4,6 +4,7 @@
 
 mod attach;
 mod browser;
+mod channels;
 mod clients;
 mod core;
 mod hooks;

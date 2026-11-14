@@ -190,10 +190,7 @@ impl Lan {
         if state.on.is_none() {
             return Err("turn on the page for other devices first".into());
         }
-        let mut n = [0u8; 4];
-        // SAFETY: the pointer and length describe `n`.
-        unsafe { libc::arc4random_buf(n.as_mut_ptr().cast(), n.len()) };
-        let code = format!("{:06}", u32::from_le_bytes(n) % 1_000_000);
+        let code = sys::pair_code();
         state.code = Some(Code {
             code: code.clone(),
             until: Instant::now() + CODE_LIFE,
@@ -422,6 +419,10 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "remove_device",
     "get_provider",
     "set_provider",
+    "get_channels",
+    "set_channel",
+    "pair_channel",
+    "remove_chat",
 ];
 
 fn send(s: &Session, body: &[u8]) -> Answer {

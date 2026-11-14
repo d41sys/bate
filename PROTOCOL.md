@@ -151,6 +151,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
 | `remove_device` | `device` (an id) | `{}`: forgets the device, ending its active sessions immediately |
+| `get_channels` | `bot` | `{channels: [{kind, hasToken, chats: [{chat, name}], error}]}`: one entry for `telegram` and one for `discord`. The token itself is never sent back. `error` says why the channel is not connected, else `null` |
+| `set_channel` | `bot`, `kind`, `token` (empty: remove) | `{}`: saves the bot token of the channel and connects, or removes the channel and its paired chats. Code `token_in_use` when another bot has the same token |
+| `pair_channel` | `bot`, `kind` | `{code, expiresAt}`: a 6-digit code that lets one chat in; it lasts 5 minutes or 5 wrong guesses. Code `no_channel` without a token |
+| `remove_chat` | `bot`, `kind`, `chat` | `{}`: the chat is no longer let in. Code `no_such_chat` |
 
 `Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color, model, effort}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
@@ -166,6 +170,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
+| `{"type":"channels_changed","bot"}` | Re-run `get_channels`. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
@@ -344,11 +349,24 @@ When enabled in Settings, the service serves Bate's web client over HTTPS on por
 
 Secrets are removed from the logs, and from `settings.json`, in three ways:
 
-- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY` and the key saved with `set_provider`.
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY`, the key saved with `set_provider`, and the tokens saved with `set_channel`.
 - What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
 - PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
 
 Not recognised: a secret the service never stored that is printed with none of those words, and a stored value printed in another form (percent-encoded, base64).
+
+### Channels (Telegram and Discord)
+
+A bot can be written to from a chat app. The user makes a bot there (Telegram: BotFather; Discord: the developer portal) and gives Bate its token with `set_channel`. The service connects out from the Mac; nothing in between relays messages.
+
+- **Telegram:** long polling, `GET <api>/bot<token>/getUpdates`; replies with `sendMessage`. `<api>` is `https://api.telegram.org` (`BATE_TELEGRAM_API`).
+- **Discord:** `GET <api>/gateway/bot`, then the gateway WebSocket (Identify with the direct-messages intent only, heartbeats; a broken connection starts a new session, without resume); replies with `POST <api>/channels/<id>/messages`. `<api>` is `https://discord.com/api/v10` (`BATE_DISCORD_API`).
+- Only one-to-one chats with text are read: Telegram private chats, Discord direct messages from people. Groups, servers, other bots, photos and files are passed over.
+- **Pairing:** a chat that is not paired gets a note on how to pair, and the bot hears nothing of it. The chat is let in by sending the code from `pair_channel`. A wrong 6-digit guess is answered and counted; a code is used up by the chat it lets in.
+- A paired chat's message is sent to the bot as a prompt, as written. When the turn ends, the text the bot wrote since its last tool call goes back to the chat, in pieces of at most 1900 characters. A turn that ends otherwise is answered `No reply: <why>.`
+- While the bot is occupied, a message is answered that the bot is busy; it is not queued.
+- Questions and approvals are answered in Bate's window only; the chat gets a note that one is waiting.
+- Tokens are stored in `app.db` as given, are never sent to a window or an engine, are replaced in bug reports, and the four commands are refused to devices on the LAN.
 
 ### Storage
 

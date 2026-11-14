@@ -1,3 +1,4 @@
+import { Channels } from "./Channels.tsx";
 import { Devices } from "./Devices.tsx";
 import { useEffect, useState } from "react";
 import { inShell, listen, request } from "./service.ts";
@@ -119,6 +120,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
       <h2>Bug report</h2>
       <button onClick={() => run(request<{ path: string }>("export_report").then((d) => setReport(d.path)))}>Export a bug report</button>
       {report && <p>Saved to <code>{report}</code></p>}
+      {inShell && <Channels bot={bot.id} />}
       {inShell && <Devices />}
       <h2>Delete</h2>
       {deleting ? (

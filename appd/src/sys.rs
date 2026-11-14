@@ -53,6 +53,14 @@ pub fn peer_is_self(stream: &UnixStream) -> bool {
     rc == 0 && uid == unsafe { libc::geteuid() }
 }
 
+/// Six random digits: a code a person reads off one screen and types on another.
+pub fn pair_code() -> String {
+    let mut n = [0u8; 4];
+    // SAFETY: the pointer and length describe `n`.
+    unsafe { libc::arc4random_buf(n.as_mut_ptr().cast(), n.len()) };
+    format!("{:06}", u32::from_le_bytes(n) % 1_000_000)
+}
+
 /// Random lowercase hex string of `bytes * 2` characters.
 pub fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];

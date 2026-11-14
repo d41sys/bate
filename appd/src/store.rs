@@ -80,10 +80,12 @@ CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, con
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
+CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 14] = [
+const BOT_TABLES: [&str; 16] = [
     "transcript",
     "ledger",
     "questions",
@@ -97,6 +99,8 @@ const BOT_TABLES: [&str; 14] = [
     "connectors",
     "profiles",
     "models",
+    "channels",
+    "chats",
     "bots",
 ];
 
@@ -261,6 +265,70 @@ impl Store {
                 params![url, key],
             )
             .map(drop)
+    }
+
+    /// Every bot's channels, as `(bot, kind, token)`.
+    pub fn channels(&self) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT bot, kind, token FROM channels")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect()
+    }
+
+    pub fn channel(&self, bot: &str, kind: &str) -> Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT token FROM channels WHERE bot = ?1 AND kind = ?2",
+                [bot, kind],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_channel(&self, bot: &str, kind: &str, token: &str) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO channels(bot, kind, token) VALUES (?1, ?2, ?3)",
+                [bot, kind, token],
+            )
+            .map(drop)
+    }
+
+    /// Forgets the channel and the chats that were let in on it.
+    pub fn delete_channel(&self, bot: &str, kind: &str) -> Result<()> {
+        for table in ["channels", "chats"] {
+            self.0.execute(
+                &format!("DELETE FROM {table} WHERE bot = ?1 AND kind = ?2"),
+                [bot, kind],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The chats let in on a channel, as `(chat, name)`.
+    pub fn chats(&self, bot: &str, kind: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT chat, name FROM chats WHERE bot = ?1 AND kind = ?2 ORDER BY rowid",
+        )?;
+        stmt.query_map([bot, kind], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
+    pub fn put_chat(&self, bot: &str, kind: &str, chat: &str, name: &str) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO chats(bot, kind, chat, name) VALUES (?1, ?2, ?3, ?4)",
+                [bot, kind, chat, name],
+            )
+            .map(drop)
+    }
+
+    pub fn delete_chat(&self, bot: &str, kind: &str, chat: &str) -> Result<bool> {
+        Ok(self.0.execute(
+            "DELETE FROM chats WHERE bot = ?1 AND kind = ?2 AND chat = ?3",
+            [bot, kind, chat],
+        )? > 0)
     }
 
     pub fn delete_provider(&self) -> Result<()> {
