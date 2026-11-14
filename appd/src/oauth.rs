@@ -328,7 +328,7 @@ pub fn decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> [u8; 32] {
     // macOS's own (CommonCrypto, part of libSystem): no crate for one hash.
     unsafe extern "C" {
         fn CC_SHA256(data: *const u8, len: u32, out: *mut u8) -> *mut u8;
@@ -339,7 +339,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn base64url(data: &[u8]) -> String {
+pub fn base64url(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in data.chunks(3) {

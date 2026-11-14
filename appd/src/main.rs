@@ -6,6 +6,7 @@ mod attach;
 mod browser;
 mod clients;
 mod core;
+mod gate;
 mod hooks;
 mod lan;
 mod launch;
@@ -34,19 +35,23 @@ use sys::log;
 const USAGE: &str = "usage:
   appd              serve (launchd runs this)
   appd launch       register this appd with launchd and start it
-  appd unregister   stop the service and remove its launchd registration";
+  appd unregister   stop the service and remove its launchd registration
+  appd gate chatgpt [model]
+                    sign in to ChatGPT in the browser, send one request, print the reply";
 
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
-    let result = match arg.as_deref() {
-        None => serve(),
-        Some("launch") => std::env::current_exe().and_then(|exe| launch::ensure(&exe)),
-        Some("unregister") => launch::remove().map(|removed| {
+    let mut args = std::env::args().skip(1);
+    let (arg, what) = (args.next(), args.next());
+    let result = match (arg.as_deref(), what.as_deref()) {
+        (None, _) => serve(),
+        (Some("gate"), Some("chatgpt")) => gate::chatgpt(args.next()),
+        (Some("launch"), _) => std::env::current_exe().and_then(|exe| launch::ensure(&exe)),
+        (Some("unregister"), _) => launch::remove().map(|removed| {
             if !removed {
                 println!("not registered");
             }
         }),
-        Some(_) => {
+        _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
