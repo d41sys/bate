@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use proto::connectors::{Connector, Transport};
 use proto::groups::{Group, Peer};
@@ -19,6 +19,7 @@ use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_pr
 use serde_json::{Value, json};
 
 use crate::attach;
+use crate::channels::{self, Note};
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
@@ -54,6 +55,13 @@ pub enum Msg {
         client: u64,
         id: Value,
         models: Vec<String>,
+    },
+    /// News from the reader of a bot's channel; `reader` says which reader.
+    Channel {
+        bot: String,
+        kind: &'static str,
+        reader: Arc<AtomicBool>,
+        note: Note,
     },
     /// What came of an action in a bot's browser.
     Browsed {
@@ -100,6 +108,13 @@ fn internal(e: rusqlite::Error) -> Refusal {
 
 fn bad(msg: impl Into<String>) -> Refusal {
     ("bad_request", msg.into())
+}
+
+/// The channel a request names.
+fn kind_of(f: &Value) -> Result<&'static str, Refusal> {
+    let kind = str_field(f, "kind")?;
+    let known = channels::KINDS.into_iter().find(|k| *k == kind);
+    known.ok_or_else(|| bad(format!("`kind` is one of: {}", channels::KINDS.join(", "))))
 }
 
 fn str_field<'a>(f: &'a Value, key: &str) -> Result<&'a str, Refusal> {
@@ -180,11 +195,9 @@ enum Waiter {
     Service,
     /// The service's own `connectors`.
     Connectors,
-    /// A message from the bot `from`, sent on as a prompt.
+    /// A message from another bot or from a chat, sent on as a prompt.
     Peer {
-        from: String,
-        generation: u64,
-        message: String,
+        caller: Caller,
         prompt: Outgoing,
     },
     /// The service's own `peers` or `reply`: a refusal changes nothing (the turn that waited
@@ -219,29 +232,48 @@ struct Running {
     busy: bool,
     /// `compact` requests the engine has not answered yet.
     compacting: u32,
-    /// The message from another bot that the running turn answers.
-    call: Option<PeerCall>,
+    /// The message from another bot, or from a chat, that the running turn answers.
+    call: Option<Call>,
     /// The browser action the running turn waits on: set when the turn ends, so that an
     /// action still waiting for the user's hand-back is not run.
     browsing: Option<Arc<AtomicBool>>,
 }
 
-/// A message one bot sent another, while the other works on it.
-struct PeerCall {
-    from: String,
-    /// Which engine of `from` waits: a later one numbers its messages from the start again,
-    /// and must not get this one's reply.
-    generation: u64,
-    message: String,
+/// Who, other than the windows, a turn's last words go to.
+enum Caller {
+    /// The bot `from`, which sent `message`.
+    Bot {
+        from: String,
+        /// Which engine of `from` waits: a later one numbers its messages from the start
+        /// again, and must not get this one's reply.
+        generation: u64,
+        message: String,
+    },
+    /// A chat on one of the bot's own channels.
+    Chat { kind: &'static str, chat: String },
+}
+
+/// A message sent to a bot from outside its windows, while the bot works on it.
+struct Call {
+    caller: Caller,
     /// What the bot said since its last tool call: at the turn's end, its reply.
     reply: String,
 }
+
+/// A bot's channel: `telegram` or `discord`.
+type Channel = (String, &'static str);
 
 pub struct Core {
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
     /// The page for other devices on the network.
     lan: Arc<crate::lan::Lan>,
+    /// The reader of each channel that has a token.
+    channels: HashMap<Channel, Arc<AtomicBool>>,
+    /// Why a channel does not work, as its reader last said.
+    channel_errors: HashMap<Channel, String>,
+    /// The code that lets one more chat in, while it is good.
+    chat_codes: HashMap<Channel, channels::Code>,
     /// Sign-ins the browser has not come back from, by the `state` given to it.
     sign_ins: HashMap<String, oauth::Pending>,
     /// Each bot's browser, from its first use on.
@@ -275,9 +307,23 @@ impl Core {
                 }
             }
         }
+        let mut readers = HashMap::new();
+        let stored = store.channels().unwrap_or_else(|e| {
+            log!("channels not read: {e}");
+            Vec::new()
+        });
+        for (bot, kind, token) in stored {
+            if let Some(kind) = channels::KINDS.into_iter().find(|k| *k == kind) {
+                let reader = channels::start(&bot, kind, &token, tx.clone());
+                readers.insert((bot, kind), reader);
+            }
+        }
         Core {
             hook_port,
             lan,
+            channels: readers,
+            channel_errors: HashMap::new(),
+            chat_codes: HashMap::new(),
             sign_ins: HashMap::new(),
             browsers: HashMap::new(),
             store,
@@ -356,6 +402,30 @@ impl Core {
             }
             Msg::Models { client, id, models } => {
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
+            }
+            Msg::Channel {
+                bot,
+                kind,
+                reader,
+                note,
+            } => {
+                let key = (bot, kind);
+                // A reader stopped since has no say: its channel is gone, or has another token.
+                if !(self.channels.get(&key)).is_some_and(|now| Arc::ptr_eq(now, &reader)) {
+                    return;
+                }
+                match note {
+                    Note::State(error) => {
+                        match error {
+                            Some(e) => self.channel_errors.insert(key.clone(), e),
+                            None => self.channel_errors.remove(&key),
+                        };
+                        self.broadcast(&json!({"type": "channels_changed", "bot": key.0}));
+                    }
+                    Note::Message { chat, name, text } => {
+                        self.on_chat(&key.0, kind, &chat, &name, &text)
+                    }
+                }
             }
             Msg::SignIn { client, id, result } => {
                 let reply = match result {
@@ -1026,6 +1096,9 @@ impl Core {
                     }
                 }
                 self.store.delete_bot(&bot).map_err(internal)?;
+                for kind in channels::KINDS {
+                    self.stop_channel(&(bot.clone(), kind));
+                }
                 if groups_changed {
                     self.groups_changed();
                 }
@@ -1181,6 +1254,84 @@ impl Core {
                 self.forget_connector_grants(&bot, &c.name);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({"connector": c})))
+            }
+            "get_channels" => {
+                let bot = self.bot_of(f)?;
+                let mut all = Vec::new();
+                for kind in channels::KINDS {
+                    let token = self.store.channel(&bot, kind).map_err(internal)?;
+                    let chats = self.store.chats(&bot, kind).map_err(internal)?;
+                    let chats: Vec<Value> = chats
+                        .into_iter()
+                        .map(|(chat, name)| json!({"chat": chat, "name": name}))
+                        .collect();
+                    let key = (bot.clone(), kind);
+                    let pairing = self.chat_codes.get(&key);
+                    all.push(json!({
+                        "kind": kind,
+                        "hasToken": token.is_some(),
+                        // Whether the code last given still lets a chat in.
+                        "pairing": pairing.is_some_and(|code| Instant::now() < code.until),
+                        "chats": chats,
+                        "error": self.channel_errors.get(&key),
+                    }));
+                }
+                Ok(Some(json!({"channels": all})))
+            }
+            "set_channel" => {
+                let key = (self.bot_of(f)?, kind_of(f)?);
+                let (bot, kind) = (&key.0, key.1);
+                let token = str_field(f, "token")?.trim();
+                // It becomes part of an address.
+                let odd = |c: char| c.is_whitespace() || c.is_control() || "/?#%".contains(c);
+                if token.contains(odd) {
+                    return Err(bad("`token` is not a bot token"));
+                }
+                let all = self.store.channels().map_err(internal)?;
+                // Two readers of one token would take each other's messages.
+                if !token.is_empty()
+                    && all
+                        .iter()
+                        .any(|(b, k, t)| b != bot && k == kind && t == token)
+                {
+                    return Err(("token_in_use", "another bot uses that token".into()));
+                }
+                // Stored first: should that fail, the reader there is goes on.
+                if token.is_empty() {
+                    self.store.delete_channel(bot, kind).map_err(internal)?;
+                    self.stop_channel(&key);
+                } else {
+                    self.store.set_channel(bot, kind, token).map_err(internal)?;
+                    self.stop_channel(&key);
+                    let reader = channels::start(bot, kind, token, self.tx.clone());
+                    self.channels.insert(key.clone(), reader);
+                }
+                self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
+                Ok(Some(json!({})))
+            }
+            "pair_channel" => {
+                let key = (self.bot_of(f)?, kind_of(f)?);
+                if self
+                    .store
+                    .channel(&key.0, key.1)
+                    .map_err(internal)?
+                    .is_none()
+                {
+                    return Err(("no_channel", "give the channel its token first".into()));
+                }
+                let code = channels::Code::new();
+                let reply = json!({"code": code.code, "expiresAt": now_ms() + channels::CODE_LIFE.as_millis() as u64});
+                self.chat_codes.insert(key, code);
+                Ok(Some(reply))
+            }
+            "remove_chat" => {
+                let (bot, kind) = (self.bot_of(f)?, kind_of(f)?);
+                let chat = str_field(f, "chat")?;
+                if !self.store.delete_chat(&bot, kind, chat).map_err(internal)? {
+                    return Err(("no_such_chat", "no such chat".into()));
+                }
+                self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
+                Ok(Some(json!({})))
             }
             "delete_connector" => {
                 let bot = self.bot_of(f)?;
@@ -1556,16 +1707,134 @@ impl Core {
                         "[Message from the bot {name:?}. It is another bot, not your user. What you say last goes back to it as your reply.]\n{text}"
                     ),
                 };
-                self.send_prompt(to, prompt, |p| Waiter::Peer {
+                let caller = Caller::Bot {
                     from: from.to_owned(),
                     generation,
                     message: message.clone(),
-                    prompt: p,
-                })
+                };
+                self.send_prompt(to, prompt, |p| Waiter::Peer { caller, prompt: p })
                 .map_err(|(_, e)| e)
             });
         if let Err(e) = sent {
             self.send_reply(from, generation, message, Err(e));
+        }
+    }
+
+    /// Stops the reader of a channel and forgets what was known of its state.
+    fn stop_channel(&mut self, key: &Channel) {
+        if let Some(reader) = self.channels.remove(key) {
+            reader.store(true, Ordering::SeqCst);
+        }
+        self.channel_errors.remove(key);
+        self.chat_codes.remove(key);
+    }
+
+    /// Sends `text` to a chat on the bot's channel.
+    fn say(&self, bot: &str, kind: &'static str, chat: &str, text: &str) {
+        match self.store.channel(bot, kind) {
+            Ok(Some(token)) => channels::send(kind, &token, chat, text),
+            Ok(None) => {}
+            Err(e) => log!("bot {bot}: {kind} token not read: {e}"),
+        }
+    }
+
+    /// Someone wrote to the bot on a channel. A chat that was let in has its message sent on
+    /// as a prompt, and the reply follows when the turn ends; any other must send the code
+    /// the window shows first.
+    fn on_chat(&mut self, bot: &str, kind: &'static str, chat: &str, name: &str, text: &str) {
+        let known = match self.store.chats(bot, kind) {
+            Ok(chats) => chats.iter().any(|(known, _)| known == chat),
+            Err(e) => return log!("bot {bot}: chats not read: {e}"),
+        };
+        if !known {
+            let key = (bot.to_owned(), kind);
+            let said: String = text.split_whitespace().collect();
+            let guess = said.len() == 6 && said.bytes().all(|b| b.is_ascii_digit());
+            let right = match self.chat_codes.get_mut(&key) {
+                Some(code) if !guess || Instant::now() >= code.until => None,
+                Some(code) if said == code.code => Some(true),
+                Some(code) => {
+                    // Five guesses and the code is no more.
+                    code.tries += 1;
+                    if code.tries >= channels::CODE_TRIES {
+                        code.until = Instant::now();
+                    }
+                    Some(false)
+                }
+                None => None,
+            };
+            let reply = match right {
+                Some(true) => {
+                    self.chat_codes.remove(&key);
+                    if let Err(e) = self.store.put_chat(bot, kind, chat, name) {
+                        return log!("bot {bot}: chat not stored: {e}");
+                    }
+                    self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
+                    "Paired. What you write here now goes to the bot."
+                }
+                Some(false) => {
+                    // The fifth has ended the code: the window should not go on showing it.
+                    self.broadcast(&json!({"type": "channels_changed", "bot": bot}));
+                    "That is not the code."
+                }
+                // Nobody waits for this one: it is not worth a place in a crowd.
+                None if channels::crowded() => return,
+                None => {
+                    "This bot is private. To write to it, open its Settings in Bate, press Pair a chat under Channels, and send the 6-digit code here."
+                }
+            };
+            return self.say(bot, kind, chat, reply);
+        }
+        if text.trim().is_empty() {
+            return self.say(bot, kind, chat, "Only text is read here.");
+        }
+        // One at a time, as for a webhook: whoever wrote should hear it now.
+        if self.occupied(bot) {
+            return self.say(
+                bot,
+                kind,
+                chat,
+                "The bot is busy. Write again when it is done.",
+            );
+        }
+        let prompt = Outgoing {
+            nonce: format!("chat-{}", sys::random_hex(6)),
+            text: text.to_owned(),
+        };
+        let caller = Caller::Chat {
+            kind,
+            chat: chat.to_owned(),
+        };
+        if let Err((_, e)) = self.send_prompt(bot, prompt, |p| Waiter::Peer { caller, prompt: p }) {
+            self.say(
+                bot,
+                kind,
+                chat,
+                &format!("The bot could not be started: {e}"),
+            );
+        }
+    }
+
+    /// Tells whoever sent a bot a message what came of it.
+    fn answer_caller(&mut self, bot: &str, caller: Caller, reply: Result<String, String>) {
+        match caller {
+            Caller::Bot {
+                from,
+                generation,
+                message,
+            } => self.send_reply(&from, generation, message, reply),
+            Caller::Chat { kind, chat } => {
+                // The reasons are worded for another bot: `it` and `its` are this bot.
+                let text = reply.unwrap_or_else(|e| {
+                    let e = match (e.strip_prefix("its "), e.strip_prefix("it ")) {
+                        (Some(rest), _) => format!("the bot's {rest}"),
+                        (_, Some(rest)) => format!("the bot {rest}"),
+                        _ => e,
+                    };
+                    format!("No reply: {e}.")
+                });
+                self.say(bot, kind, &chat, &text);
+            }
         }
     }
 
@@ -1866,7 +2135,7 @@ impl Core {
                             error.as_deref().unwrap_or("no reason given")
                         )),
                     };
-                    self.send_reply(&call.from, call.generation, call.message, reply);
+                    self.answer_caller(bot, call.caller, reply);
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
@@ -1875,10 +2144,22 @@ impl Core {
                     log!("bot {bot}: session not stored: {e}");
                 }
             }
-            Event::Question { question, .. } => {
+            Event::Question {
+                question, title, ..
+            } => {
                 let entry = serde_json::to_value(&ev).expect("serializable");
                 if let Err(e) = self.store.put_question(bot, question, &entry) {
                     log!("bot {bot}: question not stored: {e}");
+                }
+                // The chat cannot answer it: whoever wrote there is told where to.
+                if let Some(Call {
+                    caller: Caller::Chat { kind, chat },
+                    ..
+                }) = &r.call
+                {
+                    let (kind, chat) = (*kind, chat.clone());
+                    let note = format!("The bot waits for your answer in Bate: {title}");
+                    self.say(bot, kind, &chat, &note);
                 }
             }
             _ => {}
@@ -1994,21 +2275,14 @@ impl Core {
                     log!("bot {bot}: engine refused the connectors: {e}");
                 }
             }
-            Waiter::Peer {
-                from,
-                generation,
-                message,
-                prompt,
-            } => {
+            Waiter::Peer { caller, prompt } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
                 match error {
-                    Some(e) => self.send_reply(&from, generation, message, Err(e)),
+                    Some(e) => self.answer_caller(bot, caller, Err(e)),
                     None => {
                         if let Some(r) = self.engines.get_mut(bot) {
-                            r.call = Some(PeerCall {
-                                from,
-                                generation,
-                                message,
+                            r.call = Some(Call {
+                                caller,
                                 reply: String::new(),
                             });
                         }
@@ -2101,18 +2375,14 @@ impl Core {
                 Waiter::Routine { routine, .. } => {
                     self.routine_failed(bot, &routine, "the engine stopped".into())
                 }
-                Waiter::Peer {
-                    from,
-                    generation,
-                    message,
-                    ..
-                } => self.send_reply(&from, generation, message, Err("its engine stopped".into())),
+                Waiter::Peer { caller, .. } => {
+                    self.answer_caller(bot, caller, Err("its engine stopped".into()))
+                }
                 Waiter::Service | Waiter::Connectors | Waiter::Decision | Waiter::Quiet => {}
             }
         }
         if let Some(call) = r.call {
-            let stopped = Err("its engine stopped".into());
-            self.send_reply(&call.from, call.generation, call.message, stopped);
+            self.answer_caller(bot, call.caller, Err("its engine stopped".into()));
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));
         self.broadcast(&json!({"type": "bots_changed"}));

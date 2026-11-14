@@ -50,6 +50,9 @@ pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
     if let Ok(Some((_, Some(key)))) = store.provider() {
         secrets.push(key);
     }
+    for (_, _, token) in store.channels().map_err(db)? {
+        secrets.push(token);
+    }
     let mut bots = Vec::new();
     for bot in store.bots().map_err(db)? {
         let mut connectors = Vec::new();
