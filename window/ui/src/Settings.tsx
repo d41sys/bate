@@ -19,25 +19,26 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [report, setReport] = useState("");
   const [serverUrl, setServerUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [hasKey, setHasKey] = useState(false);
+  const [provider, setProvider] = useState<{ url: string | null; hasKey: boolean; fromEnv: boolean }>({ url: null, hasKey: false, fromEnv: false });
   const [error, setError] = useState("");
 
   useEffect(() => {
     const load = () =>
       request<Permissions>("get_permissions", { bot: bot.id }).then(setPermissions, (e) => setError(e.message));
     load();
-    request<{ url?: string; hasKey: boolean }>("get_provider").then(
-      (p) => {
-        setServerUrl(p.url ?? "");
-        setHasKey(p.hasKey);
-      },
-      () => {},
-    );
+    loadProvider().catch(() => {});
     return listen((frame) => {
       if (frame.type === "permissions_changed" && frame.bot === bot.id) load();
     });
   }, [bot.id]);
 
+  // What the service has, after every change: the field shows the saved server.
+  const loadProvider = () =>
+    request<typeof provider>("get_provider").then((p) => {
+      setServerUrl(p.url ?? "");
+      setApiKey("");
+      setProvider(p);
+    });
   const run = (p: Promise<unknown>) => p.then(() => setError(""), (e: Error) => setError(e.message));
   const words = agent.trim().split(/\s+/).filter(Boolean);
 
@@ -95,19 +96,13 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           <h2>Model server</h2>
       <form onSubmit={(e) => {
         e.preventDefault();
-        run(request("set_provider", { url: serverUrl.trim(), key: apiKey.trim() }).then(() => {
-          setApiKey("");
-          return request<{ url?: string; hasKey: boolean }>("get_provider").then((p) => {
-            setServerUrl(p.url ?? "");
-            setHasKey(p.hasKey);
-          });
-        }));
+        run(request("set_provider", { url: serverUrl.trim(), key: apiKey.trim() }).then(loadProvider));
       }}>
         <label>URL <input placeholder="http://127.0.0.1:1234/v1" value={serverUrl} onChange={(e) => setServerUrl(e.target.value)} /></label>
-        <label>API key <input type="password" placeholder={hasKey ? "(key saved; enter new to change)" : "optional"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></label>
+        <label>API key <input type="password" placeholder={provider.hasKey ? (provider.fromEnv ? "(key from the environment)" : "(key saved; enter new to change)") : "optional"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></label>
         <button>Save</button>
-        {hasKey && (
-          <button type="button" onClick={() => run(request("set_provider", { url: serverUrl.trim(), key: null }).then(() => setHasKey(false)))}>Remove key</button>
+        {provider.hasKey && !provider.fromEnv && (
+          <button type="button" onClick={() => run(request("set_provider", { url: provider.url, key: null }).then(loadProvider))}>Remove key</button>
         )}
       </form>
         </>
