@@ -87,14 +87,17 @@ pub struct Routine {
     pub id: Option<String>,
     pub name: String,
     pub prompt: String,
-    /// Off: neither the schedule nor the webhook starts it.
+    /// Off: nothing starts it.
     pub enabled: bool,
-    /// Missing: only the webhook starts it.
+    /// Missing: only the webhook or a chat message starts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
     /// Whether a request to `hook_url` starts it too.
     #[serde(default)]
     pub webhook: bool,
+    /// Whether `/run <name>` from a chat paired on one of the bot's channels starts it too.
+    #[serde(default)]
+    pub chat: bool,
     /// Daemon-made secret, kept while `webhook` stays on; turn it off and on for a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_token: Option<String>,
