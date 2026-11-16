@@ -247,7 +247,18 @@ impl Provider {
             Api::Responses => {
                 let body = serde_json::to_vec(&responses_body(ask)).map_err(|e| e.to_string())?;
                 let url = format!("{base}/responses");
-                responses(&self.lines(url, key, body, responses_done), abort, on)
+                responses(&self.lines(url, key, body, responses_done), abort, on).map_err(|e| {
+                    // Comes as a 429 or as `response.failed` mid-stream; it may be the plan's limit
+                    // or one ChatGPT sets for Bate, and says nothing of when it ends.
+                    if e.contains("subscription_sharing_usage_limit_exceeded") {
+                        format!(
+                            "the ChatGPT plan's usage limit is reached (for the plan, or for \
+                             Bate): see https://chatgpt.com/settings/usage ({e})"
+                        )
+                    } else {
+                        e
+                    }
+                })
             }
         }
     }

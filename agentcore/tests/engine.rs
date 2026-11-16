@@ -2019,10 +2019,8 @@ fn a_responses_stream_that_fails_or_just_ends_is_an_error_with_its_reason() {
     let mut engine = Engine::start_manual_token(&dir, &model, &[]);
     engine.open_new();
     for (nonce, why) in [
-        (
-            "n1",
-            "the model server failed: subscription_sharing_usage_limit_exceeded: Limit reached.",
-        ),
+        // OpenAI's usage limit says where to look: a turn can't tell the plan's from Bate's own.
+        ("n1", "https://chatgpt.com/settings/usage"),
         ("n2", "the model's reply was cut off"),
     ] {
         engine.prompt_as(nonce, "Hi");
