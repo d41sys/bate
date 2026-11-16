@@ -164,8 +164,8 @@ fn gate(home: &Home, openai: &OpenAi) -> (Child, BufReader<ChildStdout>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_appd"))
         .args(["gate", "chatgpt"])
         .env("APPD_HOME", &home.0)
-        .env("BATE_GATE_AUTH", &openai.base)
-        .env("BATE_GATE_API", format!("{}/v1", openai.base))
+        .env("BATE_CHATGPT_AUTH", &openai.base)
+        .env("BATE_CHATGPT_API", format!("{}/v1", openai.base))
         // No browser in a test: the test is the browser.
         .env("BATE_GATE_BROWSER", "/usr/bin/true")
         .stdin(Stdio::null())

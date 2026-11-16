@@ -50,6 +50,10 @@ pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
     if let Ok(Some((_, Some(key)))) = store.provider() {
         secrets.push(key);
     }
+    if let Ok(Some(chatgpt)) = store.chatgpt() {
+        let tokens = [chatgpt.access_token, chatgpt.refresh_token];
+        secrets.extend(tokens.into_iter().filter(|t| !t.is_empty()));
+    }
     for (_, _, token) in store.channels().map_err(db)? {
         secrets.push(token);
     }

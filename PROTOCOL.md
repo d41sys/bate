@@ -41,7 +41,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
-| `token` | `request`, `url?`, `key?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. |
+| `token` | `request`, `url?`, `key?`, `api?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. `api` is `responses` when the endpoint speaks OpenAI's Responses API; without it, the chat API. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.
@@ -68,7 +68,7 @@ A killed engine sends nothing more.
 
 ## `agentcore` (Bate's own engine)
 
-- **Model:** one provider, the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
+- **Model:** two providers. With `api: "responses"` in the `token` answer (a ChatGPT sign-in), the engine calls OpenAI's Responses API: `POST <base>/responses` with `store: false`, `stream: true`, the system prompt as `instructions`, the conversation as `input` items (a tool call as `function_call`, its result as `function_call_output`) and the tools as functions in one `namespace` named `bate`. `response.output_text.delta` becomes `text`; a `function_call` item that is done becomes a tool call; the reply is whole at `response.completed`, and `response.failed`, `response.incomplete` or `error` ends the turn with that reason. Thinking is not shown on this route. Otherwise the engine calls the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
 - **Approval:** every tool call asks first: a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
@@ -146,7 +146,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 | `get_provider` | none | `{url, hasKey, fromEnv}`: the model server's URL (`null`: none) and whether it has an API key. `fromEnv`: nothing is saved, so both are the service's `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Refused (`forbidden`) for a device on the network, as is `set_provider`. |
 | `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user, password, query or fragment. Without `key`, or with an empty one, the saved key stays if the scheme, host and port are written the same; `key: null` removes it. A key from the environment is never saved. |
-| `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable |
+| `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable. Signed in to ChatGPT: the models the account is offered |
+| `get_chatgpt` | none | `{signedIn}`: whether bots run on a ChatGPT plan |
+| `sign_in_chatgpt` | none | `{url}`: the address to open in the browser. The service listens on `127.0.0.1:1455` (another port when taken) for 10 minutes; when the browser comes back, or the sign-in fails, `chatgpt_changed` is sent, with `error` when it failed. Code `sign_in_failed` |
+| `sign_out_chatgpt` | none | `{}`: forgets the tokens, keeps the registration, and asks OpenAI to end the session (one try; a failure is logged). Sends `chatgpt_changed` |
 | `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
@@ -169,6 +172,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
+| `{"type":"chatgpt_changed","error?"}` | Re-run `get_chatgpt`. `error` says why a sign-in failed. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
 | `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
@@ -302,6 +306,14 @@ An access token within 30 s of its end is renewed before use; an answer of 401 f
 
 Tokens are stored as plain text in `app.db`, like connector values. A bot limited to its folder cannot read that file.
 
+### ChatGPT sign-in
+
+A user signs in with ChatGPT the way OpenAI documents for open-source local apps (<https://developers.openai.com/siwc/token-sharing-open-source>): the first sign-in registers Bate for this user (`client_id=dynamic_agent_client`, `agent_name_hint=Bate`, a host id made once for this Mac), later ones use the client id that came back. The request asks for `chatgpt.tokens.use.direct`; tokens without that scope are not kept. The code is traded with PKCE (`S256`), and the ID token must carry the request's nonce.
+
+While signed in, every bot's model calls go to `https://api.openai.com/v1` through the Responses API with the access token; a saved model server is not used. An access token within 60 s of its end is renewed before it is handed to an engine, one renewal at a time (each renewal replaces the refresh token). When OpenAI says the refresh token will never work again, the tokens are forgotten, the waiting turns end with "sign in again in Settings", and `chatgpt_changed` is sent. Any other failure to renew leaves the sign-in as it is.
+
+The registration and tokens are stored as plain text in `app.db`, and are removed from bug reports. Devices on the local network can neither read nor change the sign-in. `BATE_CHATGPT_AUTH` and `BATE_CHATGPT_API` name stand-ins for OpenAI's two servers (tests).
+
 ### Browser
 
 Each bot has a web browser of its own: the Chrome installed on this Mac (`/Applications/Google Chrome.app`, else Chromium; `$APPD_CHROME` names another), started by the service on the bot's first browser action, in its own window, with a profile of the bot's own (`browsers/<bot>` in the service's folder, so the bot's programs cannot read its cookies and its sign-ins are kept apart from the user's and other bots'). Without one, the action fails with a message saying so; Bate does not install a browser.
@@ -351,7 +363,7 @@ When enabled in Settings, the service serves Bate's web client over HTTPS on por
 
 Secrets are removed from the logs, and from `settings.json`, in three ways:
 
-- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY`, the key saved with `set_provider`, and the tokens saved with `set_channel`.
+- Every stored connector value is replaced by `[removed]` where it is 4 characters or more: `env` values, header values and their parts, arguments with a `=` and their values, other arguments of 12 characters or more, a URL as a whole, its user and password, its query values and the pieces of its path of 12 characters or more. So are the service's `BATE_MODEL_API_KEY`, the key saved with `set_provider`, the tokens of a ChatGPT sign-in, and the tokens saved with `set_channel`.
 - What follows one of these words and a `:` or `=` is removed, up to the next space or `&`, or up to the closing quote: `credential`, `signature`, `password`, `passwd`, `secret`, `token`, `pwd`, `sig`, and any word ending in `key` or `auth`. After `authorization`, `auth` and `cookie` the rest of the line goes. The word after `bearer`, and after a flag ending in one of the words (`--api-key value`), goes too.
 - PEM blocks (`-----BEGIN` to the end of the `-----END` line) are removed.
 

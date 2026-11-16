@@ -100,6 +100,9 @@ pub enum Op {
         url: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
+        /// `responses` when the server speaks OpenAI's Responses API; else the chat API.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

@@ -4018,3 +4018,274 @@ fn a_message_from_a_paired_chat_starts_a_routine_that_allows_it() {
     let run = all.iter().find(|r| r["id"] == crash["id"]).unwrap();
     assert_eq!(run["lastRun"]["outcome"], "failed", "{run}");
 }
+
+/// A stand-in for OpenAI's sign-in server and API. `seen`: one line per request,
+/// `METHOD path | authorization | body`.
+struct ChatGpt {
+    base: String,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The nonce the next ID token carries.
+    nonce: std::sync::Arc<std::sync::Mutex<String>>,
+    /// The sign-in was ended at OpenAI: a renewal is refused for good.
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn base64url(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().fold(0u32, |n, &b| (n << 8) | u32::from(b)) << (8 * (3 - chunk.len()));
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+        }
+    }
+    out
+}
+
+impl ChatGpt {
+    fn start() -> ChatGpt {
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let openai = ChatGpt {
+            base: base.clone(),
+            seen: Default::default(),
+            nonce: Default::default(),
+            ended: Default::default(),
+        };
+        let (seen, nonce, ended) = (
+            openai.seen.clone(),
+            openai.nonce.clone(),
+            openai.ended.clone(),
+        );
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut first, mut auth, mut length) = (String::new(), String::new(), 0);
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    if lower.starts_with("authorization:") {
+                        auth = line["authorization:".len()..].trim().to_owned();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let first = first.trim_end().trim_end_matches(" HTTP/1.1").to_owned();
+                let body = String::from_utf8(body).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{first} | {auth} | {body}"));
+                let scope =
+                    "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke";
+                let (status, kind, answer) = match first.as_str() {
+                    "POST /api/accounts/oauth/token"
+                        if body.contains("grant_type=refresh_token") =>
+                    {
+                        if ended.load(Ordering::SeqCst) {
+                            (
+                                400,
+                                "application/json",
+                                json!({"error": "invalid_grant"}).to_string(),
+                            )
+                        } else {
+                            let tokens = json!({"access_token": "plan-at-2", "refresh_token": "plan-rt-2",
+                                "token_type": "Bearer", "expires_in": 3600, "scope": scope});
+                            (200, "application/json", tokens.to_string())
+                        }
+                    }
+                    "POST /api/accounts/oauth/token" => {
+                        let claims = json!({"sub": "user-1", "nonce": *nonce.lock().unwrap()});
+                        let id_token =
+                            format!("e30.{}.sig", base64url(claims.to_string().as_bytes()));
+                        // At its end at once: the first model call has to renew it.
+                        let tokens = json!({"access_token": "plan-at-1", "refresh_token": "plan-rt-1",
+                            "id_token": id_token, "token_type": "Bearer", "expires_in": 0, "scope": scope});
+                        (200, "application/json", tokens.to_string())
+                    }
+                    "GET /.well-known/openid-configuration" => {
+                        let meta = json!({"revocation_endpoint": format!("{base}/oauth/revoke")});
+                        (200, "application/json", meta.to_string())
+                    }
+                    "POST /oauth/revoke" => (200, "text/plain", String::new()),
+                    "GET /v1/models" => {
+                        let models = json!({"models": [
+                            {"slug": "hidden", "visibility": "hide"},
+                            {"slug": "gpt-test", "display_name": "GPT Test", "visibility": "list"},
+                        ]});
+                        (200, "application/json", models.to_string())
+                    }
+                    "POST /v1/responses" => {
+                        let events = [
+                            json!({"type": "response.output_text.delta", "delta": "Hello."}),
+                            json!({"type": "response.completed"}),
+                        ];
+                        let stream: String =
+                            events.iter().map(|e| format!("data: {e}\n\n")).collect();
+                        (200, "text/event-stream", stream)
+                    }
+                    _ => (404, "text/plain", String::new()),
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} -\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        openai
+    }
+
+    fn seen(&self, start: &str) -> Vec<String> {
+        let seen = self.seen.lock().unwrap();
+        seen.iter()
+            .filter(|line| line.starts_with(start))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The value of `name` in the query of `url`, decoded.
+fn query_param(url: &str, name: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    let (_, value) = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)?;
+    let bytes = value.as_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            out.push(u8::from_str_radix(&value[i + 1..i + 3], 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(String::from_utf8(out).unwrap())
+}
+
+/// Signs in to the stand-in as the browser would; gives the address the window was to open.
+fn sign_in_chatgpt(w: &mut Window, openai: &ChatGpt) -> String {
+    let url = w.ok("sign_in_chatgpt", json!({}))["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        url.starts_with(&format!("{}/api/accounts/authorize?", openai.base)),
+        "{url}"
+    );
+    *openai.nonce.lock().unwrap() = query_param(&url, "nonce").unwrap();
+    let back = format!(
+        "{}?code=c0de&state={}&client_id=oaiapp_1",
+        query_param(&url, "redirect_uri").unwrap(),
+        query_param(&url, "state").unwrap()
+    );
+    assert_eq!(ureq::get(&back).call().unwrap().status(), 200);
+    let changed = w.wait_for(|f| f["type"] == "chatgpt_changed");
+    assert_eq!(changed["error"], Value::Null, "{changed}");
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": true}));
+    url
+}
+
+#[test]
+fn bots_run_on_a_chatgpt_sign_in_that_is_renewed_and_can_be_ended() {
+    build_engine();
+    let openai = ChatGpt::start();
+    let home = home("chatgpt");
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env("BATE_CHATGPT_AUTH", &openai.base)
+            .env("BATE_CHATGPT_API", format!("{}/v1", openai.base))
+            // Nothing listens there: a turn that used it would fail.
+            .env("BATE_MODEL_BASE_URL", "http://127.0.0.1:9/v1");
+    });
+    let mut w = Window::connect(&home);
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
+
+    // The first sign-in registers Bate, and asks for use of the plan.
+    let url = sign_in_chatgpt(&mut w, &openai);
+    let asked = |url: &str, name: &str| query_param(url, name).unwrap_or_default();
+    assert_eq!(asked(&url, "client_id"), "dynamic_agent_client");
+    assert_eq!(asked(&url, "agent_name_hint"), "Bate");
+    assert!(
+        asked(&url, "scope").contains("chatgpt.tokens.use.direct"),
+        "{url}"
+    );
+    let host_id = asked(&url, "ext_agent_host_id");
+
+    // A turn runs on the plan, through the Responses API, with a token renewed before use.
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "gpt-test"}));
+    let turn = |w: &mut Window, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end")["entry"]
+            .clone()
+    };
+    let end = turn(&mut w, "n1");
+    assert_eq!(end["reason"], "done", "{end}");
+    let renewals = || openai.seen("POST /api/accounts/oauth/token").split_off(1);
+    assert_eq!(renewals().len(), 1, "{:?}", renewals());
+    assert!(
+        renewals()[0].contains("refresh_token=plan-rt-1")
+            && renewals()[0].contains("client_id=oaiapp_1"),
+        "{:?}",
+        renewals()
+    );
+    let calls = openai.seen("POST /v1/responses");
+    assert!(calls[0].contains("| Bearer plan-at-2 |"), "{calls:?}");
+    // The renewed token is good for an hour: the next turn does not renew.
+    let end = turn(&mut w, "n2");
+    assert_eq!(end["reason"], "done", "{end}");
+    assert_eq!(renewals().len(), 1);
+    assert_eq!(openai.seen("POST /v1/responses").len(), 2);
+
+    assert_eq!(
+        w.ok("list_models", json!({})),
+        json!({"models": ["gpt-test"]})
+    );
+    // No token is in the conversation or the log.
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+    for token in ["plan-at-1", "plan-at-2", "plan-rt-1", "plan-rt-2"] {
+        assert!(!history.contains(token) && !log.contains(token), "{token}");
+    }
+
+    // Signing out ends the session at OpenAI and keeps the registration.
+    w.ok("sign_out_chatgpt", json!({}));
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
+    eventually("the session is revoked", || {
+        let revoked = openai.seen("POST /oauth/revoke");
+        revoked
+            .iter()
+            .any(|r| r.contains("token=plan-rt-2") && r.contains("client_id=oaiapp_1"))
+    });
+    let url = sign_in_chatgpt(&mut w, &openai);
+    assert_eq!(asked(&url, "client_id"), "oaiapp_1");
+    assert_eq!(asked(&url, "agent_name_hint"), "");
+    assert_eq!(asked(&url, "ext_agent_host_id"), host_id);
+
+    // A sign-in ended at OpenAI ends here too, and the turn says what to do.
+    openai
+        .ended
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let end = turn(&mut w, "n3");
+    assert_eq!(end["reason"], "error", "{end}");
+    assert!(
+        end["error"]
+            .as_str()
+            .unwrap()
+            .contains("sign in again in Settings"),
+        "{end}"
+    );
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
+}

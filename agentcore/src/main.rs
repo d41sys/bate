@@ -353,6 +353,7 @@ impl Engine {
                 request,
                 url,
                 key,
+                api,
                 error,
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
@@ -367,7 +368,8 @@ impl Engine {
                         let res = match (url, error) {
                             (Some(u), None) => {
                                 let k = key.unwrap_or_default();
-                                Ok(format!("{u}\n{k}"))
+                                let a = api.unwrap_or_default();
+                                Ok(format!("{u}\n{k}\n{a}"))
                             }
                             (_, Some(e)) => Err(e),
                             _ => Err("no model server is set up".into()),
