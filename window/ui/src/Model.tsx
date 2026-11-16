@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
-import { inShell, listen, request } from "./service.ts";
+import { inShell, listen, openInBrowser, request } from "./service.ts";
 import type { Bot } from "./types.ts";
 
 const EFFORTS = ["minimal", "low", "medium", "high"];
+const USAGE = "https://chatgpt.com/settings/usage";
 
 /** The bot's model and thinking effort; a change applies from the next model call. */
 export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
@@ -56,7 +57,8 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
       {error && <span className="error" role="alert">{error}</span>}
       {onPlan && (
         <span>
-          Using ChatGPT plan · <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
+          Using ChatGPT plan ·{" "}
+          <a href={USAGE} onClick={(e) => { e.preventDefault(); openInBrowser(USAGE); }}>Manage usage</a>
         </span>
       )}
     </form>
