@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { listen, newWindow, pair, request } from "./service.ts";
+import { listen, newWindow, openInBrowser, pair, request } from "./service.ts";
 import { Pair } from "./Devices.tsx";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
@@ -211,6 +211,15 @@ function App() {
     </div>
   );
 }
+
+// The shell denies a link's navigation out of the page; only a new window reaches the browser.
+addEventListener("click", (e) => {
+  const link = (e.target as Element).closest?.("a[target=_blank]");
+  if (link instanceof HTMLAnchorElement && link.href) {
+    e.preventDefault();
+    openInBrowser(link.href);
+  }
+});
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
