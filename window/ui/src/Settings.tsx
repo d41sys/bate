@@ -1,7 +1,7 @@
 import { Channels } from "./Channels.tsx";
 import { Devices } from "./Devices.tsx";
 import { useEffect, useState } from "react";
-import { inShell, listen, request } from "./service.ts";
+import { inShell, listen, openInBrowser, request } from "./service.ts";
 import { KINDS, type Bot, type Level, type Permissions } from "./types.ts";
 
 const ACTIONS = { read: "Read files", write: "Change files", run: "Run commands", connector: "Use connectors" };
@@ -21,6 +21,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [apiKey, setApiKey] = useState("");
   const [provider, setProvider] = useState<{ url: string | null; hasKey: boolean; fromEnv: boolean }>({ url: null, hasKey: false, fromEnv: false });
   const [error, setError] = useState("");
+  const [chatgpt, setChatgpt] = useState(false);
+
+  useEffect(() => {
+    if (!inShell) return;
+    const load = () => request<{ signedIn: boolean }>("get_chatgpt").then((c) => setChatgpt(c.signedIn), () => {});
+    load();
+    return listen((frame) => {
+      if (frame.type !== "chatgpt_changed") return;
+      if (typeof frame.error === "string") setError(frame.error);
+      load();
+    });
+  }, []);
 
   useEffect(() => {
     const load = () =>
@@ -93,6 +105,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
       )}
       {inShell && (
         <>
+          <h2>ChatGPT</h2>
+          {chatgpt ? (
+            <p>
+              Signed in: every bot runs on your ChatGPT plan, not on the model server below.{" "}
+              <button onClick={() => run(request("sign_out_chatgpt"))}>Sign out</button>
+            </p>
+          ) : (
+            <p>
+              <button onClick={() => run(request<{ url: string }>("sign_in_chatgpt").then((d) => openInBrowser(d.url)))}>Sign in with ChatGPT</button>{" "}
+              Bots then run on your ChatGPT plan. The sign-in happens in your browser.
+            </p>
+          )}
           <h2>Model server</h2>
       <form onSubmit={(e) => {
         e.preventDefault();

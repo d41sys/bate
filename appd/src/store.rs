@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, con
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
+CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
 ";
@@ -329,6 +330,36 @@ impl Store {
             "DELETE FROM chats WHERE bot = ?1 AND kind = ?2 AND chat = ?3",
             [bot, kind, chat],
         )? > 0)
+    }
+
+    /// The registration with ChatGPT and, while signed in, its tokens.
+    pub fn chatgpt(&self) -> Result<Option<crate::chatgpt::Saved>> {
+        let columns = "host_id, client_id, access_token, refresh_token, expires_ms";
+        self.0
+            .query_row(
+                &format!("SELECT {columns} FROM chatgpt WHERE id = 1"),
+                [],
+                |r| {
+                    Ok(crate::chatgpt::Saved {
+                        host_id: r.get(0)?,
+                        client_id: r.get(1)?,
+                        access_token: r.get(2)?,
+                        refresh_token: r.get(3)?,
+                        expires_ms: r.get::<_, i64>(4)?.max(0) as u64,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn set_chatgpt(&self, s: &crate::chatgpt::Saved) -> Result<()> {
+        let expires = i64::try_from(s.expires_ms).unwrap_or(i64::MAX);
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO chatgpt (id, host_id, client_id, access_token, refresh_token, expires_ms) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+                params![s.host_id, s.client_id, s.access_token, s.refresh_token, expires],
+            )
+            .map(drop)
     }
 
     pub fn delete_provider(&self) -> Result<()> {

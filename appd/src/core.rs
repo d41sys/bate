@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use crate::attach;
 use crate::channels::{self, Note};
+use crate::chatgpt;
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
@@ -56,6 +57,7 @@ pub enum Msg {
         id: Value,
         models: Vec<String>,
     },
+    ChatGpt(ChatGptNews),
     /// News from the reader of a bot's channel; `reader` says which reader.
     Channel {
         bot: String,
@@ -267,7 +269,23 @@ struct Call {
 /// A bot's channel: `telegram` or `discord`.
 type Channel = (String, &'static str);
 
+/// News of the ChatGPT sign-in, from the threads that talk to OpenAI.
+pub enum ChatGptNews {
+    /// Bate was registered; the browser's sign-in is not through yet.
+    Registered(chatgpt::Saved),
+    SignedIn(Result<chatgpt::Saved, String>),
+    /// What came of a renewal, and the refresh token it used: the result is for the sign-in
+    /// that still has that token, and for no other.
+    Renewed(String, Result<chatgpt::Saved, chatgpt::Failed>),
+}
+
+/// How long before its end an access token is renewed.
+const RENEW_BEFORE_MS: u64 = 60_000;
+
 pub struct Core {
+    /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
+    /// renewed; `Some` while a renewal runs, so that there is one at a time.
+    chatgpt_waiting: Option<Vec<(String, String)>>,
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
     /// The page for other devices on the network.
@@ -329,6 +347,7 @@ impl Core {
             channel_errors: HashMap::new(),
             chat_codes: HashMap::new(),
             sign_ins: HashMap::new(),
+            chatgpt_waiting: None,
             browsers: HashMap::new(),
             store,
             tx,
@@ -407,6 +426,7 @@ impl Core {
             Msg::Models { client, id, models } => {
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
+            Msg::ChatGpt(news) => self.on_chatgpt(news),
             Msg::Channel {
                 bot,
                 kind,
@@ -1185,13 +1205,63 @@ impl Core {
                 }
                 Ok(Some(json!({})))
             }
+            "get_chatgpt" => {
+                let saved = self.store.chatgpt().map_err(internal)?;
+                Ok(Some(
+                    json!({"signedIn": saved.is_some_and(|s| s.signed_in())}),
+                ))
+            }
+            "sign_in_chatgpt" => {
+                let old = self.store.chatgpt().map_err(internal)?;
+                let (pending, url) =
+                    chatgpt::begin(&chatgpt::auth(), &chatgpt::api(), old.as_ref())
+                        .map_err(|e| ("sign_in_failed", e))?;
+                let tx = self.tx.clone();
+                // Waits for the browser, then the network: not on this thread.
+                std::thread::spawn(move || {
+                    let registered = |saved: &chatgpt::Saved| {
+                        let news = ChatGptNews::Registered(saved.clone());
+                        tx.send(Msg::ChatGpt(news)).map_err(|e| e.to_string())
+                    };
+                    let result = chatgpt::finish(pending, registered);
+                    let _ = tx.send(Msg::ChatGpt(ChatGptNews::SignedIn(result)));
+                });
+                Ok(Some(json!({"url": url})))
+            }
+            "sign_out_chatgpt" => {
+                if let Some(saved) = self.store.chatgpt().map_err(internal)? {
+                    // The registration stays for the next sign-in; the tokens go now.
+                    let out = chatgpt::Saved {
+                        host_id: saved.host_id.clone(),
+                        client_id: saved.client_id.clone(),
+                        ..Default::default()
+                    };
+                    self.store.set_chatgpt(&out).map_err(internal)?;
+                    if !saved.refresh_token.is_empty() {
+                        // shortcut: one try, and a failure is only logged; the user can also
+                        // disconnect Bate in ChatGPT's settings. Retry when that is not enough.
+                        std::thread::spawn(move || {
+                            if let Err(e) = chatgpt::revoke(&chatgpt::auth(), &saved) {
+                                log!("ChatGPT sign-out was not confirmed by OpenAI: {e}");
+                            }
+                        });
+                    }
+                }
+                self.broadcast(&json!({"type": "chatgpt_changed"}));
+                Ok(Some(json!({})))
+            }
             "list_models" => {
+                let chatgpt = self.store.chatgpt().map_err(internal)?;
                 let (url, key, _) = self.provider().map_err(internal)?;
                 let (tx, id) = (self.tx.clone(), id.clone());
                 std::thread::spawn(move || {
-                    let models = match url {
-                        Some(u) => fetch_models(&u, key.as_deref()),
-                        None => Vec::new(),
+                    let models = match (chatgpt.filter(chatgpt::Saved::signed_in), url) {
+                        // shortcut: with a token past its end the list is empty until the
+                        // next model call has renewed it.
+                        (Some(saved), _) => chatgpt::models(&chatgpt::api(), &saved.access_token)
+                            .unwrap_or_default(),
+                        (None, Some(u)) => fetch_models(&u, key.as_deref()),
+                        (None, None) => Vec::new(),
                     };
                     let _ = tx.send(Msg::Models { client, id, models });
                 });
@@ -2043,8 +2113,122 @@ impl Core {
         self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
     }
 
+    /// Answers a bot's `token` request from the ChatGPT sign-in, renewing it first when
+    /// its access token is at its end.
+    fn chatgpt_token(&mut self, bot: &str, request: String, saved: chatgpt::Saved) {
+        if now_ms() + RENEW_BEFORE_MS < saved.expires_ms {
+            return self.send_chatgpt_token(bot, request, Ok(&saved));
+        }
+        let asked = (bot.to_owned(), request);
+        if let Some(waiting) = &mut self.chatgpt_waiting {
+            return waiting.push(asked);
+        }
+        self.chatgpt_waiting = Some(vec![asked]);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = chatgpt::renew(&chatgpt::auth(), &chatgpt::api(), &saved);
+            let news = ChatGptNews::Renewed(saved.refresh_token, result);
+            let _ = tx.send(Msg::ChatGpt(news));
+        });
+    }
+
+    fn send_chatgpt_token(
+        &mut self,
+        bot: &str,
+        request: String,
+        saved: Result<&chatgpt::Saved, &str>,
+    ) {
+        let op = Op::Token {
+            request,
+            url: saved.is_ok().then(chatgpt::api),
+            key: saved.ok().map(|s| s.access_token.clone()),
+            api: Some("responses".into()),
+            error: saved.err().map(str::to_owned),
+        };
+        if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+            log!("bot {bot}: token response not sent: {e}");
+        }
+    }
+
+    fn on_chatgpt(&mut self, news: ChatGptNews) {
+        let now = self.store.chatgpt().unwrap_or_else(|e| {
+            log!("the ChatGPT sign-in cannot be read: {e}");
+            None
+        });
+        let keep = |core: &Core, saved: &chatgpt::Saved| {
+            if let Err(e) = core.store.set_chatgpt(saved) {
+                log!("the ChatGPT sign-in was not saved: {e}");
+            }
+        };
+        match news {
+            // Never over a sign-in: registration is news only while there is none.
+            ChatGptNews::Registered(saved) => {
+                if now.is_none() {
+                    keep(self, &saved);
+                }
+            }
+            ChatGptNews::SignedIn(result) => {
+                let error = match result {
+                    Ok(saved) => {
+                        keep(self, &saved);
+                        Value::Null
+                    }
+                    Err(e) => {
+                        log!("ChatGPT sign-in failed: {e}");
+                        json!(e)
+                    }
+                };
+                self.broadcast(&json!({"type": "chatgpt_changed", "error": error}));
+            }
+            ChatGptNews::Renewed(used, result) => {
+                let waiting = self.chatgpt_waiting.take().unwrap_or_default();
+                // Signed out, or signed in anew, while the renewal ran: what came of it is
+                // neither kept nor held against the sign-in there is now.
+                let now = now.filter(|n| n.signed_in() && n.refresh_token == used);
+                let answer: Result<chatgpt::Saved, String> = match (result, now) {
+                    (_, None) => Err("the ChatGPT sign-in changed: send it again".into()),
+                    (Ok(new), Some(_)) => {
+                        keep(self, &new);
+                        Ok(new)
+                    }
+                    (Err(failed), Some(old)) if failed.forget => {
+                        log!("{}", failed.why);
+                        let out = chatgpt::Saved {
+                            host_id: old.host_id,
+                            client_id: old.client_id,
+                            ..Default::default()
+                        };
+                        keep(self, &out);
+                        self.broadcast(&json!({"type": "chatgpt_changed"}));
+                        Err("the ChatGPT sign-in has ended: sign in again in Settings".into())
+                    }
+                    // Not renewed this time (the network, say): the token is good to its end.
+                    (Err(failed), Some(old)) => {
+                        log!("{}", failed.why);
+                        if now_ms() < old.expires_ms {
+                            Ok(old)
+                        } else {
+                            Err(failed.why)
+                        }
+                    }
+                };
+                for (bot, request) in waiting {
+                    self.send_chatgpt_token(&bot, request, answer.as_ref().map_err(String::as_str));
+                }
+            }
+        }
+    }
+
     fn on_event(&mut self, bot: &str, mut ev: Event) {
         if let Event::Token { request } = &ev {
+            // A ChatGPT sign-in comes before a model server.
+            match self.store.chatgpt() {
+                Ok(Some(saved)) if saved.signed_in() => {
+                    return self.chatgpt_token(bot, request.clone(), saved);
+                }
+                Ok(_) => {}
+                Err(e) => log!("the ChatGPT sign-in cannot be read: {e}"),
+            }
             let (url, key, error) = match self.provider() {
                 Ok((Some(url), key, _)) => (Some(url), key, None),
                 Ok((None, ..)) => (
@@ -2061,6 +2245,7 @@ impl Core {
                 request: request.clone(),
                 url,
                 key,
+                api: None,
                 error,
             };
             if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {

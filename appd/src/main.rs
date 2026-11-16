@@ -5,6 +5,7 @@
 mod attach;
 mod browser;
 mod channels;
+mod chatgpt;
 mod clients;
 mod core;
 mod gate;

@@ -173,6 +173,7 @@ impl Engine {
                             request: request.clone(),
                             url: Some(model_url.clone()),
                             key: None,
+                            api: None,
                             error: None,
                         },
                     };
@@ -1849,6 +1850,7 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
             request: req,
             url: Some(model.url.clone()),
             key: Some("sk-secret-token-123".into()),
+            api: None,
             error: None,
         }),
         None
@@ -1875,6 +1877,169 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
     );
 }
 
+/// A Responses stream of `events`, as OpenAI sends it.
+fn responses_body(events: &[Value]) -> Vec<u8> {
+    let lines = events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()));
+    lines.collect::<String>().into_bytes()
+}
+
+/// Answers the engine's next `token` request with a server that speaks the Responses API.
+fn give_responses_token(engine: &mut Engine, model: &Model) {
+    let request = match engine.next() {
+        Event::Token { request } => request,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    let op = Op::Token {
+        request,
+        url: Some(model.url.clone()),
+        key: Some("plan-token".into()),
+        api: Some("responses".into()),
+        error: None,
+    };
+    assert_eq!(engine.request(op), None);
+}
+
+#[test]
+fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
+    let dir = workdir("engine-responses");
+    fs::write(dir.join("a.txt"), "alpha").unwrap();
+    let completed = json!({"type": "response.completed", "response": {"status": "completed"}});
+    let model = Model::replay(vec![
+        responses_body(&[
+            json!({"type": "response.created", "response": {}}),
+            // A call in pieces, then whole: only the whole one counts.
+            json!({"type": "response.function_call_arguments.delta", "delta": "{\"pa"}),
+            json!({"type": "response.output_item.done", "item": {"type": "reasoning", "id": "rs_1"}}),
+            json!({"type": "response.output_item.done", "item": {"type": "function_call",
+                "call_id": "call_1", "namespace": "bate", "name": "read",
+                "arguments": "{\"path\":\"a.txt\"}"}}),
+            completed.clone(),
+        ]),
+        responses_body(&[
+            json!({"type": "response.output_text.delta", "delta": "It says "}),
+            json!({"type": "response.output_text.delta", "delta": "alpha."}),
+            completed,
+        ]),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt("Read a.txt");
+    give_responses_token(&mut engine, &model);
+    let mut events = answer(&mut engine, "Approve");
+    events.extend(engine.until(|e| matches!(e, Event::Token { .. } | Event::TurnEnd { .. })));
+    assert!(
+        events.iter().any(|e| matches!(e, Event::ToolStart { call, tool, .. } if call == "call_1" && tool == "read")),
+        "{events:?}"
+    );
+    let request = match events.last() {
+        Some(Event::Token { request }) => request.clone(),
+        other => panic!("expected a second Token, got {other:?}"),
+    };
+    let op = Op::Token {
+        request,
+        url: Some(model.url.clone()),
+        key: Some("plan-token".into()),
+        api: Some("responses".into()),
+        error: None,
+    };
+    assert_eq!(engine.request(op), None);
+    let events = engine.until(is_turn_end);
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, "It says alpha.");
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnd {
+            reason: TurnEnd::Done,
+            error: None
+        })
+    );
+
+    let requests = model.requests();
+    let first = &requests[0];
+    // What a ChatGPT sign-in demands of a request.
+    assert_eq!(first["store"], false);
+    assert_eq!(first["stream"], true);
+    assert!(
+        first["instructions"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    assert!(first.get("messages").is_none());
+    assert_eq!(
+        first["input"],
+        json!([{"role": "user", "content": "Read a.txt"}])
+    );
+    // Function tools go in one namespace, each in the Responses shape.
+    assert_eq!(first["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(first["tools"][0]["type"], "namespace");
+    let read = first["tools"][0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "read")
+        .expect("the read tool");
+    assert_eq!(read["type"], "function");
+    assert!(read["parameters"].is_object() && read.get("function").is_none());
+    // The call and its result go back as items.
+    let input = requests[1]["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3, "{input:?}");
+    assert_eq!(
+        input[1],
+        json!({"type": "function_call", "call_id": "call_1", "namespace": "bate",
+            "name": "read", "arguments": "{\"path\":\"a.txt\"}"})
+    );
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert!(input[2]["output"].as_str().unwrap().contains("alpha"));
+    assert_eq!(
+        model.headers()[1].get("authorization").map(String::as_str),
+        Some("Bearer plan-token")
+    );
+}
+
+#[test]
+fn a_responses_stream_that_fails_or_just_ends_is_an_error_with_its_reason() {
+    let dir = workdir("engine-responses-fail");
+    let model = Model::replay(vec![
+        responses_body(&[
+            json!({"type": "response.output_text.delta", "delta": "So"}),
+            json!({"type": "response.failed", "response": {"error": {
+                "code": "subscription_sharing_usage_limit_exceeded", "message": "Limit reached."}}}),
+        ]),
+        responses_body(&[json!({"type": "response.output_text.delta", "delta": "So"})]),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    for (nonce, why) in [
+        (
+            "n1",
+            "the model server failed: subscription_sharing_usage_limit_exceeded: Limit reached.",
+        ),
+        ("n2", "the model's reply was cut off"),
+    ] {
+        engine.prompt_as(nonce, "Hi");
+        give_responses_token(&mut engine, &model);
+        let events = engine.until(is_turn_end);
+        match events.last() {
+            Some(Event::TurnEnd {
+                reason: TurnEnd::Error,
+                error: Some(error),
+            }) => {
+                assert!(error.contains(why), "{error}");
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
     let dir = workdir("engine-token-err");
@@ -1892,6 +2057,7 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
             request: req,
             url: None,
             key: None,
+            api: None,
             error: Some("no model server configured".into()),
         }),
         None
@@ -1925,6 +2091,7 @@ fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment
             request: req,
             url: Some(model.url.clone()),
             key: None,
+            api: None,
             error: None,
         }),
         None
