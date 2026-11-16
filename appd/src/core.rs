@@ -274,7 +274,9 @@ pub enum ChatGptNews {
     /// Bate was registered; the browser's sign-in is not through yet.
     Registered(chatgpt::Saved),
     SignedIn(Result<chatgpt::Saved, String>),
-    Renewed(Result<chatgpt::Saved, chatgpt::Failed>),
+    /// What came of a renewal, and the refresh token it used: the result is for the sign-in
+    /// that still has that token, and for no other.
+    Renewed(String, Result<chatgpt::Saved, chatgpt::Failed>),
 }
 
 /// How long before its end an access token is renewed.
@@ -2125,7 +2127,8 @@ impl Core {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result = chatgpt::renew(&chatgpt::auth(), &chatgpt::api(), &saved);
-            let _ = tx.send(Msg::ChatGpt(ChatGptNews::Renewed(result)));
+            let news = ChatGptNews::Renewed(saved.refresh_token, result);
+            let _ = tx.send(Msg::ChatGpt(news));
         });
     }
 
@@ -2177,20 +2180,17 @@ impl Core {
                 };
                 self.broadcast(&json!({"type": "chatgpt_changed", "error": error}));
             }
-            ChatGptNews::Renewed(result) => {
+            ChatGptNews::Renewed(used, result) => {
                 let waiting = self.chatgpt_waiting.take().unwrap_or_default();
-                // Signed out, or signed in anew, while the renewal ran: its tokens are not
-                // this sign-in's.
-                let same = |new: &chatgpt::Saved| {
-                    now.as_ref()
-                        .is_some_and(|n| n.signed_in() && n.client_id == new.client_id)
-                };
-                let answer: Result<chatgpt::Saved, String> = match (result, now.clone()) {
-                    (Ok(new), _) if same(&new) => {
+                // Signed out, or signed in anew, while the renewal ran: what came of it is
+                // neither kept nor held against the sign-in there is now.
+                let now = now.filter(|n| n.signed_in() && n.refresh_token == used);
+                let answer: Result<chatgpt::Saved, String> = match (result, now) {
+                    (_, None) => Err("the ChatGPT sign-in changed: send it again".into()),
+                    (Ok(new), Some(_)) => {
                         keep(self, &new);
                         Ok(new)
                     }
-                    (Ok(_), _) | (Err(_), None) => Err("signed out of ChatGPT".into()),
                     (Err(failed), Some(old)) if failed.forget => {
                         log!("{}", failed.why);
                         let out = chatgpt::Saved {
