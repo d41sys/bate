@@ -1,12 +1,14 @@
 //! The window: a small shell around the macOS system web view. The page is the interface;
 //! the shell gives each window two calls (send a line to the service, receive the next line)
-//! and one more (open another window), keeps it on its own local files, and adds the menus and
-//! the menu-bar icon.
+//! and two more (open another window, start dictation), keeps it on its own local files, and
+//! adds the menus and the menu-bar icon.
 
 mod bridge;
 mod files;
 
 use bridge::Bridge;
+use objc2::{MainThreadMarker, sel};
+use objc2_app_kit::NSApplication;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,6 +61,26 @@ async fn recv(bridges: State<'_, Bridges>, window: WebviewWindow) -> Result<Stri
 #[tauri::command]
 fn new_window(app: AppHandle) -> Result<(), String> {
     open_window(&app).map_err(|e| e.to_string())
+}
+
+/// Starts the system's Dictation in the box that has focus, as the Edit menu's Start
+/// Dictation… does (macOS adds that item to the Edit menu itself). The system does the
+/// listening, and asks the user itself the first time.
+// shortcut: Dictation runs on-device only where macOS offers that (Apple silicon, supported
+// languages); elsewhere macOS may send audio to Apple. Upgrade if that must be refused.
+#[tauri::command]
+fn start_dictation() -> Result<(), String> {
+    // Commands that are not `async` run on the main thread, where AppKit may be used.
+    let main = MainThreadMarker::new().ok_or("not on the main thread")?;
+    // SAFETY: `startDictation:` is a selector without arguments, sent down the responder chain.
+    let sent = unsafe {
+        NSApplication::sharedApplication(main).sendAction_to_from(sel!(startDictation:), None, None)
+    };
+    if sent {
+        Ok(())
+    } else {
+        Err("Dictation is not available here: turn it on in System Settings, Keyboard".into())
+    }
 }
 
 /// Opens one more window on the page.
@@ -185,7 +207,12 @@ fn open_outside(url: &Url) {
 fn main() {
     let app = tauri::Builder::default()
         .manage(Bridges::default())
-        .invoke_handler(tauri::generate_handler![send, recv, new_window])
+        .invoke_handler(tauri::generate_handler![
+            send,
+            recv,
+            new_window,
+            start_dictation
+        ])
         .register_uri_scheme_protocol("botfile", |_, request| {
             files::serve(&proto::paths::home(), &request.uri().to_string())
         })
@@ -245,6 +272,26 @@ mod tests {
             .map(|d| d.split('"').next().unwrap_or(d))
             .collect();
         assert_eq!(frames, ["botfile:"]);
+    }
+
+    #[test]
+    fn the_page_may_call_every_command_the_shell_has() {
+        // A command without its permission fails only when the page calls it.
+        let build = include_str!("../build.rs");
+        let listed = build
+            .split("commands(&[")
+            .nth(1)
+            .and_then(|c| c.split(']').next());
+        let capability = include_str!("../capabilities/default.json");
+        for command in listed
+            .unwrap()
+            .split(',')
+            .map(|c| c.trim().trim_matches('"'))
+            .filter(|c| !c.is_empty())
+        {
+            let permission = format!("\"allow-{}\"", command.replace('_', "-"));
+            assert!(capability.contains(&permission), "{permission}");
+        }
     }
 
     #[test]
