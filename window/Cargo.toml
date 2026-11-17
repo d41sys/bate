@@ -11,5 +11,9 @@ path = "src/main.rs"
 proto = { path = "../proto" }
 tauri = { version = "2", features = ["tray-icon"] }
 
+# Starts the system's Dictation (the Edit menu's item) for the mic button.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder"] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
