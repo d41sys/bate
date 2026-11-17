@@ -3,6 +3,7 @@
 //! window (5 minutes, 5 tries) and keeps a cookie; each page it opens is relayed to the
 //! service's socket as one more window, so it can do what the window can.
 
+use crate::keychain;
 use crate::paths;
 use crate::sys::{self, log, now_ms};
 use proto::MAX_WINDOW_FRAME;
@@ -493,10 +494,14 @@ fn save(devices: &[Device]) -> Result<(), String> {
         .map_err(|e| format!("devices not saved: {e}"))
 }
 
-/// The certificate (made on first use, kept in `lan/`) and its SHA-256 fingerprint.
+/// The certificate (made on first use, kept in `lan/`) and its SHA-256 fingerprint. The private
+/// key is made beside it, then moved into the Keychain (`lan.key`) and its file removed; a key
+/// file an older version left is moved the same way.
 fn tls() -> io::Result<(ServerConfig, String)> {
+    const ACCOUNT: &str = "lan.key";
+    let kc = io::Error::other;
     let (cert, key) = (dir().join("cert.pem"), dir().join("key.pem"));
-    if !cert.exists() || !key.exists() {
+    if !cert.exists() || !(key.exists() || keychain::get(ACCOUNT).map_err(kc)?.is_some()) {
         let host = sys::hostname();
         let made = std::process::Command::new("/usr/bin/openssl")
             .args([
@@ -523,6 +528,18 @@ fn tls() -> io::Result<(ServerConfig, String)> {
             ));
         }
     }
+    if key.exists() {
+        let pem = fs::read_to_string(&key)?;
+        keychain::put(ACCOUNT, &pem).map_err(kc)?;
+        // The file goes only once the Keychain gives the key back.
+        if keychain::get(ACCOUNT).map_err(kc)?.as_deref() != Some(pem.as_str()) {
+            return Err(io::Error::other("the Keychain did not keep the key"));
+        }
+        fs::remove_file(&key)?;
+    }
+    let pem = keychain::get(ACCOUNT)
+        .map_err(kc)?
+        .ok_or_else(|| io::Error::other("no private key in the Keychain"))?;
     let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(&cert)
         .map_err(io::Error::other)?
         .collect::<Result<_, _>>()
@@ -535,7 +552,7 @@ fn tls() -> io::Result<(ServerConfig, String)> {
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
         .join(":");
-    let key = PrivateKeyDer::from_pem_file(&key).map_err(io::Error::other)?;
+    let key = PrivateKeyDer::from_pem_slice(pem.as_bytes()).map_err(io::Error::other)?;
     let config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()

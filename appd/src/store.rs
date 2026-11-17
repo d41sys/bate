@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
+use crate::keychain;
 use crate::oauth::Tokens;
+use crate::sys::log;
 use proto::connectors::Connector;
 use proto::groups::Group;
 use proto::permissions::{Grant, Kind, Level};
@@ -154,6 +156,91 @@ fn parse<T: serde::de::DeserializeOwned>(text: String) -> rusqlite::Result<T> {
     })
 }
 
+/// Where the Keychain keeps each secret; every account is under the service in `keychain`.
+const PROVIDER_KEY: &str = "provider";
+const CHATGPT_ACCESS: &str = "chatgpt.access";
+const CHATGPT_REFRESH: &str = "chatgpt.refresh";
+
+fn oauth_account(bot: &str, name: &str) -> String {
+    format!("oauth:{bot}:{name}")
+}
+
+fn channel_account(bot: &str, kind: &str) -> String {
+    format!("channel:{bot}:{kind}")
+}
+
+fn kc<T>(r: keychain::Result<T>) -> Result<T> {
+    // No error variant fits better: this one only carries the message on.
+    r.map_err(|e| rusqlite::Error::ToSqlConversionFailure(format!("keychain: {e}").into()))
+}
+
+/// The secret kept under `account`. `legacy` is what an older `app.db` held in its place: it
+/// stands in until `move_secrets` has moved it, and when the Keychain cannot be read.
+fn secret(account: &str, legacy: String) -> Result<String> {
+    match keychain::get(account) {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) => Ok(legacy),
+        Err(_) if !legacy.is_empty() => Ok(legacy),
+        Err(e) => kc(Err(e)),
+    }
+}
+
+/// Moves the secrets an older `app.db` holds into the Keychain. Each is written, read back, and
+/// only then blanked in the database: a secret the Keychain refuses stays where it was (and in
+/// use, see `secret`) and is tried again at the next start.
+fn move_secrets(db: &Connection) -> Result<()> {
+    // (account, secret, statement that blanks it, its parameters)
+    let mut found: Vec<(String, String, &str, Vec<String>)> = Vec::new();
+    let key: Option<String> = db
+        .query_row("SELECT key FROM providers WHERE id = 1", [], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if let Some(key) = key {
+        let blank = "UPDATE providers SET key = NULL";
+        found.push((PROVIDER_KEY.into(), key, blank, vec![]));
+    }
+    let tokens = db
+        .query_row(
+            "SELECT access_token, refresh_token FROM chatgpt WHERE id = 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if let Some((access, refresh)) = tokens {
+        let blank = "UPDATE chatgpt SET access_token = ''";
+        found.push((CHATGPT_ACCESS.into(), access, blank, vec![]));
+        let blank = "UPDATE chatgpt SET refresh_token = ''";
+        found.push((CHATGPT_REFRESH.into(), refresh, blank, vec![]));
+    }
+    let mut stmt = db.prepare("SELECT bot, name, tokens FROM oauth WHERE tokens IS NOT NULL")?;
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)))? {
+        let (bot, name, text): (String, String, String) = row?;
+        let blank = "UPDATE oauth SET tokens = NULL WHERE bot = ?1 AND name = ?2";
+        found.push((oauth_account(&bot, &name), text, blank, vec![bot, name]));
+    }
+    let mut stmt = db.prepare("SELECT bot, kind, token FROM channels")?;
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        let (bot, kind, token): (String, String, String) = row?;
+        let blank = "UPDATE channels SET token = '' WHERE bot = ?1 AND kind = ?2";
+        found.push((channel_account(&bot, &kind), token, blank, vec![bot, kind]));
+    }
+    found.retain(|(_, secret, ..)| !secret.is_empty());
+    let moved = !found.is_empty();
+    for (account, secret, blank, params) in found {
+        let kept = keychain::put(&account, &secret).and_then(|()| keychain::get(&account));
+        if !matches!(kept, Ok(Some(back)) if back == secret) {
+            log!("{account} stays in app.db: the Keychain did not keep it");
+            continue;
+        }
+        db.execute(blank, rusqlite::params_from_iter(params))?;
+    }
+    if moved {
+        // The old pages must not linger in the write-ahead log.
+        db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Opens (or creates) the database. Engines do not outlive the service, so
     /// a prompt still `sending` becomes uncertain and open questions are dropped.
@@ -162,12 +249,15 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // FULL: a committed ledger row survives power loss, not only a crash.
         conn.pragma_update(None, "synchronous", "FULL")?;
+        // A blanked secret must not stay in the file as freed bytes.
+        conn.pragma_update(None, "secure_delete", true)?;
         conn.execute_batch(SCHEMA)?;
         conn.execute(
             "UPDATE ledger SET state = 'uncertain' WHERE state = 'sending'",
             [],
         )?;
         conn.execute("DELETE FROM questions", [])?;
+        move_secrets(&conn)?;
         Ok(Store(conn))
     }
 
@@ -252,18 +342,25 @@ impl Store {
 
     /// The model server URL and optional API key configured in the service.
     pub fn provider(&self) -> Result<Option<(String, Option<String>)>> {
-        self.0
+        let row: Option<(String, Option<String>)> = self
+            .0
             .query_row("SELECT url, key FROM providers WHERE id = 1", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
-            .optional()
+            .optional()?;
+        row.map(|(url, legacy)| {
+            let key = secret(PROVIDER_KEY, legacy.unwrap_or_default())?;
+            Ok((url, Some(key).filter(|k| !k.is_empty())))
+        })
+        .transpose()
     }
 
     pub fn set_provider(&self, url: &str, key: Option<&str>) -> Result<()> {
+        kc(keychain::put(PROVIDER_KEY, key.unwrap_or_default()))?;
         self.0
             .execute(
-                "INSERT INTO providers (id, url, key) VALUES (1, ?1, ?2)                  ON CONFLICT(id) DO UPDATE SET url = ?1, key = ?2",
-                params![url, key],
+                "INSERT INTO providers (id, url, key) VALUES (1, ?1, NULL)                  ON CONFLICT(id) DO UPDATE SET url = ?1, key = NULL",
+                [url],
             )
             .map(drop)
     }
@@ -273,31 +370,44 @@ impl Store {
         let mut stmt = self
             .0
             .prepare_cached("SELECT bot, kind, token FROM channels")?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_>>()?;
+        rows.into_iter()
+            .map(|(bot, kind, legacy)| {
+                let token = secret(&channel_account(&bot, &kind), legacy)?;
+                Ok((bot, kind, token))
+            })
             .collect()
     }
 
     pub fn channel(&self, bot: &str, kind: &str) -> Result<Option<String>> {
-        self.0
+        let legacy: Option<String> = self
+            .0
             .query_row(
                 "SELECT token FROM channels WHERE bot = ?1 AND kind = ?2",
                 [bot, kind],
                 |r| r.get(0),
             )
-            .optional()
+            .optional()?;
+        legacy
+            .map(|legacy| secret(&channel_account(bot, kind), legacy))
+            .transpose()
     }
 
     pub fn set_channel(&self, bot: &str, kind: &str, token: &str) -> Result<()> {
+        kc(keychain::put(&channel_account(bot, kind), token))?;
         self.0
             .execute(
-                "INSERT OR REPLACE INTO channels(bot, kind, token) VALUES (?1, ?2, ?3)",
-                [bot, kind, token],
+                "INSERT OR REPLACE INTO channels(bot, kind, token) VALUES (?1, ?2, '')",
+                [bot, kind],
             )
             .map(drop)
     }
 
     /// Forgets the channel and the chats that were let in on it.
     pub fn delete_channel(&self, bot: &str, kind: &str) -> Result<()> {
+        kc(keychain::delete(&channel_account(bot, kind)))?;
         for table in ["channels", "chats"] {
             self.0.execute(
                 &format!("DELETE FROM {table} WHERE bot = ?1 AND kind = ?2"),
@@ -335,7 +445,8 @@ impl Store {
     /// The registration with ChatGPT and, while signed in, its tokens.
     pub fn chatgpt(&self) -> Result<Option<crate::chatgpt::Saved>> {
         let columns = "host_id, client_id, access_token, refresh_token, expires_ms";
-        self.0
+        let row = self
+            .0
             .query_row(
                 &format!("SELECT {columns} FROM chatgpt WHERE id = 1"),
                 [],
@@ -349,20 +460,29 @@ impl Store {
                     })
                 },
             )
-            .optional()
+            .optional()?;
+        row.map(|mut s| {
+            s.access_token = secret(CHATGPT_ACCESS, s.access_token)?;
+            s.refresh_token = secret(CHATGPT_REFRESH, s.refresh_token)?;
+            Ok(s)
+        })
+        .transpose()
     }
 
     pub fn set_chatgpt(&self, s: &crate::chatgpt::Saved) -> Result<()> {
         let expires = i64::try_from(s.expires_ms).unwrap_or(i64::MAX);
+        kc(keychain::put(CHATGPT_ACCESS, &s.access_token))?;
+        kc(keychain::put(CHATGPT_REFRESH, &s.refresh_token))?;
         self.0
             .execute(
-                "INSERT OR REPLACE INTO chatgpt (id, host_id, client_id, access_token, refresh_token, expires_ms) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-                params![s.host_id, s.client_id, s.access_token, s.refresh_token, expires],
+                "INSERT OR REPLACE INTO chatgpt (id, host_id, client_id, access_token, refresh_token, expires_ms) VALUES (1, ?1, ?2, '', '', ?3)",
+                params![s.host_id, s.client_id, expires],
             )
             .map(drop)
     }
 
     pub fn delete_provider(&self) -> Result<()> {
+        kc(keychain::delete(PROVIDER_KEY))?;
         self.0
             .execute("DELETE FROM providers WHERE id = 1", [])
             .map(drop)
@@ -391,8 +511,26 @@ impl Store {
         tx.commit()
     }
 
-    /// Forgets the bot and everything stored for it.
+    /// Forgets the bot and everything stored for it, its secrets in the Keychain too.
     pub fn delete_bot(&mut self, bot: &str) -> Result<()> {
+        for (table, column, account) in [
+            (
+                "channels",
+                "kind",
+                channel_account as fn(&str, &str) -> String,
+            ),
+            ("oauth", "name", oauth_account),
+        ] {
+            let mut stmt = self
+                .0
+                .prepare(&format!("SELECT {column} FROM {table} WHERE bot = ?1"))?;
+            let names: Vec<String> = stmt
+                .query_map([bot], |r| r.get(0))?
+                .collect::<Result<_>>()?;
+            for name in names {
+                kc(keychain::delete(&account(bot, &name)))?;
+            }
+        }
         let tx = self.0.transaction()?;
         for table in BOT_TABLES {
             let column = if table == "bots" { "id" } else { "bot" };
@@ -870,7 +1008,7 @@ impl Store {
 
     /// The sign-in of a connector, if the user is signed in.
     pub fn tokens(&self, bot: &str, name: &str) -> Result<Option<Tokens>> {
-        let text: Option<Option<String>> = self
+        let row: Option<Option<String>> = self
             .0
             .query_row(
                 "SELECT tokens FROM oauth WHERE bot = ?1 AND name = ?2",
@@ -878,18 +1016,34 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        text.flatten().map(parse).transpose()
+        let Some(legacy) = row else { return Ok(None) };
+        let text = secret(&oauth_account(bot, name), legacy.unwrap_or_default())?;
+        Some(text).filter(|t| !t.is_empty()).map(parse).transpose()
     }
 
     /// Keeps a sign-in, or forgets it (`None`). False if the connector has no key.
     pub fn set_tokens(&self, bot: &str, name: &str, tokens: Option<&Tokens>) -> Result<bool> {
-        Ok(self.0.execute(
-            "UPDATE oauth SET tokens = ?3 WHERE bot = ?1 AND name = ?2",
-            params![bot, name, tokens.map(json)],
-        )? > 0)
+        let known = self.0.query_row(
+            "SELECT 1 FROM oauth WHERE bot = ?1 AND name = ?2",
+            [bot, name],
+            |_| Ok(()),
+        );
+        if known.optional()?.is_none() {
+            return Ok(false);
+        }
+        kc(keychain::put(
+            &oauth_account(bot, name),
+            &tokens.map(json).unwrap_or_default(),
+        ))?;
+        self.0.execute(
+            "UPDATE oauth SET tokens = NULL WHERE bot = ?1 AND name = ?2",
+            [bot, name],
+        )?;
+        Ok(true)
     }
 
     pub fn delete_oauth(&self, bot: &str, name: &str) -> Result<()> {
+        kc(keychain::delete(&oauth_account(bot, name)))?;
         self.0
             .execute(
                 "DELETE FROM oauth WHERE bot = ?1 AND name = ?2",

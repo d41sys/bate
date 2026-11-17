@@ -23,6 +23,8 @@ macOS 13 or later on Apple Silicon. The Rust version is pinned in `rust-toolchai
 
 The window's page needs Node 24 or later: run `npm ci && npm run build` in `window/ui` before building the Rust workspace. `cargo run -p window` then opens the window. Files a bot links to in a reply open in a sandboxed frame (`botfile:`) with no network and no way to the service; `window/check-frames.sh` shows this in a real window.
 
+Bate keeps its secrets (model key, sign-ins, channel tokens) in the macOS Keychain, not in `app.db`. The Keychain recognises a program by its signature, so a build signed ad hoc is a new program after every rebuild and macOS asks again. To avoid that, make a self-signed code-signing certificate named `Bate Dev` once (the script prints the steps) and run `window/sign-dev.sh` after each `cargo build`; it signs `appd`, `agentcore` and `bate` under `target/debug` and `target/release`.
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
