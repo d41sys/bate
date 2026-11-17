@@ -12,6 +12,7 @@ mod core;
 mod desktop;
 mod gate;
 mod hooks;
+mod keychain;
 mod lan;
 mod launch;
 mod limit;

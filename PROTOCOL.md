@@ -315,7 +315,7 @@ The bot never holds the token. Its engine is sent the connector with `url` repla
 
 An access token within 30 s of its end is renewed before use; an answer of 401 from the server renews it once and sends the request again. Without tokens, or when renewing fails, the proxy answers 401 and the server is not asked. When the sign-in server refuses to renew, the tokens are forgotten: the connector shows as signed out. Tokens are for one address: changing a connector's `url`, `headers` or `oauth`, or removing it, forgets them. A connector that is off is not served.
 
-Tokens are stored as plain text in `app.db`, like connector values. A bot limited to its folder cannot read that file.
+Tokens are kept in the Keychain (see Secrets), not in `app.db`. Connector values are plain text in `app.db`. A bot limited to its folder cannot read that file or use the Keychain.
 
 ### ChatGPT sign-in
 
@@ -323,7 +323,7 @@ A user signs in with ChatGPT the way OpenAI documents for open-source local apps
 
 While signed in, every bot's model calls go to `https://api.openai.com/v1` through the Responses API with the access token; a saved model server is not used. An access token within 60 s of its end is renewed before it is handed to an engine, one renewal at a time (each renewal replaces the refresh token). When OpenAI says the refresh token will never work again, the tokens are forgotten, the waiting turns end with "sign in again in Settings", and `chatgpt_changed` is sent. Any other failure to renew leaves the sign-in as it is.
 
-The registration and tokens are stored as plain text in `app.db`, and are removed from bug reports. Devices on the local network can neither read nor change the sign-in. `BATE_CHATGPT_AUTH` and `BATE_CHATGPT_API` name stand-ins for OpenAI's two servers (tests).
+The registration is stored in `app.db`, the tokens in the Keychain (see Secrets); the tokens are removed from bug reports. Devices on the local network can neither read nor change the sign-in. `BATE_CHATGPT_AUTH` and `BATE_CHATGPT_API` name stand-ins for OpenAI's two servers (tests).
 
 ### Updates
 
@@ -416,7 +416,7 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 
 ### Other devices on the local network (LAN)
 
-When enabled in Settings, the service serves Bate's web client over HTTPS on port 47822 (`APPD_LAN_PORT`) using a self-signed certificate generated once in `lan/cert.pem` with its SHA-256 fingerprint shown in the window.
+When enabled in Settings, the service serves Bate's web client over HTTPS on port 47822 (`APPD_LAN_PORT`) using a self-signed certificate generated once in `lan/cert.pem` with its SHA-256 fingerprint shown in the window. Its private key is kept in the Keychain, not in a file.
 
 The same page is reachable from the user's own Tailscale network (no relay of Bate's): the listener is on every interface, so a device on the tailnet pairs and works as on the local network. The certificate also names this Mac's MagicDNS name and Tailscale addresses (from `tailscale status --json`, read when serving starts; `APPD_TAILSCALE` names another command) and is made again when these change, which changes its fingerprint. It is still self-signed: `tailscale cert` is not used. Local networks and Tailscale's 100.64.0.0/10 are alike treated as the user's own.
 
@@ -459,8 +459,18 @@ A bot can be written to from a chat app. The user makes a bot there (Telegram: B
 - `/run <name>` starts a routine that has `chat: true` (see Routines); any other message is a prompt.
 - Questions and approvals are answered in Bate's window only; the chat gets a note that one is waiting.
 - A new token for a channel keeps its paired chats (a Telegram chat is the same person for any bot; a Discord one is of no use to another bot and can be removed).
-- Tokens are stored in `app.db` as given, are never sent to a window or an engine, are replaced in bug reports, and the four commands are refused to devices on the LAN.
+- Tokens are kept in the Keychain (see Secrets), are never sent to a window or an engine, are replaced in bug reports, and the four commands are refused to devices on the LAN.
 
 ### Storage
 
 One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+
+#### Secrets
+
+Secrets are not in `app.db`; the service keeps each as a generic password in the macOS Keychain (login keychain; the service name is the launchd label, `com.oursnever.bate.appd`, with a suffix of its own for a service with a custom `APPD_HOME`, so two homes never share items): the model server's key (`provider`), the ChatGPT tokens (`chatgpt.access`, `chatgpt.refresh`), a connector's sign-in (`oauth:<bot>:<name>`, as JSON), a channel's token (`channel:<bot>:<kind>`) and the private key of the LAN certificate (`lan.key`, PEM). Their columns in `app.db` are empty. Removing a channel, connector sign-in, bot or the model server removes its items; an empty value removes one too.
+
+An `app.db` from an earlier version is moved at start: each secret is written to the Keychain and read back, and only then blanked (`secure_delete` is on and the log is checkpointed, so its bytes are gone from the files). A secret the Keychain does not keep stays where it was, stays in use and is tried again at the next start. If the Keychain cannot be read, a secret still in `app.db` is used, and a secret still in `app.db` is the newer one. The same holds when a new value (a renewed refresh token) cannot be written: it is put in its `app.db` column instead, and moved at the next start. A `lan/key.pem` from an earlier version is moved the same way when the LAN page is turned on, and the file is removed.
+
+`APPD_KEYCHAIN=<file>` makes the service use a keychain file of its own (made if missing) in place of the login keychain; the tests use it. Not passed on by `appd launch`. `window/sign-dev.sh` signs the programs so that the Keychain keeps allowing them after a rebuild.
+
+Kept in files on purpose, and why: the key of a connector for the engine (`oauth.key`, `/mcp/<key>`) and a routine's webhook token are only good through the service's loopback port, and the window is shown the webhook URL; `lan/devices.json` has only hashes; `gate-chatgpt.json` is the output of the hand-run sign-in check (`appd gate chatgpt`), mode 0600, and is for deleting after the check.
