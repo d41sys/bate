@@ -540,11 +540,11 @@ impl Turn {
     }
 
     /// One action in other apps, which the service has the helper app do. Asked about as the
-    /// `desktop` kind: for the app, or for `apps` when listing.
+    /// `desktop` kind, once for each exact action (what is typed included).
     fn desktop(&self, args: &Map<String, Value>) -> Result<String, String> {
         let arg = |key: &str| {
             args.get(key).map_or(String::new(), |v| match v {
-                Value::String(text) => text.chars().take(200).collect(),
+                Value::String(text) => text.clone(),
                 other => other.to_string(),
             })
         };
@@ -569,12 +569,9 @@ impl Turn {
         if action != "apps" && app.trim().is_empty() {
             return Err("`app` must be the name of an app, as `apps` lists it.".into());
         }
-        let target = if action == "apps" {
-            "apps".to_owned()
-        } else {
-            app
-        };
-        self.allowed(Kind::Desktop, target, format!("Desktop: {what}"))?;
+// The whole action is the target, never cut: a grant is for exactly this, and the user
+        // reads all of it.
+        self.allowed(Kind::Desktop, what.clone(), format!("Desktop: {what}"))?;
         let id = self.wait_on("d");
         self.out.send(&Event::Desktop {
             request: id.clone(),

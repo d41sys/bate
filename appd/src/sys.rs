@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Creates `dir` (and parents) and forces mode 0700 on it.
 /// Held while a program is started, and while descriptors are made that only become
@@ -51,26 +51,6 @@ pub fn peer_is_self(stream: &UnixStream) -> bool {
     let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
     // SAFETY: `geteuid` has no preconditions.
     rc == 0 && uid == unsafe { libc::geteuid() }
-}
-
-/// The program file of the process on the other end of `stream`, if it can be told.
-pub fn peer_exe(stream: &UnixStream) -> Option<PathBuf> {
-    let mut pid: libc::pid_t = 0;
-    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
-    // SAFETY: valid descriptor; the pointers describe `pid` and `len`.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_LOCAL,
-            libc::LOCAL_PEERPID,
-            (&raw mut pid).cast(),
-            &mut len,
-        )
-    };
-    let mut path = [0u8; 4096];
-    // SAFETY: the pointer and length describe `path`.
-    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-    (rc == 0 && n > 0).then(|| PathBuf::from(OsStr::from_bytes(&path[..n as usize])))
 }
 
 /// Six random digits: a code a person reads off one screen and types on another.

@@ -1871,7 +1871,7 @@ fn the_desktop_tool_asks_for_the_app_and_waits_for_what_the_service_did() {
     };
     assert_eq!(
         (kind, target.as_deref()),
-        (&Some(Kind::Desktop), Some("apps"))
+        (&Some(Kind::Desktop), Some("list the apps and windows"))
     );
     assert_eq!(title, "Desktop: list the apps and windows");
     let asked = engine.until(|e| matches!(e, Event::Desktop { .. }));
@@ -1903,7 +1903,7 @@ fn the_desktop_tool_asks_for_the_app_and_waits_for_what_the_service_did() {
     };
     assert_eq!(
         (kind, target.as_deref()),
-        (&Some(Kind::Desktop), Some("TextEdit"))
+        (&Some(Kind::Desktop), Some("type into TextEdit: hello"))
     );
     // `look` without an app is not asked about, nor sent: neither is a made-up action.
     engine.until(is_turn_end);
@@ -2210,4 +2210,43 @@ fn an_abort_while_the_engine_waits_for_the_token_ends_the_turn_as_aborted() {
             error: None
         }
     );
+}
+
+#[test]
+fn a_desktop_question_names_the_whole_action_so_a_grant_covers_only_that() {
+    let dir = workdir("desktop-card");
+    let long = format!("{}; rm -rf ~", "x".repeat(300));
+    let model = Model::serve(vec![
+        vec![call("c1", "desktop", json!({"action": "look", "app": "Terminal"}))],
+        vec![call(
+            "c2",
+            "desktop",
+            json!({"action": "type", "app": "Terminal", "text": long}),
+        )],
+        vec![call(
+            "c3",
+            "desktop",
+            json!({"action": "set_value", "app": "Terminal", "element": 2, "value": long}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("go");
+    let mut asked = Vec::new();
+    for _ in 0..3 {
+        let events = answer(&mut engine, "Deny");
+        let Some(Event::Question { title, target, .. }) = events.last() else {
+            unreachable!()
+        };
+        asked.push((title.clone(), target.clone().unwrap()));
+    }
+    engine.until(is_turn_end);
+    // Allowing a look at an app is not allowing what is typed into it, and the card shows all of it.
+    assert_eq!(asked[0].1, "look at Terminal");
+    assert_eq!(asked[1].1, format!("type into Terminal: {long}"));
+    assert_eq!(asked[2].1, format!("set element 2 in Terminal to: {long}"));
+    for (title, target) in &asked {
+        assert_eq!(title, &format!("Desktop: {target}"));
+    }
 }

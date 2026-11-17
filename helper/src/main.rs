@@ -9,7 +9,7 @@ use proto::desktop::{Call, Frame, MAX_FRAME, Request};
 use proto::{read_frame, write_frame};
 use std::io::{self, BufReader};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,8 +23,8 @@ fn main() {
     let socket = std::env::args_os()
         .nth(1)
         .map_or_else(proto::paths::helper_socket, PathBuf::from);
-    let stream = UnixStream::connect(&socket).unwrap_or_else(|e| {
-        eprintln!("bate-helper: cannot reach {}: {e}", socket.display());
+    let stream = connect(&socket).unwrap_or_else(|e| {
+        eprintln!("bate-helper: cannot use {}: {e}", socket.display());
         exit(1)
     });
     let out = Arc::new(Mutex::new(stream.try_clone().unwrap_or_else(|e| {
@@ -73,6 +73,21 @@ fn main() {
             },
         };
         send(&out, &reply);
+    }
+}
+
+/// Connects to the service. The helper holds the user's privacy permissions, so it does what a
+/// socket says only when the program on the other end is the service's own `appd`: a program
+/// of the user's that runs the helper against a socket of its own gets nothing.
+// shortcut: the program's name, not its signature; check the Team ID once the apps are signed (#37).
+fn connect(socket: &Path) -> io::Result<UnixStream> {
+    let stream = UnixStream::connect(socket)?;
+    match proto::desktop::peer_exe(&stream) {
+        Some(exe) if proto::desktop::is_service(&exe) => Ok(stream),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the other end is not Bate's service",
+        )),
     }
 }
 
@@ -186,7 +201,8 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::*;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn base64_is_standard_and_padded() {
@@ -195,5 +211,16 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(&[0xff, 0xef]), "/+8=");
+    }
+
+    #[test]
+    fn the_helper_connects_only_to_the_service_program() {
+        let socket = std::env::temp_dir().join(format!("helper-peer-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        // This test program is not `appd`: a socket of its own gets no helper.
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let refused = connect(&socket).err().expect("a stranger was trusted");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_file(&socket);
     }
 }

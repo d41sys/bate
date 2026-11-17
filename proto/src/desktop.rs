@@ -3,6 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::ffi::OsStr;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 
 /// Largest frame either way, newline included. A screenshot comes as base64.
 pub const MAX_FRAME: usize = 64 << 20;
@@ -130,6 +135,31 @@ fn text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The program file of the process on the other end of `stream`, if it can be told.
+pub fn peer_exe(stream: &UnixStream) -> Option<PathBuf> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: valid descriptor; the pointers describe `pid` and `len`.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &mut len,
+        )
+    };
+    let mut path = [0u8; 4096];
+    // SAFETY: the pointer and length describe `path`.
+    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    (rc == 0 && n > 0).then(|| PathBuf::from(OsStr::from_bytes(&path[..n as usize])))
+}
+
+/// Whether `exe` is the service's program, which the helper obeys.
+pub fn is_service(exe: &Path) -> bool {
+    exe.file_name() == Some(OsStr::new("appd"))
+}
+
 /// Service → helper: one call, with the id its `reply` carries back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -194,6 +224,15 @@ mod tests {
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_peer_of_a_socket_is_told_by_its_program_file() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(peer_exe(&a), std::env::current_exe().ok());
+        assert!(is_service(Path::new("/x/target/debug/appd")));
+        assert!(!is_service(Path::new("/x/bate-helper")));
+        assert!(!is_service(Path::new("/x/appd/other")));
     }
 
     #[test]

@@ -96,7 +96,7 @@ impl Link {
         for stream in listener.incoming().flatten() {
             // The user's own, and the helper's own program: not another program of theirs.
             let expected = exe().canonicalize().ok();
-            let actual = sys::peer_exe(&stream).and_then(|p| p.canonicalize().ok());
+            let actual = proto::desktop::peer_exe(&stream).and_then(|p| p.canonicalize().ok());
             if !sys::peer_is_self(&stream) || actual.is_none() || actual != expected {
                 log!("refused a connection to the helper's socket from another program");
                 continue;

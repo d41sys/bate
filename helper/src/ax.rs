@@ -132,6 +132,11 @@ fn int(value: Option<CFType>) -> Option<i64> {
     value?.downcast::<CFNumber>()?.to_i64()
 }
 
+/// A size or position: macOS gives fractional ones on scaled displays.
+fn float(value: Option<CFType>) -> Option<f64> {
+    value?.downcast::<CFNumber>()?.to_f64()
+}
+
 fn string(value: Option<CFType>) -> Option<String> {
     Some(value?.downcast::<CFString>()?.to_string())
 }
@@ -160,7 +165,7 @@ pub fn windows() -> Vec<Win> {
         let Some(bounds) = get(entry, "kCGWindowBounds") else {
             continue;
         };
-        let size = |key| int(get(bounds.as_CFTypeRef(), key)).unwrap_or(0);
+        let size = |key| float(get(bounds.as_CFTypeRef(), key)).unwrap_or(0.0).round() as i64;
         let (width, height) = (size("Width"), size("Height"));
         let (Some(id), Some(pid), Some(owner)) = (
             int(get(entry, "kCGWindowNumber")),
