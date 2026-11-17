@@ -26,7 +26,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{browser, oauth};
+use crate::{apple, browser, oauth};
 use crate::{limit, memory, paths, schedule, skills};
 
 pub enum Msg {
@@ -67,6 +67,13 @@ pub enum Msg {
     },
     /// What came of an action in a bot's browser.
     Browsed {
+        bot: String,
+        generation: u64,
+        request: String,
+        result: Result<String, String>,
+    },
+    /// What came of an action in one of the user's Apple apps.
+    Applied {
         bot: String,
         generation: u64,
         request: String,
@@ -419,6 +426,28 @@ impl Core {
                     log!("bot {bot}: browser result not sent: {e}");
                 }
             }
+            Msg::Applied {
+                bot,
+                generation,
+                request,
+                result,
+            } => {
+                if self.engines.get(&bot).map(|r| r.generation) != Some(generation) {
+                    return;
+                }
+                let (output, error) = match result {
+                    Ok(output) => (Some(output), None),
+                    Err(e) => (None, Some(e)),
+                };
+                let op = Op::AppleResult {
+                    request,
+                    output,
+                    error,
+                };
+                if let Err((_, e)) = self.send_op(&bot, op, Waiter::Quiet) {
+                    log!("bot {bot}: Apple app result not sent: {e}");
+                }
+            }
             Msg::BrowserTaken { bot } => {
                 log!("bot {bot}: the user took over its browser");
                 self.broadcast(&json!({"type": "bots_changed"}));
@@ -651,6 +680,11 @@ impl Core {
                         .zip(asked["target"].as_str());
                     let (kind, target) =
                         action.ok_or(bad("`Always` is only for a question about an action"))?;
+                    if kind.always_asks() {
+                        return Err(bad(
+                            "a send or change in an Apple app is asked about every time",
+                        ));
+                    }
                     Some((kind, target.to_owned()))
                 } else {
                     None
@@ -923,6 +957,11 @@ impl Core {
             "set_permission" => {
                 let bot = self.bot_of(f)?;
                 let (kind, level) = (field::<Kind>(f, "kind")?, field::<Level>(f, "level")?);
+                if kind.always_asks() && level == Level::Always {
+                    return Err(bad(
+                        "a send or change in an Apple app is asked about every time: use `ask` or `never`",
+                    ));
+                }
                 self.store.set_level(&bot, kind, level).map_err(internal)?;
                 self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
                 Ok(Some(json!({})))
@@ -2030,6 +2069,30 @@ impl Core {
         });
     }
 
+    /// The engine asks for an action in an Apple app: run on a thread of its own, since the app
+    /// may wait for the user to allow it, and answered with `apple_result` when done.
+    fn on_apple(
+        &mut self,
+        bot: &str,
+        request: String,
+        tool: String,
+        args: serde_json::Map<String, Value>,
+    ) {
+        let Some(r) = self.engines.get(bot) else {
+            return;
+        };
+        let (bot, generation, tx) = (bot.to_owned(), r.generation, self.tx.clone());
+        std::thread::spawn(move || {
+            let result = apple::run(&apple::Tools::system(), &tool, &args);
+            let _ = tx.send(Msg::Applied {
+                bot,
+                generation,
+                request,
+                result,
+            });
+        });
+    }
+
     /// The local port's threads ask for what only this thread may read or keep.
     fn on_proxy(&mut self, ask: proxy::Ask) {
         match ask {
@@ -2273,7 +2336,22 @@ impl Core {
                 }
                 return;
             }
-            *options = [APPROVE, ALWAYS, DENY].map(String::from).to_vec();
+            // A send or change shows its card every time: there is no `Always` for it.
+            let choices: &[&str] = if kind.always_asks() {
+                &[APPROVE, DENY]
+            } else {
+                &[APPROVE, ALWAYS, DENY]
+            };
+            *options = choices.iter().map(|c| c.to_string()).collect();
+        }
+        if let Event::Apple {
+            request,
+            tool,
+            args,
+        } = &ev
+        {
+            // Not for the transcript either: the tool call is there.
+            return self.on_apple(bot, request.clone(), tool.clone(), args.clone());
         }
         if let Event::Browser { request, action } = &ev {
             // Not for the transcript either: the tool call is there.
@@ -2379,8 +2457,10 @@ impl Core {
     fn decide(&self, bot: &str, kind: Kind, target: &str) -> Option<&'static str> {
         let known = self.store.level(bot, kind).and_then(|level| {
             Ok(match level {
-                Level::Always => Some(APPROVE),
                 Level::Never => Some(DENY),
+                // Whatever the level says, such an action is shown to the user every time.
+                _ if kind.always_asks() => None,
+                Level::Always => Some(APPROVE),
                 Level::Ask if self.store.has_grant(bot, kind, target)? => Some(APPROVE),
                 Level::Ask => None,
             })
