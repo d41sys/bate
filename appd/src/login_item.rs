@@ -257,16 +257,16 @@ mod tests {
 
     #[test]
     fn the_bundles_job_description_is_the_services_own() {
-        let plist = include_str!("../../window/bundle/com.oursnever.bate.appd.plist");
-        assert!(plist.contains(&format!(
+        let file = include_str!("../../window/bundle/com.oursnever.bate.appd.plist");
+        assert!(file.contains(&format!(
             "<key>Label</key><string>{}</string>",
             launch::BASE_LABEL
         )));
-        assert!(plist.contains("<key>BundleProgram</key><string>Contents/MacOS/appd</string>"));
+        assert!(file.contains("<key>BundleProgram</key><string>Contents/MacOS/appd</string>"));
         // As in `launch.rs`: a clean exit stays stopped, any other one is restarted.
-        assert!(plist.contains("<dict><key>SuccessfulExit</key><false/></dict>"));
+        assert!(file.contains("<dict><key>SuccessfulExit</key><false/></dict>"));
         // `appd update` starts a program that must outlive the service's exit (see `update.rs`).
-        assert!(plist.contains("<key>AbandonProcessGroup</key><true/>"));
+        assert!(file.contains("<key>AbandonProcessGroup</key><true/>"));
         assert_eq!(plist(), format!("{}.plist", launch::BASE_LABEL));
     }
 }
