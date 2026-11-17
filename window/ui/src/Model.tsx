@@ -15,11 +15,13 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
     setModel(bot.model ?? "");
     setEffort(bot.effort ?? "");
   }, [bot.model, bot.effort]);
+  // Again when the sign-in changes: the list is the plan's then, or the model server's.
   useEffect(() => {
-    void request<{ models: string[] }>("list_models").then(
-      (d) => setServerModels(d.models),
-      () => {},
-    );
+    const load = () => void request<{ models: string[] }>("list_models").then((d) => setServerModels(d.models), () => {});
+    load();
+    return listen((frame) => {
+      if (frame.type === "chatgpt_changed") load();
+    });
   }, []);
   const [onPlan, setOnPlan] = useState(false);
   // Only Bate's own window may read the sign-in, as in Settings.
@@ -42,7 +44,16 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
   return (
     <form className="model" onSubmit={(e) => { e.preventDefault(); save(model, effort); }}>
       <label>
-        Model <input list={list} placeholder="the engine's default" value={model} onChange={(e) => setModel(e.target.value)} />
+        Model{" "}
+        {serverModels.length ? (
+          // Every model the server lists: a text box's suggestions show only those that match what is in it.
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="">the engine's default</option>
+            {[...new Set([...serverModels, ...(model ? [model] : [])])].map((m) => <option key={m}>{m}</option>)}
+          </select>
+        ) : (
+          <input list={list} placeholder="the engine's default" value={model} onChange={(e) => setModel(e.target.value)} />
+        )}
       </label>
       <datalist id={list}>{known.map((m) => <option key={m} value={m} />)}</datalist>
       <label>
