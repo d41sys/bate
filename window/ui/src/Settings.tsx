@@ -1,5 +1,6 @@
 import { Channels } from "./Channels.tsx";
 import { Devices } from "./Devices.tsx";
+import { Helper } from "./Helper.tsx";
 import { Updates } from "./Updates.tsx";
 import { useEffect, useState } from "react";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
@@ -10,6 +11,7 @@ const ACTIONS: Record<Kind, string> = {
   write: "Change files",
   run: "Run commands",
   connector: "Use connectors",
+  desktop: "See and control other apps",
   apple_read: "Read Messages, Mail, Notes, Reminders, Calendar, Contacts",
   apple_change: "Send and change in those apps (always shows what it sends)",
 };
@@ -149,6 +151,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
       {report && <p>Saved to <code>{report}</code></p>}
       {inShell && <Channels bot={bot.id} />}
       {inShell && <Devices />}
+      {inShell && <Helper />}
       <Updates />
       <h2>Delete</h2>
       {deleting ? (

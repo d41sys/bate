@@ -1939,6 +1939,94 @@ fn an_apple_app_tool_shows_the_exact_recipient_and_text_and_runs_only_what_was_a
 }
 
 #[test]
+fn the_desktop_tool_asks_for_the_app_and_waits_for_what_the_service_did() {
+    let dir = workdir("desktop");
+    let model = Model::serve(vec![
+        vec![call("c1", "desktop", json!({"action": "apps"}))],
+        vec![call(
+            "c2",
+            "desktop",
+            json!({"action": "type", "app": "TextEdit", "text": "hello"}),
+        )],
+        vec![call("c3", "desktop", json!({"action": "look"}))],
+        vec![call("c4", "desktop", json!({"action": "fly"}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("write a note");
+    let result = |request: &str, output: Option<&str>, error: Option<&str>| Op::DesktopResult {
+        request: request.into(),
+        output: output.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question {
+        kind,
+        target,
+        title,
+        ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Desktop), Some("list the apps and windows"))
+    );
+    assert_eq!(title, "Desktop: list the apps and windows");
+    let asked = engine.until(|e| matches!(e, Event::Desktop { .. }));
+    let Some(Event::Desktop { request, action }) = asked.last() else {
+        unreachable!()
+    };
+    assert_eq!(action["action"], "apps");
+    // Only the desktop request takes a desktop result.
+    assert!(engine.request(result("b999", Some("x"), None)).is_some());
+    let browser = Op::BrowserResult {
+        request: request.clone(),
+        output: Some("x".into()),
+        error: None,
+    };
+    assert!(engine.request(browser).is_some());
+    assert_eq!(
+        engine.request(result(
+            request,
+            Some("TextEdit\n  window 5 \"Untitled\""),
+            None
+        )),
+        None
+    );
+
+    // Each app is asked about on its own, and a denial never reaches the service.
+    let events = answer(&mut engine, "Deny");
+    let Some(Event::Question { kind, target, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Desktop), Some("type into TextEdit: hello"))
+    );
+    // `look` without an app is not asked about, nor sent: neither is a made-up action.
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    assert!(offered(&requests[0]).contains(&"desktop"));
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "TextEdit\n  window 5 \"Untitled\"");
+    assert_eq!(result(2), "The user denied this action.");
+    assert_eq!(
+        result(3),
+        "`app` must be the name of an app, as `apps` lists it."
+    );
+    assert_eq!(
+        result(4),
+        "`fly` is not an action: apps, look, screenshot, press, set_value or type."
+    );
+}
+
+#[test]
 fn the_engine_asks_for_the_token_before_each_model_call() {
     let dir = workdir("engine-token");
     let model = Model::serve(vec![vec![text("Hello with token")]]);
@@ -2224,4 +2312,47 @@ fn an_abort_while_the_engine_waits_for_the_token_ends_the_turn_as_aborted() {
             error: None
         }
     );
+}
+
+#[test]
+fn a_desktop_question_names_the_whole_action_so_a_grant_covers_only_that() {
+    let dir = workdir("desktop-card");
+    let long = format!("{}; rm -rf ~", "x".repeat(300));
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "desktop",
+            json!({"action": "look", "app": "Terminal"}),
+        )],
+        vec![call(
+            "c2",
+            "desktop",
+            json!({"action": "type", "app": "Terminal", "text": long}),
+        )],
+        vec![call(
+            "c3",
+            "desktop",
+            json!({"action": "set_value", "app": "Terminal", "element": 2, "value": long}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("go");
+    let mut asked = Vec::new();
+    for _ in 0..3 {
+        let events = answer(&mut engine, "Deny");
+        let Some(Event::Question { title, target, .. }) = events.last() else {
+            unreachable!()
+        };
+        asked.push((title.clone(), target.clone().unwrap()));
+    }
+    engine.until(is_turn_end);
+    // Allowing a look at an app is not allowing what is typed into it, and the card shows all of it.
+    assert_eq!(asked[0].1, "look at Terminal");
+    assert_eq!(asked[1].1, format!("type into Terminal: {long}"));
+    assert_eq!(asked[2].1, format!("set element 2 in Terminal to: {long}"));
+    for (title, target) in &asked {
+        assert_eq!(title, &format!("Desktop: {target}"));
+    }
 }

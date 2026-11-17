@@ -26,7 +26,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, oauth};
+use crate::{apple, browser, desktop, oauth};
 use crate::{limit, memory, paths, schedule, skills, update};
 
 pub enum Msg {
@@ -87,6 +87,15 @@ pub enum Msg {
     BrowserTaken {
         bot: String,
     },
+    /// What the helper app did for a bot.
+    Desktopped {
+        bot: String,
+        generation: u64,
+        request: String,
+        result: Result<String, String>,
+    },
+    /// The helper app connected, quit, or its permissions changed.
+    HelperChanged,
     /// `event: None`: the engine closed its output (it exited or broke the protocol).
     Engine {
         bot: String,
@@ -336,6 +345,8 @@ pub struct Core {
     sign_ins: HashMap<String, oauth::Pending>,
     /// Each bot's browser, from its first use on.
     browsers: HashMap<String, browser::Handle>,
+    /// The helper app that sees and controls other apps for the bots.
+    desktop: desktop::Link,
     store: Store,
     tx: Sender<Msg>,
     clients: HashMap<u64, Client>,
@@ -396,6 +407,7 @@ impl Core {
             sign_ins: HashMap::new(),
             chatgpt_waiting: None,
             browsers: HashMap::new(),
+            desktop: desktop::Link::start(tx.clone()),
             store,
             tx,
             clients: HashMap::new(),
@@ -493,6 +505,29 @@ impl Core {
                 log!("bot {bot}: the user took over its browser");
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
+            Msg::Desktopped {
+                bot,
+                generation,
+                request,
+                result,
+            } => {
+                if self.engines.get(&bot).map(|r| r.generation) != Some(generation) {
+                    return;
+                }
+                let (output, error) = match result {
+                    Ok(output) => (Some(output), None),
+                    Err(e) => (None, Some(e)),
+                };
+                let op = Op::DesktopResult {
+                    request,
+                    output,
+                    error,
+                };
+                if let Err((_, e)) = self.send_op(&bot, op, Waiter::Quiet) {
+                    log!("bot {bot}: desktop result not sent: {e}");
+                }
+            }
+            Msg::HelperChanged => self.broadcast(&json!({"type": "helper_changed"})),
             Msg::Models { client, id, models } => {
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
@@ -954,6 +989,13 @@ impl Core {
                     handle.hand_back();
                     self.broadcast(&json!({"type": "bots_changed"}));
                 }
+                Ok(Some(json!({})))
+            }
+            "get_helper" => Ok(Some(self.desktop.info())),
+            "open_helper_settings" => {
+                self.desktop
+                    .open_settings(str_field(f, "pane")?)
+                    .map_err(|e| bad(&e))?;
                 Ok(Some(json!({})))
             }
             "set_agent" => {
@@ -2226,6 +2268,39 @@ impl Core {
         });
     }
 
+    /// The engine asks for an action in other apps: checked here, done by the helper app on a
+    /// thread of its own, and answered with `desktop_result` when done.
+    fn on_desktop(&mut self, bot: &str, request: String, action: &serde_json::Map<String, Value>) {
+        let Some(r) = self.engines.get(bot) else {
+            return;
+        };
+        let generation = r.generation;
+        let call = match proto::desktop::Call::parse(action) {
+            Ok(call) => call,
+            Err(e) => {
+                let op = Op::DesktopResult {
+                    request,
+                    output: None,
+                    error: Some(e),
+                };
+                if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                    log!("bot {bot}: desktop result not sent: {e}");
+                }
+                return;
+            }
+        };
+        let (link, tx, bot) = (self.desktop.clone(), self.tx.clone(), bot.to_owned());
+        std::thread::spawn(move || {
+            let result = link.call(&bot, call);
+            let _ = tx.send(Msg::Desktopped {
+                bot,
+                generation,
+                request,
+                result,
+            });
+        });
+    }
+
     /// The engine asks for an action in an Apple app: run on a thread of its own, since the app
     /// may wait for the user to allow it, and answered with `apple_result` when done.
     fn on_apple(
@@ -2513,6 +2588,9 @@ impl Core {
         if let Event::Browser { request, action } = &ev {
             // Not for the transcript either: the tool call is there.
             return self.on_browser(bot, request.clone(), action);
+        }
+        if let Event::Desktop { request, action } = &ev {
+            return self.on_desktop(bot, request.clone(), action);
         }
         if let Event::Message { message, to, text } = &ev {
             // Not for the transcript: the tool call that sent it is there already.

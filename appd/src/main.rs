@@ -9,6 +9,7 @@ mod channels;
 mod chatgpt;
 mod clients;
 mod core;
+mod desktop;
 mod gate;
 mod hooks;
 mod keychain;

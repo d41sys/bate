@@ -58,6 +58,8 @@ const SUB_AGENT: &str = "\n\nYou are a sub-agent: another agent handed you the o
 /// The tool that messages another bot.
 const MESSAGE: &str = "message_bot";
 const BROWSER: &str = "browser";
+/// The tool that sees and controls other apps through the helper app.
+const DESKTOP: &str = "desktop";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
 /// and `message_bot` when there is a bot to message.
@@ -73,6 +75,16 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
                 "element": {"type": "integer", "description": "For `click` and `type`: the element's number"},
                 "text": {"type": "string", "description": "For `type`: what to put in the field"},
                 "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"}},
+                "required": ["action"]}}}));
+        list.push(json!({"type": "function", "function": {"name": DESKTOP,
+            "description": "See and control other apps on this Mac without taking the focus from the user. `apps` lists the apps and their windows (window ids). `look` reads a window as a tree of numbered elements; `press` or `set_value` act on an element by its number from the latest `look` of that window, and `type` types text into an element or into whatever has the focus. `screenshot` saves a picture of a window in your folder and gives its path. Look again after any action: the numbers change. If the user lacks a macOS permission, the result says which.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["apps", "look", "screenshot", "press", "set_value", "type"]},
+                "app": {"type": "string", "description": "The app's name, as `apps` lists it (all but `apps`)"},
+                "window": {"type": "integer", "description": "A window id from `apps` (default: the app's front window)"},
+                "element": {"type": "integer", "description": "For `press` and `set_value`, and optionally `type`: the element's number"},
+                "text": {"type": "string", "description": "For `type`"},
+                "value": {"type": "string", "description": "For `set_value`"}},
                 "required": ["action"]}}}));
         list.extend(proto::apple::APPS.iter().map(apple_tool));
         if peers {
@@ -491,6 +503,9 @@ impl Turn {
         if tool == BROWSER {
             return self.browse(args);
         }
+        if tool == DESKTOP {
+            return self.desktop(args);
+        }
         if let Some(app) = proto::apple::app(tool) {
             return self.apple(app, args);
         }
@@ -538,6 +553,50 @@ impl Turn {
         self.allowed(Kind::Connector, BROWSER.to_owned(), title)?;
         let id = self.wait_on("b");
         self.out.send(&Event::Browser {
+            request: id.clone(),
+            action: args.clone(),
+        });
+        match self.answer(&id) {
+            Some(result) => result,
+            None => Err("Aborted by the user".into()),
+        }
+    }
+
+    /// One action in other apps, which the service has the helper app do. Asked about as the
+    /// `desktop` kind, once for each exact action (what is typed included).
+    fn desktop(&self, args: &Map<String, Value>) -> Result<String, String> {
+        let arg = |key: &str| {
+            args.get(key).map_or(String::new(), |v| match v {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+        };
+        let (action, app) = (arg("action"), arg("app"));
+        let what = match action.as_str() {
+            "apps" => "list the apps and windows".to_owned(),
+            "look" => format!("look at {app}"),
+            "screenshot" => format!("take a picture of {app}"),
+            "press" => format!("press element {} in {app}", arg("element")),
+            "set_value" => format!(
+                "set element {} in {app} to: {}",
+                arg("element"),
+                arg("value")
+            ),
+            "type" => format!("type into {app}: {}", arg("text")),
+            other => {
+                return Err(format!(
+                    "`{other}` is not an action: apps, look, screenshot, press, set_value or type."
+                ));
+            }
+        };
+        if action != "apps" && app.trim().is_empty() {
+            return Err("`app` must be the name of an app, as `apps` lists it.".into());
+        }
+        // The whole action is the target, never cut: a grant is for exactly this, and the user
+        // reads all of it.
+        self.allowed(Kind::Desktop, what.clone(), format!("Desktop: {what}"))?;
+        let id = self.wait_on("d");
+        self.out.send(&Event::Desktop {
             request: id.clone(),
             action: args.clone(),
         });

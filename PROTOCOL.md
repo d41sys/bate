@@ -41,6 +41,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
+| `desktop_result` | `request`, `output?`, `error?` | What came of the open `desktop` request: what the helper saw or did, or why not. |
 | `apple_result` | `request`, `output?`, `error?` | What came of the open `apple` request: what the app returned, or why not. |
 | `token` | `request`, `url?`, `key?`, `api?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. `api` is `responses` when the endpoint speaks OpenAI's Responses API; without it, the chat API. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
@@ -62,6 +63,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`, `apple_read`, `apple_change`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
 | `browser` | `request`, `action` | An action in the bot's browser (see Browser). The engine waits until the service sends `browser_result` for `request`. Not part of the transcript. |
+| `desktop` | `request`, `action` | An action in other apps (see Desktop). The engine waits until the service sends `desktop_result` for `request`. Not part of the transcript. |
 | `apple` | `request`, `tool`, `args` | An action in one of the user's Apple apps (see Apple apps). The engine waits until the service sends `apple_result` for `request`. Not part of the transcript. |
 | `token` | `request` | The engine asks the service for the endpoint and token before a model call. The engine waits until the service sends `token` for `request`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
@@ -139,8 +141,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
 | `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
 | `hand_back_browser` | `bot` | `{}`; the user gives the bot's browser back (see Browser) |
+| `get_helper` | none | `{installed, path, connected, accessibility, screenRecording}`: Bate Helper (see Desktop). The two permissions are `null` until the helper has connected. |
+| `open_helper_settings` | `pane` (`accessibility` or `screen_recording`) | `{}`: opens that pane of System Settings, starting the helper first if it is not running, which is what makes macOS list it there. Not for devices on the network. Code `bad_request` for another pane |
 | `set_agent` | `bot`, `command` | `{}`; `command` is a list (program, then arguments) or `null`; see Installed agents |
-| `get_permissions` | `bot` | `{levels: {read, write, run, connector, apple_read, apple_change}, grants:[Grant]}` |
+| `get_permissions` | `bot` | `{levels: {read, write, run, connector, desktop, apple_read, apple_change}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}`. `always` for `apple_change` is refused (`bad_request`): see Apple apps |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
@@ -180,6 +184,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"update_changed"}` | Re-run `get_update`. |
 | `{"type":"chatgpt_changed","error?"}` | Re-run `get_chatgpt`. `error` says why a sign-in failed. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
+| `{"type":"helper_changed"}` | Re-run `get_helper`: the helper app connected, quit, or its permissions changed. |
 | `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
@@ -254,7 +259,7 @@ Whatever the limit, no engine gets `BATE_MODEL_API_KEY` in its environment, and 
 
 ### Permissions
 
-Same shapes as `proto::permissions`. For each bot and each kind of action (`read`, `write`, `run`, `connector`, `apple_read`, `apple_change`) there is a level: `always`, `ask` or `never`. A bot starts with `read` on `always` and the rest on `ask`.
+Same shapes as `proto::permissions`. For each bot and each kind of action (`read`, `write`, `run`, `connector`, `desktop`, `apple_read`, `apple_change`) there is a level: `always`, `ask` or `never`. A bot starts with `read` on `always` and the rest on `ask`.
 
 The service decides every engine `question` that has a `kind`, on the `target` the engine is about to run:
 
@@ -353,6 +358,27 @@ Every result is the page as it is after the action, once loaded (at most 15 s): 
 The user watches in the browser's window. Clicking, tapping or typing in a page there takes the browser over (in the page's own frame; not in a frame from another site, the address bar or another tab): `browserTaken` becomes true (`bots_changed`), and the bot's next browser action waits, its turn with it, until `hand_back_browser`. An action that waited for a turn which has ended meanwhile (an abort) is not done. Scrolling does not take the browser over. An action already under way when the user takes over finishes.
 
 The browser stays open while the service runs; a browser the user quit is started again by the next action.
+
+### Desktop (Bate Helper)
+
+Bots can see and control other apps through **Bate Helper**, a separate app (`Bate Helper.app`, at `~/Applications` unless `$APPD_HELPER` names its program: `…/Contents/MacOS/bate-helper`). It is the only program that holds the macOS permissions **Accessibility** and **Screen Recording**; the service and the window never need them. `helper/bundle.sh` makes the app from the `bate-helper` program (one script, so the installer can call it); an ad-hoc signature, the script's default, makes macOS ask for the permissions again after every rebuild.
+
+The service listens on `helper.sock` in its run dir (mode 0600). On a bot's first desktop action, or when the user opens a System Settings pane from Settings, it starts the helper with `open -g -a <app> --args <socket>` (`$APPD_OPEN` names another `open`): through the system, so macOS gives the permissions to the helper and not to the service. The helper connects, and quits when the service goes. The service accepts a connection only from the user's own processes whose program file is the helper's, and the helper connects only to a process whose program file is named `appd`; anything else is closed (a signature check replaces the name once the apps are signed). Bots' engines cannot reach the socket (the folder limit denies it) or start apps.
+
+Frames are one JSON object per line, at most 64 MiB, as in `proto::desktop`. Service → helper: `{id, action, …}` with `action` one of the six below. Helper → service: `{"type":"status","accessibility","screenRecording"}` (first, and at each change; the service sends `helper_changed`) and `{"type":"reply","id","output?","png?","error?"}`. A closed socket fails every waiting call (`Bate Helper quit before it answered.`); a call takes at most 30 s.
+
+The engine's `desktop` tool is asked about as kind `desktop`, once for each exact action: the target is the whole action as the card shows it (`look at TextEdit`, `type into TextEdit: hello`, `press element 4 in TextEdit`; `list the apps and windows` for `apps`), never cut, so an `Always` for looking at an app is not one for typing into it, and what is typed is all on the card. The action is sent as a `desktop` event; the service checks its shape and answers with `desktop_result`. The helper finds an app by name, in any case, among the apps with a window on screen.
+
+| `action` | Fields | Does |
+|---|---|---|
+| `apps` | none | Lists the apps with a window on screen and their windows (`window <id> "<title>" <w>x<h>`). Needs no permission (titles need Screen Recording). |
+| `look` | `app`, `window?` | The window's accessibility tree, one element per line as `[n] Role "label" = "value"`, children indented; at most 500 elements and 10 s. A password field's value is not shown. The numbers hold until the next `look`. `window` is an id from `apps`; default the app's front window. Needs Accessibility. |
+| `screenshot` | `app`, `window?` | A PNG of the window even where others cover it. The helper sends it as base64 `png`; the service saves it as `attachments/screenshot-<ms>.png` in the bot's folder and tells the bot the path. Needs Screen Recording. |
+| `press` | `app`, `window?`, `element` | Presses the element (AX action `AXPress`). Needs a `look` of that window first. |
+| `set_value` | `app`, `window?`, `element`, `value` | Sets the element's `AXValue` (at most 10 000 characters). |
+| `type` | `app`, `window?`, `text`, `element?` | Types `text` (at most 10 000 characters): into the element, which is focused first (`AXFocused`), or into what has the focus. The keys are posted to the app's process (`CGEventPostToPid`), so the user's front app and pointer stay where they are. |
+
+Without a permission, the call fails with a message that names it and where to allow it; `get_helper` and Settings show the same. Limits: windows that are minimised or on another Space are not listed; a few apps ignore keys posted to a background process; the model is given the tree and the picture's path, not the picture itself.
 
 ### Apple apps
 

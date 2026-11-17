@@ -167,10 +167,11 @@ impl Engine {
     }
 
     fn handle(&mut self, id: String, op: Op) {
-        // What a `reply`, a `browser_result` or an `apple_result` may answer: a message, a
-        // browser request or an Apple app request.
+        // What a `reply`, a `browser_result`, a `desktop_result` or an `apple_result` may answer: a
+        // message, or a browser, desktop or Apple app request.
         let prefix = match op {
             Op::BrowserResult { .. } => 'b',
+            Op::DesktopResult { .. } => 'd',
             Op::AppleResult { .. } => 'a',
             _ => 'm',
         };
@@ -322,8 +323,13 @@ impl Engine {
                 text,
                 error,
             }
-            // What the browser or an app did is waited on as a message is (`b…` or `a…` in place of `m…`).
+            // What the browser, the desktop or an app did is waited on as a message is (`b…`, `d…` or `a…` in place of `m…`).
             | Op::BrowserResult {
+                request: message,
+                output: text,
+                error,
+            }
+            | Op::DesktopResult {
                 request: message,
                 output: text,
                 error,

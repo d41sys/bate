@@ -439,6 +439,7 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "get_chatgpt",
     "sign_in_chatgpt",
     "sign_out_chatgpt",
+    "open_helper_settings",
     "get_channels",
     "set_channel",
     "pair_channel",

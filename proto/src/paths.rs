@@ -25,3 +25,8 @@ pub fn run_dir() -> PathBuf {
 pub fn socket() -> PathBuf {
     run_dir().join("appd.sock")
 }
+
+/// Where the helper app connects to the service.
+pub fn helper_socket() -> PathBuf {
+    run_dir().join("helper.sock")
+}

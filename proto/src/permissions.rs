@@ -21,6 +21,8 @@ pub enum Kind {
     Run,
     /// Use a connector's tool.
     Connector,
+    /// See and control other apps through the helper app.
+    Desktop,
     /// Look at the user's Apple apps: messages, mail, notes, reminders, calendar, contacts.
     AppleRead,
     /// Send from or change them. Asked about every time: see `always_asks`.
@@ -28,11 +30,12 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [
+    pub const ALL: [Kind; 7] = [
         Kind::Read,
         Kind::Write,
         Kind::Run,
         Kind::Connector,
+        Kind::Desktop,
         Kind::AppleRead,
         Kind::AppleChange,
     ];
