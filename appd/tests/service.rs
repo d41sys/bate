@@ -1168,6 +1168,41 @@ impl Device {
 }
 
 #[test]
+fn the_page_for_other_devices_is_named_for_the_tailnet() {
+    let home = home("lan-tailscale");
+    // A stand-in for the Tailscale command: the real one would answer for this Mac.
+    let tailscale = home.join("tailscale");
+    fs::write(
+        &tailscale,
+        "#!/bin/sh\necho '{\"Self\": {\"DNSName\": \"mac.tail1.ts.net.\"}}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o755)).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0")
+            .env("APPD_TAILSCALE", &tailscale);
+    });
+    let mut w = Window::connect(&home);
+    let status = w.ok("set_lan", json!({"on": true}));
+    let port = status["port"].as_u64().unwrap();
+    assert_eq!(
+        status["tailscaleUrls"][0],
+        format!("https://mac.tail1.ts.net:{port}/"),
+        "{status}"
+    );
+    let cert = Command::new("/usr/bin/openssl")
+        .args(["x509", "-noout", "-text", "-in"])
+        .arg(home.join("lan/cert.pem"))
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&cert.stdout).contains("DNS:mac.tail1.ts.net"),
+        "{}",
+        String::from_utf8_lossy(&cert.stdout)
+    );
+}
+
+#[test]
 fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     let home = home("lan");
     let _service = Service::start_with(&home, |c| {
@@ -1277,6 +1312,7 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("7", "pair_channel"),
         ("8", "get_channels"),
         ("9", "remove_chat"),
+        ("10", "install_update"),
     ] {
         send(
             &device,
@@ -4288,4 +4324,325 @@ fn bots_run_on_a_chatgpt_sign_in_that_is_renewed_and_can_be_ended() {
         "{end}"
     );
     assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
+}
+
+/// A stand-in for the release host: serves the files put in it, by path.
+struct Releases {
+    base: String,
+    files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+impl Releases {
+    fn start() -> Releases {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
+            Default::default();
+        let served = files.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let path = first.split(' ').nth(1).unwrap_or("").to_owned();
+                let file = served.lock().unwrap().get(&path).cloned();
+                let (status, body) = file.map_or((404, Vec::new()), |b| (200, b));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} -\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        Releases { base, files }
+    }
+
+    fn put(&self, path: &str, body: impl Into<Vec<u8>>) {
+        self.files.lock().unwrap().insert(path.into(), body.into());
+    }
+}
+
+/// Runs the real `appd update ...`; its output.
+fn appd_update(args: &[&str], key: Option<&str>) -> String {
+    let mut appd = Command::new(env!("CARGO_BIN_EXE_appd"));
+    appd.arg("update").args(args);
+    if let Some(key) = key {
+        appd.env("BATE_UPDATE_KEY", key);
+    }
+    let out = appd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A throwaway signing key, as `(private, public)`.
+fn new_key() -> (String, String) {
+    let out = appd_update(&["keygen"], None);
+    let value = |name: &str| {
+        let line = out.lines().find_map(|l| l.strip_prefix(name)).unwrap();
+        line.strip_prefix('=').unwrap().to_owned()
+    };
+    (value("BATE_UPDATE_KEY"), value("BATE_UPDATE_PUBKEY"))
+}
+
+/// A release archive of the two programs, each saying `tag`.
+fn release(dir: &Path, tag: &str) -> PathBuf {
+    let src = dir.join(format!("src-{tag}"));
+    fs::create_dir_all(&src).unwrap();
+    for name in ["appd", "agentcore"] {
+        fs::write(src.join(name), format!("new {name} {tag}")).unwrap();
+    }
+    let archive = dir.join(format!("{tag}.tar.gz"));
+    let status = Command::new("/usr/bin/tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&src)
+        .args(["appd", "agentcore"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    archive
+}
+
+/// `appd update sign`: the feed for `archive`, which is to be found at `url`.
+fn signed_feed(key: &str, archive: &Path, version: &str, url: &str) -> Value {
+    let archive = archive.to_str().unwrap();
+    let out = appd_update(&["sign", archive, version, url], Some(key));
+    serde_json::from_str(&out).unwrap()
+}
+
+/// A service that reads a stand-in feed, with installed programs of its own to swap.
+struct Updating {
+    home: Home,
+    install: PathBuf,
+    service: Service,
+    window: Window,
+    _releases: Releases,
+}
+
+impl Updating {
+    /// `feed` and the release archive are served; `pubkey` is the key the service trusts.
+    fn start(name: &str, releases: Releases, pubkey: Option<&str>) -> Updating {
+        let home = home(name);
+        let install = home.join("install");
+        fs::create_dir_all(&install).unwrap();
+        for program in ["appd", "agentcore"] {
+            fs::write(install.join(program), format!("old {program}")).unwrap();
+        }
+        let service = Service::start_with(&home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("BATE_UPDATE_FEED", format!("{}/feed.json", releases.base))
+                .env("BATE_UPDATE_INSTALL_DIR", &install)
+                .env_remove("BATE_UPDATE_PUBKEY");
+            if let Some(key) = pubkey {
+                c.env("BATE_UPDATE_PUBKEY", key);
+            }
+        });
+        let window = Window::connect(&home);
+        Updating {
+            home,
+            install,
+            service,
+            window,
+            _releases: releases,
+        }
+    }
+
+    /// Whether the installed programs are the ones the test put there.
+    fn untouched(&self) -> bool {
+        ["appd", "agentcore"].iter().all(|p| {
+            fs::read_to_string(self.install.join(p)).is_ok_and(|t| t == format!("old {p}"))
+        })
+    }
+
+    /// Whether anything of a release was unpacked.
+    fn staged(&self) -> bool {
+        fs::read_dir(self.home.join("updates")).is_ok_and(|mut d| d.next().is_some())
+    }
+}
+
+/// The service's check of a feed that serves `feed` and `archive`.
+fn updating(name: &str, pubkey: &str, feed: &Value, archive: &Path) -> Updating {
+    let releases = Releases::start();
+    releases.put("/feed.json", feed.to_string());
+    releases.put("/release.tar.gz", fs::read(archive).unwrap());
+    Updating::start(name, releases, Some(pubkey))
+}
+
+#[test]
+fn a_release_signed_with_the_key_is_staged_and_waits_for_the_install() {
+    let (key, pubkey) = new_key();
+    let scratch = home("update-good-files");
+    let archive = release(&scratch, "9.9.9");
+    let releases = Releases::start();
+    let url = format!("{}/release.tar.gz", releases.base);
+    let feed = signed_feed(&key, &archive, "9.9.9", &url);
+    assert_eq!(feed["version"], "9.9.9");
+    releases.put("/feed.json", feed.to_string());
+    releases.put("/release.tar.gz", fs::read(&archive).unwrap());
+    let mut u = Updating::start("update-good", releases, Some(&pubkey));
+
+    let state = u.window.ok("check_update", json!({}));
+    assert_eq!(state["state"], "ready", "{state}");
+    assert_eq!(state["available"], "9.9.9");
+    assert_eq!(state["current"], env!("CARGO_PKG_VERSION"));
+    let staged = u.home.join("updates/9.9.9");
+    assert_eq!(
+        fs::read_to_string(staged.join("appd")).unwrap(),
+        "new appd 9.9.9"
+    );
+    assert_eq!(
+        fs::read_to_string(staged.join("agentcore")).unwrap(),
+        "new agentcore 9.9.9"
+    );
+    // Staged is not installed.
+    assert!(u.untouched());
+    assert_eq!(u.window.ok("get_update", json!({}))["state"], "ready");
+}
+
+#[test]
+fn a_release_that_fails_a_check_is_refused_with_its_reason() {
+    let (key, pubkey) = new_key();
+    let (other_key, _) = new_key();
+    let scratch = home("update-bad-files");
+    let archive = release(&scratch, "9.9.9");
+    let tampered = release(&scratch, "tampered");
+    let current = env!("CARGO_PKG_VERSION");
+    let url = "http://127.0.0.1:9/release.tar.gz";
+    let sign = |key: &str, version: &str| signed_feed(key, &archive, version, url);
+
+    let mut wrong_version = sign(&key, "9.9.9");
+    wrong_version["version"] = json!("9.9.10");
+    // (what is wrong, the feed, the archive served, what the reason says)
+    let cases = [
+        ("bad hash", sign(&key, "9.9.9"), &tampered, "sha256"),
+        (
+            "bad signature",
+            sign(&other_key, "9.9.9"),
+            &archive,
+            "signature",
+        ),
+        ("wrong version", wrong_version, &archive, "signature"),
+        ("downgrade", sign(&key, "0.0.1"), &archive, "older"),
+    ];
+    for (what, feed, served, reason) in cases {
+        let releases = Releases::start();
+        let mut feed = feed;
+        // The url is not signed: the feed points at the stand-in.
+        feed["url"] = json!(format!("{}/release.tar.gz", releases.base));
+        let name = format!("update-{}", what.replace(' ', "-"));
+        releases.put("/feed.json", feed.to_string());
+        releases.put("/release.tar.gz", fs::read(served).unwrap());
+        let mut u = Updating::start(&name, releases, Some(&pubkey));
+        let id = u.window.send("check_update", json!({}));
+        let reply = u
+            .window
+            .wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["success"], false, "{what}: {reply}");
+        assert_eq!(reply["code"], "update_failed");
+        assert!(
+            reply["error"].as_str().unwrap().contains(reason),
+            "{what}: {reply}"
+        );
+        let state = u.window.ok("get_update", json!({}));
+        assert_eq!(state["state"], "error", "{what}: {state}");
+        assert_eq!(state["available"], Value::Null);
+        assert!(!u.staged(), "{what}: something was unpacked");
+        assert!(u.untouched(), "{what}: the programs changed");
+        let install = u.window.send("install_update", json!({}));
+        let refused = u
+            .window
+            .wait_for(|f| f["type"] == "response" && f["id"] == install.as_str());
+        assert_eq!(refused["code"], "no_update", "{what}: {refused}");
+    }
+
+    // The running version again is no update, and no failure.
+    let same = signed_feed(&key, &archive, current, url);
+    let mut u = updating("update-same", &pubkey, &same, &archive);
+    let state = u.window.ok("check_update", json!({}));
+    assert_eq!(state["state"], "current", "{state}");
+    assert!(!u.staged());
+}
+
+#[test]
+fn a_build_without_a_key_does_not_update() {
+    let u = &mut Updating::start("update-off", Releases::start(), None);
+    assert_eq!(u.window.ok("get_update", json!({}))["state"], "off");
+    for command in ["check_update", "install_update"] {
+        let id = u.window.send(command, json!({}));
+        let reply = u
+            .window
+            .wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["code"], "updates_off", "{reply}");
+    }
+}
+
+#[test]
+fn an_install_waits_for_the_reply_to_end_and_then_swaps_the_programs() {
+    let (key, pubkey) = new_key();
+    let scratch = home("update-install-files");
+    let archive = release(&scratch, "9.9.9");
+    let releases = Releases::start();
+    let url = format!("{}/release.tar.gz", releases.base);
+    releases.put(
+        "/feed.json",
+        signed_feed(&key, &archive, "9.9.9", &url).to_string(),
+    );
+    releases.put("/release.tar.gz", fs::read(&archive).unwrap());
+    let mut u = Updating::start("update-install", releases, Some(&pubkey));
+    let bot = u.window.create_bot();
+    assert_eq!(u.window.ok("check_update", json!({}))["state"], "ready");
+
+    // A reply is under way (it takes a second): the install is asked for, and waits.
+    u.window
+        .ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    u.window
+        .wait_for(|f| f["type"] == "transcript" && f["entry"]["delta"] == "hel");
+    let waiting = u.window.ok("install_update", json!({}));
+    assert_eq!(waiting["state"], "waiting", "{waiting}");
+    assert!(
+        u.untouched(),
+        "the programs were swapped under a running reply"
+    );
+    assert!(
+        u.service.0.try_wait().unwrap().is_none(),
+        "the service left mid-reply"
+    );
+
+    // The reply ends whole, and only then do the programs change and the service restart.
+    let end = u
+        .window
+        .wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert_eq!(end["entry"]["reason"], "done");
+    let service = &mut u.service;
+    let mut code = None;
+    eventually("the service to exit", || {
+        code = service.0.try_wait().unwrap().map(|s| s.code());
+        code.is_some()
+    });
+    // Not zero: launchd restarts a service only after an exit like that.
+    assert_eq!(code, Some(Some(75)));
+    for program in ["appd", "agentcore"] {
+        assert_eq!(
+            fs::read_to_string(u.install.join(program)).unwrap(),
+            format!("new {program} 9.9.9")
+        );
+        let mode = fs::metadata(u.install.join(program))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{program} must be executable");
+    }
 }

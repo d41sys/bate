@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -87,6 +87,8 @@ struct State {
     on: Option<Arc<AtomicBool>>,
     port: u16,
     fingerprint: String,
+    /// This Mac's MagicDNS name on the user's tailnet, as of when serving began.
+    magic_dns: Option<String>,
     code: Option<Code>,
     devices: Vec<Device>,
     sessions: HashMap<String, Arc<Session>>,
@@ -140,13 +142,18 @@ impl Lan {
             .map(|d| json!({"id": d.id, "name": d.name, "createdAt": d.created_at, "lastSeen": d.last_seen}))
             .collect();
         match state.on {
-            Some(_) => json!({
+            Some(_) => {
+                let (lan, tailnet) = split(addresses());
+                let url = |host: String| format!("https://{host}:{}/", state.port);
+                json!({
                 "on": true,
                 "port": state.port,
-                "urls": addresses().iter().map(|ip| format!("https://{ip}:{}/", state.port)).collect::<Vec<_>>(),
+                "urls": lan.into_iter().map(|ip| url(ip.to_string())).collect::<Vec<_>>(),
+                "tailscaleUrls": state.magic_dns.iter().cloned().chain(tailnet.iter().map(Ipv4Addr::to_string)).map(url).collect::<Vec<_>>(),
                 "fingerprint": state.fingerprint,
                 "devices": devices,
-            }),
+                })
+            }
             None => json!({"on": false, "devices": devices}),
         }
     }
@@ -165,7 +172,13 @@ impl Lan {
             return Ok(());
         }
         sys::create_private_dir(&dir()).map_err(|e| e.to_string())?;
-        let (config, fingerprint) = tls().map_err(|e| format!("no certificate: {e}"))?;
+        let magic_dns = tailscale_status().and_then(|j| magic_dns(&j));
+        let names = cert_names(
+            &sys::hostname(),
+            &split(addresses()).1,
+            magic_dns.as_deref(),
+        );
+        let (config, fingerprint) = tls(&names).map_err(|e| format!("no certificate: {e}"))?;
         let port = match std::env::var("APPD_LAN_PORT") {
             Ok(p) => p
                 .parse()
@@ -176,6 +189,7 @@ impl Lan {
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         state.port = listener.local_addr().map_err(|e| e.to_string())?.port();
         state.fingerprint = fingerprint;
+        state.magic_dns = magic_dns;
         let flag = Arc::new(AtomicBool::new(true));
         state.on = Some(flag.clone());
         let _ = fs::write(mark, "");
@@ -411,7 +425,8 @@ impl Lan {
     }
 }
 
-/// A paired device may do what the window does, but not change network settings or add devices.
+/// A paired device may do what the window does, but not change network settings, add devices
+/// or install an update.
 const FORBIDDEN_OVER_LAN: &[&str] = &[
     "lan_status",
     "set_lan",
@@ -419,6 +434,7 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "remove_device",
     "get_provider",
     "set_provider",
+    "install_update",
     "get_chatgpt",
     "sign_in_chatgpt",
     "sign_out_chatgpt",
@@ -493,11 +509,15 @@ fn save(devices: &[Device]) -> Result<(), String> {
         .map_err(|e| format!("devices not saved: {e}"))
 }
 
-/// The certificate (made on first use, kept in `lan/`) and its SHA-256 fingerprint.
-fn tls() -> io::Result<(ServerConfig, String)> {
+/// The certificate (made on first use, kept in `lan/`) and its SHA-256 fingerprint. It is made
+/// again when `names` (what it must cover) are not what it was made for.
+fn tls(names: &str) -> io::Result<(ServerConfig, String)> {
     let (cert, key) = (dir().join("cert.pem"), dir().join("key.pem"));
-    if !cert.exists() || !key.exists() {
-        let host = sys::hostname();
+    let made_for = dir().join("cert.names");
+    if !cert.exists()
+        || !key.exists()
+        || fs::read_to_string(&made_for).ok().as_deref() != Some(names)
+    {
         let made = std::process::Command::new("/usr/bin/openssl")
             .args([
                 "req",
@@ -511,7 +531,7 @@ fn tls() -> io::Result<(ServerConfig, String)> {
             .args(["-pkeyopt", "ec_param_enc:named_curve"])
             .args(["-nodes", "-days", "3650", "-subj", "/CN=Bate"])
             .arg("-addext")
-            .arg(format!("subjectAltName=DNS:{host}.local"))
+            .arg(format!("subjectAltName={names}"))
             .arg("-keyout")
             .arg(&key)
             .arg("-out")
@@ -522,6 +542,7 @@ fn tls() -> io::Result<(ServerConfig, String)> {
                 String::from_utf8_lossy(&made.stderr).trim().to_owned(),
             ));
         }
+        fs::write(&made_for, names)?;
     }
     let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(&cert)
         .map_err(io::Error::other)?
@@ -546,9 +567,9 @@ fn tls() -> io::Result<(ServerConfig, String)> {
     Ok((config, fingerprint))
 }
 
-// shortcut: IPv4 addresses only, upgrade if IPv6 local addresses are requested
+// shortcut: IPv4 addresses only, upgrade if IPv6 local addresses are requested (the listener is IPv4 too)
 /// This Mac's IPv4 addresses on its networks.
-fn addresses() -> Vec<String> {
+fn addresses() -> Vec<Ipv4Addr> {
     let mut found = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs` fills `list`, read here and freed once.
@@ -561,9 +582,9 @@ fn addresses() -> Vec<String> {
             let addr = (*at).ifa_addr;
             if !addr.is_null() && (*addr).sa_family as i32 == libc::AF_INET {
                 let ip = (*(addr as *const libc::sockaddr_in)).sin_addr.s_addr;
-                let ip = std::net::Ipv4Addr::from(u32::from_be(ip));
+                let ip = Ipv4Addr::from(u32::from_be(ip));
                 if !ip.is_loopback() && !ip.is_link_local() {
-                    found.push(ip.to_string());
+                    found.push(ip);
                 }
             }
             at = (*at).ifa_next;
@@ -571,6 +592,78 @@ fn addresses() -> Vec<String> {
         libc::freeifaddrs(list);
     }
     found
+}
+
+/// Addresses on a local network, and those on the user's tailnet (100.64.0.0/10, which Tailscale
+/// assigns). Both are the user's own networks: nothing else is told apart.
+fn split(all: Vec<Ipv4Addr>) -> (Vec<Ipv4Addr>, Vec<Ipv4Addr>) {
+    all.into_iter()
+        .partition(|ip| ip.octets()[0] != 100 || ip.octets()[1] & 0xC0 != 64)
+}
+
+/// What the certificate must name: this Mac on its local network, and on the tailnet.
+fn cert_names(host: &str, tailnet: &[Ipv4Addr], magic_dns: Option<&str>) -> String {
+    let mut names = vec![format!("DNS:{host}.local")];
+    names.extend(magic_dns.map(|n| format!("DNS:{n}")));
+    names.extend(tailnet.iter().map(|ip| format!("IP:{ip}")));
+    names.join(",")
+}
+
+/// Where the Tailscale command is: the standalone install, the Mac app, or Homebrew's.
+/// `APPD_TAILSCALE` names another (tests).
+fn tailscale_path() -> Option<PathBuf> {
+    std::env::var_os("APPD_TAILSCALE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                "/usr/local/bin/tailscale",
+                "/opt/homebrew/bin/tailscale",
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+        })
+}
+
+/// `tailscale status --json`, when Tailscale is installed and answers within 3 seconds.
+fn tailscale_status() -> Option<String> {
+    let mut child = std::process::Command::new(tailscale_path()?)
+        .args(["status", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = out.read_to_string(&mut text);
+        text
+    });
+    let end = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < end => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    status.success().then(|| reader.join().ok()).flatten()
+}
+
+/// This Mac's MagicDNS name (`mac.tailnet.ts.net`) from `tailscale status --json`; none when
+/// signed out.
+fn magic_dns(status: &str) -> Option<String> {
+    let name = serde_json::from_str::<Value>(status).ok()?["Self"]["DNSName"]
+        .as_str()?
+        .trim_end_matches('.')
+        .to_owned();
+    (!name.is_empty()).then_some(name)
 }
 
 fn query<'a>(query: &'a str, name: &str) -> &'a str {
@@ -714,4 +807,56 @@ fn read(stream: &mut impl Read) -> Result<Request, Answer> {
         headers,
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ips(list: &[&str]) -> Vec<Ipv4Addr> {
+        list.iter().map(|ip| ip.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn tailnet_addresses_are_told_from_local_ones() {
+        let all = ips(&[
+            "192.168.1.5",
+            "100.64.0.1",
+            "100.101.102.103",
+            "100.127.255.254",
+            "100.63.0.1",
+            "100.128.0.1",
+            "10.0.0.2",
+        ]);
+        let (lan, tailnet) = split(all);
+        assert_eq!(
+            lan,
+            ips(&["192.168.1.5", "100.63.0.1", "100.128.0.1", "10.0.0.2"])
+        );
+        assert_eq!(
+            tailnet,
+            ips(&["100.64.0.1", "100.101.102.103", "100.127.255.254"])
+        );
+    }
+
+    #[test]
+    fn the_certificate_names_the_tailnet_when_there_is_one() {
+        assert_eq!(cert_names("mac", &[], None), "DNS:mac.local");
+        assert_eq!(
+            cert_names("mac", &ips(&["100.64.0.1"]), Some("mac.tail1.ts.net")),
+            "DNS:mac.local,DNS:mac.tail1.ts.net,IP:100.64.0.1"
+        );
+    }
+
+    #[test]
+    fn the_magic_dns_name_comes_from_the_status() {
+        let signed_in =
+            r#"{"Self": {"DNSName": "mac.tail1.ts.net.", "TailscaleIPs": ["100.64.0.1"]}}"#;
+        assert_eq!(magic_dns(signed_in).as_deref(), Some("mac.tail1.ts.net"));
+        assert_eq!(
+            magic_dns(r#"{"BackendState": "NeedsLogin", "Self": null}"#),
+            None
+        );
+        assert_eq!(magic_dns("not json"), None);
+    }
 }
