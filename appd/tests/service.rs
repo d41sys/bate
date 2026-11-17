@@ -4795,6 +4795,55 @@ fn bots_run_on_a_chatgpt_sign_in_that_is_renewed_and_can_be_ended() {
     assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
 }
 
+/// A fresh install: the user makes a bot and writes to it, having chosen no model.
+#[test]
+fn a_new_bot_says_what_to_set_up_and_answers_on_chatgpt_with_no_model_chosen() {
+    build_engine();
+    let openai = ChatGpt::start();
+    let home = home("fresh");
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env_remove("BATE_MODEL")
+            .env_remove("BATE_MODEL_BASE_URL")
+            .env("BATE_CHATGPT_AUTH", &openai.base)
+            .env("BATE_CHATGPT_API", format!("{}/v1", openai.base));
+    });
+    let mut w = Window::connect(&home);
+    let turn = |w: &mut Window, bot: &str, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end")["entry"]
+            .clone()
+    };
+    let bot = w.create_bot();
+
+    // Nothing is set up: the turn says where to go.
+    let end = turn(&mut w, &bot, "n1");
+    assert_eq!(end["reason"], "error", "{end}");
+    assert!(end["error"].as_str().unwrap().contains("Settings"), "{end}");
+
+    // Signed in: the bot answers on the first model the plan lists, and shows which.
+    sign_in_chatgpt(&mut w, &openai);
+    let end = turn(&mut w, &bot, "n2");
+    assert_eq!(end["reason"], "done", "{end}");
+    let calls = openai.seen("POST /v1/responses");
+    assert!(calls[0].contains(r#""model":"gpt-test""#), "{calls:?}");
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["model"], "gpt-test");
+    // The choice is kept: the list is not read again.
+    assert_eq!(turn(&mut w, &bot, "n3")["reason"], "done");
+    assert_eq!(openai.seen("GET /v1/models").len(), 1);
+
+    // A model server lists in no order: there the user chooses, and is told where.
+    w.ok("sign_out_chatgpt", json!({}));
+    w.ok("set_provider", json!({"url": "http://127.0.0.1:9/v1"}));
+    w.ok("set_model", json!({"bot": bot, "model": ""}));
+    let end = turn(&mut w, &bot, "n4");
+    assert_eq!(end["reason"], "error", "{end}");
+    assert!(
+        end["error"].as_str().unwrap().contains("Model field"),
+        "{end}"
+    );
+}
+
 /// A stand-in for the release host: serves the files put in it, by path.
 struct Releases {
     base: String,

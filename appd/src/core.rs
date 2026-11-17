@@ -57,6 +57,13 @@ pub enum Msg {
         id: Value,
         models: Vec<String>,
     },
+    /// The first model the ChatGPT plan lists, for a bot with none chosen.
+    PlanModel {
+        bot: String,
+        request: String,
+        key: String,
+        first: Result<String, String>,
+    },
     ChatGpt(ChatGptNews),
     /// Time to read the update feed.
     UpdateDue,
@@ -530,6 +537,31 @@ impl Core {
             Msg::HelperChanged => self.broadcast(&json!({"type": "helper_changed"})),
             Msg::Models { client, id, models } => {
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
+            }
+            Msg::PlanModel {
+                bot,
+                request,
+                key,
+                first,
+            } => {
+                // A bot deleted since has no engine to answer, and gets no model.
+                if !self.engines.contains_key(&bot) {
+                    return;
+                }
+                // A model the user chose meanwhile stands.
+                if let Some(chosen) = self.model_of(&bot) {
+                    return self.send_plan_token(&bot, request, Ok(key), Some(chosen));
+                }
+                // Kept: the window shows which model answers, and the list is read once.
+                let model = first.and_then(|model| {
+                    (self.store.set_model(&bot, &model, None)).map_err(|e| internal(e).1)?;
+                    self.broadcast(&json!({"type": "bots_changed"}));
+                    Ok(model)
+                });
+                match model {
+                    Ok(model) => self.send_plan_token(&bot, request, Ok(key), Some(model)),
+                    Err(e) => self.send_plan_token(&bot, request, Err(e), None),
+                }
             }
             Msg::ChatGpt(news) => self.on_chatgpt(news),
             Msg::UpdateDue => self.start_check(),
@@ -2432,18 +2464,51 @@ impl Core {
         });
     }
 
+    /// The model `bot`'s engine calls: the one chosen for it, else the environment's.
+    fn model_of(&self, bot: &str) -> Option<String> {
+        let chosen = self.store.model(bot).ok().flatten().map(|(model, _)| model);
+        chosen.or_else(|| std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty()))
+    }
+
     fn send_chatgpt_token(
         &mut self,
         bot: &str,
         request: String,
         saved: Result<&chatgpt::Saved, &str>,
     ) {
+        let model = self.model_of(bot);
+        if let (Ok(saved), None) = (saved, &model) {
+            // No model chosen: the bot gets the first one the plan lists, OpenAI's default.
+            let (tx, bot, key) = (self.tx.clone(), bot.to_owned(), saved.access_token.clone());
+            std::thread::spawn(move || {
+                let first = chatgpt::models(&chatgpt::api(), &key).map(|mut all| all.remove(0));
+                let _ = tx.send(Msg::PlanModel {
+                    bot,
+                    request,
+                    key,
+                    first,
+                });
+            });
+            return;
+        }
+        let key = saved.map(|s| s.access_token.clone()).map_err(str::to_owned);
+        self.send_plan_token(bot, request, key, model);
+    }
+
+    fn send_plan_token(
+        &mut self,
+        bot: &str,
+        request: String,
+        key: Result<String, String>,
+        model: Option<String>,
+    ) {
         let op = Op::Token {
             request,
-            url: saved.is_ok().then(chatgpt::api),
-            key: saved.ok().map(|s| s.access_token.clone()),
+            url: key.is_ok().then(chatgpt::api),
             api: Some("responses".into()),
-            error: saved.err().map(str::to_owned),
+            model,
+            error: key.as_ref().err().cloned(),
+            key: key.ok(),
         };
         if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
             log!("bot {bot}: token response not sent: {e}");
@@ -2530,15 +2595,26 @@ impl Core {
                 Err(e) => log!("the ChatGPT sign-in cannot be read: {e}"),
             }
             let (url, key, error) = match self.provider() {
-                Ok((Some(url), key, _)) => (Some(url), key, None),
                 Ok((None, ..)) => (
                     None,
                     None,
                     Some(
-                        "no model server is set up: set one in Settings or set BATE_MODEL_BASE_URL"
+                        "No model is set up yet. Open this bot's Settings and sign in with \
+                         ChatGPT, or give a model server."
                             .into(),
                     ),
                 ),
+                // A model server lists in no order: the user chooses.
+                Ok(_) if self.model_of(bot).is_none() => (
+                    None,
+                    None,
+                    Some(
+                        "No model is chosen for this bot. Pick one in the Model field above \
+                         the chat, then click Use."
+                            .into(),
+                    ),
+                ),
+                Ok((url, key, _)) => (url, key, None),
                 Err(e) => (None, None, Some(internal(e).1)),
             };
             let op = Op::Token {
@@ -2546,6 +2622,7 @@ impl Core {
                 url,
                 key,
                 api: None,
+                model: None,
                 error,
             };
             if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {

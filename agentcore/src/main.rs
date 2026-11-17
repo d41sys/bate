@@ -366,6 +366,7 @@ impl Engine {
                 url,
                 key,
                 api,
+                model,
                 error,
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
@@ -381,7 +382,8 @@ impl Engine {
                             (Some(u), None) => {
                                 let k = key.unwrap_or_default();
                                 let a = api.unwrap_or_default();
-                                Ok(format!("{u}\n{k}\n{a}"))
+                                let m = model.unwrap_or_default();
+                                Ok(format!("{u}\n{k}\n{a}\n{m}"))
                             }
                             (_, Some(e)) => Err(e),
                             _ => Err("no model server is set up".into()),
@@ -416,10 +418,7 @@ impl Engine {
 
     fn begin_turn(&mut self) -> Result<(turn::Turn, Work), String> {
         self.idle()?;
-        let model = self
-            .model
-            .clone()
-            .ok_or("no model chosen: send set_model first")?;
+        let model = self.model.clone();
         let provider = model::Provider::new();
         let context = match std::env::var("BATE_MODEL_CONTEXT") {
             Ok(tokens) => tokens

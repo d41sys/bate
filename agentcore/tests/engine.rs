@@ -177,6 +177,7 @@ impl Engine {
                             url: Some(model_url.clone()),
                             key: None,
                             api: None,
+                            model: None,
                             error: None,
                         },
                     };
@@ -2044,6 +2045,7 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
             url: Some(model.url.clone()),
             key: Some("sk-secret-token-123".into()),
             api: None,
+            model: None,
             error: None,
         }),
         None
@@ -2089,6 +2091,7 @@ fn give_responses_token(engine: &mut Engine, model: &Model) {
         url: Some(model.url.clone()),
         key: Some("plan-token".into()),
         api: Some("responses".into()),
+        model: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2135,6 +2138,7 @@ fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
         url: Some(model.url.clone()),
         key: Some("plan-token".into()),
         api: Some("responses".into()),
+        model: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2254,6 +2258,7 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
             url: None,
             key: None,
             api: None,
+            model: None,
             error: Some("no model server configured".into()),
         }),
         None
@@ -2288,6 +2293,7 @@ fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment
             url: Some(model.url.clone()),
             key: None,
             api: None,
+            model: None,
             error: None,
         }),
         None
