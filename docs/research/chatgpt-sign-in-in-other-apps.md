@@ -194,7 +194,7 @@ All fetched 2026-11-17 as Markdown from the `.md` twin of each page.
 
 ## Bate against pi (the app Bate follows first)
 
-Compared 2026-11-17: Bate `appd/src/chatgpt.rs`, `agentcore/src/model.rs` against pi `cead615b`, `packages/ai/src/auth/oauth/openai-chatgpt.ts` and `packages/ai/src/api/openai-responses.ts`. pi offers both sign-ins; its README says the Codex one is "Superseded by Sign in with ChatGPT" (`packages/ai/README.md:1888`), so Method B is the one compared here. (pi labelled the Codex one "(legacy)" and later dropped the label: `packages/coding-agent/CHANGELOG.md:765`, `:104`.) oh-my-pi (omp, the second app Bate follows) has Method A only in the installed copy, so it has nothing to follow for this sign-in.
+Compared 2026-11-17: Bate `appd/src/chatgpt.rs`, `agentcore/src/model.rs` against pi `cead615b`, `packages/ai/src/auth/oauth/openai-chatgpt.ts` and `packages/ai/src/api/openai-responses.ts`. pi ships both sign-ins as equal options today: it labelled the Codex one "(legacy)" (`packages/coding-agent/CHANGELOG.md:765`) and later dropped that label (`:104`), though its README still says "Superseded by Sign in with ChatGPT" (`packages/ai/README.md:1888`). This table compares Method B, the one Bate has. oh-my-pi (omp, the second app Bate follows) has Method A only: `@oh-my-pi/pi-ai@18.22.1`, the newest on npm on 2026-11-18, holds the Codex client id in `src/registry/oauth/openai-codex.ts` and no `dynamic_agent_client`. So following omp, or pi in full, means adding Method A as a second sign-in. That is not decided.
 
 | Point | pi | Bate | Decision |
 |---|---|---|---|
