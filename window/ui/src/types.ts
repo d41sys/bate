@@ -45,7 +45,7 @@ export type Connector = {
   signedIn?: boolean;
 };
 
-export const KINDS = ["read", "write", "run", "connector"] as const;
+export const KINDS = ["read", "write", "run", "connector", "desktop"] as const;
 export type Kind = (typeof KINDS)[number];
 export type Level = "always" | "ask" | "never";
 export type Permissions = {

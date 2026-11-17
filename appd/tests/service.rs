@@ -57,6 +57,16 @@ while IFS= read -r line; do
           words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"message\",\"message\":\"m-$nonce\",\"to\":\"$to\",\"text\":\"$words\"}" ;;
+        *'"text":"desktop '*)
+          set -- $(printf '%s' "$line" | sed 's/.*"text":"desktop \([^"]*\)".*/\1/')
+          case "$1" in
+            look|screenshot) action="{\"action\":\"$1\",\"app\":\"$2\"}" ;;
+            press) action="{\"action\":\"press\",\"app\":\"$2\",\"element\":$3}" ;;
+            type) action="{\"action\":\"type\",\"app\":\"$2\",\"text\":\"$3\"}" ;;
+            *) action="{\"action\":\"$1\"}" ;;
+          esac
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"desktop\",\"request\":\"d-$nonce\",\"action\":$action}" ;;
         *'"text":"browse '*)
           set -- $(printf '%s' "$line" | sed 's/.*"text":"browse \([^"]*\)".*/\1/')
           case "$1" in
@@ -88,6 +98,7 @@ while IFS= read -r line; do
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
+    *'"type":"desktop_result"'*) printf '%s\n' "$line" >> desktop.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"reply"'*)
       said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"$said\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -1536,7 +1547,7 @@ fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() 
     let permissions = |w: &mut Window| w.ok("get_permissions", json!({"bot": bot}));
     assert_eq!(
         permissions(&mut w),
-        json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask"},
+        json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask", "desktop": "ask"},
             "grants": []})
     );
 
@@ -1621,7 +1632,7 @@ fn a_level_of_always_or_never_is_answered_by_the_service_without_asking() {
     );
     assert_eq!(
         w.ok("get_permissions", json!({"bot": bot}))["levels"],
-        json!({"read": "never", "write": "ask", "run": "always", "connector": "ask"})
+        json!({"read": "never", "write": "ask", "run": "always", "connector": "ask", "desktop": "ask"})
     );
 
     // Never beats a remembered answer.
@@ -4645,4 +4656,310 @@ fn an_install_waits_for_the_reply_to_end_and_then_swaps_the_programs() {
             .mode();
         assert_eq!(mode & 0o111, 0o111, "{program} must be executable");
     }
+}
+
+/// A stand-in for `Bate Helper`: connects as the real one does, says which permissions it has,
+/// and answers calls. `look Gone` makes it quit without answering. Every call it got is kept.
+struct FakeHelper {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    stream: UnixStream,
+}
+
+impl FakeHelper {
+    fn connect(home: &Path, accessibility: bool, screen_recording: bool) -> FakeHelper {
+        let socket = home.join("run/helper.sock");
+        let deadline = Instant::now() + TIMEOUT;
+        let stream = loop {
+            match UnixStream::connect(&socket) {
+                Ok(stream) => break stream,
+                Err(e) => assert!(Instant::now() < deadline, "no helper socket: {e}"),
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut out = stream.try_clone().unwrap();
+        let status = json!({"type": "status", "accessibility": accessibility, "screenRecording": screen_recording});
+        writeln!(out, "{status}").unwrap();
+        let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
+        let (seen, input) = (calls.clone(), stream.try_clone().unwrap());
+        std::thread::spawn(move || {
+            for line in BufReader::new(input).lines() {
+                let Ok(line) = line else { break };
+                let call: Value = serde_json::from_str(&line).unwrap();
+                seen.lock().unwrap().push(call.clone());
+                let id = &call["id"];
+                let reply = match (call["action"].as_str().unwrap(), call["app"].as_str()) {
+                    ("apps", _) => {
+                        json!({"type": "reply", "id": id, "output": "TextEdit\n  window 5 \"Untitled\" 500x400\n"})
+                    }
+                    ("look", Some("Gone")) => break,
+                    ("screenshot", _) => {
+                        json!({"type": "reply", "id": id, "output": "A picture of window 5.", "png": "aGVsbG8="})
+                    }
+                    (_, Some("Nowhere")) => {
+                        json!({"type": "reply", "id": id, "error": "No app named Nowhere has a window on screen."})
+                    }
+                    (_, Some("Locked")) => {
+                        json!({"type": "reply", "id": id, "error": "Bate Helper is not allowed to control apps."})
+                    }
+                    _ => json!({"type": "reply", "id": id, "output": "done"}),
+                };
+                if writeln!(out, "{reply}").is_err() {
+                    break;
+                }
+            }
+            let _ = out.shutdown(std::net::Shutdown::Both);
+        });
+        FakeHelper { calls, stream }
+    }
+}
+
+#[test]
+fn a_bots_desktop_actions_go_to_the_helper_app_and_its_answers_come_back() {
+    let home = home("desktop");
+    let opener = home.join("fake-open");
+    fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            home.join("open.log").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
+    // The test itself plays the helper, so its program is the one that may connect.
+    let me = std::env::current_exe().unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_HELPER", &me)
+            .env("APPD_OPEN", &opener);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let log = home.join("bots").join(&bot).join("desktop.log");
+    let results = || -> Vec<Value> {
+        let all = fs::read_to_string(&log).unwrap_or_default();
+        all.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let desk = |w: &mut Window, nonce: &str, what: &str| {
+        let before = results().len();
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "text": format!("desktop {what}")}),
+        );
+        eventually("the desktop result", || results().len() > before);
+        let result = results().pop().unwrap();
+        assert_eq!(result["request"], format!("d-{nonce}"));
+        result
+    };
+
+    // Not running yet: the service starts the helper app, through `open`, and tells it where to connect.
+    let info = w.ok("get_helper", json!({}));
+    assert_eq!(
+        (
+            &info["installed"],
+            &info["connected"],
+            &info["accessibility"]
+        ),
+        (&json!(true), &json!(false), &Value::Null)
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "desktop apps"}),
+    );
+    eventually("the helper to be started", || {
+        home.join("open.log").exists()
+    });
+    let started = fs::read_to_string(home.join("open.log")).unwrap();
+    assert!(
+        started.starts_with("-g -a ")
+            && started.trim_end().ends_with(&format!(
+                "--args {}",
+                home.join("run/helper.sock").display()
+            )),
+        "{started}"
+    );
+    let helper = FakeHelper::connect(&home, true, false);
+    eventually("the first result", || results().len() == 1);
+    assert_eq!(
+        results()[0]["output"],
+        "TextEdit\n  window 5 \"Untitled\" 500x400\n"
+    );
+    w.wait_for(|f| f["type"] == "helper_changed");
+    let info = w.ok("get_helper", json!({}));
+    assert_eq!(
+        (
+            &info["connected"],
+            &info["accessibility"],
+            &info["screenRecording"]
+        ),
+        (&json!(true), &json!(true), &json!(false))
+    );
+
+    // What the bot asked reaches the helper exactly; what the helper says comes back.
+    assert_eq!(desk(&mut w, "n2", "look TextEdit")["output"], "done");
+    assert_eq!(desk(&mut w, "n3", "press TextEdit 4")["output"], "done");
+    assert_eq!(desk(&mut w, "n4", "type TextEdit hi")["output"], "done");
+    assert_eq!(
+        helper.calls.lock().unwrap()[1..]
+            .iter()
+            .map(|c| {
+                let mut c = c.clone();
+                c.as_object_mut().unwrap().remove("id");
+                c
+            })
+            .collect::<Vec<_>>(),
+        [
+            json!({"action": "look", "app": "TextEdit"}),
+            json!({"action": "press", "app": "TextEdit", "element": 4}),
+            json!({"action": "type", "app": "TextEdit", "text": "hi"}),
+        ]
+    );
+    assert_eq!(
+        desk(&mut w, "n5", "look Nowhere")["error"],
+        "No app named Nowhere has a window on screen."
+    );
+    // A missing macOS permission is told to the bot as the helper says it.
+    assert_eq!(
+        desk(&mut w, "n6", "look Locked")["error"],
+        "Bate Helper is not allowed to control apps."
+    );
+
+    // A picture is saved in the bot's folder; the bot gets its path.
+    let shot = desk(&mut w, "n7", "screenshot TextEdit");
+    let output = shot["output"].as_str().unwrap();
+    let path = output
+        .strip_prefix("A picture of window 5. Saved in your folder as ")
+        .unwrap();
+    let path = path.strip_suffix('.').unwrap();
+    assert!(path.starts_with("attachments/screenshot-"), "{path}");
+    assert_eq!(
+        fs::read(home.join("bots").join(&bot).join(path)).unwrap(),
+        b"hello"
+    );
+
+    // What is not an action, or not the right shape, is refused here and never reaches the helper.
+    let calls = helper.calls.lock().unwrap().len();
+    assert!(
+        desk(&mut w, "n8", "press TextEdit 0")["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("`element` must be")
+    );
+    assert!(
+        desk(&mut w, "n9", "fly")["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("not a desktop action")
+    );
+    assert_eq!(helper.calls.lock().unwrap().len(), calls);
+
+    // The Settings buttons open the right pane of System Settings.
+    w.ok("open_helper_settings", json!({"pane": "screen_recording"}));
+    eventually("System Settings to be opened", || {
+        fs::read_to_string(home.join("open.log"))
+            .unwrap()
+            .contains("com.apple.preference.security?Privacy_ScreenCapture")
+    });
+    let bad = w.send("open_helper_settings", json!({"pane": "contacts"}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == bad.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+
+    // A helper that quits mid-call does not leave the bot waiting.
+    assert_eq!(
+        desk(&mut w, "n10", "look Gone")["error"],
+        "Bate Helper quit before it answered."
+    );
+    eventually("the helper to be gone", || {
+        w.ok("get_helper", json!({}))["connected"] == false
+    });
+    drop(helper);
+}
+
+#[test]
+fn only_the_helper_program_may_connect_and_a_missing_helper_is_said_so() {
+    let home = home("desktop-peer");
+    // Not this program: a connection from the test is refused.
+    let service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_HELPER", "/bin/sh");
+    });
+    let mut w = Window::connect(&home);
+    let mut stranger = FakeHelper::connect(&home, true, true);
+    let mut closed = [0u8; 1];
+    stranger.stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    assert_eq!(stranger.stream.read(&mut closed).unwrap(), 0);
+    assert_eq!(w.ok("get_helper", json!({}))["connected"], false);
+    drop(service);
+
+    // No helper installed: the bot is told, and so is the window.
+    let home = self::home("desktop-missing");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine")).env(
+            "APPD_HELPER",
+            home.join("Bate Helper.app/Contents/MacOS/bate-helper"),
+        );
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    assert_eq!(w.ok("get_helper", json!({}))["installed"], false);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "desktop apps"}),
+    );
+    let log = home.join("bots").join(&bot).join("desktop.log");
+    eventually("the desktop result", || log.exists());
+    let result: Value = serde_json::from_str(fs::read_to_string(&log).unwrap().trim()).unwrap();
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bate Helper is not installed"),
+        "{result}"
+    );
+}
+
+#[test]
+fn desktop_actions_are_asked_about_per_app_and_the_level_never_refuses_them() {
+    let home = home("desktop-permissions");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // A bot starts with desktop control on "ask".
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["levels"]["desktop"],
+        "ask"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n1", "desktop TextEdit", Some("Always")),
+        "chose Approve"
+    );
+    let grants = w.ok("get_permissions", json!({"bot": bot}))["grants"].clone();
+    assert_eq!(
+        (&grants[0]["kind"], &grants[0]["target"]),
+        (&json!("desktop"), &json!("TextEdit"))
+    );
+    // That app no longer asks; another app, and the list of apps, still do.
+    assert_eq!(
+        act(&mut w, &bot, "n2", "desktop TextEdit", None),
+        "chose Approve"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n3", "desktop Safari", Some("Deny")),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4", "desktop apps", Some("Deny")),
+        "chose Deny"
+    );
+    // Never beats the grant, and is answered without asking.
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "desktop", "level": "never"}),
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n5", "desktop TextEdit", None),
+        "chose Deny"
+    );
 }

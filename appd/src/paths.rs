@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub use proto::paths::{home, run_dir, socket};
+pub use proto::paths::{helper_socket, home, run_dir, socket};
 
 pub fn lock() -> PathBuf {
     run_dir().join("appd.lock")
