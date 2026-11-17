@@ -62,6 +62,9 @@ export async function pair(code: string, name: string) {
 /** Opens one more window, a page of its own with its own connection. */
 export const newWindow = () => invoke("new_window");
 
+/** Starts the system's Dictation in the box that has focus (the shell's; not on another device). */
+export const startDictation = () => invoke("start_dictation");
+
 export type Frame = { type: string; bot?: string; [field: string]: unknown };
 
 let next = 0;

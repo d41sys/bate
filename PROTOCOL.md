@@ -403,6 +403,14 @@ The same page is reachable from the user's own Tailscale network (no relay of Ba
 - Removing a device in Settings terminates its sessions and revokes its cookie immediately.
 - Files (`botfile://`) open in Bate's native window frames only and are not served to LAN devices.
 
+### Speech (the window, not the service)
+
+Both parts run on this Mac with no network and send nothing to the service.
+
+- **Dictation:** the **Dictate** button next to the message box focuses it and calls the shell's `start_dictation`, which sends `startDictation:` down the responder chain, the same action as the Edit menu's Start Dictation… (macOS adds that item to Edit itself). The system listens and types into the box; Bate asks for no microphone or speech permission. macOS decides where it runs: on the device on Apple silicon for the languages it supports, else it may send audio to Apple. Without Dictation turned on in System Settings, the call fails and the window shows why.
+- **Read aloud:** each reply has **Read aloud** and, while it speaks, **Stop reading**. The page calls `speechSynthesis` with a voice marked `localService` (in the window, the system's voices). It reads the text as the page shows it: no Markdown marks, no link addresses, no code blocks. A reply that is still arriving is not read.
+- **Web client on another device:** no **Dictate** button (the shell's call is not there, and a browser's speech recognition may send audio to its maker); **Read aloud** is shown when the browser has `speechSynthesis` and uses only its local voices.
+
 ### Bug report
 
 `export_report` writes `reports/bate-report-<unixMs>.tar.gz` (mode 0600) under the service's home. It holds `logs/` (the service log and its older files) and `settings.json`: versions, and per bot its id, its routines (schedule, next and last run; no name, no prompt), and its connectors: the command, the number of arguments, the names of `env` and header entries, and a URL's scheme and host only. Conversations are not included.
