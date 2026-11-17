@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
+/// `apple <tool> <action> <field>=<word>…` asks the service to run that action in an Apple app; the
+/// `apple_result` is logged to `apple.log` and ends the turn.
 /// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
@@ -48,8 +50,8 @@ while IFS= read -r line; do
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"text\",\"delta\":\"$r\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
         *'"text":"do '*)
-          kind=$(printf '%s' "$line" | sed 's/.*"text":"do \([a-z]*\) .*/\1/')
-          target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z]* \([^"]*\)".*/\1/')
+          kind=$(printf '%s' "$line" | sed 's/.*"text":"do \([a-z_]*\) .*/\1/')
+          target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z_]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"question\",\"question\":\"q-$nonce\",\"title\":\"$kind $target\",\"options\":[\"Approve\",\"Deny\"],\"kind\":\"$kind\",\"target\":\"$target\"}" ;;
         *'"text":"tell '*)
@@ -57,6 +59,12 @@ while IFS= read -r line; do
           words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"message\",\"message\":\"m-$nonce\",\"to\":\"$to\",\"text\":\"$words\"}" ;;
+        *'"text":"apple '*)
+          set -- $(printf '%s' "$line" | sed 's/.*"text":"apple \([^"]*\)".*/\1/')
+          tool=$1; args="\"action\":\"$2\""; shift 2
+          for kv in "$@"; do args="$args,\"${kv%%=*}\":\"${kv#*=}\""; done
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"apple\",\"request\":\"a-$nonce\",\"tool\":\"$tool\",\"args\":{$args}}" ;;
         *'"text":"browse '*)
           set -- $(printf '%s' "$line" | sed 's/.*"text":"browse \([^"]*\)".*/\1/')
           case "$1" in
@@ -87,6 +95,7 @@ while IFS= read -r line; do
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
+    *'"type":"apple_result"'*) printf '%s\n' "$line" >> apple.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"reply"'*)
       said=$(printf '%s' "$line" | sed -E 's/.*"(text|error)":"([^"]*)".*/\1: \2/')
@@ -1536,8 +1545,8 @@ fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() 
     let permissions = |w: &mut Window| w.ok("get_permissions", json!({"bot": bot}));
     assert_eq!(
         permissions(&mut w),
-        json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask"},
-            "grants": []})
+        json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask",
+            "apple_read": "ask", "apple_change": "ask"}, "grants": []})
     );
 
     assert_eq!(
@@ -1621,7 +1630,8 @@ fn a_level_of_always_or_never_is_answered_by_the_service_without_asking() {
     );
     assert_eq!(
         w.ok("get_permissions", json!({"bot": bot}))["levels"],
-        json!({"read": "never", "write": "ask", "run": "always", "connector": "ask"})
+        json!({"read": "never", "write": "ask", "run": "always", "connector": "ask",
+            "apple_read": "ask", "apple_change": "ask"})
     );
 
     // Never beats a remembered answer.
@@ -1649,6 +1659,143 @@ fn a_level_of_always_or_never_is_answered_by_the_service_without_asking() {
     );
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == bad.as_str());
     assert_eq!(refused["code"], "bad_request", "{refused}");
+}
+
+/// Makes the engine ask for `do apple_change messages send` and returns the question's frame.
+fn apple_change_asked(w: &mut Window, bot: &str, nonce: &str) -> Value {
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": nonce, "text": "do apple_change messages send to=+49100 text=hello"}),
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question")["entry"].clone()
+}
+
+#[test]
+fn a_send_or_change_in_an_apple_app_asks_every_time_at_every_level() {
+    let home = home("apple-asks");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let set = |w: &mut Window, kind: &str, level: &str| {
+        w.send(
+            "set_permission",
+            json!({"bot": bot, "kind": kind, "level": level}),
+        )
+    };
+
+    // The card has the choices of a one-off: no `Always`, and no way to ask for one.
+    let q = apple_change_asked(&mut w, &bot, "n1");
+    assert_eq!(q["kind"], "apple_change");
+    assert_eq!(q["options"], json!(["Approve", "Deny"]));
+    assert_eq!(q["target"], "messages send to=+49100 text=hello");
+    let id = w.send(
+        "answer",
+        json!({"bot": bot, "question": q["question"], "choice": "Always"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": q["question"], "choice": "Approve"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["grants"],
+        json!([])
+    );
+
+    // The most permissive level a send can have is `ask`; `always` is refused.
+    let id = set(&mut w, "apple_change", "always");
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+    // Reading is another kind, and can be free.
+    set(&mut w, "apple_read", "always");
+    w.wait_for(|f| f["type"] == "permissions_changed");
+    assert_eq!(
+        act(&mut w, &bot, "n2", "apple_read notes list", None),
+        "chose Approve"
+    );
+
+    // Even a level of `always` found in the database (an older or edited one) does not skip
+    // the card; `never` still refuses without one.
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO permissions(bot, kind, level) VALUES (?1, '\"apple_change\"', '\"always\"')",
+        [&bot],
+    )
+    .unwrap();
+    drop(db);
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let q = apple_change_asked(&mut w, &bot, "n3");
+    assert_eq!(q["options"], json!(["Approve", "Deny"]));
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": q["question"], "choice": "Deny"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "apple_change", "level": "never"}),
+    );
+    assert_eq!(
+        act(
+            &mut w,
+            &bot,
+            "n4",
+            "apple_change messages send to=+49100",
+            None
+        ),
+        "chose Deny"
+    );
+}
+
+#[test]
+fn the_service_runs_an_apple_action_with_the_text_as_arguments_and_returns_what_the_app_said() {
+    let home = home("apple-runs");
+    let fake = home.join("fake-osascript");
+    fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/osascript.args\"\necho 'app says ok'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_OSASCRIPT", &fake);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "apple messages send to=+49100 text=hello"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    let log = fs::read_to_string(home.join("bots").join(&bot).join("apple.log")).unwrap();
+    assert!(
+        log.contains(r#""type":"apple_result""#) && log.contains(r#""output":"app says ok""#),
+        "{log}"
+    );
+    let args = fs::read_to_string(home.join("osascript.args")).unwrap();
+    assert!(args.ends_with("\n--\n+49100\nhello\n"), "{args}");
+
+    // A refused call never reaches the app.
+    fs::remove_file(home.join("osascript.args")).unwrap();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "apple notes wipe"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    assert!(!home.join("osascript.args").exists());
+    let log = fs::read_to_string(home.join("bots").join(&bot).join("apple.log")).unwrap();
+    assert!(
+        log.lines()
+            .last()
+            .unwrap()
+            .contains("is not an action of notes"),
+        "{log}"
+    );
 }
 
 #[test]

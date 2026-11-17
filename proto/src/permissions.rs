@@ -21,10 +21,28 @@ pub enum Kind {
     Run,
     /// Use a connector's tool.
     Connector,
+    /// Look at the user's Apple apps: messages, mail, notes, reminders, calendar, contacts.
+    AppleRead,
+    /// Send from or change them. Asked about every time: see `always_asks`.
+    AppleChange,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Read, Kind::Write, Kind::Run, Kind::Connector];
+    pub const ALL: [Kind; 6] = [
+        Kind::Read,
+        Kind::Write,
+        Kind::Run,
+        Kind::Connector,
+        Kind::AppleRead,
+        Kind::AppleChange,
+    ];
+
+    /// Whether every action of this kind shows the user a card, whatever the level and
+    /// whatever was answered before: a send must never go out unseen, so such a kind has no
+    /// `Always` and its level can only be `ask` or `never`.
+    pub fn always_asks(self) -> bool {
+        self == Kind::AppleChange
+    }
 
     /// The level of a bot that was never set up otherwise: reading is free, the rest asks.
     pub fn default_level(self) -> Level {
