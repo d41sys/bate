@@ -129,6 +129,7 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "proto",
+ "rusqlite",
 ]
 
 [[package]]

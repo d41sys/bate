@@ -6,6 +6,7 @@
 //! of the source, so no text can turn into AppleScript.
 
 use proto::apple::App;
+use proto::permissions::Kind;
 use serde_json::{Map, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,23 @@ fn source(tool: &str) -> Option<String> {
     Some(include_str!("apple/text.applescript").to_owned() + own)
 }
 
+/// A read of the Messages history, which the helper app does (it holds Full Disk Access; this
+/// service must not): `None` for any other call, which `run` does.
+pub fn history(
+    tool: &str,
+    args: &Map<String, Value>,
+) -> Option<Result<proto::desktop::Call, String>> {
+    let call = match proto::apple::app(tool)?.parse(args) {
+        Ok(call) if tool == "messages" && call.kind == Kind::AppleRead => call,
+        Ok(_) => return None,
+        Err(e) => return Some(Err(e)),
+    };
+    let [action, to, _text, query, limit] = &call.argv[..] else {
+        unreachable!("messages has four fields")
+    };
+    Some(proto::desktop::Call::history(action, to, query, limit))
+}
+
 /// `Err` is what the model is told.
 pub fn run(tools: &Tools, tool: &str, args: &Map<String, Value>) -> Result<String, String> {
     let app: &App = proto::apple::app(tool).ok_or(format!("there is no app `{tool}`"))?;
@@ -59,7 +77,7 @@ pub fn run(tools: &Tools, tool: &str, args: &Map<String, Value>) -> Result<Strin
         if argv[1].is_empty() || argv[2].is_empty() {
             return Err("`to` and `text` are both needed to send.".into());
         }
-        &argv[1..]
+        &argv[1..3]
     } else {
         &argv[..]
     };

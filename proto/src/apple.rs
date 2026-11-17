@@ -20,12 +20,17 @@ pub struct App {
 pub const APPS: [App; 6] = [
     App {
         tool: "messages",
-        about: "Messages (iMessage). `send` sends `text` to `to`, a phone number or email address. Reading messages is not available.",
-        reads: &[],
+        about: "Messages (iMessage). `send` sends `text` to `to`, a phone number or email address. `read` lists the newest messages, optionally of the conversation with `to`; `search` lists the newest messages with `query` in them. Both give at most `limit` messages (default 20, at most 50), newest first.",
+        reads: &["read", "search"],
         changes: &["send"],
         fields: &[
-            ("to", "Phone number or email address"),
-            ("text", "The message"),
+            (
+                "to",
+                "For `send`: phone number or email address. For `read` and `search`: only the conversation with this person, written as Messages shows it (+4915112345678 or name@example.com)",
+            ),
+            ("text", "For `send`: the message"),
+            ("query", "For `search`"),
+            ("limit", "For `read` and `search`: a number"),
         ],
     },
     App {
@@ -190,8 +195,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(send.kind, Kind::AppleChange);
-        assert_eq!(send.argv, ["send", "+49", "hi"]);
+        assert_eq!(send.argv, ["send", "+49", "hi", "", ""]);
         assert_eq!(send.shown, "to: +49\ntext: hi");
+        // Reading Messages is a read, and the card shows what it looks for.
+        let read = parse(
+            "messages",
+            json!({"action": "search", "to": "+49", "query": "lunch", "limit": "5"}),
+        )
+        .unwrap();
+        assert_eq!(read.kind, Kind::AppleRead);
+        assert_eq!(read.shown, "to: +49\nquery: lunch\nlimit: 5");
         let read = parse("notes", json!({"action": "list"})).unwrap();
         assert_eq!((read.kind, read.shown.as_str()), (Kind::AppleRead, ""));
         // A model that makes up an action cannot get it run as a read.
