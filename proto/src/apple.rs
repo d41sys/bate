@@ -44,7 +44,7 @@ pub const APPS: [App; 6] = [
     },
     App {
         tool: "notes",
-        about: "Notes. `list` shows notes, optionally with `query` in the title; `read` returns the note `id`; `create` makes a note with `title` and `body`; `edit` replaces the body of note `id`; `delete` removes it.",
+        about: "Notes. `list` shows notes, optionally with `query` in the title; `read` returns the note `id`; `create` makes a note with `title` and `body`; `edit` replaces the content of note `id` with `body` (under `title` if given); `delete` removes it.",
         reads: &["list", "read"],
         changes: &["create", "edit", "delete"],
         fields: &[
@@ -53,7 +53,7 @@ pub const APPS: [App; 6] = [
                 "id",
                 "For `read`, `edit` and `delete`: a note id from `list`",
             ),
-            ("title", "For `create`"),
+            ("title", "For `create` and `edit`: the note's heading"),
             ("body", "For `create` and `edit`: plain text"),
         ],
     },
@@ -106,6 +106,9 @@ pub const APPS: [App; 6] = [
     },
 ];
 
+/// The only fields that may hold line breaks. Any other is one line, so a value cannot add a
+/// line of its own to the approval card and pass for another field.
+const MULTILINE: [&str; 4] = ["text", "body", "notes", "note"];
 /// Longest value of one field, in bytes.
 const MAX_FIELD: usize = 100_000;
 
@@ -152,6 +155,9 @@ impl App {
                     "`{name}` must be at most {MAX_FIELD} bytes with no NUL."
                 ));
             }
+            if value.contains(['\n', '\r']) && !MULTILINE.contains(name) {
+                return Err(format!("`{name}` must be one line."));
+            }
             if !value.is_empty() {
                 shown.push_str(&format!("{name}: {value}\n"));
             }
@@ -193,6 +199,16 @@ mod tests {
         assert!(parse("notes", json!({})).is_err());
         assert!(parse("notes", json!({"action": "list", "query": 3})).is_err());
         assert!(parse("notes", json!({"action": "list", "query": "a\0b"})).is_err());
+        // A one-line field cannot carry a line that looks like another field of the card.
+        let forged = json!({"action": "send", "to": "+49\ntext: hello mom", "text": "hi"});
+        assert!(parse("messages", forged).is_err());
+        assert!(
+            parse(
+                "messages",
+                json!({"action": "send", "to": "+49", "text": "a\nb"})
+            )
+            .is_ok()
+        );
     }
 
     #[test]

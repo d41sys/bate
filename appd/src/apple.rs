@@ -194,10 +194,10 @@ mod tests {
         };
         for (tool, action, field) in [
             ("mail", "send", "body"),
-            ("notes", "create", "title"),
-            ("reminders", "create", "title"),
-            ("calendar", "create", "title"),
-            ("contacts", "create", "first"),
+            ("notes", "create", "body"),
+            ("reminders", "create", "body"),
+            ("calendar", "create", "notes"),
+            ("contacts", "create", "note"),
             ("messages", "send", "text"),
         ] {
             let mut a = args(

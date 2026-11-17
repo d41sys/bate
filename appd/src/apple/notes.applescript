@@ -27,6 +27,7 @@ on run argv
 		if action is "read" then return plaintext of aNote
 		if action is "edit" then
 			set html to ""
+			if theTitle is not "" then set html to "<div><h1>" & my htmlText(theTitle) & "</h1></div>"
 			repeat with l in my splitText(theBody, linefeed)
 				set html to html & "<div>" & my htmlText(l as text) & "</div>"
 			end repeat
