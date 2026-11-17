@@ -25,6 +25,8 @@ The window's page needs Node 24 or later: run `npm ci && npm run build` in `wind
 
 Bate keeps its secrets (model key, sign-ins, channel tokens) in the macOS Keychain, not in `app.db`. The Keychain recognises a program by its signature, so a build signed ad hoc is a new program after every rebuild and macOS asks again. To avoid that, make a self-signed code-signing certificate named `Bate Dev` once (the script prints the steps) and run `window/sign-dev.sh` after each `cargo build`; it signs `appd`, `agentcore` and `bate` under `target/debug` and `target/release`.
 
+`window/bundle.sh` builds `Bate.app` (signed with `Bate Dev` if the Mac has it, else ad hoc). Copy it to `/Applications` and open it: the app registers the background service itself, and the first screen points at Settings for ChatGPT or a model server. Notarisation needs an Apple Developer ID and is off until `BATE_NOTARIZE_PROFILE` is set; see `PROTOCOL.md`, "The app".
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

@@ -507,6 +507,100 @@ fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
 }
 
 #[test]
+fn a_service_signed_with_a_certificate_refuses_a_window_signed_otherwise() {
+    let home = home("signer");
+    // `BATE_SIGNER_LEAF` (debug builds): as if appd were signed with this certificate. This test
+    // program is not signed with it, so it is not the service's window.
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_SIGNER_LEAF", "0".repeat(40));
+    });
+    let stream = UnixStream::connect(home.join("run/appd.sock")).unwrap();
+    // macOS refuses a timeout on a socket whose peer is already gone: then there is nothing to wait for.
+    let _ = stream.set_read_timeout(Some(TIMEOUT));
+    let mut line = String::new();
+    // Closed without the `hello` every accepted window gets first.
+    let read = BufReader::new(stream).read_line(&mut line).unwrap();
+    assert_eq!((read, line.as_str()), (0, ""));
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+    assert!(log.contains("not signed like the service"), "{log}");
+}
+
+/// `appd <command>` as if run from `app`, with a fake in place of macOS's login items.
+fn appd_in_bundle(home: &Path, fake: &Path, app: &Path, command: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_appd"))
+        .arg(command)
+        .env_remove("APPD_HOME")
+        .env("HOME", home)
+        .env("BATE_BUNDLE", app)
+        .env("BATE_LOGIN_ITEM_FAKE", fake)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_bundled_service_registers_once_from_applications_and_opens_settings_when_approval_is_needed() {
+    let home = home("login-item");
+    let app = home.join("Applications/Bate.app");
+    let fake = home.join("fake-login-items");
+    fs::create_dir_all(&fake).unwrap();
+    fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    fs::write(app.join("Contents/MacOS/appd"), "build 1").unwrap();
+    let calls = || fs::read_to_string(fake.join("calls")).unwrap_or_default();
+    let launch = |app: &Path| appd_in_bundle(&home, &fake, app, "launch");
+    let said = |out: &std::process::Output| String::from_utf8_lossy(&out.stdout).trim().to_owned();
+
+    let out = launch(&app);
+    assert!(out.status.success());
+    assert_eq!(said(&out), "enabled");
+    // Registered once: the next start finds it enabled.
+    assert_eq!(said(&launch(&app)), "enabled");
+    assert_eq!(calls(), "unregister\nregister\n");
+    // An update replaced the app: macOS lost the login item, so it is registered again.
+    fs::write(app.join("Contents/MacOS/appd"), "build 2").unwrap();
+    assert_eq!(said(&launch(&app)), "enabled");
+    assert_eq!(calls(), "unregister\nregister\nunregister\nregister\n");
+
+    // Not in Applications: refused, and nothing is registered.
+    fs::remove_dir_all(&fake).unwrap();
+    fs::create_dir_all(&fake).unwrap();
+    let out = launch(&home.join("Downloads/Bate.app"));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/Applications"));
+    assert_eq!(calls(), "");
+
+    // macOS registers the service but cannot start it (the app was just replaced): it is
+    // registered again, until it starts.
+    fs::write(fake.join("spawn_fails"), "2").unwrap();
+    fs::write(app.join("Contents/MacOS/appd"), "build 3").unwrap();
+    fs::remove_file(fake.join("calls")).ok();
+    assert_eq!(said(&launch(&app)), "enabled");
+    assert_eq!(calls(), "unregister\nregister\n".repeat(3));
+    // And it never starts: the failure is said, and the build is not remembered as done.
+    fs::write(fake.join("spawn_fails"), "100").unwrap();
+    fs::write(app.join("Contents/MacOS/appd"), "build 4").unwrap();
+    let out = launch(&app);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("did not start it"));
+    fs::remove_file(fake.join("spawn_fails")).unwrap();
+    fs::remove_file(fake.join("calls")).unwrap();
+
+    // macOS wants the user's approval: the note says so, and Settings opens, the first time only.
+    fs::write(fake.join("needs_approval"), "").unwrap();
+    assert!(said(&launch(&app)).starts_with("requires approval"));
+    assert!(said(&launch(&app)).starts_with("requires approval"));
+    assert_eq!(calls(), "unregister\nregister\nsettings\n");
+
+    let out = appd_in_bundle(&home, &fake, &app, "unregister");
+    assert!(out.status.success());
+    assert_eq!(calls(), "unregister\nregister\nsettings\nunregister\n");
+    assert_eq!(
+        fs::read_to_string(fake.join("status")).unwrap(),
+        "not_registered"
+    );
+}
+
+#[test]
 fn engine_error_output_lands_in_the_service_log_tagged_with_its_bot() {
     let home = home("stderr");
     let _service = Service::start(&home);
@@ -4761,20 +4855,26 @@ fn new_key() -> (String, String) {
     (value("BATE_UPDATE_KEY"), value("BATE_UPDATE_PUBKEY"))
 }
 
-/// A release archive of the two programs, each saying `tag`.
+/// A release archive of `Bate.app`, whose programs and `Info.plist` each say `tag`.
 fn release(dir: &Path, tag: &str) -> PathBuf {
     let src = dir.join(format!("src-{tag}"));
-    fs::create_dir_all(&src).unwrap();
+    let macos = src.join("Bate.app/Contents/MacOS");
+    fs::create_dir_all(&macos).unwrap();
     for name in ["appd", "agentcore"] {
-        fs::write(src.join(name), format!("new {name} {tag}")).unwrap();
+        fs::write(macos.join(name), format!("new {name} {tag}")).unwrap();
     }
+    fs::write(
+        src.join("Bate.app/Contents/Info.plist"),
+        format!("new plist {tag}"),
+    )
+    .unwrap();
     let archive = dir.join(format!("{tag}.tar.gz"));
     let status = Command::new("/usr/bin/tar")
         .arg("-czf")
         .arg(&archive)
         .arg("-C")
         .arg(&src)
-        .args(["appd", "agentcore"])
+        .arg("Bate.app")
         .status()
         .unwrap();
     assert!(status.success());
@@ -4800,6 +4900,16 @@ struct Updating {
 impl Updating {
     /// `feed` and the release archive are served; `pubkey` is the key the service trusts.
     fn start(name: &str, releases: Releases, pubkey: Option<&str>) -> Updating {
+        Updating::start_in(name, releases, pubkey, None)
+    }
+
+    /// With `bundle`: the service takes itself to run from that `Bate.app`.
+    fn start_in(
+        name: &str,
+        releases: Releases,
+        pubkey: Option<&str>,
+        bundle: Option<&Path>,
+    ) -> Updating {
         let home = home(name);
         let install = home.join("install");
         fs::create_dir_all(&install).unwrap();
@@ -4813,6 +4923,9 @@ impl Updating {
                 .env_remove("BATE_UPDATE_PUBKEY");
             if let Some(key) = pubkey {
                 c.env("BATE_UPDATE_PUBKEY", key);
+            }
+            if let Some(app) = bundle {
+                c.env("BATE_BUNDLE", app);
             }
         });
         let window = Window::connect(&home);
@@ -4863,7 +4976,7 @@ fn a_release_signed_with_the_key_is_staged_and_waits_for_the_install() {
     assert_eq!(state["state"], "ready", "{state}");
     assert_eq!(state["available"], "9.9.9");
     assert_eq!(state["current"], env!("CARGO_PKG_VERSION"));
-    let staged = u.home.join("updates/9.9.9");
+    let staged = u.home.join("updates/9.9.9/Bate.app/Contents/MacOS");
     assert_eq!(
         fs::read_to_string(staged.join("appd")).unwrap(),
         "new appd 9.9.9"
@@ -5316,4 +5429,44 @@ fn desktop_actions_are_asked_about_per_app_and_the_level_never_refuses_them() {
         act(&mut w, &bot, "n5", "desktop TextEdit", None),
         "chose Deny"
     );
+}
+
+#[test]
+fn from_an_app_the_install_replaces_the_whole_app_and_the_programs_beside_it_stay() {
+    let (key, pubkey) = new_key();
+    let scratch = home("update-app-files");
+    let archive = release(&scratch, "9.9.9");
+    let releases = Releases::start();
+    let url = format!("{}/release.tar.gz", releases.base);
+    releases.put(
+        "/feed.json",
+        signed_feed(&key, &archive, "9.9.9", &url).to_string(),
+    );
+    releases.put("/release.tar.gz", fs::read(&archive).unwrap());
+    // An installed app of its own (a folder under the test's home, not a real /Applications).
+    let apps = scratch.join("Applications");
+    let app = apps.join("Bate.app");
+    fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    fs::write(app.join("Contents/MacOS/appd"), "old appd").unwrap();
+    fs::write(app.join("Contents/Info.plist"), "old plist").unwrap();
+    fs::write(app.join("Contents/Resources-only-in-old"), "gone").unwrap();
+    let mut u = Updating::start_in("update-app", releases, Some(&pubkey), Some(&app));
+    assert_eq!(u.window.ok("check_update", json!({}))["state"], "ready");
+    u.window.ok("install_update", json!({}));
+    let service = &mut u.service;
+    let mut code = None;
+    eventually("the service to exit", || {
+        code = service.0.try_wait().unwrap().map(|s| s.code());
+        code.is_some()
+    });
+    assert_eq!(code, Some(Some(75)));
+    let read = |p: &str| fs::read_to_string(app.join(p)).unwrap();
+    assert_eq!(read("Contents/MacOS/appd"), "new appd 9.9.9");
+    assert_eq!(read("Contents/MacOS/agentcore"), "new agentcore 9.9.9");
+    assert_eq!(read("Contents/Info.plist"), "new plist 9.9.9");
+    assert!(!app.join("Contents/Resources-only-in-old").exists());
+    // Nothing is left beside the app, and the programs of the test's own install are not touched.
+    let beside: Vec<_> = fs::read_dir(&apps).unwrap().flatten().collect();
+    assert_eq!(beside.len(), 1, "{beside:?}");
+    assert!(u.untouched());
 }

@@ -17,6 +17,7 @@ pub mod memory;
 pub mod paths;
 pub mod permissions;
 pub mod routines;
+pub mod signer;
 pub mod skills;
 
 /// Engine protocol version this build speaks; an engine announces it in `ready`.

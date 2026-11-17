@@ -65,6 +65,9 @@ export const newWindow = () => invoke("new_window");
 /** Starts the system's Dictation in the box that has focus (the shell's; not on another device). */
 export const startDictation = () => invoke("start_dictation");
 
+/** What the shell says of starting the service with the app, if macOS wants the user's approval (the shell's). */
+export const serviceNote = () => invoke("service_note") as Promise<string | null>;
+
 export type Frame = { type: string; bot?: string; [field: string]: unknown };
 
 let next = 0;

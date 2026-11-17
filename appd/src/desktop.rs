@@ -26,13 +26,18 @@ const START: Duration = Duration::from_secs(10);
 /// How long it may take over one call.
 const CALL: Duration = Duration::from_secs(30);
 
-/// The helper program: `$APPD_HELPER`, else inside `Bate Helper.app` in the user's
-/// Applications folder.
+/// The helper program: `$APPD_HELPER`, else inside `Bate Helper.app` in `Bate.app`'s
+/// `Contents/Helpers` when the service runs from the app, else in the user's Applications folder.
 fn exe() -> PathBuf {
+    const PROGRAM: &str = "Bate Helper.app/Contents/MacOS/bate-helper";
     match std::env::var_os("APPD_HELPER").filter(|p| !p.is_empty()) {
         Some(path) => path.into(),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join("Applications/Bate Helper.app/Contents/MacOS/bate-helper"),
+        None => match paths::bundle() {
+            Some(app) => app.join("Contents/Helpers").join(PROGRAM),
+            None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join("Applications")
+                .join(PROGRAM),
+        },
     }
 }
 

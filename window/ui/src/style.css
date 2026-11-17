@@ -50,3 +50,4 @@ button.file { font: inherit; text-decoration: underline; background: none; borde
 .palette li { padding: .4rem 1rem; cursor: pointer; }
 .palette li[aria-selected="true"] { background: Highlight; color: HighlightText; }
 .palette small { opacity: .7; margin-left: .5rem; }
+.first-run { border: 1px solid #8884; border-radius: 6px; padding: 0 1em 1em; margin-bottom: 1em; }

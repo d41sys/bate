@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { inShell, listen, newWindow, openInBrowser, pair, request } from "./service.ts";
+import { inShell, listen, newWindow, openInBrowser, pair, request, serviceNote } from "./service.ts";
 import { Pair } from "./Devices.tsx";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
@@ -8,6 +8,7 @@ import { Chat } from "./Chat.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { Settings } from "./Settings.tsx";
+import { FirstRun } from "./FirstRun.tsx";
 import { Palette, type Choice } from "./Palette.tsx";
 import "./style.css";
 
@@ -33,6 +34,16 @@ function App() {
   const [jump, setJump] = useState<{ seq: number }>();
   const [find, setFind] = useState(false);
   const newName = useRef<HTMLInputElement>(null);
+  // What the shell says of starting the service with the app (macOS may want an approval).
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!inShell || !state) return setNote(null);
+    const ask = () => serviceNote().then(setNote, () => {});
+    void ask();
+    const timer = setInterval(ask, 2000);
+    return () => clearInterval(timer);
+  }, [state]);
 
   useEffect(() => {
     const load = () => request<{ bots: Bot[] }>("list_bots").then((d) => setBots(d.bots), (e) => setError(e.message));
@@ -166,6 +177,8 @@ function App() {
       </nav>
       <main>
         {state && <p className="note">{state}</p>}
+        {note && <p className="note">{note}</p>}
+        {inShell && !state && <FirstRun hasBots={bots.length > 0} reload={`${connection}-${tab}`} onSettings={() => open(bot?.id ?? bots[0].id, "settings")} />}
         {error && <p className="error" role="alert" onClick={() => setError("")}>{error}</p>}
         {bot ? (
           <>

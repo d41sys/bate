@@ -17,6 +17,7 @@ mod lan;
 mod launch;
 mod limit;
 mod log;
+mod login_item;
 mod memory;
 mod oauth;
 mod paths;
@@ -40,8 +41,8 @@ use sys::log;
 
 const USAGE: &str = "usage:
   appd              serve (launchd runs this)
-  appd launch       register this appd with launchd and start it
-  appd unregister   stop the service and remove its launchd registration
+  appd launch       register this appd with launchd and start it; from Bate.app, as the app's login item
+  appd unregister   stop the service and remove its registration
   appd gate chatgpt [model]
                     sign in to ChatGPT in the browser, send one request, print the reply
   appd update keygen
@@ -57,8 +58,8 @@ fn main() -> ExitCode {
         (Some("gate"), Some("chatgpt")) => gate::chatgpt(args.next()),
         (Some("update"), Some("keygen")) => update::keygen(),
         (Some("update"), Some("sign")) => update::sign(args.next(), args.next(), args.next()),
-        (Some("launch"), _) => std::env::current_exe().and_then(|exe| launch::ensure(&exe)),
-        (Some("unregister"), _) => launch::remove().map(|removed| {
+        (Some("launch"), _) => launch::start(),
+        (Some("unregister"), _) => launch::stop().map(|removed| {
             if !removed {
                 println!("not registered");
             }

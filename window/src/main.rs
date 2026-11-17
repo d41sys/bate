@@ -5,10 +5,12 @@
 
 mod bridge;
 mod files;
+mod service;
 
 use bridge::Bridge;
 use objc2::{MainThreadMarker, sel};
 use objc2_app_kit::NSApplication;
+use service::Note;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,6 +58,13 @@ async fn recv(bridges: State<'_, Bridges>, window: WebviewWindow) -> Result<Stri
     tauri::async_runtime::spawn_blocking(move || bridge.recv())
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// What the page shows while the service is not there: macOS wants an approval, or the
+/// service could not be started. `None`: nothing to tell.
+#[tauri::command]
+fn service_note(note: State<'_, Note>) -> Option<String> {
+    note.get()
 }
 
 #[tauri::command]
@@ -207,11 +216,13 @@ fn open_outside(url: &Url) {
 fn main() {
     let app = tauri::Builder::default()
         .manage(Bridges::default())
+        .manage(Note::default())
         .invoke_handler(tauri::generate_handler![
             send,
             recv,
             new_window,
-            start_dictation
+            start_dictation,
+            service_note
         ])
         .register_uri_scheme_protocol("botfile", |_, request| {
             files::serve(&proto::paths::home(), &request.uri().to_string())
@@ -236,6 +247,7 @@ fn main() {
                 icon = icon.icon(image.clone());
             }
             icon.build(app)?;
+            app.state::<Note>().start();
             open_window(handle)?;
             Ok(())
         })
