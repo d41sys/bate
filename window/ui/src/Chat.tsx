@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { inShell, listen, request } from "./service.ts";
+import { inShell, listen, request, startDictation } from "./service.ts";
 import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
 import { SANDBOX, fileUrl } from "./frame.ts";
 import { Markdown } from "./Markdown.ts";
+import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
 import type { Bot } from "./types.ts";
 
@@ -35,6 +36,9 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
   const inFlight = useRef(false);
   const [files, setFiles] = useState<{ id: string; name: string; path?: string; error?: string }[]>([]);
   const picker = useRef<HTMLInputElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+  // The reply being read aloud.
+  const [reading, setReading] = useState<number>();
   // The prompt being edited: sending goes back to just before it first.
   const [editing, setEditing] = useState<string>();
   const [saved, setSaved] = useState("");
@@ -134,6 +138,24 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
       stop();
     };
   }, [bot.id]);
+
+  // Another bot's chat, or no chat: what is being read stops.
+  useEffect(() => () => {
+    if (canRead) hush();
+    setReading(undefined);
+  }, [bot.id]);
+  const read = (id: number, text: string) => {
+    try {
+      speak(text, () => setReading((now) => (now === id ? undefined : now)));
+      setReading(id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const stopReading = () => {
+    hush();
+    setReading(undefined);
+  };
 
   const show = async (seq: number) => {
     await opened.current;
@@ -321,6 +343,9 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
                 busy={bot.busy || sending}
                 retry={retry}
                 fork={fork}
+                reading={reading === items[row.index].id}
+                read={canRead ? read : undefined}
+                stopReading={stopReading}
                 // Bots' files open in the window's frames only, not on other devices.
                 open={inShell ? setShown : undefined}
                 edit={(item) => {
@@ -380,7 +405,20 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
           }}
         />
         <button type="button" onClick={() => picker.current?.click()}>Attach</button>
+        {inShell && (
+          <button
+            type="button"
+            title="Dictate with the system's Dictation (on this Mac)"
+            onClick={() => {
+              box.current?.focus();
+              run(startDictation());
+            }}
+          >
+            Dictate
+          </button>
+        )}
         <textarea
+          ref={box}
           aria-label="Message"
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -414,9 +452,13 @@ type Actions = {
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
   open?: (path: string) => void;
+  /** Whether this reply is being read aloud; `read` is missing where the page can't speak. */
+  reading: boolean;
+  read?: (id: number, text: string) => void;
+  stopReading: () => void;
 };
 
-function Row({ item, busy, retry, edit, fork, open }: { item: Item } & Actions) {
+function Row({ item, busy, retry, edit, fork, open, reading, read, stopReading }: { item: Item } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -430,7 +472,7 @@ function Row({ item, busy, retry, edit, fork, open }: { item: Item } & Actions) 
         </>
       );
     case "reply":
-      return <Markdown text={item.text} open={open} />;
+      return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "tool":
       return (
         <details>
@@ -446,4 +488,32 @@ function Row({ item, busy, retry, edit, fork, open }: { item: Item } & Actions) 
     default:
       return <p>{item.text}</p>;
   }
+}
+
+function Reply({ item, busy, open, reading, read, stopReading }: {
+  item: Extract<Item, { kind: "reply" }>;
+  busy: boolean;
+  open?: (path: string) => void;
+  reading: boolean;
+  read?: (id: number, text: string) => void;
+  stopReading: () => void;
+}) {
+  const text = useRef<HTMLDivElement>(null);
+  return (
+    <>
+      <div ref={text}>
+        <Markdown text={item.text} open={open} />
+      </div>
+      {read && (
+        <div className="actions">
+          {reading ? (
+            <button onClick={stopReading}>Stop reading</button>
+          ) : (
+            // A reply still arriving is not read: it would stop at what has come so far.
+            <button disabled={busy} onClick={() => text.current && read(item.id, readable(text.current))}>Read aloud</button>
+          )}
+        </div>
+      )}
+    </>
+  );
 }

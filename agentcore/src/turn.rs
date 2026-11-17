@@ -74,6 +74,7 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
                 "text": {"type": "string", "description": "For `type`: what to put in the field"},
                 "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"}},
                 "required": ["action"]}}}));
+        list.extend(proto::apple::APPS.iter().map(apple_tool));
         if peers {
             list.push(json!({"type": "function", "function": {"name": MESSAGE,
                 "description": "Send a message to another bot and wait for its reply. It works on the message in its own folder with its own tools and knows nothing of this conversation: put everything it needs in `text`. A bot does one thing at a time; if it is busy you are told so.",
@@ -88,6 +89,25 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
         }
     }
     tools
+}
+
+/// The definition of one Apple app's tool.
+fn apple_tool(app: &proto::apple::App) -> Value {
+    let actions: Vec<_> = app.reads.iter().chain(app.changes).collect();
+    let mut properties = Map::new();
+    properties.insert("action".into(), json!({"type": "string", "enum": actions}));
+    for (name, what) in app.fields {
+        properties.insert(
+            (*name).into(),
+            json!({"type": "string", "description": what}),
+        );
+    }
+    let about = format!(
+        "{} Every send or change is shown to the user for approval first.",
+        app.about
+    );
+    json!({"type": "function", "function": {"name": app.tool, "description": about,
+        "parameters": {"type": "object", "properties": properties, "required": ["action"]}}})
 }
 
 /// The message that records what the model said and which tools it called.
@@ -471,6 +491,9 @@ impl Turn {
         if tool == BROWSER {
             return self.browse(args);
         }
+        if let Some(app) = proto::apple::app(tool) {
+            return self.apple(app, args);
+        }
         // Every action is asked about: the service decides from the bot's permissions, and
         // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);
@@ -517,6 +540,26 @@ impl Turn {
         self.out.send(&Event::Browser {
             request: id.clone(),
             action: args.clone(),
+        });
+        match self.answer(&id) {
+            Some(result) => result,
+            None => Err("Aborted by the user".into()),
+        }
+    }
+
+    /// One action in an Apple app, which the service runs. The card carries every field the
+    /// model gave, whole: for a send that is the recipient and the text.
+    fn apple(&self, app: &proto::apple::App, args: &Map<String, Value>) -> Result<String, String> {
+        let call = app.parse(args)?;
+        let title = format!("{}: {}", app.tool, call.action);
+        // The target names the action too, so an "Always" for one read is not one for another.
+        let target = format!("{} {}\n{}", app.tool, call.action, call.shown);
+        self.allowed(call.kind, target.trim_end().to_owned(), title)?;
+        let id = self.wait_on("a");
+        self.out.send(&Event::Apple {
+            request: id.clone(),
+            tool: app.tool.to_owned(),
+            args: args.clone(),
         });
         match self.answer(&id) {
             Some(result) => result,
