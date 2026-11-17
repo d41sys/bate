@@ -4844,6 +4844,31 @@ fn a_new_bot_says_what_to_set_up_and_answers_on_chatgpt_with_no_model_chosen() {
     );
 }
 
+/// The button pressed again: after a tab closed by mistake, or a second click.
+#[test]
+fn a_new_chatgpt_sign_in_ends_the_one_before() {
+    let openai = ChatGpt::start();
+    let home = home("chatgpt-again");
+    let _service = Service::start_with(&home, |c| {
+        c.env("BATE_CHATGPT_AUTH", &openai.base)
+            .env("BATE_CHATGPT_API", format!("{}/v1", openai.base));
+    });
+    let mut w = Window::connect(&home);
+    let left = w.ok("sign_in_chatgpt", json!({}))["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let back = format!(
+        "{}?code=c0de&state={}&client_id=oaiapp_1",
+        query_param(&left, "redirect_uri").unwrap(),
+        query_param(&left, "state").unwrap()
+    );
+    sign_in_chatgpt(&mut w, &openai);
+    // The tab left open signs nobody in: its port is closed, or is another sign-in's.
+    assert!(ureq::get(&back).call().is_err());
+    assert_eq!(openai.seen("POST /api/accounts/oauth/token").len(), 1);
+}
+
 /// A stand-in for the release host: serves the files put in it, by path.
 struct Releases {
     base: String,

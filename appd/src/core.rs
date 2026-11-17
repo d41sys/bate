@@ -338,6 +338,8 @@ pub struct Core {
     /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
     /// renewed; `Some` while a renewal runs, so that there is one at a time.
     chatgpt_waiting: Option<Vec<(String, String)>>,
+    /// The flag that ends the ChatGPT sign-in begun last, should the user begin another.
+    chatgpt_signing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
     /// The page for other devices on the network.
@@ -413,6 +415,7 @@ impl Core {
             chat_codes: HashMap::new(),
             sign_ins: HashMap::new(),
             chatgpt_waiting: None,
+            chatgpt_signing: None,
             browsers: HashMap::new(),
             desktop: desktop::Link::start(tx.clone()),
             store,
@@ -1393,6 +1396,12 @@ impl Core {
                 let (pending, url) =
                     chatgpt::begin(&chatgpt::auth(), &chatgpt::api(), old.as_ref())
                         .map_err(|e| ("sign_in_failed", e))?;
+                // One at a time: the attempt before stops waiting, gives its port back and
+                // says nothing, so a tab left open cannot end as an error ten minutes on.
+                let over = pending.over.clone();
+                if let Some(before) = self.chatgpt_signing.replace(over.clone()) {
+                    before.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let tx = self.tx.clone();
                 // Waits for the browser, then the network: not on this thread.
                 std::thread::spawn(move || {
@@ -1401,7 +1410,9 @@ impl Core {
                         tx.send(Msg::ChatGpt(news)).map_err(|e| e.to_string())
                     };
                     let result = chatgpt::finish(pending, registered);
-                    let _ = tx.send(Msg::ChatGpt(ChatGptNews::SignedIn(result)));
+                    if !over.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = tx.send(Msg::ChatGpt(ChatGptNews::SignedIn(result)));
+                    }
                 });
                 Ok(Some(json!({"url": url})))
             }

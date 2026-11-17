@@ -78,6 +78,8 @@ pub struct Pending {
     host_id: String,
     /// The registration this sign-in is for; none yet the first time.
     client_id: Option<String>,
+    /// Set when another sign-in has begun: this one stops waiting and gives its port back.
+    pub over: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Why a renewal gave no tokens.
@@ -134,6 +136,7 @@ pub fn begin(auth: &str, api: &str, old: Option<&Saved>) -> Result<(Pending, Str
         verifier: random_hex(32),
         host_id: old.map_or_else(new_host_id, |s| s.host_id.clone()),
         client_id: old.map(|s| s.client_id.clone()),
+        over: Default::default(),
     };
     let challenge = oauth::base64url(&oauth::sha256(pending.verifier.as_bytes()));
     let mut fields = vec![
@@ -166,7 +169,7 @@ pub fn finish(
     pending: Pending,
     keep: impl FnOnce(&Saved) -> Result<(), String>,
 ) -> Result<Saved, String> {
-    let query = come_back(&pending.listener, &pending.state)?;
+    let query = come_back(&pending.listener, &pending.state, &pending.over)?;
     let field = |name: &str| param(&query, name);
     if let Some(error) = field("error") {
         let more = field("error_description").unwrap_or_default();
@@ -372,13 +375,22 @@ fn new_host_id() -> String {
 
 /// Waits for the browser to come back to `/auth/callback` with `state`, and gives the query
 /// it came with. Anything else that connects is turned away.
-fn come_back(listener: &TcpListener, state: &str) -> Result<String, String> {
+fn come_back(
+    listener: &TcpListener,
+    state: &str,
+    over: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
     let listening = |e: std::io::Error| format!("cannot listen for the browser: {e}");
     // Not blocking, so that a sign-in nobody finishes gives the port back.
     listener.set_nonblocking(true).map_err(listening)?;
     let until = Instant::now() + WAIT;
     loop {
-        let stream = match listener.accept() {
+        let accepted = listener.accept();
+        // Also with a connection in hand: a tab left open is not answered.
+        if over.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("another sign-in was started".into());
+        }
+        let stream = match accepted {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if Instant::now() > until {
