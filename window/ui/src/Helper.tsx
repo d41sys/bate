@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
 
-type Helper = { installed: boolean; path: string; connected: boolean; accessibility: boolean | null; screenRecording: boolean | null };
+type Helper = { installed: boolean; path: string; connected: boolean; accessibility: boolean | null; screenRecording: boolean | null; fullDiskAccess: boolean | null };
 
 /** Bate Helper: the app that holds the macOS permissions for seeing and controlling other apps. */
 export function Helper() {
@@ -12,7 +12,7 @@ export function Helper() {
     void load();
     return listen((frame) => frame.type === "helper_changed" && void load());
   }, []);
-  const open = (pane: "accessibility" | "screen_recording") =>
+  const open = (pane: "accessibility" | "screen_recording" | "full_disk_access") =>
     request("open_helper_settings", { pane }).then(() => setError(""), (e: Error) => setError(e.message));
   // Unknown until the helper runs: it starts when a bot first uses it, or when a button below is pressed.
   const state = (granted: boolean | null) => (granted === null ? "not known yet" : granted ? "allowed" : "not allowed");
@@ -33,6 +33,11 @@ export function Helper() {
           <li>
             Screen Recording (pictures of windows): {state(helper.screenRecording)}{" "}
             <button onClick={() => open("screen_recording")}>Open System Settings</button>
+          </li>
+          <li>
+            Full Disk Access (read your Messages history): {state(helper.fullDiskAccess)}{" "}
+            <button onClick={() => open("full_disk_access")}>Open System Settings</button>
+            {helper.fullDiskAccess === false && <> If Bate Helper is not listed there, add it with the + button.</>}
           </li>
         </ul>
       )}

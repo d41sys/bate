@@ -17,6 +17,11 @@ pub const MAX_TEXT: usize = 10_000;
 const MAX_APP: usize = 200;
 /// Highest element number a window's tree lists.
 const MAX_ELEMENT: u32 = 10_000;
+/// Most messages one `messages` call returns, and how many it returns without a `limit`.
+pub const MAX_MESSAGES: u32 = 50;
+pub const DEFAULT_MESSAGES: u32 = 20;
+/// Most characters of a search or of a person's address.
+const MAX_QUERY: usize = 200;
 
 /// What the bot may do to other apps. Closed: nothing else reaches the helper.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,14 +68,26 @@ pub enum Call {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         element: Option<u32>,
     },
+    /// The newest messages of the user's Messages history, or those with `query` in them;
+    /// of the conversation with `with` only, if given. Needs Full Disk Access. Not a `desktop`
+    /// action: it comes from the `messages` tool (`Call::history`), asked about as `apple_read`.
+    Messages {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with: Option<String>,
+        limit: u32,
+    },
 }
 
 impl Call {
-    /// Checks what the engine sent; the helper never sees anything else.
+    /// Checks what the engine sent as a `desktop` action; the helper never sees anything else.
     pub fn parse(args: &Map<String, Value>) -> Result<Call, String> {
         let call: Call = serde_json::from_value(Value::Object(args.clone()))
             .map_err(|e| format!("not a desktop action: {e}"))?;
         match &call {
+            // The `desktop` tool is asked about as `desktop`; reading messages is `apple_read`.
+            Call::Messages { .. } => return Err("not a desktop action: messages".into()),
             Call::Apps => {}
             Call::Look { app, .. } | Call::Screenshot { app, .. } => name(app)?,
             Call::Press { app, element, .. } => {
@@ -101,10 +118,44 @@ impl Call {
         Ok(call)
     }
 
+    /// A read of the Messages history, from the `messages` tool's `action` (`read` or `search`)
+    /// and fields, all text and checked here.
+    pub fn history(action: &str, with: &str, query: &str, limit: &str) -> Result<Call, String> {
+        let short = |s: &str, what: &str| match s.chars().count() > MAX_QUERY
+            || s.chars().any(char::is_control)
+        {
+            true => Err(format!(
+                "`{what}` may be {MAX_QUERY} characters, on one line"
+            )),
+            false => Ok(()),
+        };
+        short(with, "to")?;
+        short(query, "query")?;
+        match (action, query.is_empty()) {
+            ("search", true) => return Err("`search` needs a `query`.".into()),
+            ("read", false) => return Err("`query` is for `search`; `read` has none.".into()),
+            _ => {}
+        }
+        let limit = match limit {
+            "" => DEFAULT_MESSAGES,
+            n => n
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (1..=MAX_MESSAGES).contains(n))
+                .ok_or(format!("`limit` must be a number from 1 to {MAX_MESSAGES}"))?,
+        };
+        Ok(Call::Messages {
+            query: (!query.is_empty()).then(|| query.to_owned()),
+            with: (!with.is_empty()).then(|| with.to_owned()),
+            limit,
+        })
+    }
+
     /// What a permission is for: the app, or `apps` for the list.
     pub fn target(&self) -> &str {
         match self {
             Call::Apps => "apps",
+            Call::Messages { .. } => "messages",
             Call::Look { app, .. }
             | Call::Screenshot { app, .. }
             | Call::Press { app, .. }
@@ -180,6 +231,7 @@ pub enum Frame {
     Status {
         accessibility: bool,
         screen_recording: bool,
+        full_disk_access: bool,
     },
     /// Outcome of the request `id`: `output` (text for the bot) and, for a screenshot, `png`
     /// (base64); or `error`.
@@ -221,9 +273,50 @@ mod tests {
             json!({"action": "look", "app": " "}),
             json!({"action": "press", "app": "A", "element": 0}),
             json!({"action": "type", "app": "A", "text": "x".repeat(MAX_TEXT + 1)}),
+            // Reading messages is the `messages` tool's, never a `desktop` action.
+            json!({"action": "messages", "limit": 5}),
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_read_of_messages_is_checked_and_defaults_to_a_few() {
+        let call = Call::history;
+        let long = "x".repeat(MAX_QUERY + 1);
+        assert_eq!(
+            call("read", "", "", ""),
+            Ok(Call::Messages {
+                query: None,
+                with: None,
+                limit: DEFAULT_MESSAGES
+            })
+        );
+        assert_eq!(
+            call("search", "+49100", "lunch", "5"),
+            Ok(Call::Messages {
+                query: Some("lunch".into()),
+                with: Some("+49100".into()),
+                limit: 5
+            })
+        );
+        for bad in [
+            call("search", "", "", ""),
+            call("read", "", "lunch", ""),
+            call("read", "", "", "0"),
+            call("read", "", "", "51"),
+            call("read", "", "", "many"),
+            call("read", &long, "", ""),
+            call("read", "a\nb", "", ""),
+        ] {
+            assert!(bad.is_err(), "{bad:?}");
+        }
+        let line = serde_json::to_string(&Request {
+            id: 1,
+            call: call("read", "", "", "").unwrap(),
+        })
+        .unwrap();
+        assert_eq!(line, r#"{"id":1,"action":"messages","limit":20}"#);
     }
 
     #[test]

@@ -5020,7 +5020,12 @@ struct FakeHelper {
 }
 
 impl FakeHelper {
-    fn connect(home: &Path, accessibility: bool, screen_recording: bool) -> FakeHelper {
+    fn connect(
+        home: &Path,
+        accessibility: bool,
+        screen_recording: bool,
+        full_disk_access: bool,
+    ) -> FakeHelper {
         let socket = home.join("run/helper.sock");
         let deadline = Instant::now() + TIMEOUT;
         let stream = loop {
@@ -5031,7 +5036,7 @@ impl FakeHelper {
             std::thread::sleep(Duration::from_millis(20));
         };
         let mut out = stream.try_clone().unwrap();
-        let status = json!({"type": "status", "accessibility": accessibility, "screenRecording": screen_recording});
+        let status = json!({"type": "status", "accessibility": accessibility, "screenRecording": screen_recording, "fullDiskAccess": full_disk_access});
         writeln!(out, "{status}").unwrap();
         let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let (seen, input) = (calls.clone(), stream.try_clone().unwrap());
@@ -5042,6 +5047,12 @@ impl FakeHelper {
                 seen.lock().unwrap().push(call.clone());
                 let id = &call["id"];
                 let reply = match (call["action"].as_str().unwrap(), call["app"].as_str()) {
+                    ("messages", _) if !full_disk_access => {
+                        json!({"type": "reply", "id": id, "error": "Bate Helper is not allowed to read Messages."})
+                    }
+                    ("messages", _) => {
+                        json!({"type": "reply", "id": id, "output": "2026-03-01 09:12 me: hello\n"})
+                    }
                     ("apps", _) => {
                         json!({"type": "reply", "id": id, "output": "TextEdit\n  window 5 \"Untitled\" 500x400\n"})
                     }
@@ -5134,7 +5145,7 @@ fn a_bots_desktop_actions_go_to_the_helper_app_and_its_answers_come_back() {
             )),
         "{started}"
     );
-    let helper = FakeHelper::connect(&home, true, false);
+    let helper = FakeHelper::connect(&home, true, false, false);
     eventually("the first result", || results().len() == 1);
     assert_eq!(
         results()[0]["output"],
@@ -5232,6 +5243,108 @@ fn a_bots_desktop_actions_go_to_the_helper_app_and_its_answers_come_back() {
 }
 
 #[test]
+fn a_bot_reads_messages_through_the_helper_and_the_service_runs_no_script_for_it() {
+    let home = home("messages-read");
+    let osascript = home.join("fake-osascript");
+    fs::write(
+        &osascript,
+        "#!/bin/sh\ntouch \"$(dirname \"$0\")/osascript.ran\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&osascript, fs::Permissions::from_mode(0o755)).unwrap();
+    let opener = home.join("fake-open");
+    fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            home.join("open.log").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
+    let me = std::env::current_exe().unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_HELPER", &me)
+            .env("APPD_OPEN", &opener)
+            .env("BATE_OSASCRIPT", &osascript);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let log = home.join("bots").join(&bot).join("apple.log");
+    let ask = |w: &mut Window, nonce: &str, what: &str| -> Value {
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "text": format!("apple messages {what}")}),
+        );
+        w.wait_for(|f| f["entry"]["type"] == "turn_end");
+        serde_json::from_str(fs::read_to_string(&log).unwrap().lines().last().unwrap()).unwrap()
+    };
+    let sent = |helper: &FakeHelper| -> Vec<Value> {
+        helper
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let mut c = c.clone();
+                c.as_object_mut().unwrap().remove("id");
+                c
+            })
+            .collect()
+    };
+
+    // The helper lacks Full Disk Access: the bot is told as the helper says it, and the window
+    // can show it.
+    let helper = FakeHelper::connect(&home, true, true, false);
+    w.wait_for(|f| f["type"] == "helper_changed");
+    assert_eq!(w.ok("get_helper", json!({}))["fullDiskAccess"], false);
+    let result = ask(&mut w, "n1", "read limit=5");
+    assert_eq!(
+        result["error"],
+        "Bate Helper is not allowed to read Messages."
+    );
+    w.ok("open_helper_settings", json!({"pane": "full_disk_access"}));
+    eventually("System Settings to be opened", || {
+        fs::read_to_string(home.join("open.log"))
+            .unwrap_or_default()
+            .contains("com.apple.preference.security?Privacy_AllFiles")
+    });
+    helper.stream.shutdown(std::net::Shutdown::Both).unwrap();
+    eventually("the helper to be gone", || {
+        w.ok("get_helper", json!({}))["connected"] == false
+    });
+
+    // With it, what the bot asked reaches the helper exactly, and its text comes back.
+    let helper = FakeHelper::connect(&home, true, true, true);
+    eventually("the helper", || {
+        w.ok("get_helper", json!({}))["fullDiskAccess"] == true
+    });
+    let result = ask(&mut w, "n2", "read limit=5");
+    assert_eq!(result["output"], "2026-03-01 09:12 me: hello\n");
+    ask(&mut w, "n3", "search query=lunch to=+49100");
+    assert_eq!(
+        sent(&helper),
+        [
+            json!({"action": "messages", "limit": 5}),
+            json!({"action": "messages", "query": "lunch", "with": "+49100", "limit": 20}),
+        ]
+    );
+
+    // A call that is not well formed is refused here; nothing reaches the helper or a script.
+    for (nonce, what) in [
+        ("n4", "search"),
+        ("n5", "read query=x"),
+        ("n6", "read limit=0"),
+    ] {
+        let result = ask(&mut w, nonce, what);
+        assert!(result["error"].as_str().unwrap().contains('`'), "{result}");
+    }
+    assert_eq!(sent(&helper).len(), 2);
+    assert!(!home.join("osascript.ran").exists());
+}
+
+#[test]
 fn only_the_helper_program_may_connect_and_a_missing_helper_is_said_so() {
     let home = home("desktop-peer");
     // Not this program: a connection from the test is refused.
@@ -5240,10 +5353,12 @@ fn only_the_helper_program_may_connect_and_a_missing_helper_is_said_so() {
             .env("APPD_HELPER", "/bin/sh");
     });
     let mut w = Window::connect(&home);
-    let mut stranger = FakeHelper::connect(&home, true, true);
+    let mut stranger = FakeHelper::connect(&home, true, true, true);
     let mut closed = [0u8; 1];
-    stranger.stream.set_read_timeout(Some(TIMEOUT)).unwrap();
-    assert_eq!(stranger.stream.read(&mut closed).unwrap(), 0);
+    // macOS refuses the timeout (EINVAL) once the service has already closed the socket.
+    if stranger.stream.set_read_timeout(Some(TIMEOUT)).is_ok() {
+        assert_eq!(stranger.stream.read(&mut closed).unwrap(), 0);
+    }
     assert_eq!(w.ok("get_helper", json!({}))["connected"], false);
     drop(service);
 

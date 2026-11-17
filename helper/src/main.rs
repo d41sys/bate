@@ -1,9 +1,10 @@
 //! `bate-helper`, wrapped as `Bate Helper.app` (`helper/bundle.sh`): the one program that holds
-//! the macOS permissions Accessibility and Screen Recording, so the main app never needs them.
+//! the macOS permissions Accessibility, Screen Recording and Full Disk Access, so the main app never needs them.
 //! The service starts it and it connects to the service's helper socket; it does what a
 //! `Call` says and quits when the service goes. The protocol is in `PROTOCOL.md`.
 
 mod ax;
+mod messages;
 
 use proto::desktop::{Call, Frame, MAX_FRAME, Request};
 use proto::{read_frame, write_frame};
@@ -31,7 +32,13 @@ fn main() {
         eprintln!("bate-helper: {e}");
         exit(1)
     })));
-    let status = || (ax::trusted(), ax::can_capture());
+    let status = || {
+        (
+            ax::trusted(),
+            ax::can_capture(),
+            messages::full_disk_access(),
+        )
+    };
     let mut last = status();
     ax::ask_for_permissions();
     send(&out, &frame(last));
@@ -91,10 +98,11 @@ fn connect(socket: &Path) -> io::Result<UnixStream> {
     }
 }
 
-fn frame((accessibility, screen_recording): (bool, bool)) -> Frame {
+fn frame((accessibility, screen_recording, full_disk_access): (bool, bool, bool)) -> Frame {
     Frame::Status {
         accessibility,
         screen_recording,
+        full_disk_access,
     }
 }
 
@@ -108,6 +116,18 @@ fn send(out: &Mutex<UnixStream>, frame: &Frame) {
 
 /// Does one call: the text for the bot, and for a screenshot the PNG.
 fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8>>), String> {
+    let call = match call {
+        Call::Messages { query, with, limit } => {
+            return messages::read(
+                &messages::chat_db(),
+                query.as_deref(),
+                with.as_deref(),
+                limit,
+            )
+            .map(|text| (text, None));
+        }
+        call => call,
+    };
     let wins = ax::windows();
     let needs_accessibility = !matches!(call, Call::Apps | Call::Screenshot { .. });
     if needs_accessibility && !ax::trusted() {
@@ -122,6 +142,7 @@ fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8
         )),
     };
     match call {
+        Call::Messages { .. } => unreachable!("answered above"),
         Call::Apps => Ok((ax::apps_text(&wins), None)),
         Call::Look { app, window } => {
             let (text, seen) = ax::look(ax::find(&wins, &app, window)?)?;

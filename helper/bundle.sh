@@ -1,5 +1,5 @@
 #!/bin/sh
-# Wraps bate-helper as "Bate Helper.app": macOS gives Accessibility and Screen Recording to an
+# Wraps bate-helper as "Bate Helper.app": macOS gives Accessibility, Screen Recording and Full Disk Access to an
 # app, not to a bare program, and the service looks for it at a fixed path.
 #
 #   helper/bundle.sh [folder]     folder defaults to ~/Applications
