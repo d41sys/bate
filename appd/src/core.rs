@@ -2314,8 +2314,13 @@ impl Core {
             return;
         };
         let (bot, generation, tx) = (bot.to_owned(), r.generation, self.tx.clone());
+        let helper = self.desktop.clone();
         std::thread::spawn(move || {
-            let result = apple::run(&apple::Tools::system(), &tool, &args);
+            let result = match apple::history(&tool, &args) {
+                Some(Ok(call)) => helper.call(&bot, call),
+                Some(Err(e)) => Err(e),
+                None => apple::run(&apple::Tools::system(), &tool, &args),
+            };
             let _ = tx.send(Msg::Applied {
                 bot,
                 generation,

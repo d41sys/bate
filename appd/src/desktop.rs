@@ -1,5 +1,5 @@
-//! The helper app: `Bate Helper.app`, at a fixed path, holds the macOS permissions Accessibility
-//! and Screen Recording, so the service and the window never need them. The service listens on
+//! The helper app: `Bate Helper.app`, at a fixed path, holds the macOS permissions Accessibility,
+//! Screen Recording and Full Disk Access, so the service and the window never need them. The service listens on
 //! a socket in its run dir, starts the helper on the first desktop action, and passes each
 //! call of a bot to it. Only the helper's own program may connect.
 
@@ -62,8 +62,9 @@ struct State {
     /// Counts connections, so the end of an old one does not undo a newer.
     connection: u64,
     writer: Option<UnixStream>,
-    /// The helper's macOS permissions, from its latest `status`: accessibility, screen recording.
-    status: Option<(bool, bool)>,
+    /// The helper's macOS permissions, from its latest `status`: accessibility, screen recording,
+    /// full disk access.
+    status: Option<(bool, bool, bool)>,
     next: u64,
     waiting: HashMap<u64, Sender<Frame>>,
 }
@@ -135,10 +136,11 @@ impl Link {
                 Ok(Some(Frame::Status {
                     accessibility,
                     screen_recording,
+                    full_disk_access,
                 })) => {
                     let mut state = lock(&self.0.state);
                     if state.connection == connection {
-                        state.status = Some((accessibility, screen_recording));
+                        state.status = Some((accessibility, screen_recording, full_disk_access));
                         drop(state);
                         let _ = self.0.tx.send(Msg::HelperChanged);
                     }
@@ -173,6 +175,7 @@ impl Link {
             "connected": state.writer.is_some(),
             "accessibility": state.status.map(|s| s.0),
             "screenRecording": state.status.map(|s| s.1),
+            "fullDiskAccess": state.status.map(|s| s.2),
         })
     }
 
@@ -182,7 +185,12 @@ impl Link {
         let pane = match pane {
             "accessibility" => "Privacy_Accessibility",
             "screen_recording" => "Privacy_ScreenCapture",
-            _ => return Err("`pane` must be accessibility or screen_recording".into()),
+            "full_disk_access" => "Privacy_AllFiles",
+            _ => {
+                return Err(
+                    "`pane` must be accessibility, screen_recording or full_disk_access".into(),
+                );
+            }
         };
         let link = self.clone();
         thread::spawn(move || {
