@@ -775,6 +775,67 @@ fn a_secret_the_keychain_cannot_keep_stays_in_app_db_and_in_use_until_it_can() {
 }
 
 #[test]
+fn two_homes_sharing_a_keychain_keep_their_secrets_apart() {
+    let (a, b) = (home("keychain-a"), home("keychain-b"));
+    let shared = std::env::temp_dir().join(format!("appd-{}-keychain-shared", std::process::id()));
+    let start = |home: &Path| {
+        Service::start_with(home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("APPD_KEYCHAIN", &shared);
+        })
+    };
+    let (_sa, _sb) = (start(&a), start(&b));
+    let (mut wa, mut wb) = (Window::connect(&a), Window::connect(&b));
+    wa.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:9/v1", "key": "sk-home-a"}),
+    );
+    // Home B has no key of its own: it must not find A's.
+    wb.ok("set_provider", json!({"url": "http://127.0.0.1:9/v1"}));
+    assert_eq!(wb.ok("get_provider", json!({}))["hasKey"], false);
+    wb.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:9/v1", "key": "sk-home-b"}),
+    );
+    wb.ok("set_provider", json!({"url": ""}));
+    // B's changes, its removal included, left A's key alone.
+    assert_eq!(wa.ok("get_provider", json!({}))["hasKey"], true);
+    let _ = fs::remove_file(&shared);
+}
+
+#[test]
+fn a_renewed_chatgpt_sign_in_is_not_lost_when_the_keychain_refuses_it() {
+    build_engine();
+    let openai = ChatGpt::start();
+    let home = home("keychain-renewal");
+    let start = || {
+        Service::start_with(&home, |c| {
+            c.env_remove("APPD_ENGINE")
+                .env("BATE_CHATGPT_AUTH", &openai.base)
+                .env("BATE_CHATGPT_API", format!("{}/v1", openai.base))
+                .env("BATE_MODEL_BASE_URL", "http://127.0.0.1:9/v1")
+                // A keychain file that cannot be made: its "folder" is a file.
+                .env("APPD_KEYCHAIN", home.join("fake-engine/keychain"));
+        })
+    };
+    let mut service = start();
+    let mut w = Window::connect(&home);
+    sign_in_chatgpt(&mut w, &openai);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "gpt-test"}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    let end = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert_eq!(end["entry"]["reason"], "done", "{end}");
+    // OpenAI replaced the refresh token; the new one is the only one that works now.
+    assert!(db_holds(&home, "plan-rt-2"), "the renewed token was lost");
+    drop(w);
+    service.kill();
+    let _service = start();
+    let mut w = Window::connect(&home);
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": true}));
+}
+
+#[test]
 fn secrets_given_to_the_service_are_kept_in_the_keychain_and_never_in_app_db() {
     let (home, telegram) = (home("keychain-new"), Telegram::start());
     let start = || {

@@ -174,13 +174,32 @@ fn kc<T>(r: keychain::Result<T>) -> Result<T> {
     r.map_err(|e| rusqlite::Error::ToSqlConversionFailure(format!("keychain: {e}").into()))
 }
 
-/// The secret kept under `account`. `legacy` is what an older `app.db` held in its place: it
-/// stands in until `move_secrets` has moved it, and when the Keychain cannot be read.
+/// Keeps `secret` under `account` (an empty one forgets it), and gives what must go in its
+/// column of `app.db` in the meantime: nothing when the Keychain has it, the secret itself when
+/// the Keychain refuses it (a prompt denied, a locked keychain). Dropping it then could lose a
+/// token the server has already replaced; `move_secrets` tries again at the next start.
+// shortcut: forgetting a secret the Keychain refuses to delete only logs, so an item that
+// outlives a sign-out comes back when the Keychain works again; upgrade with a tombstone if
+// that is ever seen (the sign-out is also revoked at the server).
+fn keep(account: &str, secret: &str) -> Result<Option<String>> {
+    match keychain::put(account, secret) {
+        Ok(()) => Ok(None),
+        Err(e) => {
+            log!("{account} stays in app.db: the Keychain did not keep it: {e}");
+            Ok(Some(secret.to_owned()).filter(|s| !s.is_empty()))
+        }
+    }
+}
+
+/// The secret kept under `account`. `legacy` is what `app.db` holds in its place: a secret not
+/// moved yet, or one the Keychain refused since. It is the newer: a refused one is written
+/// while the Keychain may still hold an older value.
 fn secret(account: &str, legacy: String) -> Result<String> {
+    if !legacy.is_empty() {
+        return Ok(legacy);
+    }
     match keychain::get(account) {
-        Ok(Some(found)) => Ok(found),
-        Ok(None) => Ok(legacy),
-        Err(_) if !legacy.is_empty() => Ok(legacy),
+        Ok(found) => Ok(found.unwrap_or_default()),
         Err(e) => kc(Err(e)),
     }
 }
@@ -356,11 +375,11 @@ impl Store {
     }
 
     pub fn set_provider(&self, url: &str, key: Option<&str>) -> Result<()> {
-        kc(keychain::put(PROVIDER_KEY, key.unwrap_or_default()))?;
+        let kept = keep(PROVIDER_KEY, key.unwrap_or_default())?;
         self.0
             .execute(
-                "INSERT INTO providers (id, url, key) VALUES (1, ?1, NULL)                  ON CONFLICT(id) DO UPDATE SET url = ?1, key = NULL",
-                [url],
+                "INSERT INTO providers (id, url, key) VALUES (1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET url = ?1, key = ?2",
+                params![url, kept],
             )
             .map(drop)
     }
@@ -396,11 +415,11 @@ impl Store {
     }
 
     pub fn set_channel(&self, bot: &str, kind: &str, token: &str) -> Result<()> {
-        kc(keychain::put(&channel_account(bot, kind), token))?;
+        let kept = keep(&channel_account(bot, kind), token)?;
         self.0
             .execute(
-                "INSERT OR REPLACE INTO channels(bot, kind, token) VALUES (?1, ?2, '')",
-                [bot, kind],
+                "INSERT OR REPLACE INTO channels(bot, kind, token) VALUES (?1, ?2, ?3)",
+                params![bot, kind, kept.unwrap_or_default()],
             )
             .map(drop)
     }
@@ -471,12 +490,12 @@ impl Store {
 
     pub fn set_chatgpt(&self, s: &crate::chatgpt::Saved) -> Result<()> {
         let expires = i64::try_from(s.expires_ms).unwrap_or(i64::MAX);
-        kc(keychain::put(CHATGPT_ACCESS, &s.access_token))?;
-        kc(keychain::put(CHATGPT_REFRESH, &s.refresh_token))?;
+        let access = keep(CHATGPT_ACCESS, &s.access_token)?;
+        let refresh = keep(CHATGPT_REFRESH, &s.refresh_token)?;
         self.0
             .execute(
-                "INSERT OR REPLACE INTO chatgpt (id, host_id, client_id, access_token, refresh_token, expires_ms) VALUES (1, ?1, ?2, '', '', ?3)",
-                params![s.host_id, s.client_id, expires],
+                "INSERT OR REPLACE INTO chatgpt (id, host_id, client_id, access_token, refresh_token, expires_ms) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+                params![s.host_id, s.client_id, access.unwrap_or_default(), refresh.unwrap_or_default(), expires],
             )
             .map(drop)
     }
@@ -1031,13 +1050,13 @@ impl Store {
         if known.optional()?.is_none() {
             return Ok(false);
         }
-        kc(keychain::put(
+        let kept = keep(
             &oauth_account(bot, name),
             &tokens.map(json).unwrap_or_default(),
-        ))?;
+        )?;
         self.0.execute(
-            "UPDATE oauth SET tokens = NULL WHERE bot = ?1 AND name = ?2",
-            [bot, name],
+            "UPDATE oauth SET tokens = ?3 WHERE bot = ?1 AND name = ?2",
+            params![bot, name, kept],
         )?;
         Ok(true)
     }

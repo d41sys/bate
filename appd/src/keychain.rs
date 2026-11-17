@@ -1,5 +1,6 @@
 //! Secrets live in the macOS Keychain, not in `app.db`: one generic password per secret, all
-//! under one service. `APPD_KEYCHAIN=<file>` swaps the login keychain for a keychain file of
+//! under one service: the launchd label, which is made per home, so two services with different
+//! homes never read, overwrite or delete each other's. `APPD_KEYCHAIN=<file>` swaps the login keychain for a keychain file of
 //! its own, through the same Security.framework calls; the tests use it so they never touch the
 //! user's.
 
@@ -8,7 +9,6 @@ use security_framework::os::macos::keychain::{CreateOptions, SecKeychain};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-const SERVICE: &str = "com.oursnever.bate";
 /// Protects nothing: a keychain file made through `APPD_KEYCHAIN` holds test data only.
 const FILE_PASSWORD: &str = "bate-test";
 const ITEM_NOT_FOUND: i32 = -25300;
@@ -32,7 +32,7 @@ fn open() -> Result<SecKeychain> {
 
 /// The secret kept under `account`, if there is one.
 pub fn get(account: &str) -> Result<Option<String>> {
-    match open()?.find_generic_password(SERVICE, account) {
+    match open()?.find_generic_password(&crate::launch::label(), account) {
         Ok((secret, _)) => Ok(Some(String::from_utf8_lossy(&secret).into_owned())),
         Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
         Err(e) => Err(e),
@@ -44,12 +44,12 @@ pub fn put(account: &str, secret: &str) -> Result<()> {
     if secret.is_empty() {
         return delete(account);
     }
-    open()?.set_generic_password(SERVICE, account, secret.as_bytes())
+    open()?.set_generic_password(&crate::launch::label(), account, secret.as_bytes())
 }
 
 /// Forgets `account`; fine if there is none.
 pub fn delete(account: &str) -> Result<()> {
-    match open()?.find_generic_password(SERVICE, account) {
+    match open()?.find_generic_password(&crate::launch::label(), account) {
         // `delete` reports nothing: look again.
         Ok((_, item)) => item.delete(),
         Err(e) if e.code() == ITEM_NOT_FOUND => return Ok(()),
