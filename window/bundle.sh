@@ -25,7 +25,10 @@ identity=${SIGN_IDENTITY:-}
 if [ -z "$identity" ]; then
     if security find-identity -v -p codesigning | grep -q '"Bate Dev"'; then identity="Bate Dev"; else identity="-"; fi
 fi
-sign_options=
+# The hardened runtime always: without it a program ignores DYLD_INSERT_LIBRARIES, and code
+# injected into the window would pass the service's signature check. A secure timestamp is
+# for notarisation only (it needs the network).
+sign_options="--options runtime"
 [ -z "${BATE_NOTARIZE_PROFILE:-}" ] || sign_options="--options runtime --timestamp"
 
 # The page is compiled into the window.

@@ -335,7 +335,7 @@ A debug build reads `$BATE_BUNDLE` (the app to take itself to run from), `$BATE_
 
 ### Signatures
 
-When `appd` is signed with a certificate (Developer ID, or `Bate Dev`), a window connects to the socket only if its code is validly signed with the same certificate (`SecCodeCheckValidity` on the peer's audit token, requirement `certificate leaf = H"<sha1>"`); another program is closed without a `hello`. The service's own connections (the LAN relay) pass. An ad-hoc or unsigned `appd` (a build folder) checks nothing beyond the user. A debug build reads the certificate's SHA-1 from `$BATE_SIGNER_LEAF` for tests.
+When `appd` is signed with a certificate (Developer ID, or `Bate Dev`), a window connects to the socket only if its code is validly signed with the same certificate (`SecCodeCheckValidity` on the peer's audit token, requirement `certificate leaf = H"<sha1>"`); another program is closed without a `hello`. The check is not a boundary against code running as the same user (the peer is looked at when it connects, not per message); per-message audit tokens (XPC) would be. The service's own connections (the LAN relay) pass. An ad-hoc or unsigned `appd` (a build folder) checks nothing beyond the user. A debug build reads the certificate's SHA-1 from `$BATE_SIGNER_LEAF` for tests.
 
 ### Updates
 

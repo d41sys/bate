@@ -508,6 +508,11 @@ fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
 
 #[test]
 fn a_service_signed_with_a_certificate_refuses_a_window_signed_otherwise() {
+    // The overrides this test relies on exist only in debug builds; without them it would reach
+    // the real launchd.
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let home = home("signer");
     // `BATE_SIGNER_LEAF` (debug builds): as if appd were signed with this certificate. This test
     // program is not signed with it, so it is not the service's window.
@@ -540,6 +545,11 @@ fn appd_in_bundle(home: &Path, fake: &Path, app: &Path, command: &str) -> std::p
 
 #[test]
 fn a_bundled_service_registers_once_from_applications_and_opens_settings_when_approval_is_needed() {
+    // The overrides this test relies on exist only in debug builds; without them it would reach
+    // the real launchd.
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let home = home("login-item");
     let app = home.join("Applications/Bate.app");
     let fake = home.join("fake-login-items");
@@ -5548,6 +5558,11 @@ fn desktop_actions_are_asked_about_per_app_and_the_level_never_refuses_them() {
 
 #[test]
 fn from_an_app_the_install_replaces_the_whole_app_and_the_programs_beside_it_stay() {
+    // The overrides this test relies on exist only in debug builds; without them it would reach
+    // the real launchd.
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let (key, pubkey) = new_key();
     let scratch = home("update-app-files");
     let archive = release(&scratch, "9.9.9");

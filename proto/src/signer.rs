@@ -83,6 +83,8 @@ pub fn own_requirement() -> Option<&'static str> {
 
 /// The audit token of the process on the other end of `stream`: it names that process alone,
 /// where a process id can be reused.
+// shortcut: the token is read when this runs, not per message, so a process of the same user can
+// connect, queue frames, then exec a signed program and pass; upgrade to per-message audit tokens (XPC).
 fn peer_token(stream: &UnixStream) -> Option<[u32; 8]> {
     let mut token = [0u32; 8];
     let mut len = std::mem::size_of_val(&token) as libc::socklen_t;

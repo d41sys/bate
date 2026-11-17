@@ -17,7 +17,9 @@ impl Note {
 
     /// Runs `appd launch` of the app this program is in, if it is in one, on a thread of its own.
     pub fn start(&self) {
-        let Some(app) = proto::paths::bundle() else {
+        // A custom data folder is a dev or test run: its service is started by hand.
+        let custom_home = std::env::var_os("APPD_HOME").is_some_and(|h| !h.is_empty());
+        let Some(app) = proto::paths::bundle().filter(|_| !custom_home) else {
             return;
         };
         let note = self.0.clone();
