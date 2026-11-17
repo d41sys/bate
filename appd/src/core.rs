@@ -27,7 +27,7 @@ use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{apple, browser, oauth};
-use crate::{limit, memory, paths, schedule, skills};
+use crate::{limit, memory, paths, schedule, skills, update};
 
 pub enum Msg {
     ClientConnected {
@@ -58,6 +58,10 @@ pub enum Msg {
         models: Vec<String>,
     },
     ChatGpt(ChatGptNews),
+    /// Time to read the update feed.
+    UpdateDue,
+    /// What came of reading the feed: a release staged, nothing new, or why not.
+    Update(Result<Option<update::Staged>, String>),
     /// News from the reader of a bot's channel; `reader` says which reader.
     Channel {
         bot: String,
@@ -104,6 +108,13 @@ const MAX_REPLY: usize = 100_000;
 const CATCH_UP_MS: u64 = 6 * 3600 * 1000;
 /// The core wakes at least this often while a routine is enabled.
 const TICK: Duration = Duration::from_secs(30);
+
+fn updates_off() -> Refusal {
+    (
+        "updates_off",
+        "this build has no update key, so it does not update itself".into(),
+    )
+}
 
 /// `(code, message)` of a refused request.
 type Refusal = (&'static str, String);
@@ -289,7 +300,25 @@ pub enum ChatGptNews {
 /// How long before its end an access token is renewed.
 const RENEW_BEFORE_MS: u64 = 60_000;
 
+/// Where updates stand. The core swaps the programs only when no bot is replying.
+#[derive(Default)]
+struct Updates {
+    /// A thread is reading the feed.
+    checking: bool,
+    /// Windows that asked `check_update`: answered when the check is over.
+    waiting: Vec<(u64, Value)>,
+    /// Downloaded and verified; waits for `install_update`.
+    ready: Option<update::Staged>,
+    /// `install_update` came: the swap follows as soon as no bot is replying.
+    install: bool,
+    /// Why the last check or install failed.
+    error: Option<String>,
+}
+
 pub struct Core {
+    /// The key releases must be signed with; `None`: updates are off.
+    update_key: Option<Vec<u8>>,
+    update: Updates,
     /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
     /// renewed; `Some` while a renewal runs, so that there is one at a time.
     chatgpt_waiting: Option<Vec<(String, String)>>,
@@ -347,7 +376,18 @@ impl Core {
                 readers.insert((bot, kind), reader);
             }
         }
+        let update_key = update::public_key();
+        if update_key.is_some() {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                while tx.send(Msg::UpdateDue).is_ok() {
+                    thread::sleep(update::EVERY);
+                }
+            });
+        }
         Core {
+            update_key,
+            update: Updates::default(),
             hook_port,
             lan,
             channels: readers,
@@ -367,6 +407,7 @@ impl Core {
 
     pub fn run(mut self, rx: Receiver<Msg>) {
         loop {
+            self.install_if_idle();
             let wait = self.run_due_routines();
             match rx.recv_timeout(wait) {
                 Ok(msg) => self.handle(msg),
@@ -456,6 +497,8 @@ impl Core {
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
             Msg::ChatGpt(news) => self.on_chatgpt(news),
+            Msg::UpdateDue => self.start_check(),
+            Msg::Update(result) => self.on_update(result),
             Msg::Channel {
                 bot,
                 kind,
@@ -1244,6 +1287,27 @@ impl Core {
                 }
                 Ok(Some(json!({})))
             }
+            "get_update" => Ok(Some(self.update_info())),
+            "check_update" => {
+                if self.update_key.is_none() {
+                    return Err(updates_off());
+                }
+                // Answered by `on_update`, when the feed has been read.
+                self.update.waiting.push((client, id.clone()));
+                self.start_check();
+                Ok(None)
+            }
+            "install_update" => {
+                if self.update_key.is_none() {
+                    return Err(updates_off());
+                }
+                if self.update.ready.is_none() {
+                    return Err(("no_update", "there is no update to install".into()));
+                }
+                self.update.install = true;
+                self.broadcast(&json!({"type": "update_changed"}));
+                Ok(Some(self.update_info()))
+            }
             "get_chatgpt" => {
                 let saved = self.store.chatgpt().map_err(internal)?;
                 Ok(Some(
@@ -1775,6 +1839,99 @@ impl Core {
         g.id.get_or_insert_with(|| sys::random_hex(4));
         self.store.put_group(&g).map_err(internal)?;
         Ok(g)
+    }
+
+    /// `get_update`'s answer.
+    fn update_info(&self) -> Value {
+        let u = &self.update;
+        let state = match () {
+            _ if self.update_key.is_none() => "off",
+            _ if u.install => "waiting",
+            _ if u.checking => "checking",
+            _ if u.ready.is_some() => "ready",
+            _ if u.error.is_some() => "error",
+            _ => "current",
+        };
+        json!({
+            "state": state,
+            "current": update::current(),
+            "available": u.ready.as_ref().map(|s| s.version.as_str()),
+            "error": u.error,
+        })
+    }
+
+    /// Reads the feed on its own thread, unless that is already going on.
+    fn start_check(&mut self) {
+        let Some(key) = self.update_key.clone() else {
+            return;
+        };
+        if self.update.checking {
+            return;
+        }
+        self.update.checking = true;
+        self.broadcast(&json!({"type": "update_changed"}));
+        let staged = self.update.ready.as_ref().map(|s| s.version.clone());
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Msg::Update(update::fetch(&key, staged.as_deref())));
+        });
+    }
+
+    fn on_update(&mut self, result: Result<Option<update::Staged>, String>) {
+        self.update.checking = false;
+        let answer = match result {
+            Ok(found) => {
+                if let Some(staged) = found {
+                    log!("update {} is ready", staged.version);
+                    self.update.ready = Some(staged);
+                    // What was asked for was the release before this one.
+                    self.update.install = false;
+                }
+                self.update.error = None;
+                Ok(self.update_info())
+            }
+            Err(e) => {
+                log!("update check: {e}");
+                self.update.error = Some(e.clone());
+                Err(e)
+            }
+        };
+        for (client, id) in std::mem::take(&mut self.update.waiting) {
+            let reply = answer.clone().map_err(|e| ("update_failed", e));
+            self.reply(client, &id, "check_update", reply);
+        }
+        self.broadcast(&json!({"type": "update_changed"}));
+    }
+
+    /// With an install asked for and no bot replying, swaps the programs and exits for launchd
+    /// to start the new ones. This thread is the only one that starts turns, so none begins
+    /// between the check and the exit.
+    fn install_if_idle(&mut self) {
+        let Some(staged) = self.update.ready.as_ref().filter(|_| self.update.install) else {
+            return;
+        };
+        let busy = self
+            .engines
+            .iter()
+            .any(|(bot, r)| self.occupied(bot) || r.compacting > 0);
+        if busy {
+            return;
+        }
+        match update::install(staged) {
+            Ok(()) => {
+                log!("update {} installed: restarting", staged.version);
+                // shortcut: a pause for the answer to `install_update` to leave the socket;
+                // windows reconnect either way.
+                thread::sleep(Duration::from_millis(200));
+                std::process::exit(update::RESTART_CODE);
+            }
+            Err(e) => {
+                log!("update not installed: {e}");
+                self.update.error = Some(format!("cannot install: {e}"));
+                self.update.install = false;
+                self.broadcast(&json!({"type": "update_changed"}));
+            }
+        }
     }
 
     /// Whether a prompt sent to `bot` now would be refused: a turn runs, or a prompt is with

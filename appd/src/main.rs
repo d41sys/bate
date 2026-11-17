@@ -24,6 +24,7 @@ mod schedule;
 mod skills;
 mod store;
 mod sys;
+mod update;
 
 use std::fs;
 use std::io;
@@ -40,7 +41,11 @@ const USAGE: &str = "usage:
   appd launch       register this appd with launchd and start it
   appd unregister   stop the service and remove its launchd registration
   appd gate chatgpt [model]
-                    sign in to ChatGPT in the browser, send one request, print the reply";
+                    sign in to ChatGPT in the browser, send one request, print the reply
+  appd update keygen
+                    print a new key for signing releases (a private and a public half)
+  appd update sign <archive> <version> [url]
+                    print the signed feed.json for a release archive; the private key is in $BATE_UPDATE_KEY";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -48,6 +53,8 @@ fn main() -> ExitCode {
     let result = match (arg.as_deref(), what.as_deref()) {
         (None, _) => serve(),
         (Some("gate"), Some("chatgpt")) => gate::chatgpt(args.next()),
+        (Some("update"), Some("keygen")) => update::keygen(),
+        (Some("update"), Some("sign")) => update::sign(args.next(), args.next(), args.next()),
         (Some("launch"), _) => std::env::current_exe().and_then(|exe| launch::ensure(&exe)),
         (Some("unregister"), _) => launch::remove().map(|removed| {
             if !removed {

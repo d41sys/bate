@@ -21,7 +21,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # A `v*` tag publishes the two programs as a GitHub release. Unsigned until #37.
+  # A `v*` tag publishes the two programs as a GitHub release (not code-signed until #37), and
+  # with the `BATE_UPDATE_KEY` secret set, the update feed for it.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
@@ -30,8 +31,22 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      # The tag is the version the running programs report; if the two differ, an updated
+      # app would be offered the same release again.
+      - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
+      # The public half of the update key is compiled in (unset: the app does not update itself).
       - run: cargo build --release --locked -p appd -p agentcore
+        env:
+          BATE_UPDATE_PUBKEY: ${{ vars.BATE_UPDATE_PUBKEY }}
       - run: tar -czf "bate-$GITHUB_REF_NAME-macos-arm64.tar.gz" -C target/release appd agentcore
-      - run: gh release create "$GITHUB_REF_NAME" bate-*.tar.gz --generate-notes
+      # With a signing key, the release also carries the feed that installed apps read.
+      - run: |
+          files=(bate-*.tar.gz)
+          if [ -n "$BATE_UPDATE_KEY" ]; then
+            target/release/appd update sign "${files[0]}" "${GITHUB_REF_NAME#v}" > feed.json
+            files+=(feed.json)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+          BATE_UPDATE_KEY: ${{ secrets.BATE_UPDATE_KEY }}
