@@ -11,6 +11,7 @@ mod clients;
 mod core;
 mod gate;
 mod hooks;
+mod keychain;
 mod lan;
 mod launch;
 mod limit;
