@@ -40,4 +40,5 @@ cat "$found"; echo
 echo "opened: $(tr '\n' ' ' < "$home/opened.txt" 2>/dev/null)"
 [ "$(head -1 "$found")" = PASS ] &&
     grep -q 'from=page' "$home/opened.txt" &&
+    grep -q 'from=link' "$home/opened.txt" &&
     ! grep -q leak "$home/opened.txt"
