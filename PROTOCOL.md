@@ -150,7 +150,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_chatgpt` | none | `{signedIn}`: whether bots run on a ChatGPT plan |
 | `sign_in_chatgpt` | none | `{url}`: the address to open in the browser. The service listens on `127.0.0.1:1455` (another port when taken) for 10 minutes; when the browser comes back, or the sign-in fails, `chatgpt_changed` is sent, with `error` when it failed. Code `sign_in_failed` |
 | `sign_out_chatgpt` | none | `{}`: forgets the tokens, keeps the registration, and asks OpenAI to end the session (one try; a failure is logged). Sends `chatgpt_changed` |
-| `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
+| `lan_status` | none | `{on, port?, urls?, tailscaleUrls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs on local networks, its URLs on the user's Tailscale network (the MagicDNS name, then 100.64.0.0/10 addresses), its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
 | `remove_device` | `device` (an id) | `{}`: forgets the device, ending its active sessions immediately |
@@ -350,6 +350,8 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 ### Other devices on the local network (LAN)
 
 When enabled in Settings, the service serves Bate's web client over HTTPS on port 47822 (`APPD_LAN_PORT`) using a self-signed certificate generated once in `lan/cert.pem` with its SHA-256 fingerprint shown in the window.
+
+The same page is reachable from the user's own Tailscale network (no relay of Bate's): the listener is on every interface, so a device on the tailnet pairs and works as on the local network. The certificate also names this Mac's MagicDNS name and Tailscale addresses (from `tailscale status --json`, read when serving starts; `APPD_TAILSCALE` names another command) and is made again when these change, which changes its fingerprint. It is still self-signed: `tailscale cert` is not used. Local networks and Tailscale's 100.64.0.0/10 are alike treated as the user's own.
 
 - Devices pair using a 6-digit code shown in Bate's window; pairing issues an `HttpOnly`, `Secure`, `SameSite=Strict` cookie containing a 32-byte hex token. The service stores only the SHA-256 hash of the token in `lan/devices.json`.
 - All API requests require the `X-Bate: 1` header.

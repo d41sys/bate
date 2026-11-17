@@ -1168,6 +1168,41 @@ impl Device {
 }
 
 #[test]
+fn the_page_for_other_devices_is_named_for_the_tailnet() {
+    let home = home("lan-tailscale");
+    // A stand-in for the Tailscale command: the real one would answer for this Mac.
+    let tailscale = home.join("tailscale");
+    fs::write(
+        &tailscale,
+        "#!/bin/sh\necho '{\"Self\": {\"DNSName\": \"mac.tail1.ts.net.\"}}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o755)).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0")
+            .env("APPD_TAILSCALE", &tailscale);
+    });
+    let mut w = Window::connect(&home);
+    let status = w.ok("set_lan", json!({"on": true}));
+    let port = status["port"].as_u64().unwrap();
+    assert_eq!(
+        status["tailscaleUrls"][0],
+        format!("https://mac.tail1.ts.net:{port}/"),
+        "{status}"
+    );
+    let cert = Command::new("/usr/bin/openssl")
+        .args(["x509", "-noout", "-text", "-in"])
+        .arg(home.join("lan/cert.pem"))
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&cert.stdout).contains("DNS:mac.tail1.ts.net"),
+        "{}",
+        String::from_utf8_lossy(&cert.stdout)
+    );
+}
+
+#[test]
 fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     let home = home("lan");
     let _service = Service::start_with(&home, |c| {
