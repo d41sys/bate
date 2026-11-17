@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod connectors;
+pub mod desktop;
 pub mod groups;
 pub mod memory;
 pub mod paths;
@@ -87,6 +88,14 @@ pub enum Op {
     },
     /// What came of the open `browser` request: the page as the bot sees it, or why not.
     BrowserResult {
+        request: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// What came of the open `desktop` request: what the helper saw or did, or why not.
+    DesktopResult {
         request: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
@@ -174,6 +183,12 @@ pub enum Event {
     /// Something to do in the bot's browser, which the service runs. The engine waits until
     /// the service sends `browser_result` for `request`.
     Browser {
+        request: String,
+        action: Map<String, Value>,
+    },
+    /// Something to do in other apps, which the service has the helper app do. The engine
+    /// waits until the service sends `desktop_result` for `request`.
+    Desktop {
         request: String,
         action: Map<String, Value>,
     },

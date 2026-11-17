@@ -1837,6 +1837,94 @@ fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did
 }
 
 #[test]
+fn the_desktop_tool_asks_for_the_app_and_waits_for_what_the_service_did() {
+    let dir = workdir("desktop");
+    let model = Model::serve(vec![
+        vec![call("c1", "desktop", json!({"action": "apps"}))],
+        vec![call(
+            "c2",
+            "desktop",
+            json!({"action": "type", "app": "TextEdit", "text": "hello"}),
+        )],
+        vec![call("c3", "desktop", json!({"action": "look"}))],
+        vec![call("c4", "desktop", json!({"action": "fly"}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("write a note");
+    let result = |request: &str, output: Option<&str>, error: Option<&str>| Op::DesktopResult {
+        request: request.into(),
+        output: output.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question {
+        kind,
+        target,
+        title,
+        ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Desktop), Some("apps"))
+    );
+    assert_eq!(title, "Desktop: list the apps and windows");
+    let asked = engine.until(|e| matches!(e, Event::Desktop { .. }));
+    let Some(Event::Desktop { request, action }) = asked.last() else {
+        unreachable!()
+    };
+    assert_eq!(action["action"], "apps");
+    // Only the desktop request takes a desktop result.
+    assert!(engine.request(result("b999", Some("x"), None)).is_some());
+    let browser = Op::BrowserResult {
+        request: request.clone(),
+        output: Some("x".into()),
+        error: None,
+    };
+    assert!(engine.request(browser).is_some());
+    assert_eq!(
+        engine.request(result(
+            request,
+            Some("TextEdit\n  window 5 \"Untitled\""),
+            None
+        )),
+        None
+    );
+
+    // Each app is asked about on its own, and a denial never reaches the service.
+    let events = answer(&mut engine, "Deny");
+    let Some(Event::Question { kind, target, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (kind, target.as_deref()),
+        (&Some(Kind::Desktop), Some("TextEdit"))
+    );
+    // `look` without an app is not asked about, nor sent: neither is a made-up action.
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    assert!(offered(&requests[0]).contains(&"desktop"));
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "TextEdit\n  window 5 \"Untitled\"");
+    assert_eq!(result(2), "The user denied this action.");
+    assert_eq!(
+        result(3),
+        "`app` must be the name of an app, as `apps` lists it."
+    );
+    assert_eq!(
+        result(4),
+        "`fly` is not an action: apps, look, screenshot, press, set_value or type."
+    );
+}
+
+#[test]
 fn the_engine_asks_for_the_token_before_each_model_call() {
     let dir = workdir("engine-token");
     let model = Model::serve(vec![vec![text("Hello with token")]]);

@@ -21,10 +21,18 @@ pub enum Kind {
     Run,
     /// Use a connector's tool.
     Connector,
+    /// See and control other apps through the helper app.
+    Desktop,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Read, Kind::Write, Kind::Run, Kind::Connector];
+    pub const ALL: [Kind; 5] = [
+        Kind::Read,
+        Kind::Write,
+        Kind::Run,
+        Kind::Connector,
+        Kind::Desktop,
+    ];
 
     /// The level of a bot that was never set up otherwise: reading is free, the rest asks.
     pub fn default_level(self) -> Level {
