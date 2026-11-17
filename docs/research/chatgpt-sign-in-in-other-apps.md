@@ -221,13 +221,19 @@ Compared 2026-11-17: Bate `appd/src/chatgpt.rs`, `agentcore/src/model.rs` agains
 |---|---|---|---|---|---|---|
 | OpenBot (`CopilotKit/OpenBot`, a Tauri desktop app) | Yes | A, by running OpenAI's own `codex login` | none | `chatgpt.com/backend-api/codex` | `GET chatgpt.com/backend-api/codex/models`, keeps `visibility == "list"`, first is the default | [chatgpt_models.py#L1-L32](https://github.com/CopilotKit/OpenBot/blob/7b1a7f6e591c077f6445dc295fd258529cdd001a/agent-langgraph-agui/src/chatgpt_models.py#L1-L32) |
 | OpenBot (`nightly-labs/openbot`, a desktop app that runs Codex as the agent) | Yes | A, by running OpenAI's own `codex login` | none | Codex's own | Codex's own | [TROUBLESHOOTING.md#L17](https://github.com/nightly-labs/openbot/blob/07b5e99673870c72b38aefb5e1ae7908e208b4ad/docs/TROUBLESHOOTING.md#L17) |
+| Kwant (`alexsergivan/kwant`, self-hosted bots) | Yes | A, by running OpenAI's own `codex login --device-auth` | none | Codex's own | Codex's own | [llm-profiles.md#L22-L24](https://github.com/alexsergivan/kwant/blob/9a6965a957ce5bd916bfd80a4a25c9db45112f20/docs/llm-profiles.md#L22-L24) |
+| Brigade (`spinabot/brigade`, built on pi `@earendil-works/pi-ai` 0.79.9) | Yes | A: pi's `openai-codex` sign-in, or the Codex CLI's saved login | none in Brigade's code (pi holds it) | not traced | not traced | [cli-login.ts#L56](https://github.com/spinabot/brigade/blob/6aa84b6ba9c749951a2f6801f887bfdc1d86bdc8/src/integrations/cli-login.ts#L56) |
+| AionUi (`iOfficeAI/AionUi`, a desktop front for other agents) | No sign-in of its own | runs the Codex CLI | none | n/a | n/a | [CHANGELOG.md#L928](https://github.com/iOfficeAI/AionUi/blob/e108b6b56b1a6eb99a00904878d0582f657b2908/CHANGELOG.md#L928) |
 
 - CopilotKit/OpenBot, why it holds no client id: `desktop/src-tauri/src/plan.rs:5-9` "Reimplementing that here would mean holding somebody else's OAuth client id, redirect and PKCE details and re-shipping them whenever any of it moves." Its claim about OpenAI, with no OpenAI source cited: `desktop/src-tauri/src/provider.rs:65` "OpenAI supports subscription OAuth in other people's tools: `codex login` exists for it".
 - CopilotKit/OpenBot, where the token goes: `agent-langgraph-agui/src/main.py:202` "A plan token is a bearer for `chatgpt.com/backend-api/codex`".
 - nightly-labs/openbot: `docs/TROUBLESHOOTING.md:17` "Then run `codex login`, sign in with ChatGPT, fully quit OpenBot, and open it again." Error text `packages/i18n/src/messages/en/error/provider.ts:263` "Codex requires a ChatGPT subscription login. Run `codex login`."
-- Neither repo contains `dynamic_agent_client`, `agent_name_hint` or `api/accounts/authorize` (searched with `rg`).
+- Kwant: `docs/llm-profiles.md:22-24` "runs the CLI's own login with the profile's home: ... `codex login --device-auth`".
+- Brigade: `README.md:185-186` "sign in with a Claude/ChatGPT/Copilot subscription, reuse your Claude Code or Codex CLI login"; `package.json:194` pins `@earendil-works/pi-ai` 0.79.9; `src/integrations/cli-login.ts:56` "Read Codex's stored login from `${CODEX_HOME || ~/.codex}/auth.json`". Its profiles are named `openai-codex`. Whether it also offers pi's Method B: not verified.
+- AionUi: no sign-in marker in the repo; `CHANGELOG.md:928` "update managed Codex ACP package". How the Codex it runs is signed in was not traced.
+- None of the five repos contains `dynamic_agent_client`, `agent_name_hint` or `api/accounts/authorize` (searched each clone with `rg`).
 
-Count for the bot apps alone (8): OpenClaw has both methods and defaults to A. The other seven have A only: Hermes Agent, nanobot, ZeroClaw and PicoClaw hold the Codex client id; NanoClaw and both OpenBots run `codex login`.
+Count for the bot apps alone (10 with a ChatGPT sign-in): OpenClaw has both methods and defaults to A. The other nine have A only: Hermes Agent, nanobot, ZeroClaw and PicoClaw hold the Codex client id; Brigade gets it through pi; NanoClaw, Kwant and both OpenBots run `codex login`.
 
 ### What each method gives, in OpenClaw's own words
 
@@ -236,7 +242,8 @@ OpenClaw is the one bot app with both, and its docs compare them (`docs/provider
 | | Sign in with ChatGPT (B) | Codex login (A) |
 |---|---|---|
 | Model access | "Eligible Responses models when token sharing is granted" | "Models available to your Codex account" |
-| Usage limits | "Weekly app limits and a workspace sharing cap on Business" | none listed |
+| Usage allowance | "Included ChatGPT plan usage or applicable credits" | "Your Codex allowance" |
+| Usage limits | "Weekly app limits and a workspace sharing cap on Business" | "—" (nothing listed; the Codex allowance has its own limits) |
 | Usage shown in the app | "Shared ChatGPT Usage page; no per-app OpenClaw metrics" | "Codex usage and quota reporting" |
 | Image generation | "Not supported by this credential" | needs a Codex OAuth profile and account access |
 | Audio transcription | "Not supported by this credential" | "Subscription transcription route, subject to account access" |
