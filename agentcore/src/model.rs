@@ -255,6 +255,14 @@ impl Provider {
                             "the ChatGPT plan's usage limit is reached (for the plan, or for \
                              Bate): see https://chatgpt.com/settings/usage ({e})"
                         )
+                    } else if e
+                        .contains("subscription_sharing_workplace_individual_usage_limit_exceeded")
+                    {
+                        // A ChatGPT Business plan: only the workspace's admin can raise it.
+                        format!(
+                            "your ChatGPT workspace's usage limit is reached: ask its admin to \
+                             raise it at admin.openai.com, Workspace, Usage limits ({e})"
+                        )
                     } else {
                         e
                     }
