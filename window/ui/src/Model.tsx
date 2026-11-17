@@ -15,11 +15,13 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
     setModel(bot.model ?? "");
     setEffort(bot.effort ?? "");
   }, [bot.model, bot.effort]);
+  // Again when the sign-in changes: the list is the plan's then, or the model server's.
   useEffect(() => {
-    void request<{ models: string[] }>("list_models").then(
-      (d) => setServerModels(d.models),
-      () => {},
-    );
+    const load = () => void request<{ models: string[] }>("list_models").then((d) => setServerModels(d.models), () => {});
+    load();
+    return listen((frame) => {
+      if (frame.type === "chatgpt_changed") load();
+    });
   }, []);
   const [onPlan, setOnPlan] = useState(false);
   // Only Bate's own window may read the sign-in, as in Settings.
