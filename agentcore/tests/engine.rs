@@ -43,7 +43,8 @@ impl Model {
         Model::send(replies.into_iter().map(body).collect(), true)
     }
 
-    /// Sends recorded reply bodies byte for byte, one per request, and closes after each.
+    /// Sends recorded reply bodies byte for byte, one per request, and closes after each. A body
+    /// that starts with `HTTP/` is a whole answer, status line and headers included.
     fn replay(bodies: Vec<Vec<u8>>) -> Model {
         Model::send(bodies, false)
     }
@@ -80,8 +81,10 @@ impl Model {
                 seen.lock()
                     .unwrap()
                     .push(serde_json::from_slice(&body).unwrap());
-                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
-                let _ = stream.write_all(head.as_bytes());
+                if !reply.starts_with(b"HTTP/") {
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes());
+                }
                 let _ = stream.write_all(&reply);
                 if keep_open {
                     let _ = reader.read(&mut [0]);
@@ -2015,15 +2018,18 @@ fn a_responses_stream_that_fails_or_just_ends_is_an_error_with_its_reason() {
                 "code": "subscription_sharing_usage_limit_exceeded", "message": "Limit reached."}}}),
         ]),
         responses_body(&[json!({"type": "response.output_text.delta", "delta": "So"})]),
+        b"HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+          {\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\",\"message\":\"Limit reached.\"}}"
+            .to_vec(),
     ]);
     let mut engine = Engine::start_manual_token(&dir, &model, &[]);
     engine.open_new();
     for (nonce, why) in [
-        (
-            "n1",
-            "the model server failed: subscription_sharing_usage_limit_exceeded: Limit reached.",
-        ),
+        // OpenAI's usage limit says where to look: a turn can't tell the plan's from Bate's own.
+        ("n1", "https://chatgpt.com/settings/usage"),
         ("n2", "the model's reply was cut off"),
+        // The same limit as the answer's status, before any stream.
+        ("n3", "https://chatgpt.com/settings/usage"),
     ] {
         engine.prompt_as(nonce, "Hi");
         give_responses_token(&mut engine, &model);

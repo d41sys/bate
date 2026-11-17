@@ -47,6 +47,10 @@ const off = listen(async (frame) => {
   });
   // The way out the page itself has: the script checks this one did get to the opener.
   openInBrowser("https://example.com/?from=page");
+  // A link that opens a new tab (as in replies): the page's click handler takes it to the opener.
+  const link = Object.assign(document.createElement("a"), { href: "https://example.com/?from=link", target: "_blank" });
+  document.body.append(link);
+  link.click();
   // Give anything that did get through time to arrive.
   await new Promise((r) => setTimeout(r, 1500));
   const { bots } = await request<{ bots: { name: string }[] }>("list_bots");

@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { request } from "./service.ts";
+import { inShell, listen, request } from "./service.ts";
 import type { Bot } from "./types.ts";
 
 const EFFORTS = ["minimal", "low", "medium", "high"];
@@ -20,6 +20,16 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
       (d) => setServerModels(d.models),
       () => {},
     );
+  }, []);
+  const [onPlan, setOnPlan] = useState(false);
+  // Only Bate's own window may read the sign-in, as in Settings.
+  useEffect(() => {
+    if (!inShell) return;
+    const load = () => request<{ signedIn: boolean }>("get_chatgpt").then((c) => setOnPlan(c.signedIn), () => {});
+    load();
+    return listen((frame) => {
+      if (frame.type === "chatgpt_changed") load();
+    });
   }, []);
   const known = [...new Set([...serverModels, ...bots.flatMap((b) => (b.model ? [b.model] : []))])];
   // An empty model: back to the engine's default, effort with it.
@@ -44,6 +54,11 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
       </label>
       <button disabled={model.trim() === (bot.model ?? "") && effort === (bot.effort ?? "")}>Use</button>
       {error && <span className="error" role="alert">{error}</span>}
+      {onPlan && (
+        <span>
+          Using ChatGPT plan · <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
+        </span>
+      )}
     </form>
   );
 }
