@@ -5355,8 +5355,10 @@ fn only_the_helper_program_may_connect_and_a_missing_helper_is_said_so() {
     let mut w = Window::connect(&home);
     let mut stranger = FakeHelper::connect(&home, true, true, true);
     let mut closed = [0u8; 1];
-    stranger.stream.set_read_timeout(Some(TIMEOUT)).unwrap();
-    assert_eq!(stranger.stream.read(&mut closed).unwrap(), 0);
+    // macOS refuses the timeout (EINVAL) once the service has already closed the socket.
+    if stranger.stream.set_read_timeout(Some(TIMEOUT)).is_ok() {
+        assert_eq!(stranger.stream.read(&mut closed).unwrap(), 0);
+    }
     assert_eq!(w.ok("get_helper", json!({}))["connected"], false);
     drop(service);
 
