@@ -2215,6 +2215,9 @@ fn a_responses_stream_that_fails_or_just_ends_is_an_error_with_its_reason() {
         b"HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
           {\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\",\"message\":\"Limit reached.\"}}"
             .to_vec(),
+        b"HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+          {\"error\":{\"code\":\"subscription_sharing_workplace_individual_usage_limit_exceeded\",\"message\":\"Limit reached.\"}}"
+            .to_vec(),
     ]);
     let mut engine = Engine::start_manual_token(&dir, &model, &[]);
     engine.open_new();
@@ -2224,6 +2227,8 @@ fn a_responses_stream_that_fails_or_just_ends_is_an_error_with_its_reason() {
         ("n2", "the model's reply was cut off"),
         // The same limit as the answer's status, before any stream.
         ("n3", "https://chatgpt.com/settings/usage"),
+        // A workspace's own limit is its admin's to raise.
+        ("n4", "ask its admin"),
     ] {
         engine.prompt_as(nonce, "Hi");
         give_responses_token(&mut engine, &model);

@@ -313,8 +313,9 @@ pub enum ChatGptNews {
     Renewed(String, Result<chatgpt::Saved, chatgpt::Failed>),
 }
 
-/// How long before its end an access token is renewed.
-const RENEW_BEFORE_MS: u64 = 60_000;
+/// How long before its end an access token is renewed: a long request does not start on a
+/// token about to end.
+const RENEW_BEFORE_MS: u64 = 180_000;
 
 /// Where updates stand. The core swaps the programs only when no bot is replying.
 #[derive(Default)]
