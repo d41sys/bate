@@ -360,7 +360,7 @@ Bate's engine has a tool for each of Messages, Mail, Notes, Reminders, Calendar 
 
 | Tool | Reads (`apple_read`) | Sends or changes (`apple_change`) |
 |---|---|---|
-| `messages` | `read` (`chat?`, `query?`, `limit?`) | `send` (`to`, `text`) |
+| `messages` | none | `send` (`to`, `text`) |
 | `mail` | `search`, `read` | `draft`, `send` |
 | `notes` | `list`, `read` | `create`, `edit`, `delete` |
 | `reminders` | `list` | `create`, `edit`, `complete`, `delete` |
@@ -371,9 +371,9 @@ The engine checks the call (a known action; every field text of at most 100 000 
 
 An `apple_change` is asked about every time: whatever its level (`always` is refused by `set_permission`, and treated as `ask` if one is found stored) and whatever was answered before, the user gets a card with the options `Approve` and `Deny`; `Always` on it is refused (`bad_request`). Only `never` answers without asking, with `Deny`. `apple_read` follows its level like any other kind and starts on `ask`.
 
-The service runs the action, not the engine, because a limited bot's engine may not send Apple events or read the user's files (see Folder limit). It checks the call again with the same table, then runs the app's script with `/usr/bin/osascript` (at most 120 s; output cut at 64 KiB). Scripts are fixed text built into `appd`; what the model wrote reaches them only as `argv` (`-l AppleScript -e <script> -- <arguments>`), never as part of the source. Debug builds of `appd` take `BATE_OSASCRIPT` (another program) and `BATE_MESSAGES_DB` (another history file), so tests record calls and touch no app.
+The service runs the action, not the engine, because a limited bot's engine may not send Apple events or read the user's files (see Folder limit). It checks the call again with the same table, then runs the app's script with `/usr/bin/osascript` (at most 120 s; output cut at 64 KiB). Scripts are fixed text built into `appd`; what the model wrote reaches them only as `argv` (`-l AppleScript -e <script> -- <arguments>`), never as part of the source. Debug builds of `appd` take `BATE_OSASCRIPT` (another program) so tests record calls and touch no app.
 
-Messages' scripting cannot read old messages, so `messages read` reads `~/Library/Messages/chat.db` read-only (newest first, at most 100; with `query`, within the newest 2000), which needs Full Disk Access for the `appd` program; without it the result says so. Text that newer macOS keeps only in a message's archived form is decoded. `messages send` goes to one person (`to`: phone number or address), not to a group. `mail` searches and reads the inbox only; `draft` leaves the message open in a Mail window, unsent. The first use of each app makes macOS ask the user to allow `appd` under Automation (and Contacts, Calendars and Reminders); a refusal comes back as an error that says where to allow it.
+Reading Messages' history is not offered: the app's scripting cannot read old messages, and its history file needs Full Disk Access, which the service must not hold (every program it starts would inherit it). It is to come through the helper app that holds privacy permissions. `messages send` goes to one person (`to`: phone number or address), not to a group. `mail` searches and reads the inbox only; `draft` leaves the message open in a Mail window, unsent. The first use of each app makes macOS ask the user to allow `appd` under Automation (and Contacts, Calendars and Reminders); a refusal comes back as an error that says where to allow it.
 
 ### Installed agents (ACP)
 

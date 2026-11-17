@@ -6,7 +6,6 @@
 //! of the source, so no text can turn into AppleScript.
 
 use proto::apple::App;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,29 +16,20 @@ use std::time::{Duration, Instant};
 const OUTPUT_CAP: usize = 64 << 10;
 /// An app may sit on a macOS permission prompt for a while.
 const TIMEOUT: Duration = Duration::from_secs(120);
-/// Most messages one `read` looks through when it filters by text.
-const SCAN: i64 = 2000;
 
-/// The program that runs scripts and the file that holds Messages' history. Debug builds take
-/// `BATE_OSASCRIPT` and `BATE_MESSAGES_DB`, so a test records calls instead of touching an app.
+/// The program that runs scripts. Debug builds take `BATE_OSASCRIPT`, so a test records calls
+/// instead of touching an app.
 pub struct Tools {
     pub osascript: PathBuf,
-    pub chat_db: PathBuf,
 }
 
 impl Tools {
     pub fn system() -> Tools {
-        let env = |name: &str| {
-            std::env::var_os(name)
-                .filter(|_| cfg!(debug_assertions))
-                .map(PathBuf::from)
-        };
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let env = std::env::var_os("BATE_OSASCRIPT").filter(|_| cfg!(debug_assertions));
         Tools {
-            osascript: env("BATE_OSASCRIPT").unwrap_or("/usr/bin/osascript".into()),
-            chat_db: env("BATE_MESSAGES_DB").unwrap_or(home.join("Library/Messages/chat.db")),
+            osascript: env
+                .map(PathBuf::from)
+                .unwrap_or("/usr/bin/osascript".into()),
         }
     }
 }
@@ -62,26 +52,18 @@ fn source(tool: &str) -> Option<String> {
 pub fn run(tools: &Tools, tool: &str, args: &Map<String, Value>) -> Result<String, String> {
     let app: &App = proto::apple::app(tool).ok_or(format!("there is no app `{tool}`"))?;
     let call = app.parse(args)?;
-    let field = |name: &str| args.get(name).and_then(Value::as_str).unwrap_or("");
-    match (tool, call.action) {
-        ("messages", "read") => read_messages(
-            &tools.chat_db,
-            field("chat"),
-            field("query"),
-            field("limit"),
-        ),
-        ("messages", _) => {
-            let (to, text) = (field("to"), field("text"));
-            if to.is_empty() || text.is_empty() {
-                return Err("`to` and `text` are both needed to send.".into());
-            }
-            osascript(&tools.osascript, &source(tool).expect("known"), &[to, text])
+    let argv: Vec<_> = call.argv.iter().map(String::as_str).collect();
+    let source = source(tool).expect("a tool in the table has a script");
+    // Messages' script takes just the recipient and the text, not the action.
+    let argv = if tool == "messages" {
+        if argv[1].is_empty() || argv[2].is_empty() {
+            return Err("`to` and `text` are both needed to send.".into());
         }
-        _ => {
-            let argv: Vec<_> = call.argv.iter().map(String::as_str).collect();
-            osascript(&tools.osascript, &source(tool).expect("known"), &argv)
-        }
-    }
+        &argv[1..]
+    } else {
+        &argv[..]
+    };
+    osascript(&tools.osascript, &source, argv)
 }
 
 /// The command that runs `source` with `argv`. `--` keeps an argument that starts with `-` an
@@ -148,100 +130,6 @@ fn hint(error: &str) -> &'static str {
     }
 }
 
-/// Messages' history is a SQLite file, since the app's scripting cannot read old messages.
-/// Reading it needs Full Disk Access for the service.
-fn read_messages(db: &Path, chat: &str, query: &str, limit: &str) -> Result<String, String> {
-    let limit = limit.parse::<i64>().unwrap_or(20).clamp(1, 100);
-    let denied = |e: rusqlite::Error| {
-        format!(
-            "cannot read {}: {e}. The user must give the service Full Disk Access ({}) in System Settings > Privacy & Security.",
-            db.display(),
-            std::env::current_exe().unwrap_or_default().display()
-        )
-    };
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(denied)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT m.date, m.is_from_me, COALESCE(h.id, ''), COALESCE(c.chat_identifier, ''), m.text, m.attributedBody
-             FROM message m
-             LEFT JOIN handle h ON h.ROWID = m.handle_id
-             LEFT JOIN chat_message_join j ON j.message_id = m.ROWID
-             LEFT JOIN chat c ON c.ROWID = j.chat_id
-             WHERE ?1 = '' OR c.chat_identifier = ?1
-             ORDER BY m.date DESC LIMIT ?2",
-        )
-        .map_err(denied)?;
-    // shortcut: with `query`, only the newest 2000 messages are searched, because text is
-    // matched here (newer macOS keeps it in a blob); upgrade when that is too few.
-    let rows = stmt
-        .query_map((chat, if query.is_empty() { limit } else { SCAN }), |r| {
-            let text: Option<String> = r.get(4)?;
-            let blob: Option<Vec<u8>> = r.get(5)?;
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, bool>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                text.filter(|t| !t.is_empty())
-                    .or_else(|| blob.as_deref().and_then(body_text)),
-            ))
-        })
-        .map_err(denied)?;
-    let query = query.to_lowercase();
-    let mut lines = Vec::new();
-    for row in rows {
-        let (date, mine, handle, chat, text) = row.map_err(denied)?;
-        let text = text.unwrap_or_default().replace('\u{fffc}', "[attachment]");
-        if text.to_lowercase().contains(&query) {
-            let who = if mine { "me" } else { &handle };
-            let text = text.replace(['\n', '\r', '\t'], " ");
-            lines.push(format!("{}\t{chat}\t{who}\t{text}\n", when(date)));
-            if lines.len() as i64 == limit {
-                break;
-            }
-        }
-    }
-    // Oldest first, the way a conversation reads.
-    lines.reverse();
-    Ok(lines.concat())
-}
-
-/// Messages stores a date as nanoseconds since 2001 (seconds in old versions).
-fn when(date: i64) -> String {
-    let secs = if date.abs() > 1_000_000_000_000 {
-        date / 1_000_000_000
-    } else {
-        date
-    };
-    jiff::Timestamp::from_second(secs + 978_307_200)
-        .map(|t| {
-            t.to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%dT%H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-/// The text of a message that only has `attributedBody`, an archived NSAttributedString: the
-/// string follows the class name `NSString`, a few bytes of type information and a length.
-fn body_text(blob: &[u8]) -> Option<String> {
-    let at = blob.windows(8).position(|w| w == b"NSString")? + 8;
-    let rest = blob.get(at..)?;
-    let rest = &rest[rest.iter().take(8).position(|b| *b == b'+')? + 1..];
-    let (len, rest) = match *rest.first()? {
-        0x81 => (
-            u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?) as usize,
-            rest.get(3..)?,
-        ),
-        0x82 => (
-            u32::from_le_bytes(rest.get(1..5)?.try_into().ok()?) as usize,
-            rest.get(5..)?,
-        ),
-        n => (n as usize, &rest[1..]),
-    };
-    String::from_utf8(rest.get(..len)?.to_vec()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,7 +191,6 @@ mod tests {
         let dir = temp("argv");
         let tools = Tools {
             osascript: recorder(&dir),
-            chat_db: dir.join("none"),
         };
         for (tool, action, field) in [
             ("mail", "send", "body"),
@@ -366,7 +253,6 @@ mod tests {
         let dir = temp("bad");
         let tools = Tools {
             osascript: recorder(&dir),
-            chat_db: dir.join("none"),
         };
         assert!(run(&tools, "notes", &args(json!({"action": "wipe"}))).is_err());
         assert!(run(&tools, "fridge", &args(json!({"action": "list"}))).is_err());
@@ -380,65 +266,5 @@ mod tests {
         );
         assert!(calls(&dir).is_empty());
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn messages_are_read_from_the_history_file_text_and_archived_text_alike() {
-        let dir = temp("chatdb");
-        let db = dir.join("chat.db");
-        let conn = Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE message(ROWID INTEGER PRIMARY KEY, date INTEGER, is_from_me INTEGER, handle_id INTEGER, text TEXT, attributedBody BLOB);
-             CREATE TABLE handle(ROWID INTEGER PRIMARY KEY, id TEXT);
-             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT);
-             CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
-             INSERT INTO handle VALUES (1, '+4915100000'), (2, 'b@example.com');
-             INSERT INTO chat VALUES (1, '+4915100000'), (2, 'b@example.com');
-             INSERT INTO message(ROWID, date, is_from_me, handle_id, text) VALUES (1, 800000000000000000, 0, 1, 'hello there');
-             INSERT INTO message(ROWID, date, is_from_me, handle_id, text) VALUES (2, 800000060000000000, 1, 1, 'hi back');
-             INSERT INTO message(ROWID, date, is_from_me, handle_id, text) VALUES (3, 800000120000000000, 0, 2, 'other chat');
-             INSERT INTO chat_message_join VALUES (1, 1), (1, 2), (2, 3);",
-        )
-        .unwrap();
-        // The text of a newer message is only inside its archived string.
-        let blob = [&b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x0barchived hi"[..], b"\x86\x84"].concat();
-        conn.execute(
-            "INSERT INTO message(ROWID, date, is_from_me, handle_id, text, attributedBody) VALUES (4, 800000180000000000, 0, 1, NULL, ?1)",
-            [blob],
-        )
-        .unwrap();
-        conn.execute("INSERT INTO chat_message_join VALUES (1, 4)", [])
-            .unwrap();
-        drop(conn);
-
-        let all = read_messages(&db, "+4915100000", "", "").unwrap();
-        let texts: Vec<_> = all
-            .lines()
-            .map(|l| l.rsplit('\t').next().unwrap())
-            .collect();
-        assert_eq!(texts, ["hello there", "hi back", "archived hi"]);
-        assert!(all.lines().nth(1).unwrap().contains("\tme\t"), "{all}");
-        let found = read_messages(&db, "", "OTHER", "").unwrap();
-        assert_eq!(found.lines().count(), 1);
-        assert!(
-            found.contains("b@example.com\tb@example.com\tother chat"),
-            "{found}"
-        );
-        assert_eq!(read_messages(&db, "", "", "1").unwrap().lines().count(), 1);
-        // A history the service may not open says what to do.
-        let e = read_messages(&dir.join("absent.db"), "", "", "").unwrap_err();
-        assert!(e.contains("Full Disk Access"), "{e}");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn archived_text_of_any_length_is_cut_out_and_junk_is_not_text() {
-        let long = "x".repeat(300);
-        let mut blob = b"..NSString\x01\x94\x84\x01+\x81".to_vec();
-        blob.extend((long.len() as u16).to_le_bytes());
-        blob.extend(long.as_bytes());
-        assert_eq!(body_text(&blob).unwrap(), long);
-        assert_eq!(body_text(b"nothing here"), None);
-        assert_eq!(body_text(b"NSString+\x09short"), None);
     }
 }

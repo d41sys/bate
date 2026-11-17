@@ -20,15 +20,12 @@ pub struct App {
 pub const APPS: [App; 6] = [
     App {
         tool: "messages",
-        about: "Messages (iMessage). `read` returns the newest messages, optionally of one `chat` (a phone number, email address or group id) or containing `query`; `limit` defaults to 20. `send` sends `text` to `to`, a phone number or email address.",
-        reads: &["read"],
+        about: "Messages (iMessage). `send` sends `text` to `to`, a phone number or email address. Reading messages is not available.",
+        reads: &[],
         changes: &["send"],
         fields: &[
-            ("chat", "For `read`: only this chat"),
-            ("query", "For `read`: only messages containing this text"),
-            ("limit", "For `read`: how many messages, at most 100"),
-            ("to", "For `send`: phone number or email address"),
-            ("text", "For `send`: the message"),
+            ("to", "Phone number or email address"),
+            ("text", "The message"),
         ],
     },
     App {
@@ -187,7 +184,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(send.kind, Kind::AppleChange);
-        assert_eq!(send.argv, ["send", "", "", "", "+49", "hi"]);
+        assert_eq!(send.argv, ["send", "+49", "hi"]);
         assert_eq!(send.shown, "to: +49\ntext: hi");
         let read = parse("notes", json!({"action": "list"})).unwrap();
         assert_eq!((read.kind, read.shown.as_str()), (Kind::AppleRead, ""));
@@ -203,11 +200,6 @@ mod tests {
         for app in &APPS {
             assert!(
                 app.reads.iter().all(|a| !app.changes.contains(a)),
-                "{}",
-                app.tool
-            );
-            assert!(
-                !app.reads.is_empty() && !app.changes.is_empty(),
                 "{}",
                 app.tool
             );
