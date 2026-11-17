@@ -5,6 +5,7 @@ type Lan = {
   on: boolean;
   port?: number;
   urls?: string[];
+  tailscaleUrls?: string[];
   fingerprint?: string;
   devices: { id: string; name: string; createdAt: number; lastSeen: number }[];
 };
@@ -46,6 +47,11 @@ export function Devices() {
       {lan?.on && (
         <>
           <p>Open on the other device: {lan.urls?.length ? lan.urls.map((u) => <code key={u}>{u} </code>) : "this Mac is on no network"}</p>
+          {!!lan.tailscaleUrls?.length && (
+            <p>
+              Or from anywhere on your Tailscale network: {lan.tailscaleUrls.map((u) => <code key={u}>{u} </code>)}
+            </p>
+          )}
           <p>
             The browser will warn about the certificate. Go on only if it shows this fingerprint (SHA-256):{" "}
             <code>{lan.fingerprint}</code>

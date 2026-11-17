@@ -147,10 +147,13 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_provider` | none | `{url, hasKey, fromEnv}`: the model server's URL (`null`: none) and whether it has an API key. `fromEnv`: nothing is saved, so both are the service's `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Refused (`forbidden`) for a device on the network, as is `set_provider`. |
 | `set_provider` | `url` (empty: clear), `key?` | `{}`: sets or deletes the model server URL and optional API key in the service. `url` is `http://` or `https://` with a host and no user, password, query or fragment. Without `key`, or with an empty one, the saved key stays if the scheme, host and port are written the same; `key: null` removes it. A key from the environment is never saved. |
 | `list_models` | none | `{models:[String]}`: models reported by `<url>/models`, or empty if unreachable. Signed in to ChatGPT: the models the account is offered |
+| `get_update` | none | `{state, current, available, error}`: `state` is `off` (the build has no update key), `current`, `checking`, `ready` (a release is downloaded and verified), `waiting` (an install was asked for and waits for the replies to end) or `error`. `available` is the version that is `ready` (or `waiting`), else `null`; `error` is why the last check or install failed. A device on the network may read it |
+| `check_update` | none | reads the feed now, and answers with `get_update`'s shape when that is done; refused with `update_failed` and the reason when the release fails a check, or `updates_off` |
+| `install_update` | none | `get_update`'s shape, with `state: "waiting"`: when no bot has a turn running (or a compaction), the programs are swapped and the service restarts. Code `no_update` when none is `ready`, `updates_off`. Refused (`forbidden`) for a device on the network |
 | `get_chatgpt` | none | `{signedIn}`: whether bots run on a ChatGPT plan |
 | `sign_in_chatgpt` | none | `{url}`: the address to open in the browser. The service listens on `127.0.0.1:1455` (another port when taken) for 10 minutes; when the browser comes back, or the sign-in fails, `chatgpt_changed` is sent, with `error` when it failed. Code `sign_in_failed` |
 | `sign_out_chatgpt` | none | `{}`: forgets the tokens, keeps the registration, and asks OpenAI to end the session (one try; a failure is logged). Sends `chatgpt_changed` |
-| `lan_status` | none | `{on, port?, urls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs, its self-signed certificate's SHA-256 fingerprint, and paired devices |
+| `lan_status` | none | `{on, port?, urls?, tailscaleUrls?, fingerprint?, devices:[Device]}`: whether the LAN client is serving, its URLs on local networks, its URLs on the user's Tailscale network (the MagicDNS name, then 100.64.0.0/10 addresses), its self-signed certificate's SHA-256 fingerprint, and paired devices |
 | `set_lan` | `on` | `{}` with the new `lan_status`; turns the LAN client on or off and remembers it in `lan/on` |
 | `pair_device` | none | `{code, expiresAt}`: opens a 6-digit pairing code that lasts 5 minutes or 5 tries; only one open at a time |
 | `remove_device` | `device` (an id) | `{}`: forgets the device, ending its active sessions immediately |
@@ -172,6 +175,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
+| `{"type":"update_changed"}` | Re-run `get_update`. |
 | `{"type":"chatgpt_changed","error?"}` | Re-run `get_chatgpt`. `error` says why a sign-in failed. |
 | `{"type":"permissions_changed","bot"}` | Re-run `get_permissions`. |
 | `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
@@ -314,6 +318,20 @@ While signed in, every bot's model calls go to `https://api.openai.com/v1` throu
 
 The registration is stored in `app.db`, the tokens in the Keychain (see Secrets); the tokens are removed from bug reports. Devices on the local network can neither read nor change the sign-in. `BATE_CHATGPT_AUTH` and `BATE_CHATGPT_API` name stand-ins for OpenAI's two servers (tests).
 
+### Updates
+
+The service reads a static feed when it starts and then every 24 hours (and on `check_update`): `https://github.com/d41sys/bate/releases/latest/download/feed.json`, or `$BATE_UPDATE_FEED`. The feed is `{version, url, sha256, signature}`: `url` is a `bate-<tag>-macos-arm64.tar.gz` with `appd` and `agentcore`, `sha256` its hash (64 lowercase hex digits), and `signature` an Ed25519 signature (base64) over the bytes `bate-update\n<version>\n<sha256>`. The version is signed too, so an old signed archive cannot be passed off as a new release.
+
+The public key is compiled in from `BATE_UPDATE_PUBKEY` (base64) at build time. A build without one does not update (`state: "off"`). A debug build also reads the variable at run time, for tests; a release build never does. Nothing is staged unless all of these hold, and a failure is reported with its reason:
+
+- the version is `a.b.c` and the signature matches it and the hash;
+- the version is greater than the running one (a lower one is refused as older; the same one is just `current`);
+- the download's SHA-256 is the feed's.
+
+A release is downloaded to `updates/` under the service's home and only `appd` and `agentcore` are unpacked from it (`/usr/bin/tar`). Nothing is installed until `install_update`. Then the service waits until no bot has a turn, a prompt or a compaction in flight, so a running reply is never cut; it copies each program next to its target, renames both over the installed ones (next to the running `appd`, or `$BATE_UPDATE_INSTALL_DIR`) and exits with status 75. launchd restarts the service after any exit that is not 0 (`KeepAlive {SuccessfulExit: false}`), so the new `appd` starts; a service started by hand stays stopped. Engines do not outlive the service. A bot that begins a turn while an install waits keeps the install waiting.
+
+`appd update keygen` prints a new key as `BATE_UPDATE_KEY=<private PKCS#8, base64>` and `BATE_UPDATE_PUBKEY=<public, base64>`. `appd update sign <archive> <version> [url]` reads `$BATE_UPDATE_KEY` and prints the feed; `url` defaults to the archive's place in the GitHub release `v<version>`.
+
 ### Browser
 
 Each bot has a web browser of its own: the Chrome installed on this Mac (`/Applications/Google Chrome.app`, else Chromium; `$APPD_CHROME` names another), started by the service on the bot's first browser action, in its own window, with a profile of the bot's own (`browsers/<bot>` in the service's folder, so the bot's programs cannot read its cookies and its sign-ins are kept apart from the user's and other bots'). Without one, the action fails with a message saying so; Bate does not install a browser.
@@ -350,6 +368,8 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 ### Other devices on the local network (LAN)
 
 When enabled in Settings, the service serves Bate's web client over HTTPS on port 47822 (`APPD_LAN_PORT`) using a self-signed certificate generated once in `lan/cert.pem` with its SHA-256 fingerprint shown in the window. Its private key is kept in the Keychain, not in a file.
+
+The same page is reachable from the user's own Tailscale network (no relay of Bate's): the listener is on every interface, so a device on the tailnet pairs and works as on the local network. The certificate also names this Mac's MagicDNS name and Tailscale addresses (from `tailscale status --json`, read when serving starts; `APPD_TAILSCALE` names another command) and is made again when these change, which changes its fingerprint. It is still self-signed: `tailscale cert` is not used. Local networks and Tailscale's 100.64.0.0/10 are alike treated as the user's own.
 
 - Devices pair using a 6-digit code shown in Bate's window; pairing issues an `HttpOnly`, `Secure`, `SameSite=Strict` cookie containing a 32-byte hex token. The service stores only the SHA-256 hash of the token in `lan/devices.json`.
 - All API requests require the `X-Bate: 1` header.
