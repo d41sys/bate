@@ -122,6 +122,9 @@ pub enum Op {
         /// `responses` when the server speaks OpenAI's Responses API; else the chat API.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api: Option<String>,
+        /// The model to call when the engine has none of its own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

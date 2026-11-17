@@ -53,6 +53,8 @@ function App() {
       } else if (frame.type === "connected") {
         setUnpaired(false);
         setState("");
+        // What failed while the service was away is tried again by every screen.
+        setError("");
         setConnection((n) => n + 1);
         load();
       } else if (frame.type === "failed") {
