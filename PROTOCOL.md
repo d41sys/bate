@@ -43,7 +43,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
 | `desktop_result` | `request`, `output?`, `error?` | What came of the open `desktop` request: what the helper saw or did, or why not. |
 | `apple_result` | `request`, `output?`, `error?` | What came of the open `apple` request: what the app returned, or why not. |
-| `token` | `request`, `url?`, `key?`, `api?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. `api` is `responses` when the endpoint speaks OpenAI's Responses API; without it, the chat API. |
+| `token` | `request`, `url?`, `key?`, `api?`, `model?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. `api` is `responses` when the endpoint speaks OpenAI's Responses API; without it, the chat API. `model` is the model to call when the engine has none from `set_model` or `BATE_MODEL`: on a ChatGPT sign-in the service sends the bot's model, and for a bot with none the first one the plan lists, which it keeps for the bot. With a model server and no model the service sends `error`. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
 An engine also exits when its standard input closes: the service has stopped or crashed, and a new service starts new engines.

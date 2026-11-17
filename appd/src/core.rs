@@ -548,6 +548,10 @@ impl Core {
                 if !self.engines.contains_key(&bot) {
                     return;
                 }
+                // A model the user chose meanwhile stands.
+                if let Some(chosen) = self.model_of(&bot) {
+                    return self.send_plan_token(&bot, request, Ok(key), Some(chosen));
+                }
                 // Kept: the window shows which model answers, and the list is read once.
                 let model = first.and_then(|model| {
                     (self.store.set_model(&bot, &model, None)).map_err(|e| internal(e).1)?;
