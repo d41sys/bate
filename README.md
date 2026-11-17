@@ -10,7 +10,7 @@ Early development. Nothing here is a release yet, and no code is published yet. 
 
 | Part | What it is |
 |---|---|
-| Sign-in | Sign in to your ChatGPT or Claude subscription, or use an API key or a local model |
+| Sign-in | Sign in to your ChatGPT subscription, or use an API key or a local model. Claude runs through its own command-line program, as an installed agent (ACP) |
 | Engine | Bate's own agent loop, written in Rust |
 | Background service | Owns the bots, their history, schedules and permission questions |
 | Window | A Rust shell around the macOS system web view, with a React interface |
