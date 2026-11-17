@@ -212,3 +212,37 @@ Compared 2026-11-17: Bate `appd/src/chatgpt.rs`, `agentcore/src/model.rs` agains
 | Paste the redirect URL by hand | yes (`:64-80`) | no | Not needed: Bate's browser is on the same Mac. |
 | `prompt_cache_key` (the session id) | sent (`openai-responses.ts:369`) | not sent | Open. |
 | Retry `subscription_sharing_usage_unavailable` and `subscription_sharing_user_unavailable` | yes (`retry.ts:137-138`) | Bate retries no model error | Open. |
+
+## More bot apps (added 2026-11-18)
+
+"Moltbot" and "Clawdbot" are earlier names of OpenClaw: `github.com/moltbot/moltbot` and `github.com/clawdbot/clawdbot` both resolve to `openclaw/openclaw`, covered above. Two apps named OpenBot were read from shallow clones of their default branches.
+
+| App | Has ChatGPT sign-in | Method | Client id in its code | API base | Model list source | Source link |
+|---|---|---|---|---|---|---|
+| OpenBot (`CopilotKit/OpenBot`, a Tauri desktop app) | Yes | A, by running OpenAI's own `codex login` | none | `chatgpt.com/backend-api/codex` | `GET chatgpt.com/backend-api/codex/models`, keeps `visibility == "list"`, first is the default | [chatgpt_models.py#L1-L32](https://github.com/CopilotKit/OpenBot/blob/7b1a7f6e591c077f6445dc295fd258529cdd001a/agent-langgraph-agui/src/chatgpt_models.py#L1-L32) |
+| OpenBot (`nightly-labs/openbot`, a desktop app that runs Codex as the agent) | Yes | A, by running OpenAI's own `codex login` | none | Codex's own | Codex's own | [TROUBLESHOOTING.md#L17](https://github.com/nightly-labs/openbot/blob/07b5e99673870c72b38aefb5e1ae7908e208b4ad/docs/TROUBLESHOOTING.md#L17) |
+
+- CopilotKit/OpenBot, why it holds no client id: `desktop/src-tauri/src/plan.rs:5-9` "Reimplementing that here would mean holding somebody else's OAuth client id, redirect and PKCE details and re-shipping them whenever any of it moves." Its claim about OpenAI, with no OpenAI source cited: `desktop/src-tauri/src/provider.rs:65` "OpenAI supports subscription OAuth in other people's tools: `codex login` exists for it".
+- CopilotKit/OpenBot, where the token goes: `agent-langgraph-agui/src/main.py:202` "A plan token is a bearer for `chatgpt.com/backend-api/codex`".
+- nightly-labs/openbot: `docs/TROUBLESHOOTING.md:17` "Then run `codex login`, sign in with ChatGPT, fully quit OpenBot, and open it again." Error text `packages/i18n/src/messages/en/error/provider.ts:263` "Codex requires a ChatGPT subscription login. Run `codex login`."
+- Neither repo contains `dynamic_agent_client`, `agent_name_hint` or `api/accounts/authorize` (searched with `rg`).
+
+Count for the bot apps alone (8): OpenClaw has both methods and defaults to A. The other seven have A only: Hermes Agent, nanobot, ZeroClaw and PicoClaw hold the Codex client id; NanoClaw and both OpenBots run `codex login`.
+
+### What each method gives, in OpenClaw's own words
+
+OpenClaw is the one bot app with both, and its docs compare them (`docs/providers/openai/authentication.md`, table "Compare capabilities", [permalink](https://github.com/openclaw/openclaw/blob/c53f0575bdac2546b35604712363993d27047b8e/docs/providers/openai/authentication.md)). These are OpenClaw's statements about its own features, not OpenAI's:
+
+| | Sign in with ChatGPT (B) | Codex login (A) |
+|---|---|---|
+| Model access | "Eligible Responses models when token sharing is granted" | "Models available to your Codex account" |
+| Usage limits | "Weekly app limits and a workspace sharing cap on Business" | none listed |
+| Usage shown in the app | "Shared ChatGPT Usage page; no per-app OpenClaw metrics" | "Codex usage and quota reporting" |
+| Image generation | "Not supported by this credential" | needs a Codex OAuth profile and account access |
+| Audio transcription | "Not supported by this credential" | "Subscription transcription route, subject to account access" |
+| Realtime voice | "Not supported by this credential" | "Selected browser and GPT-Live relay routes" |
+| Memory embeddings | "Requires a separate compatible credential" | "Supported when the account grants embedding access" |
+
+OpenClaw also renews a B token "within five minutes of expiry", and on `token_expired` renews and tries the same model once more (same file). Bate renews 3 minutes early and does not retry.
+
+Not verified: any of these capabilities on a real account; whether Bate's B token is refused for transcription or embeddings.
