@@ -55,6 +55,11 @@ pub fn accept_loop(listener: UnixListener, tx: Sender<Msg>) {
             log!("refused a connection from another user");
             continue;
         }
+        // With a certificate-signed service, only a window signed with the same one connects.
+        if !proto::signer::peer_is_same_signer(&stream) {
+            log!("refused a connection from a program not signed like the service");
+            continue;
+        }
         next_id += 1;
         if let Err(e) = serve(stream, next_id, &tx) {
             log!("client {next_id}: cannot start: {e}");

@@ -21,8 +21,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
-  # A `v*` tag publishes the two programs as a GitHub release (not code-signed until #37), and
-  # with the `BATE_UPDATE_KEY` secret set, the update feed for it.
+  # A `v*` tag publishes `Bate.app` as a GitHub release, signed ad hoc (a Developer ID signature
+  # and notarisation need an Apple account: see `window/bundle.sh`), and with the
+  # `BATE_UPDATE_KEY` secret set, the update feed for it.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
@@ -31,14 +32,21 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       # The tag is the version the running programs report; if the two differ, an updated
       # app would be offered the same release again.
       - run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
-      # The public half of the update key is compiled in (unset: the app does not update itself).
-      - run: cargo build --release --locked -p appd -p agentcore
+      # Builds the page, the programs and the app, and signs it. The public half of the update key
+      # is compiled in (unset: the app does not update itself).
+      - run: window/bundle.sh
         env:
           BATE_UPDATE_PUBKEY: ${{ vars.BATE_UPDATE_PUBKEY }}
-      - run: tar -czf "bate-$GITHUB_REF_NAME-macos-arm64.tar.gz" -C target/release appd agentcore
+      # COPYFILE_DISABLE: no `._` files for extended attributes, which the signature does not cover.
+      - run: tar -czf "bate-$GITHUB_REF_NAME-macos-arm64.tar.gz" -C target/release Bate.app
+        env:
+          COPYFILE_DISABLE: 1
       # With a signing key, the release also carries the feed that installed apps read.
       - run: |
           files=(bate-*.tar.gz)

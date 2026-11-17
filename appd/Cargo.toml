@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-concatenated"] }
 libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 proto = { path = "../proto" }
 ring = "0.17"
 rusqlite = { version = "0.37", features = ["bundled"] }

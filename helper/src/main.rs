@@ -84,13 +84,18 @@ fn main() {
 }
 
 /// Connects to the service. The helper holds the user's privacy permissions, so it does what a
-/// socket says only when the program on the other end is the service's own `appd`: a program
-/// of the user's that runs the helper against a socket of its own gets nothing.
-// shortcut: the program's name, not its signature; check the Team ID once the apps are signed (#37).
+/// socket says only when the program on the other end is the service's own `appd`, and, when
+/// the helper is signed with a certificate, signed with the same one: a program of the user's
+/// that runs the helper against a socket of its own gets nothing.
+// shortcut: an unsigned or ad-hoc helper (a dev run) checks the program's name only.
 fn connect(socket: &Path) -> io::Result<UnixStream> {
     let stream = UnixStream::connect(socket)?;
     match proto::desktop::peer_exe(&stream) {
-        Some(exe) if proto::desktop::is_service(&exe) => Ok(stream),
+        Some(exe)
+            if proto::desktop::is_service(&exe) && proto::signer::peer_is_same_signer(&stream) =>
+        {
+            Ok(stream)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the other end is not Bate's service",

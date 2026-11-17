@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The page talks to the service through the shell's two calls and may open another window and start dictation; nothing else.",
+  "description": "The page talks to the service through the shell's two calls and may open another window, start dictation and ask what the service's start left to say; nothing else.",
   "windows": ["bate-*"],
-  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation"]
+  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation", "allow-service-note"]
 }

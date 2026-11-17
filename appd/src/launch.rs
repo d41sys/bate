@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::{paths, sys};
+use crate::{login_item, paths, sys};
 
 pub const BASE_LABEL: &str = "com.oursnever.bate.appd";
 /// Environment the registering process passes on to the service (and so to its engines).
@@ -95,6 +95,30 @@ fn render(label: &str, appd: &Path, home: &Path, env: &[(&str, String)]) -> Stri
     )
 }
 
+/// The `Bate.app` whose login item the service is: only a service with the default data folder
+/// can be, as macOS cannot pass the app's service `$APPD_HOME`.
+fn app_service() -> Option<PathBuf> {
+    paths::bundle().filter(|_| custom_home().is_none() || login_item::custom_id())
+}
+
+/// `appd launch`: from `Bate.app`, registers the app's login item (`login_item.rs`); otherwise
+/// the agent for this very program in `~/Library/LaunchAgents`.
+pub fn start() -> io::Result<()> {
+    match app_service() {
+        Some(app) => println!("{}", login_item::start(&app)?),
+        None => ensure(&std::env::current_exe()?)?,
+    }
+    Ok(())
+}
+
+/// `appd unregister`: whether there was a registration to remove, of either kind.
+pub fn stop() -> io::Result<bool> {
+    match app_service() {
+        Some(_) => login_item::stop(),
+        None => remove(),
+    }
+}
+
 /// Registers the agent for `appd` with this process's environment and makes
 /// sure it is running. A loaded agent whose plist matches is only started;
 /// otherwise it is unloaded and loaded again. Refuses an `appd` in a
@@ -169,7 +193,7 @@ pub fn remove() -> io::Result<bool> {
     Ok(loaded || had_file)
 }
 
-fn domain() -> String {
+pub fn domain() -> String {
     // SAFETY: getuid cannot fail and touches no memory.
     format!("gui/{}", unsafe { libc::getuid() })
 }

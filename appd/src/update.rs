@@ -5,6 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -20,8 +21,12 @@ const DEFAULT_FEED: &str = "https://github.com/d41sys/bate/releases/latest/downl
 const RELEASES: &str = "https://github.com/d41sys/bate/releases/download";
 const MAX_FEED: u64 = 64 << 10;
 const MAX_ARCHIVE: u64 = 300 << 20;
-/// The programs in a release archive. `agentcore` goes first: a half-done swap is then a new
-/// engine under the old service, which the service already copes with, not the reverse.
+/// The app a release archive holds, and where its programs are in it.
+const APP: &str = "Bate.app";
+const MACOS: &str = "Contents/MacOS";
+/// The programs the service swaps when it does not run from an app. `agentcore` goes first: a
+/// half-done swap is then a new engine under the old service, which the service already
+/// copes with, not the reverse.
 const PROGRAMS: [&str; 2] = ["agentcore", "appd"];
 /// How often the feed is read.
 pub const EVERY: Duration = Duration::from_secs(24 * 3600);
@@ -219,13 +224,13 @@ fn stage(agent: &ureq::Agent, feed: &Feed, dir: &Path) -> Result<(), String> {
             feed.sha256
         ));
     }
-    // Only the two programs are named, so nothing else in the archive is written.
+    // Only the app is named, so nothing else in the archive is written.
     let out = Command::new("/usr/bin/tar")
         .arg("-xzf")
         .arg(&archive)
         .arg("-C")
         .arg(dir)
-        .args(PROGRAMS)
+        .arg(APP)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| err("cannot run tar", &e))?;
@@ -236,7 +241,8 @@ fn stage(agent: &ureq::Agent, feed: &Feed, dir: &Path) -> Result<(), String> {
         ));
     }
     for name in PROGRAMS {
-        let plain = fs::symlink_metadata(dir.join(name)).is_ok_and(|m| m.is_file());
+        let plain =
+            fs::symlink_metadata(dir.join(APP).join(MACOS).join(name)).is_ok_and(|m| m.is_file());
         if !plain {
             return Err(format!("the release has no program {name}"));
         }
@@ -245,19 +251,80 @@ fn stage(agent: &ureq::Agent, feed: &Feed, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Puts the staged programs in place of the installed ones. Each is copied next to its target
-/// first and then renamed over it, so a program is never half written.
+/// Puts the staged release in place. From a `Bate.app`, the whole app is replaced: a program
+/// swapped inside a signed app would break its seal. Otherwise (a build folder) the two
+/// programs are, each copied next to its target first and then renamed over it, so a program
+/// is never half written.
 pub fn install(staged: &Staged) -> io::Result<()> {
-    let target = install_dir()?;
+    let new = staged.dir.join(APP);
+    if let Some(app) = paths::bundle() {
+        replace_app(&new, &app)?;
+        // macOS cannot start a changed app's login item until it is registered again (see
+        // `login_item.rs`), so the service would not come back after its exit: the new app
+        // registers it, and says in the service's log if that fails. It must outlive this
+        // service (its own process group; the job's plist has `AbandonProcessGroup`).
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(paths::logs().join("appd.log"));
+        let mut relaunch = Command::new(app.join(MACOS).join("appd"));
+        relaunch.arg("launch").process_group(0).stdin(Stdio::null());
+        if let Ok(log) = log {
+            relaunch.stdout(log.try_clone()?).stderr(log);
+        }
+        let _ = relaunch.spawn();
+        return Ok(());
+    }
+    let (from, target) = (new.join(MACOS), install_dir()?);
     for name in PROGRAMS {
         let tmp = target.join(format!(".{name}.update"));
-        fs::copy(staged.dir.join(name), &tmp)?;
+        fs::copy(from.join(name), &tmp)?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
     }
     for name in PROGRAMS {
         fs::rename(target.join(format!(".{name}.update")), target.join(name))?;
     }
     Ok(())
+}
+
+/// Puts a copy of `new` where `app` is, in one step: the copy is made next to `app` and then
+/// exchanged with it, so `app` is always a whole app, the old or the new.
+// shortcut: the window keeps running its old code until it is opened again; only the service restarts.
+fn replace_app(new: &Path, app: &Path) -> io::Result<()> {
+    let parent = app
+        .parent()
+        .ok_or_else(|| io::Error::other("the app has no folder"))?;
+    let copy = parent.join(format!(".{APP}.update"));
+    let _ = fs::remove_dir_all(&copy);
+    // `ditto` keeps the links, modes and extended attributes a signature covers.
+    let status = Command::new("/usr/bin/ditto")
+        .arg(new)
+        .arg(&copy)
+        .status()?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&copy);
+        return Err(io::Error::other(format!(
+            "cannot copy the new app to {}",
+            copy.display()
+        )));
+    }
+    let swapped = exchange(&copy, app);
+    // What is left at `copy` is the old app after a swap, the unused copy after a failure.
+    let _ = fs::remove_dir_all(&copy);
+    swapped
+}
+
+/// Exchanges two paths atomically (`renamex_np` with `RENAME_SWAP`).
+fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes());
+    let (a, b) = (c(a)?, c(b)?);
+    // SAFETY: two valid NUL-terminated paths.
+    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// `appd update keygen`: a new signing key for releases.
