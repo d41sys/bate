@@ -1837,6 +1837,108 @@ fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did
 }
 
 #[test]
+fn an_apple_app_tool_shows_the_exact_recipient_and_text_and_runs_only_what_was_approved() {
+    let dir = workdir("apple");
+    // Text that would break out of a script, and long enough to be cut by a careless card.
+    let said = format!("Say \"hi\"; do shell script \"id\"\n{}", "x".repeat(500));
+    let send = json!({"action": "send", "to": "+49 151 0000", "text": said});
+    let model = Model::serve(vec![
+        vec![call("c1", "messages", send.clone())],
+        vec![call(
+            "c2",
+            "notes",
+            json!({"action": "list", "query": "milk"}),
+        )],
+        vec![call("c3", "mail", json!({"action": "wipe"}))],
+        vec![call("c4", "notes", json!({"action": "list", "query": 7}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("tell Ann");
+
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question {
+        kind,
+        target,
+        title,
+        ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(kind, &Some(Kind::AppleChange));
+    assert_eq!(title, "messages: send");
+    let target = target.as_deref().unwrap();
+    assert!(target.contains("to: +49 151 0000"), "{target}");
+    assert!(target.contains(&format!("text: {said}")), "{target}");
+    let asked = engine.until(|e| matches!(e, Event::Apple { .. }));
+    let Some(Event::Apple {
+        request,
+        tool,
+        args,
+    }) = asked.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!((tool.as_str(), &args["text"]), ("messages", &json!(said)));
+    // Only an Apple request takes its result: not another kind of request, nor a made-up one.
+    let result = |request: &str, output: Option<&str>, error: Option<&str>| Op::AppleResult {
+        request: request.into(),
+        output: output.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+    assert!(engine.request(result("a999", Some("x"), None)).is_some());
+    let browser = Op::BrowserResult {
+        request: request.clone(),
+        output: Some("x".into()),
+        error: None,
+    };
+    assert!(engine.request(browser).is_some());
+    assert_eq!(engine.request(result(request, Some("sent"), None)), None);
+
+    // A look asks as a read, with what it looks for.
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question { kind, target, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(kind, &Some(Kind::AppleRead));
+    assert_eq!(target.as_deref(), Some("notes list\nquery: milk"));
+    let asked = engine.until(|e| matches!(e, Event::Apple { .. }));
+    let Some(Event::Apple { request, .. }) = asked.last() else {
+        unreachable!()
+    };
+    assert_eq!(
+        engine.request(result(request, None, Some("not allowed"))),
+        None
+    );
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    let offered = offered(&requests[0]);
+    for tool in [
+        "messages",
+        "mail",
+        "notes",
+        "reminders",
+        "calendar",
+        "contacts",
+    ] {
+        assert!(offered.contains(&tool), "{tool}");
+    }
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "sent");
+    assert_eq!(result(2), "not allowed");
+    // Not an action, or not text: told so without a question or a request.
+    assert_eq!(
+        result(3),
+        "`wipe` is not an action of mail: search, read, draft, send."
+    );
+    assert_eq!(result(4), "`query` must be text.");
+}
+
+#[test]
 fn the_desktop_tool_asks_for_the_app_and_waits_for_what_the_service_did() {
     let dir = workdir("desktop");
     let model = Model::serve(vec![
@@ -2217,7 +2319,11 @@ fn a_desktop_question_names_the_whole_action_so_a_grant_covers_only_that() {
     let dir = workdir("desktop-card");
     let long = format!("{}; rm -rf ~", "x".repeat(300));
     let model = Model::serve(vec![
-        vec![call("c1", "desktop", json!({"action": "look", "app": "Terminal"}))],
+        vec![call(
+            "c1",
+            "desktop",
+            json!({"action": "look", "app": "Terminal"}),
+        )],
         vec![call(
             "c2",
             "desktop",

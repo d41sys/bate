@@ -283,7 +283,9 @@ impl Bridge {
                 Err("this agent summarises its context by itself".into()),
             ),
             Op::Reply { message, .. } => respond(id, Err(format!("message {message} is not open"))),
-            Op::BrowserResult { request, .. } | Op::DesktopResult { request, .. } => {
+            Op::BrowserResult { request, .. }
+            | Op::DesktopResult { request, .. }
+            | Op::AppleResult { request, .. } => {
                 respond(id, Err(format!("request {request} is not open")))
             }
             Op::Token { .. } => respond(

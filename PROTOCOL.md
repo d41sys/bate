@@ -42,6 +42,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
 | `desktop_result` | `request`, `output?`, `error?` | What came of the open `desktop` request: what the helper saw or did, or why not. |
+| `apple_result` | `request`, `output?`, `error?` | What came of the open `apple` request: what the app returned, or why not. |
 | `token` | `request`, `url?`, `key?`, `api?`, `error?` | What came of the open `token` request: the endpoint and authorization token/key for the model call, or why there is none. `api` is `responses` when the endpoint speaks OpenAI's Responses API; without it, the chat API. |
 | `stop` | none | Finish and exit. The engine answers, then closes its output and exits with status 0. |
 
@@ -59,10 +60,11 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `thinking` | `delta` | Thinking text, appended to the current thinking. |
 | `tool_start` | `call`, `tool`, `args` | A tool call began. `args` is a JSON object. |
 | `tool_end` | `call`, `output`, `isError` | The call's result. |
-| `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`, `desktop`) and `target` (the exact path, command, connector tool or app) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
+| `question` | `question`, `title`, `options`, `kind`, `target` | The engine waits until the service sends `answer`. With `kind` (`read`, `write`, `run`, `connector`, `apple_read`, `apple_change`) and `target` (the exact path, command or connector tool) it asks whether that action may run: the service answers from the bot's permissions and asks the user only where they say so. What is asked about is what then runs. |
 | `message` | `message`, `to`, `text` | A message for the bot `to`. The engine waits until the service sends `reply` for `message`. Not part of the transcript. |
 | `browser` | `request`, `action` | An action in the bot's browser (see Browser). The engine waits until the service sends `browser_result` for `request`. Not part of the transcript. |
 | `desktop` | `request`, `action` | An action in other apps (see Desktop). The engine waits until the service sends `desktop_result` for `request`. Not part of the transcript. |
+| `apple` | `request`, `tool`, `args` | An action in one of the user's Apple apps (see Apple apps). The engine waits until the service sends `apple_result` for `request`. Not part of the transcript. |
 | `token` | `request` | The engine asks the service for the endpoint and token before a model call. The engine waits until the service sends `token` for `request`. Not part of the transcript. |
 | `turn_end` | `reason`, `error?` | The turn ended: `done`, `aborted` or `error`. |
 
@@ -72,7 +74,7 @@ A killed engine sends nothing more.
 
 - **Model:** two providers. With `api: "responses"` in the `token` answer (a ChatGPT sign-in), the engine calls OpenAI's Responses API: `POST <base>/responses` with `store: false`, `stream: true`, the system prompt as `instructions`, the conversation as `input` items (a tool call as `function_call`, its result as `function_call_output`) and the tools as functions in one `namespace` named `bate`. `response.output_text.delta` becomes `text`; a `function_call` item that is done becomes a tool call; the reply is whole at `response.completed`, and `response.failed`, `response.incomplete` or `error` ends the turn with that reason. Thinking is not shown on this route. Otherwise the engine calls the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
 - **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
-- **Approval:** every tool call asks first: a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
+- **Approval:** every tool call asks first (the Apple app tools: see Apple apps): a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
 - **Other bots:** when `peers` is not empty the tool `message_bot {bot, text}` is offered and the system prompt names the peers (and says so when the bot leads a group). A call first asks a `question` of kind `connector` with target `bot:<id>`, then sends `message` and waits for `reply`; an abort ends the wait, not the other bot's work.
 - **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command, gives up a model call or connector call that is under way (within about 0.1 s, also when the server is sending nothing) and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
@@ -142,8 +144,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_helper` | none | `{installed, path, connected, accessibility, screenRecording}`: Bate Helper (see Desktop). The two permissions are `null` until the helper has connected. |
 | `open_helper_settings` | `pane` (`accessibility` or `screen_recording`) | `{}`: opens that pane of System Settings, starting the helper first if it is not running, which is what makes macOS list it there. Not for devices on the network. Code `bad_request` for another pane |
 | `set_agent` | `bot`, `command` | `{}`; `command` is a list (program, then arguments) or `null`; see Installed agents |
-| `get_permissions` | `bot` | `{levels: {read, write, run, connector, desktop}, grants:[Grant]}` |
-| `set_permission` | `bot`, `kind`, `level` | `{}` |
+| `get_permissions` | `bot` | `{levels: {read, write, run, connector, desktop, apple_read, apple_change}, grants:[Grant]}` |
+| `set_permission` | `bot`, `kind`, `level` | `{}`. `always` for `apple_change` is refused (`bad_request`): see Apple apps |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
 | `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
@@ -257,7 +259,7 @@ Whatever the limit, no engine gets `BATE_MODEL_API_KEY` in its environment, and 
 
 ### Permissions
 
-Same shapes as `proto::permissions`. For each bot and each kind of action (`read`, `write`, `run`, `connector`, `desktop`) there is a level: `always`, `ask` or `never`. A bot starts with `read` on `always` and the rest on `ask`.
+Same shapes as `proto::permissions`. For each bot and each kind of action (`read`, `write`, `run`, `connector`, `desktop`, `apple_read`, `apple_change`) there is a level: `always`, `ask` or `never`. A bot starts with `read` on `always` and the rest on `ask`.
 
 The service decides every engine `question` that has a `kind`, on the `target` the engine is about to run:
 
@@ -361,11 +363,11 @@ The browser stays open while the service runs; a browser the user quit is starte
 
 Bots can see and control other apps through **Bate Helper**, a separate app (`Bate Helper.app`, at `~/Applications` unless `$APPD_HELPER` names its program: `…/Contents/MacOS/bate-helper`). It is the only program that holds the macOS permissions **Accessibility** and **Screen Recording**; the service and the window never need them. `helper/bundle.sh` makes the app from the `bate-helper` program (one script, so the installer can call it); an ad-hoc signature, the script's default, makes macOS ask for the permissions again after every rebuild.
 
-The service listens on `helper.sock` in its run dir (mode 0600). On a bot's first desktop action, or when the user opens a System Settings pane from Settings, it starts the helper with `open -g -a <app> --args <socket>` (`$APPD_OPEN` names another `open`): through the system, so macOS gives the permissions to the helper and not to the service. The helper connects, and quits when the service goes. A connection is accepted only from the user's own processes whose program file is the helper's: anything else is closed. Bots' engines cannot reach the socket (the folder limit denies it) or start apps.
+The service listens on `helper.sock` in its run dir (mode 0600). On a bot's first desktop action, or when the user opens a System Settings pane from Settings, it starts the helper with `open -g -a <app> --args <socket>` (`$APPD_OPEN` names another `open`): through the system, so macOS gives the permissions to the helper and not to the service. The helper connects, and quits when the service goes. The service accepts a connection only from the user's own processes whose program file is the helper's, and the helper connects only to a process whose program file is named `appd`; anything else is closed (a signature check replaces the name once the apps are signed). Bots' engines cannot reach the socket (the folder limit denies it) or start apps.
 
 Frames are one JSON object per line, at most 64 MiB, as in `proto::desktop`. Service → helper: `{id, action, …}` with `action` one of the six below. Helper → service: `{"type":"status","accessibility","screenRecording"}` (first, and at each change; the service sends `helper_changed`) and `{"type":"reply","id","output?","png?","error?"}`. A closed socket fails every waiting call (`Bate Helper quit before it answered.`); a call takes at most 30 s.
 
-The engine's `desktop` tool is asked about as kind `desktop`, target the app's name (`apps` for the list), as written: `TextEdit` and `textedit` are two grants. The action is sent as a `desktop` event; the service checks its shape and answers with `desktop_result`. The helper finds an app by name, in any case, among the apps with a window on screen.
+The engine's `desktop` tool is asked about as kind `desktop`, once for each exact action: the target is the whole action as the card shows it (`look at TextEdit`, `type into TextEdit: hello`, `press element 4 in TextEdit`; `list the apps and windows` for `apps`), never cut, so an `Always` for looking at an app is not one for typing into it, and what is typed is all on the card. The action is sent as a `desktop` event; the service checks its shape and answers with `desktop_result`. The helper finds an app by name, in any case, among the apps with a window on screen.
 
 | `action` | Fields | Does |
 |---|---|---|
@@ -377,6 +379,27 @@ The engine's `desktop` tool is asked about as kind `desktop`, target the app's n
 | `type` | `app`, `window?`, `text`, `element?` | Types `text` (at most 10 000 characters): into the element, which is focused first (`AXFocused`), or into what has the focus. The keys are posted to the app's process (`CGEventPostToPid`), so the user's front app and pointer stay where they are. |
 
 Without a permission, the call fails with a message that names it and where to allow it; `get_helper` and Settings show the same. Limits: windows that are minimised or on another Space are not listed; a few apps ignore keys posted to a background process; the model is given the tree and the picture's path, not the picture itself.
+
+### Apple apps
+
+Bate's engine has a tool for each of Messages, Mail, Notes, Reminders, Calendar and Contacts (`messages`, `mail`, `notes`, `reminders`, `calendar`, `contacts`), defined in `proto::apple`: a tool takes an `action` and some text fields (`id`, `query`, `to`, `title`, `body`, … per tool); other keys in `args` are ignored. The actions are:
+
+| Tool | Reads (`apple_read`) | Sends or changes (`apple_change`) |
+|---|---|---|
+| `messages` | none | `send` (`to`, `text`) |
+| `mail` | `search`, `read` | `draft`, `send` |
+| `notes` | `list`, `read` | `create`, `edit`, `delete` |
+| `reminders` | `list` | `create`, `edit`, `complete`, `delete` |
+| `calendar` | `list` | `create`, `edit`, `delete` |
+| `contacts` | `search` | `create`, `edit`, `delete` |
+
+The engine checks the call (a known action; every field text of at most 100 000 bytes without a NUL; else the model is told so and nothing is asked) and asks a `question` first: title `<tool>: <action>`, `kind` `apple_read` or `apple_change`, `target` `<tool> <action>` and then each field that was given, one `name: value` per line, whole and as written. The card therefore shows the recipient and the text of a send exactly. Then it sends `apple` with the tool and the `args` it asked about, and waits for `apple_result`.
+
+An `apple_change` is asked about every time: whatever its level (`always` is refused by `set_permission`, and treated as `ask` if one is found stored) and whatever was answered before, the user gets a card with the options `Approve` and `Deny`; `Always` on it is refused (`bad_request`). Only `never` answers without asking, with `Deny`. `apple_read` follows its level like any other kind and starts on `ask`.
+
+The service runs the action, not the engine, because a limited bot's engine may not send Apple events or read the user's files (see Folder limit). It checks the call again with the same table, then runs the app's script with `/usr/bin/osascript` (at most 120 s; output cut at 64 KiB). Scripts are fixed text built into `appd`; what the model wrote reaches them only as `argv` (`-l AppleScript -e <script> -- <arguments>`), never as part of the source. Debug builds of `appd` take `BATE_OSASCRIPT` (another program) so tests record calls and touch no app.
+
+Reading Messages' history is not offered: the app's scripting cannot read old messages, and its history file needs Full Disk Access, which the service must not hold (every program it starts would inherit it). It is to come through the helper app that holds privacy permissions. `messages send` goes to one person (`to`: phone number or address), not to a group. `mail` searches and reads the inbox only; `draft` leaves the message open in a Mail window, unsent. The first use of each app makes macOS ask the user to allow `appd` under Automation (and Contacts, Calendars and Reminders); a refusal comes back as an error that says where to allow it.
 
 ### Installed agents (ACP)
 

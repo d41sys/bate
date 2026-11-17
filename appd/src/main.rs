@@ -2,6 +2,7 @@
 //! the prompt ledger, open questions, routines and connectors, so work goes on
 //! while no window is open. The window protocol is in `PROTOCOL.md`.
 
+mod apple;
 mod attach;
 mod browser;
 mod channels;

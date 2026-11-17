@@ -165,7 +165,11 @@ pub fn windows() -> Vec<Win> {
         let Some(bounds) = get(entry, "kCGWindowBounds") else {
             continue;
         };
-        let size = |key| float(get(bounds.as_CFTypeRef(), key)).unwrap_or(0.0).round() as i64;
+        let size = |key| {
+            float(get(bounds.as_CFTypeRef(), key))
+                .unwrap_or(0.0)
+                .round() as i64
+        };
         let (width, height) = (size("Width"), size("Height"));
         let (Some(id), Some(pid), Some(owner)) = (
             int(get(entry, "kCGWindowNumber")),

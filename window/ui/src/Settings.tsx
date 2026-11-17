@@ -4,9 +4,17 @@ import { Helper } from "./Helper.tsx";
 import { Updates } from "./Updates.tsx";
 import { useEffect, useState } from "react";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
-import { KINDS, type Bot, type Level, type Permissions } from "./types.ts";
+import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
 
-const ACTIONS = { read: "Read files", write: "Change files", run: "Run commands", connector: "Use connectors", desktop: "See and control other apps" };
+const ACTIONS: Record<Kind, string> = {
+  read: "Read files",
+  write: "Change files",
+  run: "Run commands",
+  connector: "Use connectors",
+  desktop: "See and control other apps",
+  apple_read: "Read Messages, Mail, Notes, Reminders, Calendar, Contacts",
+  apple_change: "Send and change in those apps (always shows what it sends)",
+};
 
 export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }) {
   const [permissions, setPermissions] = useState<Permissions>();
@@ -78,7 +86,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           <label key={kind}>
             {ACTIONS[kind]}{" "}
             <select value={permissions.levels[kind]} onChange={(e) => run(request("set_permission", { bot: bot.id, kind, level: e.target.value as Level }))}>
-              <option value="always">always</option>
+              {kind !== "apple_change" && <option value="always">always</option>}
               <option value="ask">ask me</option>
               <option value="never">never</option>
             </select>

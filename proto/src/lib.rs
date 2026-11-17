@@ -9,6 +9,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
+pub mod apple;
 pub mod connectors;
 pub mod desktop;
 pub mod groups;
@@ -96,6 +97,14 @@ pub enum Op {
     },
     /// What came of the open `desktop` request: what the helper saw or did, or why not.
     DesktopResult {
+        request: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// What came of the open `apple` request: what the app returned, or why not.
+    AppleResult {
         request: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
@@ -191,6 +200,13 @@ pub enum Event {
     Desktop {
         request: String,
         action: Map<String, Value>,
+    },
+    /// Something to do in one of the user's Apple apps (`apple` module), which the service
+    /// runs. The engine waits until the service sends `apple_result` for `request`.
+    Apple {
+        request: String,
+        tool: String,
+        args: Map<String, Value>,
     },
     /// The engine asks the service for the endpoint and token before a model call.
     /// The engine waits until the service sends `token` for `request`.

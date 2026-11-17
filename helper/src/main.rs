@@ -219,7 +219,7 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
         // This test program is not `appd`: a socket of its own gets no helper.
         let _listener = UnixListener::bind(&socket).unwrap();
-        let refused = connect(&socket).err().expect("a stranger was trusted");
+        let refused = connect(&socket).expect_err("a stranger was trusted");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
         let _ = std::fs::remove_file(&socket);
     }

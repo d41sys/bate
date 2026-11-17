@@ -167,11 +167,12 @@ impl Engine {
     }
 
     fn handle(&mut self, id: String, op: Op) {
-        // What a `reply`, a `browser_result` or a `desktop_result` may answer: a message, a
-        // browser request or a desktop request.
+        // What a `reply`, a `browser_result`, a `desktop_result` or an `apple_result` may answer: a
+        // message, or a browser, desktop or Apple app request.
         let prefix = match op {
             Op::BrowserResult { .. } => 'b',
             Op::DesktopResult { .. } => 'd',
+            Op::AppleResult { .. } => 'a',
             _ => 'm',
         };
         let saved = |e: io::Error| format!("cannot save the conversation: {e}");
@@ -322,14 +323,18 @@ impl Engine {
                 text,
                 error,
             }
-            // What the browser or the desktop did is waited on as a message is (`b…` or `d…` in
-            // place of `m…`).
+            // What the browser, the desktop or an app did is waited on as a message is (`b…`, `d…` or `a…` in place of `m…`).
             | Op::BrowserResult {
                 request: message,
                 output: text,
                 error,
             }
             | Op::DesktopResult {
+                request: message,
+                output: text,
+                error,
+            }
+            | Op::AppleResult {
                 request: message,
                 output: text,
                 error,
