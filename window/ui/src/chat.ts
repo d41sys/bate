@@ -8,18 +8,21 @@ export type Entry =
   | { type: "tool_start"; call: string; tool: string; args: unknown }
   | { type: "tool_end"; call: string; output: string; isError: boolean }
   | ({ type: "question" } & Question)
-  | { type: "turn_end"; reason: string; error?: string };
+  | { type: "turn_end"; reason: string; error?: string }
+  | { type: "fork"; nonce: string };
 
 /** An entry as the service numbers it. */
 export type Row = { seq: number; entry: Entry };
 
 /** `id` is the `seq` of the entry that began the item: it stays when older items come in front. */
 export type Item = { id: number } & (
-  | { kind: "user"; text: string; nonce: string }
+  // `past`: left behind by a fork. The bot no longer has it, so it is for reading only.
+  | { kind: "user"; text: string; nonce: string; past?: boolean }
   | { kind: "reply"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool"; call: string; tool: string; args: unknown; output?: string; isError?: boolean }
   | { kind: "ended"; reason: string; error?: string }
+  | { kind: "forked" }
 );
 
 export type Question = {
@@ -61,6 +64,16 @@ function put(items: Item[], { seq: id, entry }: Row) {
     case "turn_end":
       // A turn that ended as it should needs no line of its own.
       if (entry.reason !== "done") items.push({ id, kind: "ended", reason: entry.reason, error: entry.error });
+      break;
+    case "fork":
+      // The bot went on from before the prompt `nonce`: that prompt and the later ones stay to read.
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (item.kind !== "user") continue;
+        items[i] = { ...item, past: true };
+        if (item.nonce === entry.nonce) break;
+      }
+      items.push({ id, kind: "forked" });
       break;
   }
 }

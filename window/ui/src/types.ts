@@ -21,6 +21,8 @@ export type Bot = {
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 
+export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed"; error?: string };
+
 export type Routine = {
   id?: string;
   name: string;
@@ -31,7 +33,7 @@ export type Routine = {
   chat: boolean;
   hookUrl?: string;
   nextRunMs?: number;
-  lastRun?: { atMs: number; outcome: "sent" | "failed" | "missed"; error?: string };
+  lastRun?: RoutineRun;
 };
 
 export type Connector = {
@@ -61,3 +63,5 @@ export type Group = {
   /** The other bots' ids, 1 to 20; not the lead. */
   members: string[];
 };
+
+export type Skill = { name: string; description: string };
