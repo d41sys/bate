@@ -326,8 +326,9 @@ pub fn revoke(auth: &str, saved: &Saved) -> Result<(), String> {
     }
 }
 
-/// The models the account is offered for display, in the server's order.
-pub fn models(api: &str, access_token: &str) -> Result<Vec<String>, String> {
+/// The models the account is offered for display, in the server's order, each with its
+/// context size in tokens when the server names one.
+pub fn models(api: &str, access_token: &str) -> Result<Vec<(String, Option<usize>)>, String> {
     let url = format!("{api}/models");
     let response = agent()
         .get(&url)
@@ -336,12 +337,15 @@ pub fn models(api: &str, access_token: &str) -> Result<Vec<String>, String> {
         .map_err(|e| format!("cannot reach {url}: {e}"))?;
     let (status, text) = text_of(response);
     let answer: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let listed: Vec<String> = answer["models"]
+    let listed: Vec<_> = answer["models"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|m| m["visibility"] == "list")
-        .filter_map(|m| m["slug"].as_str().map(str::to_owned))
+        .filter_map(|m| {
+            let context = m["context_window"].as_u64().filter(|n| *n > 0);
+            Some((m["slug"].as_str()?.to_owned(), context.map(|n| n as usize)))
+        })
         .collect();
     if listed.is_empty() {
         return Err(format!(

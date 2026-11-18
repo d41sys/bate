@@ -125,6 +125,9 @@ pub enum Op {
         /// The model to call when the engine has none of its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The model's context size in tokens, when the server names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
