@@ -341,6 +341,8 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
               <Row
                 item={items[row.index]}
                 busy={bot.busy || sending}
+                // An installed agent cannot go back in a conversation.
+                fixed={!!bot.agent?.length}
                 retry={retry}
                 fork={fork}
                 reading={reading === items[row.index].id}
@@ -448,6 +450,8 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
 type Prompt = { nonce: string; text: string };
 type Actions = {
   busy: boolean;
+  /** No going back from any message. */
+  fixed: boolean;
   retry: (p: Prompt) => void;
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
@@ -458,17 +462,19 @@ type Actions = {
   stopReading: () => void;
 };
 
-function Row({ item, busy, retry, edit, fork, open, reading, read, stopReading }: { item: Item } & Actions) {
+function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopReading }: { item: Item } & Actions) {
   switch (item.kind) {
     case "user":
       return (
         <>
-          <p>{item.text}</p>
-          <div className="actions">
-            <button disabled={busy} onClick={() => retry(item)}>Retry</button>
-            <button disabled={busy} onClick={() => edit(item)}>Edit</button>
-            <button disabled={busy} onClick={() => fork(item)} title="Go on from here in a copy; this chat stays as it is">Fork</button>
-          </div>
+          <p className={item.past ? "past" : undefined}>{item.text}</p>
+          {!item.past && !fixed && (
+            <div className="actions">
+              <button disabled={busy} onClick={() => retry(item)}>Retry</button>
+              <button disabled={busy} onClick={() => edit(item)}>Edit</button>
+              <button disabled={busy} onClick={() => fork(item)} title="Go on from before this message in a copy; what came after stays here to read">Fork</button>
+            </div>
+          )}
         </>
       );
     case "reply":
@@ -485,6 +491,8 @@ function Row({ item, busy, retry, edit, fork, open, reading, read, stopReading }
       );
     case "ended":
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
+    case "forked":
+      return <p>Forked here. The bot goes on from before the greyed messages above; they are kept to read.</p>;
     default:
       return <p>{item.text}</p>;
   }
