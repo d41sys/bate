@@ -23,8 +23,10 @@ pub struct Turn {
     /// The model chosen for the bot; without one, the service names it with the token.
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// The model's context size in tokens; compaction starts at four fifths of it.
-    pub context: usize,
+    /// `BATE_MODEL_CONTEXT`: the model's context size in tokens. It goes before the size that
+    /// comes with the `token` answer; with neither, `CONTEXT`. Compaction starts at four
+    /// fifths of it.
+    pub context: Option<usize>,
     /// The bot's MCP servers as last sent by the service.
     pub connectors: Vec<Connector>,
     pub control: Arc<Control>,
@@ -45,6 +47,11 @@ pub type Answer = (String, Result<String, String>);
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
 /// Most recent messages a compaction leaves as they are.
 const KEEP: usize = 4;
+/// The context size, in tokens, taken for a model that nobody named one for.
+const CONTEXT: usize = 32_000;
+/// A `token` answer: the model server, its key, the API it speaks, the model to call, and
+/// that model's context size in tokens if the service knows it.
+type Token = (String, Option<String>, Api, String, Option<usize>);
 const SUMMARISE: &str = "Summarise the conversation so far for your own later use: what the user wants, \
     what was decided, what was found, which files changed, and what is left to do. \
     Answer with the summary only and do not call tools.";
@@ -181,7 +188,10 @@ impl Turn {
             if self.control.aborted() {
                 return Ok(TurnEnd::Aborted);
             }
-            if session.tokens() > self.context / 5 * 4 {
+            // Asked for first: with it comes how much the model holds.
+            let mut token = self.get_token();
+            let holds = token.as_ref().ok().and_then(|t| t.4);
+            if session.tokens() > self.context.or(holds).unwrap_or(CONTEXT) / 5 * 4 {
                 // A summary that fails must not end the turn, or every later prompt would fail the same way.
                 if let Err(e) = self.compact(session, &system, &tools) {
                     eprintln!("the context was not compacted: {e}");
@@ -189,8 +199,10 @@ impl Turn {
                 if self.control.aborted() {
                     return Ok(TurnEnd::Aborted);
                 }
+                // The summary was a model call of its own, and can have been a long one.
+                token = self.get_token();
             }
-            let (url, key, api, model) = match self.get_token() {
+            let (url, key, api, model, _) = match token {
                 Ok(token) => token,
                 Err(_) if self.control.aborted() => return Ok(TurnEnd::Aborted),
                 Err(e) => return Err(e),
@@ -302,7 +314,7 @@ impl Turn {
             if self.control.aborted() {
                 return Err("Aborted by the user".into());
             }
-            let (url, key, api, model) = self.get_token()?;
+            let (url, key, api, model, _) = self.get_token()?;
             let ask = self.ask_model(&model, &system, &messages, None, &tools);
             let Reply {
                 text,
@@ -460,7 +472,7 @@ impl Turn {
         }
         // Same system text and tools as a turn, so a provider's prompt cache still applies.
         let instruction = json!({"role": "user", "content": SUMMARISE});
-        let (url, key, api, model) = self.get_token()?;
+        let (url, key, api, model, _) = self.get_token()?;
         let ask = self.ask_model(&model, system, &messages[..cut], Some(&instruction), tools);
         let reply = self.provider.stream(
             &url,
@@ -647,7 +659,7 @@ impl Turn {
 
     /// Asks the service for the model server and key of the coming model call. Its ids count
     /// apart from questions', so a turn's question ids stay what they were without it.
-    fn get_token(&self) -> Result<(String, Option<String>, Api, String), String> {
+    fn get_token(&self) -> Result<Token, String> {
         static TOK: AtomicU64 = AtomicU64::new(0);
         let id = format!("tok{}", TOK.fetch_add(1, Ordering::Relaxed) + 1);
         *lock(&self.control.question) = Some(id.clone());
@@ -656,9 +668,9 @@ impl Turn {
         });
         match self.answer(&id) {
             Some(Ok(val)) => {
-                let mut parts = val.splitn(4, '\n');
+                let mut parts = val.split('\n');
                 let mut part = || parts.next().unwrap_or("");
-                let (url, key, api, named) = (part(), part(), part(), part());
+                let (url, key, api, named, context) = (part(), part(), part(), part(), part());
                 let model = (self.model.clone())
                     .or_else(|| (!named.is_empty()).then(|| named.to_owned()))
                     .ok_or("no model chosen")?;
@@ -667,7 +679,7 @@ impl Turn {
                     "responses" => Api::Responses,
                     _ => Api::Chat,
                 };
-                Ok((url.to_owned(), key, api, model))
+                Ok((url.to_owned(), key, api, model, context.parse().ok()))
             }
             Some(Err(e)) => Err(e),
             None => Err("Aborted by the user".into()),

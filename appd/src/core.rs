@@ -56,13 +56,16 @@ pub enum Msg {
         client: u64,
         id: Value,
         models: Vec<String>,
+        /// The ChatGPT plan's list, when that is what was read.
+        plan: Option<Vec<(String, Option<usize>)>>,
     },
-    /// The first model the ChatGPT plan lists, for a bot with none chosen.
+    /// The ChatGPT plan's model list, read for a bot's `token` request: a bot with no model
+    /// gets the first one, and the context sizes are kept.
     PlanModel {
         bot: String,
         request: String,
         key: String,
-        first: Result<String, String>,
+        listed: Result<Vec<(String, Option<usize>)>, String>,
     },
     ChatGpt(ChatGptNews),
     /// Time to read the update feed.
@@ -340,6 +343,9 @@ pub struct Core {
     /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
     /// renewed; `Some` while a renewal runs, so that there is one at a time.
     chatgpt_waiting: Option<Vec<(String, String)>>,
+    /// The ChatGPT plan's models and their context sizes, as last listed; `None` until the
+    /// list was asked for.
+    plan_models: Option<Vec<(String, Option<usize>)>>,
     /// The flag that ends the ChatGPT sign-in begun last, should the user begin another.
     chatgpt_signing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Where webhooks are served; `None` if the port could not be opened.
@@ -417,6 +423,7 @@ impl Core {
             chat_codes: HashMap::new(),
             sign_ins: HashMap::new(),
             chatgpt_waiting: None,
+            plan_models: None,
             chatgpt_signing: None,
             browsers: HashMap::new(),
             desktop: desktop::Link::start(tx.clone()),
@@ -540,15 +547,29 @@ impl Core {
                 }
             }
             Msg::HelperChanged => self.broadcast(&json!({"type": "helper_changed"})),
-            Msg::Models { client, id, models } => {
+            Msg::Models {
+                client,
+                id,
+                models,
+                plan,
+            } => {
+                if let Some(plan) = plan.filter(|p| !p.is_empty()) {
+                    self.plan_models = Some(plan);
+                }
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
             Msg::PlanModel {
                 bot,
                 request,
                 key,
-                first,
+                listed,
             } => {
+                // Also when it failed: the list is asked for once, not before every model call.
+                match &listed {
+                    Ok(listed) => self.plan_models = Some(listed.clone()),
+                    Err(_) => drop(self.plan_models.get_or_insert_default()),
+                }
+                let first = listed.map(|mut all| all.remove(0).0);
                 // A bot deleted since has no engine to answer, and gets no model.
                 if !self.engines.contains_key(&bot) {
                     return;
@@ -1445,15 +1466,23 @@ impl Core {
                 let (url, key, _) = self.provider().map_err(internal)?;
                 let (tx, id) = (self.tx.clone(), id.clone());
                 std::thread::spawn(move || {
-                    let models = match (chatgpt.filter(chatgpt::Saved::signed_in), url) {
+                    let (models, plan) = match (chatgpt.filter(chatgpt::Saved::signed_in), url) {
                         // shortcut: with a token past its end the list is empty until the
                         // next model call has renewed it.
-                        (Some(saved), _) => chatgpt::models(&chatgpt::api(), &saved.access_token)
-                            .unwrap_or_default(),
-                        (None, Some(u)) => fetch_models(&u, key.as_deref()),
-                        (None, None) => Vec::new(),
+                        (Some(saved), _) => {
+                            let plan = chatgpt::models(&chatgpt::api(), &saved.access_token)
+                                .unwrap_or_default();
+                            (plan.iter().map(|(m, _)| m.clone()).collect(), Some(plan))
+                        }
+                        (None, Some(u)) => (fetch_models(&u, key.as_deref()), None),
+                        (None, None) => (Vec::new(), None),
                     };
-                    let _ = tx.send(Msg::Models { client, id, models });
+                    let _ = tx.send(Msg::Models {
+                        client,
+                        id,
+                        models,
+                        plan,
+                    });
                 });
                 Ok(None)
             }
@@ -2490,16 +2519,17 @@ impl Core {
         saved: Result<&chatgpt::Saved, &str>,
     ) {
         let model = self.model_of(bot);
-        if let (Ok(saved), None) = (saved, &model) {
+        if let (Ok(saved), true) = (saved, model.is_none() || self.plan_models.is_none()) {
             // No model chosen: the bot gets the first one the plan lists, OpenAI's default.
+            // A chosen one: the list says how much it holds.
             let (tx, bot, key) = (self.tx.clone(), bot.to_owned(), saved.access_token.clone());
             std::thread::spawn(move || {
-                let first = chatgpt::models(&chatgpt::api(), &key).map(|mut all| all.remove(0));
+                let listed = chatgpt::models(&chatgpt::api(), &key);
                 let _ = tx.send(Msg::PlanModel {
                     bot,
                     request,
                     key,
-                    first,
+                    listed,
                 });
             });
             return;
@@ -2515,11 +2545,15 @@ impl Core {
         key: Result<String, String>,
         model: Option<String>,
     ) {
+        let context = (self.plan_models.iter().flatten())
+            .find(|(listed, _)| Some(listed) == model.as_ref())
+            .and_then(|(_, context)| *context);
         let op = Op::Token {
             request,
             url: key.is_ok().then(chatgpt::api),
             api: Some("responses".into()),
             model,
+            context,
             error: key.as_ref().err().cloned(),
             key: key.ok(),
         };
@@ -2636,6 +2670,9 @@ impl Core {
                 key,
                 api: None,
                 model: None,
+                // shortcut: a model server is not asked how much its model holds, so the
+                // engine's default stands; read its `/models` when one is compacted too early.
+                context: None,
                 error,
             };
             if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {

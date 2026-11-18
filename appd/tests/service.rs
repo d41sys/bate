@@ -4660,6 +4660,7 @@ impl ChatGpt {
                         let models = json!({"models": [
                             {"slug": "hidden", "visibility": "hide"},
                             {"slug": "gpt-test", "display_name": "GPT Test", "visibility": "list"},
+                            {"slug": "gpt-small", "visibility": "list", "context_window": 20},
                         ]});
                         (200, "application/json", models.to_string())
                     }
@@ -4791,7 +4792,7 @@ fn bots_run_on_a_chatgpt_sign_in_that_is_renewed_and_can_be_ended() {
 
     assert_eq!(
         w.ok("list_models", json!({})),
-        json!({"models": ["gpt-test"]})
+        json!({"models": ["gpt-test", "gpt-small"]})
     );
     // No token is in the conversation or the log.
     let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
@@ -4865,6 +4866,24 @@ fn a_new_bot_says_what_to_set_up_and_answers_on_chatgpt_with_no_model_chosen() {
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["model"], "gpt-test");
     // The choice is kept: the list is not read again.
     assert_eq!(turn(&mut w, &bot, "n3")["reason"], "done");
+    assert_eq!(openai.seen("GET /v1/models").len(), 1);
+
+    // The list says how much a model holds: a bot on a small one is compacted early.
+    let small = w.create_bot();
+    w.ok("set_model", json!({"bot": small, "model": "gpt-small"}));
+    for nonce in ["s1", "s2", "s3", "s4"] {
+        assert_eq!(turn(&mut w, &small, nonce)["reason"], "done");
+    }
+    let calls = openai.seen("POST /v1/responses");
+    let summaries = calls
+        .iter()
+        .filter(|c| c.contains("Summarise the conversation"));
+    assert!(summaries.clone().count() > 0, "{calls:?}");
+    assert!(
+        summaries
+            .clone()
+            .all(|c| c.contains(r#""model":"gpt-small""#))
+    );
     assert_eq!(openai.seen("GET /v1/models").len(), 1);
 
     // A model server lists in no order: there the user chooses, and is told where.

@@ -367,6 +367,7 @@ impl Engine {
                 key,
                 api,
                 model,
+                context,
                 error,
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
@@ -383,7 +384,8 @@ impl Engine {
                                 let k = key.unwrap_or_default();
                                 let a = api.unwrap_or_default();
                                 let m = model.unwrap_or_default();
-                                Ok(format!("{u}\n{k}\n{a}\n{m}"))
+                                let c = context.map(|c| c.to_string()).unwrap_or_default();
+                                Ok(format!("{u}\n{k}\n{a}\n{m}\n{c}"))
                             }
                             (_, Some(e)) => Err(e),
                             _ => Err("no model server is set up".into()),
@@ -421,10 +423,12 @@ impl Engine {
         let model = self.model.clone();
         let provider = model::Provider::new();
         let context = match std::env::var("BATE_MODEL_CONTEXT") {
-            Ok(tokens) => tokens
-                .parse()
-                .map_err(|_| "BATE_MODEL_CONTEXT is not a number of tokens")?,
-            Err(_) => 32_000,
+            Ok(tokens) => Some(
+                tokens
+                    .parse()
+                    .map_err(|_| "BATE_MODEL_CONTEXT is not a number of tokens")?,
+            ),
+            Err(_) => None,
         };
         let session = self.session.take().ok_or(NO_SESSION)?;
         let control = Arc::new(Control::default());

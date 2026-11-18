@@ -136,14 +136,25 @@ impl Engine {
     }
 
     fn start_manual_token(dir: &Path, model: &Model, env: &[(&str, &str)]) -> Engine {
-        Self::start_internal(dir, model, env, false)
+        Self::start_internal(dir, model, env, false, None)
     }
 
     fn start_with(dir: &Path, model: &Model, env: &[(&str, &str)]) -> Engine {
-        Self::start_internal(dir, model, env, true)
+        Self::start_internal(dir, model, env, true, None)
     }
 
-    fn start_internal(dir: &Path, model: &Model, env: &[(&str, &str)], auto_token: bool) -> Engine {
+    /// The service names `context` tokens as the model's size with every token.
+    fn start_with_context(dir: &Path, model: &Model, context: usize) -> Engine {
+        Self::start_internal(dir, model, &[], true, Some(context))
+    }
+
+    fn start_internal(
+        dir: &Path,
+        model: &Model,
+        env: &[(&str, &str)],
+        auto_token: bool,
+        context: Option<usize>,
+    ) -> Engine {
         let mut child = Command::new(env!("CARGO_BIN_EXE_agentcore"))
             .current_dir(dir)
             .env_remove("BATE_MODEL_API_KEY")
@@ -178,6 +189,7 @@ impl Engine {
                             key: None,
                             api: None,
                             model: None,
+                            context,
                             error: None,
                         },
                     };
@@ -712,6 +724,23 @@ fn a_context_near_its_limit_is_compacted_before_the_model_call() {
         "{last}"
     );
     assert!(!last.contains("Q1-old"), "{last}");
+}
+
+#[test]
+fn the_size_that_comes_with_the_token_says_when_to_compact() {
+    let dir = workdir("autocompact-token");
+    let model = Model::serve(replies(&["A1", "A2", "AUTO-SUMMARY", "A3"]));
+    // No `BATE_MODEL_CONTEXT`: at the default of 32,000 tokens nothing here would be compacted.
+    let mut engine = Engine::start_with_context(&dir, &model, 100);
+    engine.open_new();
+    let long = "x".repeat(150);
+    engine.exchange("n1", &format!("Q1-old {long}"));
+    engine.exchange("n2", &format!("Q2 {long}"));
+    engine.exchange("n3", "Q3");
+
+    assert_eq!(model.requests().len(), 4);
+    assert!(sent(&model, 2).contains("Summarise"));
+    assert!(!sent(&model, 3).contains("Q1-old"));
 }
 
 #[test]
@@ -2046,6 +2075,7 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
             key: Some("sk-secret-token-123".into()),
             api: None,
             model: None,
+            context: None,
             error: None,
         }),
         None
@@ -2092,6 +2122,7 @@ fn give_responses_token(engine: &mut Engine, model: &Model) {
         key: Some("plan-token".into()),
         api: Some("responses".into()),
         model: None,
+        context: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2139,6 +2170,7 @@ fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
         key: Some("plan-token".into()),
         api: Some("responses".into()),
         model: None,
+        context: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2264,6 +2296,7 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
             key: None,
             api: None,
             model: None,
+            context: None,
             error: Some("no model server configured".into()),
         }),
         None
@@ -2299,6 +2332,7 @@ fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment
             key: None,
             api: None,
             model: None,
+            context: None,
             error: None,
         }),
         None

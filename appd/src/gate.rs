@@ -45,7 +45,7 @@ fn run(model: Option<String>, file: &Path) -> Result<(), String> {
     println!("signed in: client {}", saved.client_id);
     let model = match model {
         Some(model) => model,
-        None => chatgpt::models(&api, &saved.access_token)?.remove(0),
+        None => chatgpt::models(&api, &saved.access_token)?.remove(0).0,
     };
     println!("model: {model}");
     reply(&api, &saved.access_token, &model)
