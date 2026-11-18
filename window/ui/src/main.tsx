@@ -7,6 +7,7 @@ import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
+import { Groups } from "./Groups.tsx";
 import { Settings } from "./Settings.tsx";
 import { FirstRun } from "./FirstRun.tsx";
 import { Palette, type Choice } from "./Palette.tsx";
@@ -15,7 +16,7 @@ import "./style.css";
 // Only in the build `window/check-frames.sh` makes.
 if (import.meta.env.VITE_FRAME_CHECK) void import("./frameCheck.ts");
 
-const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", settings: "Settings" };
+const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", groups: "Groups", settings: "Settings" };
 type Tab = keyof typeof TABS;
 
 function App() {
@@ -206,6 +207,7 @@ function App() {
               />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
+            {tab === "groups" && <Groups key={connection} bots={bots} />}
             {tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setSelected(undefined)} />}
           </>
         ) : (
