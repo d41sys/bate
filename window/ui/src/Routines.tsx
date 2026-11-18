@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
-import type { Frequency, Routine } from "./types.ts";
+import type { Frequency, Routine, RoutineRun } from "./types.ts";
 
 const EVERY: Record<Frequency, string> = {
   minutes: "minutes",
@@ -12,6 +12,40 @@ const EVERY: Record<Frequency, string> = {
 };
 
 const blank = { name: "", prompt: "", frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
+
+function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
+  const [open, setOpen] = useState(false);
+  const [runs, setRuns] = useState<RoutineRun[]>();
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    const load = () =>
+      request<{ runs: RoutineRun[] }>("list_routine_runs", { bot, routineId }).then((d) => (setRuns(d.runs), setError("")), (e: Error) => setError(e.message));
+    load();
+    return listen((frame) => {
+      if (frame.type === "routines_changed" && frame.bot === bot) load();
+    });
+  }, [open, bot, routineId]);
+
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>Past runs</summary>
+      {error && <p className="error" role="alert">{error}</p>}
+      {runs && (runs.length === 0 ? (
+        <p className="note">No runs yet.</p>
+      ) : (
+        <ul>
+          {runs.map((x) => (
+            <li key={x.atMs}>
+              {new Date(x.atMs).toLocaleString()} · {x.outcome}{x.error && `: ${x.error}`}
+            </li>
+          ))}
+        </ul>
+      ))}
+    </details>
+  );
+}
 
 export function Routines({ bot }: { bot: string }) {
   const [routines, setRoutines] = useState<Routine[]>([]);
@@ -51,6 +85,7 @@ export function Routines({ bot }: { bot: string }) {
               {r.chat && ` · from a paired chat: /run ${r.name}`}
             </span>
             {r.hookUrl && <code>{r.hookUrl}</code>}
+            {r.id && <PastRuns bot={bot} routineId={r.id} />}
             <button onClick={() => run(request("delete_routine", { bot, routineId: r.id }))}>Delete</button>
           </li>
         ))}
