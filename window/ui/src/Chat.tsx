@@ -29,6 +29,7 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
+  const [compacted, setCompacted] = useState(false);
   // A file of the bot's, shown in a frame of its own.
   const [shown, setShown] = useState<string>();
   const [sending, setSending] = useState(false);
@@ -258,6 +259,11 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
       setEditing(undefined);
       setText(item.text);
     });
+  const compact = () =>
+    once(async () => {
+      await request("compact", { bot: bot.id });
+      setCompacted(true);
+    });
   const send = async () => {
     // The text stays until the service has it.
     if (!message || uploading || bot.busy || inFlight.current) return;
@@ -271,6 +277,7 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
       }
       await prompt(message);
       setText("");
+      setCompacted(false);
       setFiles([]);
       setEditing(undefined);
       setError("");
@@ -371,6 +378,7 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
+      {compacted && <p className="note" role="status">Done: the bot keeps the last four messages as they are and a summary of anything older. The chat here is unchanged.</p>}
       {(files.length > 0 || editing) && (
         <ul className="attached">
           {editing && (
@@ -437,6 +445,9 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
             }
           }}
         />
+        {!bot.busy && !bot.agent?.length && (
+          <button type="button" disabled={sending} title="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole" onClick={compact}>Compact</button>
+        )}
         {bot.busy ? (
           <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
         ) : (
