@@ -554,7 +554,7 @@ impl Core {
                 plan,
             } => {
                 if let Some(plan) = plan.filter(|p| !p.is_empty()) {
-                    self.plan_models = Some(plan);
+                    self.keep_plan_models(plan);
                 }
                 self.reply(client, &id, "list_models", Ok(json!({"models": models})));
             }
@@ -566,7 +566,7 @@ impl Core {
             } => {
                 // Also when it failed: the list is asked for once, not before every model call.
                 match &listed {
-                    Ok(listed) => self.plan_models = Some(listed.clone()),
+                    Ok(listed) => self.keep_plan_models(listed.clone()),
                     Err(_) => drop(self.plan_models.get_or_insert_default()),
                 }
                 let first = listed.map(|mut all| all.remove(0).0);
@@ -2536,6 +2536,21 @@ impl Core {
         }
         let key = saved.map(|s| s.access_token.clone()).map_err(str::to_owned);
         self.send_plan_token(bot, request, key, model);
+    }
+
+    /// Keeps the plan's model list. A new one goes to the log, which then shows what sizes
+    /// OpenAI names.
+    fn keep_plan_models(&mut self, listed: Vec<(String, Option<usize>)>) {
+        if self.plan_models.as_ref() != Some(&listed) {
+            let sizes: Vec<String> = (listed.iter())
+                .map(|(model, context)| match context {
+                    Some(context) => format!("{model} {context}"),
+                    None => format!("{model} (no size)"),
+                })
+                .collect();
+            log!("the ChatGPT plan's models: {}", sizes.join(", "));
+        }
+        self.plan_models = Some(listed);
     }
 
     fn send_plan_token(
