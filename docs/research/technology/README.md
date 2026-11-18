@@ -170,7 +170,7 @@ Tests and quality tooling are row 17 of each per-app file.
 
 Counted over all 14 apps, from the tables above.
 
-- **Closest relatives:** Kwant (Rust, Tauri 2, React, SQLite, own HTTP model calls, raw CDP, own Telegram client, own scheduler) and ZeroClaw (Rust, Tauri 2, bundled `rusqlite`, own HTTP model calls, own MCP client, `sandbox-exec` as one of its sandboxes). Both are built on tokio and also run on Linux and Windows; Bate has no async runtime and runs on macOS only.
+- **Closest relatives:** Kwant (Rust, Tauri 2, React, SQLite, own HTTP model calls, raw CDP, own Telegram client, own scheduler) and ZeroClaw (Rust, Tauri 2, bundled `rusqlite`, own HTTP model calls, own MCP client, `sandbox-exec` as one of its sandboxes). Both build their server on tokio and also run on Linux and Windows; Bate's service and engine use plain threads (tokio is present only in the window, through Tauri) and Bate runs on macOS only.
 - **Own code where others take a library:** Bate, omp, ZeroClaw and Kwant call model APIs without a vendor SDK. Bate, pi, omp, ZeroClaw and Kwant have their own MCP client. Of the apps with a desktop shell, Bate and ZeroClaw update with their own code; the rest use Sparkle, the Tauri updater or `electron-updater`.
 - **Only in Bate:** the Keychain as the only place secrets are kept, and the system's Dictation command for speech in.
 - **Not in Bate, present in several others:** a terminal UI (7: pi, omp, OpenClaw, Hermes Agent, nanobot, ZeroClaw, Brigade), vector or embedding search (4: ZeroClaw and Kwant; omp and OpenClaw as options), on-device speech models (4: omp, OpenClaw, Hermes Agent, openbot), a plugin system beyond MCP and skills, a Linux or Windows build, a mobile app (4: OpenClaw, OpenBot, openbot, AionUi).
@@ -180,9 +180,9 @@ Counted over all 14 apps, from the tables above.
 
 1. Five readers with no shell each read two or three repos and wrote the per-app tables with `path:line` citations.
 2. Commits: all 13 confirmed with `git rev-parse` against the headings.
-3. Citations: a script resolved every cited path in files 01 to 05 to a file tracked in that repo with at least as many lines as the cited line number. 1,394 of 1,394 resolved, after one path that lacked its folders was corrected. A path cited without its folders was matched by its ending.
+3. Citations: a script resolved every cited path in files 01 to 05 to a file tracked in that repo with at least as many lines as the cited line number. 1,394 of 1,394 resolved, after one path that lacked its folders was corrected. A path cited without its folders was matched by its ending. The script also flagged 8 backticked strings that are not citations: five paths the apps create at run time (`data/v2.db`, `cron/jobs.json` twice, `memory/YYYY-MM-DD.md`, `runtime/agent-process-registry.json`), a container image name (`oven/bun`), a download URL, and one script the cell itself reports as missing.
 4. Content: 37 citations behind the tables above were read line by line. 36 said what the cell says; one line number was off by one and is corrected.
-5. Bate's citations were read at `78f8217`, and all 63 path and line references in file 06 resolve.
+5. Bate's citations were read at `78f8217`, and all 64 path and line references in file 06 resolve.
 
 ## Not verified
 
