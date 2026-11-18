@@ -1,0 +1,28 @@
+# Technology inside Bate
+
+Read from `d41sys/bate` at `78f8217`. Each cell cites `path:line` in this repo. Row 1 (languages) is in the [README](README.md), where every app is counted the same way.
+
+| Row | Technology (with citations) |
+|---|---|
+| 2. Runtime and build | Rust 1.92.0 (`rust-toolchain.toml:2`), edition 2024 (`Cargo.toml:6`), one cargo workspace of five crates: `proto`, `appd`, `agentcore`, `window`, `helper` (`Cargo.toml:3`). No async runtime in the service or the engine: `tokio` is in none of `appd/Cargo.toml`, `agentcore/Cargo.toml`, `helper/Cargo.toml`, `proto/Cargo.toml`; the engine runs one turn at a time on its own thread (`agentcore/src/main.rs:2`). UI: TypeScript 7.0.2 and Vite 8.3.8 with npm (`window/ui/package.json:21-22`). |
+| 3. What ships | One macOS app, `Bate.app`. It carries the `appd` background service, the `agentcore` engine, the window and a permissions helper. No terminal UI, mobile app, browser extension or Docker image. |
+| 4. Desktop shell and UI | Tauri 2 with a tray icon (`window/Cargo.toml:12`, `window/src/main.rs:18`). UI is React 19.3.1 with `@tanstack/react-virtual`, `react-markdown`, `remark-gfm` and `rehype-highlight` (`window/ui/package.json:10-15`). No component library and no CSS framework. |
+| 5. Process model and IPC | `appd` is a login item of the app, registered through macOS `SMAppService` (`appd/src/login_item.rs:1`). It starts one `agentcore` child process per bot and talks to it in JSON lines on stdin/stdout (`agentcore/src/main.rs:2`). The window talks to `appd` over a Unix socket; the helper connects to a second one (`appd/src/paths.rs:5`, `helper/src/main.rs:3`). Other devices on the local network use HTTPS with long-polling (`appd/src/lan.rs:33`) on `rustls` 0.23 (`appd/Cargo.toml:15`). ACP agents and stdio MCP servers are child processes of the engine (`agentcore/src/acp.rs:514`, `agentcore/src/mcp.rs:170`). |
+| 6. Storage | SQLite through `rusqlite` 0.37 with the bundled library (`appd/Cargo.toml:14`). Conversations are JSON lines in `.agentcore/sessions/<id>.jsonl` in the bot's folder (`agentcore/src/session.rs:1`). Memory is Markdown files in `memory/` in the bot's folder (`agentcore/src/memory.rs:1`). Vector index or embeddings: none. |
+| 7. Model access | Own HTTP calls with `ureq` 3 (`agentcore/Cargo.toml:11`); no vendor SDK. Two wire formats: OpenAI-style chat completions (`agentcore/src/model.rs:244`) and the Responses API read as server-sent events (`agentcore/src/model.rs:70`). |
+| 8. Agent loop | Own code in Rust: `Turn::run` and its loop (`agentcore/src/turn.rs:177,193,210`). A conversation the model cannot hold is summarised and asked again, once (`agentcore/src/turn.rs:61,255`). It can also hand a conversation to an agent program installed on the Mac, as an ACP client (`agentcore/src/acp.rs:226`). |
+| 9. Extension protocols | MCP: own client, no SDK, over stdio or HTTP (`agentcore/src/mcp.rs:170,211,394`). ACP: own client (`agentcore/src/acp.rs:226`). Skills are folders with a `SKILL.md` (`agentcore/src/skills.rs:11`). No plugin system of its own. MCP server and ACP server: none. |
+| 10. Sandbox and isolation | What a bot runs is limited by the operating system through macOS `sandbox-exec` (`appd/src/limit.rs:2`). No container, VM or Linux/Windows backend. |
+| 11. Browser and computer control | Browser: the bot's own Chrome, driven over the Chrome DevTools Protocol on `--remote-debugging-pipe`, not a network port (`appd/src/browser.rs:263,334`); no Playwright or Puppeteer. Computer: the helper reads and presses controls through the macOS Accessibility API (`helper/src/ax.rs:53`) and captures windows with `CGWindowListCreateImage` (`helper/src/ax.rs:67`). It reads Messages history from `chat.db` (`helper/src/messages.rs:1`). AppleScript runs through `osascript` (`appd/src/apple.rs:24`). |
+| 12. Messaging channels | Telegram and Discord, both own clients with no bot library (`appd/src/channels.rs:2,21-22`); Discord's gateway WebSocket uses `tungstenite` 0.30 (`appd/Cargo.toml:19`). |
+| 13. Scheduling | Own code on the `jiff` 0.2 date and time library (`appd/Cargo.toml:7`, `appd/src/schedule.rs:11`). No cron library. |
+| 14. Voice | In: the system's Dictation, started with `startDictation:` (`window/src/main.rs:84`). Out: the web view's `speechSynthesis` (`window/ui/src/speech.ts:1`). No speech model or cloud speech API in the app. |
+| 15. Secrets | macOS Keychain only, through `security-framework` 3.7 (`appd/Cargo.toml:16`, `appd/src/keychain.rs:35`). |
+| 16. Packaging and updates | `window/bundle.sh` builds the app and signs each program with `codesign`, using the "Bate Dev" certificate when present and an ad hoc signature otherwise (`window/bundle.sh:26,57`). Updates: own feed; the download's Ed25519 signature is checked with `ring` (`appd/src/update.rs:15`) and the new app replaces the old one in one atomic exchange, `renamex_np` (`appd/src/update.rs:317`). No Sparkle and no Tauri updater plugin. |
+| 17. Tests and quality | `cargo test` with tests against the real service and engine (`appd/tests/service.rs`, `agentcore/tests/engine.rs`, `agentcore/tests/acp.rs`); `cargo fmt --check`; `cargo clippy` with `-D warnings`; `node --test` for the UI (`window/ui/package.json:7`). CI: GitHub Actions on macOS (`.github/workflows/ci.yml:18-22`). |
+| 18. Licence | Apache-2.0 (`LICENSE:2`). |
+
+## Notes
+
+- **Size:** 15,747 lines of Rust in `agentcore/src` and `appd/src`, 3,475 in `helper/src`, `window/src` and `proto/src`, and 2,578 lines of TypeScript and CSS in `window/ui/src` (`wc -l` at `78f8217`).
+- **macOS only by construction:** the login item, the sandbox, the Keychain, Accessibility, Dictation and the update swap are all macOS interfaces.
