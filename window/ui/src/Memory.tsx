@@ -91,7 +91,7 @@ export function Memory({ bot }: { bot: string }) {
         )}
         <label>Text <textarea rows={12} value={text} onChange={(e) => setText(e.target.value)} /></label>
         <button disabled={!dirty && !!open}>Save</button>{" "}
-        {dirty && open && <button type="button" onClick={() => setText(saved)}>Discard changes</button>}
+        {dirty && <button type="button" onClick={() => setText(saved)}>Discard changes</button>}
         {open && !dirty && <button type="button" onClick={() => show("", "")}>New note</button>}
         {dirty && <span className="note"> Unsaved: save or discard before opening another note.</span>}
       </form>
