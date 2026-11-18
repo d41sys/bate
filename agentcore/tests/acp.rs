@@ -3,6 +3,7 @@
 
 use proto::permissions::Kind;
 use proto::{Engine, Event, Op, TurnEnd};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,8 +11,9 @@ use std::process::Command;
 /// Requests and their ids arrive as `{"id":N,"jsonrpc":"2.0","method":…}`. What the agent is
 /// sent goes to `agent.log` in its folder. Prompts: `use a tool` asks for permission (request
 /// id 900) and goes on when answered (when the request is called off, it ends its turn as if
-/// done, leaving the call unfinished); `hang` works until cancelled; `stop early` runs out of
-/// tokens; `die` exits; anything else is answered with a thought and two pieces of text.
+/// done, leaving the call unfinished); `make a plan` sends a plan and then an emptied one;
+/// `hang` works until cancelled; `stop early` runs out of tokens; `die` exits; anything else
+/// is answered with a thought and two pieces of text.
 /// With a file `signed-out` in the folder, no conversation is opened.
 const AGENT: &str = r#"#!/bin/sh
 say() { printf '%s\n' "$1"; }
@@ -40,6 +42,10 @@ while IFS= read -r line; do
         *'use a tool'*)
           update '{"sessionUpdate":"tool_call","toolCallId":"t1","title":"List files","kind":"execute","status":"pending","rawInput":{"command":"ls -la"}}'
           say '{"jsonrpc":"2.0","id":900,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"List files","kind":"execute","rawInput":{"command":"ls -la"}},"options":[{"optionId":"ever","name":"Always allow","kind":"allow_always"},{"optionId":"yes","name":"Allow","kind":"allow_once"},{"optionId":"no","name":"Reject","kind":"reject_once"}]}}' ;;
+        *'make a plan'*)
+          update '{"sessionUpdate":"plan","entries":[{"content":"Read the file","priority":"high","status":"completed"},{"content":"Fix it","priority":"medium","status":"in_progress"},{"content":"Test it","priority":"low","status":"pending"}]}'
+          update '{"sessionUpdate":"plan","entries":[]}'
+          result "$id" '{"stopReason":"end_turn"}' ;;
         *'hang'*) chunk agent_message_chunk "working" ;;
         *'stop early'*) result "$id" '{"stopReason":"max_tokens"}' ;;
         *'die'*) chunk agent_message_chunk "oh"; exit 3 ;;
@@ -206,6 +212,27 @@ fn a_turn_is_the_agents_words_and_thoughts() {
     bridge.turn("again");
     assert_eq!(bridge.rest().last(), Some(&end(TurnEnd::Done, None)));
     assert_eq!(bridge.request(Op::Stop), None);
+}
+
+#[test]
+fn the_agents_plan_is_shown_as_the_plan_tool_is() {
+    let mut bridge = Bridge::start("plan");
+    bridge.prompt("make a plan");
+    let events = bridge.rest();
+    let steps = json!({"steps": [
+        {"step": "Read the file", "status": "done"},
+        {"step": "Fix it", "status": "in_progress"},
+        {"step": "Test it", "status": "pending"}]});
+    // One call for the plan; the emptied one shows nothing.
+    assert!(
+        matches!(&events[..], [
+            Event::ToolStart { call, tool, args },
+            Event::ToolEnd { call: ended, is_error: false, .. },
+            last,
+        ] if tool == "plan" && call == ended && Value::Object(args.clone()) == steps
+            && *last == end(TurnEnd::Done, None)),
+        "{events:?}"
+    );
 }
 
 #[test]
