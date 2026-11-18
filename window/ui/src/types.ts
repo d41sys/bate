@@ -52,3 +52,5 @@ export type Permissions = {
   levels: Record<Kind, Level>;
   grants: { kind: Kind; target: string; atMs: number }[];
 };
+
+export type Skill = { name: string; description: string };
