@@ -119,7 +119,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `steer` | `bot`, `text` | `{}` |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model` (empty: back to the engine's default, with no `effort`), `effort?` (`minimal`, `low`, `medium`, `high`) | `{}`; kept for the bot, so each new engine of it starts with them; `bots_changed` follows |
-| `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. The service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy and the engine keeps the old conversation file. The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
+| `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. Without `fork`, the service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy, the engine keeps the old conversation file, and the history keeps everything: the service appends `{"type":"fork","nonce"}` to the transcript, and the prompts from `nonce` up to that entry are for reading only (the bot no longer has them, and they cannot be rewound to). The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
 | `list_routines` | `bot` | `{routines:[Routine]}` |
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
 | `delete_routine` | `bot`, `routineId` | `{}`. Its past runs go with it. |
@@ -192,7 +192,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 
 ### Transcript
 
-The service appends every engine event except `ready` and `response` to the bot's transcript, plus `{"type":"prompt","nonce","text"}` for each prompt the engine admitted. When an engine stops mid-turn, the service appends `turn_end` with reason `error`, so history never shows a reply still running. An `Entry` is `{seq, at, entry}`; `seq` grows and `at` is Unix milliseconds. Windows read history from here (`open_bot`), so a window that was closed or disconnected mid-reply sees the whole reply. Engines belong to the service, so closing a window never stops a reply.
+The service appends every engine event except `ready` and `response` to the bot's transcript, plus `{"type":"prompt","nonce","text"}` for each prompt the engine admitted and `{"type":"fork","nonce"}` after a fork. When an engine stops mid-turn, the service appends `turn_end` with reason `error`, so history never shows a reply still running. An `Entry` is `{seq, at, entry}`; `seq` grows and `at` is Unix milliseconds. Windows read history from here (`open_bot`), so a window that was closed or disconnected mid-reply sees the whole reply. Engines belong to the service, so closing a window never stops a reply.
 
 ### Prompt ledger
 
