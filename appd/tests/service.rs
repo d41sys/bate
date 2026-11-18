@@ -1084,6 +1084,41 @@ fn rewind_removes_the_prompt_and_what_followed_from_history() {
 }
 
 #[test]
+fn a_fork_keeps_the_whole_history_and_notes_where_the_bot_goes_on() {
+    let home = home("fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    for nonce in ["n1", "n2"] {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    }
+    w.send("rewind", json!({"bot": bot, "entry": "n2", "fork": true}));
+    // Told as one more entry: nothing in the chat is taken away.
+    let noted = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "fork");
+    assert_eq!(noted["entry"]["nonce"], "n2");
+
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let entries: Vec<&Value> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["entry"])
+        .collect();
+    let prompts: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["type"] == "prompt")
+        .map(|e| &e["nonce"])
+        .collect();
+    assert_eq!(prompts, ["n1", "n2"]);
+    assert_eq!(
+        entries.iter().filter(|e| e["type"] == "turn_end").count(),
+        2
+    );
+    assert_eq!(entries.last().unwrap()["type"], "fork");
+}
+
+#[test]
 fn a_bot_is_busy_while_its_conversation_is_compacted() {
     let home = home("compact-busy");
     let _service = Service::start(&home);

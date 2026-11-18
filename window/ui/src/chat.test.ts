@@ -34,3 +34,27 @@ test("a transcript becomes the chat the user reads", () => {
     { id: 14, kind: "ended", reason: "error", error: "the engine stopped" },
   ]);
 });
+
+test("a fork keeps what came after, for reading only", () => {
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "one" },
+    { type: "text", delta: "1" },
+    { type: "prompt", nonce: "n2", text: "two" },
+    { type: "text", delta: "2" },
+    { type: "prompt", nonce: "n3", text: "three" },
+    { type: "fork", nonce: "n2" },
+    { type: "prompt", nonce: "n4", text: "two, again" },
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  const chat = build(rows);
+  assert.deepEqual(rows.reduce(add, []), chat);
+  assert.deepEqual(chat, [
+    { id: 1, kind: "user", text: "one", nonce: "n1" },
+    { id: 2, kind: "reply", text: "1" },
+    { id: 3, kind: "user", text: "two", nonce: "n2", past: true },
+    { id: 4, kind: "reply", text: "2" },
+    { id: 5, kind: "user", text: "three", nonce: "n3", past: true },
+    { id: 6, kind: "forked" },
+    { id: 7, kind: "user", text: "two, again", nonce: "n4" },
+  ]);
+});
