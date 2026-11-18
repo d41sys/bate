@@ -94,6 +94,8 @@ const MESSAGE: &str = "message_bot";
 const BROWSER: &str = "browser";
 /// The tool that sees and controls other apps through the helper app.
 const DESKTOP: &str = "desktop";
+/// The tool that states a task's steps; the window shows them as a checklist.
+const PLAN: &str = "plan";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
 /// and `message_bot` when there is a bot to message.
@@ -128,6 +130,14 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
                     "bot": {"type": "string", "description": "The bot's name"},
                     "text": {"type": "string"}}, "required": ["bot", "text"]}}}));
         }
+        list.push(json!({"type": "function", "function": {"name": PLAN,
+            "description": "Show the user the steps of a task that takes three or more, and keep the list current while you work: mark a step `done` as soon as it is, before you start the next. Send the whole list every time.",
+            "parameters": {"type": "object", "properties": {"steps": {"type": "array", "items": {"type": "object",
+                "properties": {
+                    "step": {"type": "string", "description": "A few words"},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
+                "required": ["step", "status"]}}},
+                "required": ["steps"]}}}));
         if depth < MAX_DEPTH {
             list.push(json!({"type": "function", "function": {"name": AGENT,
                 "description": "Hand one self-contained task to a sub-agent: a copy of you with the same tools and working folder that knows nothing of this conversation. It works alone; its final answer comes back as the result. Put everything it needs to know in `task`.",
@@ -135,6 +145,27 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
         }
     }
     tools
+}
+
+/// Checks a `plan` call. The steps are kept nowhere but in the call itself: the window shows
+/// them from its arguments, and the model reads them back from the conversation.
+fn plan(args: &Map<String, Value>) -> Result<String, String> {
+    let steps = match args.get("steps").and_then(Value::as_array) {
+        Some(steps) if !steps.is_empty() => steps,
+        _ => return Err("`steps` must list at least one step.".into()),
+    };
+    for step in steps {
+        if step["step"].as_str().is_none_or(|s| s.trim().is_empty()) {
+            return Err("Every step needs a `step` that says what it is.".into());
+        }
+        if !matches!(
+            step["status"].as_str(),
+            Some("pending" | "in_progress" | "done")
+        ) {
+            return Err("Every step needs a `status`: pending, in_progress or done.".into());
+        }
+    }
+    Ok("Plan updated.".into())
 }
 
 /// The definition of one Apple app's tool.
@@ -560,6 +591,10 @@ impl Turn {
         }
         if tool == MESSAGE && !self.peers.is_empty() {
             return self.message(args);
+        }
+        // Nothing to ask about: a plan changes nothing.
+        if tool == PLAN {
+            return plan(args);
         }
         if tool == BROWSER {
             return self.browse(args);

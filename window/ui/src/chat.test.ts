@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, build, type Entry } from "./chat.ts";
+import { add, build, planSteps, type Entry } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -57,4 +57,32 @@ test("a fork keeps what came after, for reading only", () => {
     { id: 6, kind: "forked" },
     { id: 7, kind: "user", text: "two, again", nonce: "n4" },
   ]);
+});
+
+test("a turn shows one plan, the newest, and a sub-agent's beside it", () => {
+  const plan = (call: string, status: string): Entry => ({
+    type: "tool_start", call, tool: "plan", args: { steps: [{ step: "Fix it", status }] },
+  });
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "fix it" },
+    plan("c1", "pending"),
+    { type: "tool_end", call: "c1", output: "Plan updated.", isError: false },
+    plan("agent1/s1", "in_progress"),
+    plan("c2", "done"),
+    { type: "prompt", nonce: "n2", text: "and again" },
+    plan("c3", "pending"),
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  const chat = build(rows);
+  assert.deepEqual(rows.reduce(add, []), chat);
+  assert.deepEqual(chat.map((item) => (item.kind === "tool" ? item.call : item.kind)), [
+    "user", "agent1/s1", "c2", "user", "c3",
+  ]);
+});
+
+test("only a well-formed plan is shown as a checklist", () => {
+  const steps = [{ step: "Fix it", status: "done" }];
+  assert.deepEqual(planSteps({ steps }), steps);
+  for (const args of [null, {}, { steps: [] }, { steps: "Fix it" }, { steps: [{ step: "Fix it", status: "started" }] }, { steps: [null] }])
+    assert.equal(planSteps(args), undefined);
 });

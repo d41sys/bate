@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation } from "./service.ts";
-import { add, build, type Entry, type Item, type Question, type Row } from "./chat.ts";
+import { add, build, planSteps, type Entry, type Item, type Question, type Row } from "./chat.ts";
 import { SANDBOX, fileUrl } from "./frame.ts";
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
@@ -490,7 +490,19 @@ function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopRe
       );
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
-    case "tool":
+    case "tool": {
+      const steps = item.tool === "plan" && !item.isError ? planSteps(item.args) : undefined;
+      if (steps) {
+        return (
+          <ul className="plan">
+            {steps.map((s, i) => (
+              <li key={i} aria-current={s.status === "in_progress" ? "step" : undefined}>
+                <label><input type="checkbox" checked={s.status === "done"} disabled readOnly /> {s.step}</label>
+              </li>
+            ))}
+          </ul>
+        );
+      }
       return (
         <details>
           <summary>
@@ -500,6 +512,7 @@ function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopRe
           {item.output !== undefined && <pre>{item.output}</pre>}
         </details>
       );
+    }
     case "ended":
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
     case "forked":
