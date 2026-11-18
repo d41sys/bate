@@ -744,6 +744,53 @@ fn the_size_that_comes_with_the_token_says_when_to_compact() {
 }
 
 #[test]
+fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
+    let dir = workdir("overflow");
+    let ok = |t: &str| format!("data: {}\n\ndata: [DONE]\n\n", text(t)).into_bytes();
+    let full = b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+        {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"This model's maximum context length is 8192 tokens.\"}}";
+    // The size is unknown (32,000 is taken), so only the server's refusal says it is full.
+    let model = Model::replay(vec![
+        ok("A1"),
+        ok("A2"),
+        ok("A3"),
+        full.to_vec(),
+        ok("OVERFLOW-SUMMARY"),
+        ok("A4"),
+        // Nothing old enough to summarise: the refusal ends the turn, and is not asked about twice.
+        full.to_vec(),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.exchange("n1", "Q1-old");
+    engine.exchange("n2", "Q2");
+    engine.exchange("n3", "Q3");
+    engine.prompt_as("n4", "Q4");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(events.last(), Some(Event::TurnEnd { error: None, .. })),
+        "{events:?}"
+    );
+    assert_eq!(model.requests().len(), 6);
+    assert!(sent(&model, 4).contains("Summarise"));
+    let last = sent(&model, 5);
+    assert!(
+        last.contains("OVERFLOW-SUMMARY") && last.contains("Q4") && !last.contains("Q1-old"),
+        "{last}"
+    );
+
+    let mut small = Engine::start(&workdir("overflow-small"), &model);
+    small.open_new();
+    small.prompt_as("n1", "Q1");
+    let events = small.until(is_turn_end);
+    let Some(Event::TurnEnd { error: Some(e), .. }) = events.last() else {
+        panic!("{events:?}")
+    };
+    assert!(e.contains("maximum context length"), "{e}");
+    assert_eq!(model.requests().len(), 7);
+}
+
+#[test]
 fn rewind_in_place_drops_the_prompt_and_everything_after_it() {
     let dir = workdir("rewind");
     let model = Model::serve(replies(&["A1", "A2-dropped", "A3", "A4"]));

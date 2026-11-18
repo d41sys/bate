@@ -55,6 +55,32 @@ type Token = (String, Option<String>, Api, String, Option<usize>);
 const SUMMARISE: &str = "Summarise the conversation so far for your own later use: what the user wants, \
     what was decided, what was found, which files changed, and what is left to do. \
     Answer with the summary only and do not call tools.";
+/// Parts, in lower case, of what model servers answer when the conversation is more than the
+/// model holds: the list pi keeps (`packages/ai/src/utils/overflow.ts`), without the entries
+/// that also fit a rate limit.
+const OVERFLOW: [&str; 21] = [
+    "prompt is too long",
+    "prompt too long",
+    "request_too_large",
+    "exceeds the context window",
+    "maximum context length",
+    "context window exceeded",
+    "context window exceeds limit",
+    "exceeds the maximum number of tokens",
+    "maximum prompt length",
+    "reduce the length of the messages",
+    "maximum allowed input length",
+    "longer than the model's context length",
+    "exceeds the available context size",
+    "greater than the context length",
+    "exceeded model token limit",
+    "configured context size",
+    "context_length_exceeded",
+    "context length exceeded",
+    "context_window_exceeded",
+    "token limit exceeded",
+    "the model server answered 413",
+];
 
 /// How deep sub-agents nest: one at this depth cannot start another.
 pub const MAX_DEPTH: usize = 5;
@@ -173,6 +199,8 @@ impl Turn {
     ) -> Result<TurnEnd, String> {
         // Numbers the tool calls a server sent without an id.
         let mut unnamed = 0;
+        // Whether the conversation was already summarised for the model call that comes next.
+        let mut shrunk = false;
         let system = self.system();
         mcp.sync(&self.connectors, &self.dir, &self.control);
         let tools = self.tools(mcp, 0);
@@ -208,7 +236,7 @@ impl Turn {
                 Err(e) => return Err(e),
             };
             let ask = self.ask_model(&model, &system, &session.messages, None, &tools);
-            let reply = self.provider.stream(
+            let reply = match self.provider.stream(
                 &url,
                 key.as_deref(),
                 api,
@@ -220,7 +248,26 @@ impl Turn {
                         Delta::Thinking(t) => Event::Thinking { delta: t.into() },
                     })
                 },
-            )?;
+            ) {
+                // More than the model holds, whatever size was taken for it: the older part
+                // becomes a summary and the model is asked once more.
+                Err(e)
+                    if !shrunk && OVERFLOW.iter().any(|part| e.to_lowercase().contains(part)) =>
+                {
+                    let before = session.tokens();
+                    if let Err(summary) = self.compact(session, &system, &tools) {
+                        return Err(format!("{e} (and the summary failed: {summary})"));
+                    }
+                    // Nothing was old enough to summarise.
+                    if session.tokens() >= before {
+                        return Err(e);
+                    }
+                    shrunk = true;
+                    continue;
+                }
+                reply => reply?,
+            };
+            shrunk = false;
             let Reply {
                 text,
                 mut calls,
