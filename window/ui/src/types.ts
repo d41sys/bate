@@ -55,4 +55,13 @@ export type Permissions = {
   grants: { kind: Kind; target: string; atMs: number }[];
 };
 
+export type Group = {
+  id?: string;
+  name: string;
+  /** A bot's id. */
+  lead: string;
+  /** The other bots' ids, 1 to 20; not the lead. */
+  members: string[];
+};
+
 export type Skill = { name: string; description: string };
