@@ -1592,6 +1592,57 @@ fn a_sub_agent_does_a_task_in_a_conversation_of_its_own_and_its_answer_comes_bac
 }
 
 #[test]
+fn a_plan_reaches_the_window_without_a_question_and_what_is_not_a_plan_is_refused() {
+    let dir = workdir("plan");
+    let steps = json!({"steps": [
+        {"step": "Read the file", "status": "done"},
+        {"step": "Fix it", "status": "in_progress"},
+        {"step": "Test it", "status": "pending"}]});
+    let model = Model::serve(vec![
+        vec![call("c1", "plan", steps.clone())],
+        vec![call(
+            "c2",
+            "plan",
+            json!({"steps": [{"step": "Fix it", "status": "started"}]}),
+        )],
+        vec![call("c3", "plan", json!({"steps": []}))],
+        vec![call(
+            "c4",
+            "plan",
+            json!({"steps": [{"step": " ", "status": "done"}]}),
+        )],
+        vec![text("Fixed.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("fix the file");
+    let events = engine.until(is_turn_end);
+
+    assert!(offered(&model.requests()[0]).contains(&"plan"));
+    // A plan changes nothing, so there is nothing to approve.
+    assert!(!events.iter().any(is_question), "{events:?}");
+    // The window shows the steps from the call's arguments.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ToolStart { tool, args, .. }
+            if tool == "plan" && Value::Object(args.clone()) == steps)),
+        "{events:?}"
+    );
+    let ended: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolEnd { call, is_error, .. } => Some((call.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        [("c1", false), ("c2", true), ("c3", true), ("c4", true)]
+    );
+}
+
+#[test]
 fn sub_agents_nest_five_deep_and_no_deeper() {
     let dir = workdir("sub-agent-depth");
     let deeper = |id: &str| vec![call(id, "agent", json!({"task": "go deeper"}))];

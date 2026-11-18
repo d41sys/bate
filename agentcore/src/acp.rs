@@ -68,6 +68,8 @@ struct Bridge {
     questions: u64,
     /// Tool calls shown as started.
     started: Vec<String>,
+    /// Plans shown, to give each an id of its own.
+    plans: u64,
     /// The turn was aborted: however the agent ends it, it ends `aborted`.
     aborted: bool,
 }
@@ -469,7 +471,43 @@ impl Bridge {
                     is_error: failed,
                 });
             }
-            // Plans, commands, modes: nothing the transcript shows.
+            // The agent's plan, shown as the `plan` tool of Bate's own engine is: a call whose
+            // arguments are the steps.
+            Some("plan") => {
+                let steps: Vec<Value> = update["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|entry| entry["content"].is_string())
+                    .map(|entry| {
+                        let status = match entry["status"].as_str() {
+                            Some("completed") => "done",
+                            Some("in_progress") => "in_progress",
+                            _ => "pending",
+                        };
+                        json!({"step": entry["content"], "status": status})
+                    })
+                    .collect();
+                // An emptied plan has nothing to show.
+                if steps.is_empty() {
+                    return;
+                }
+                self.plans += 1;
+                let call = format!("plan-{}", self.plans);
+                let mut args = Map::new();
+                args.insert("steps".to_owned(), steps.into());
+                out(&Event::ToolStart {
+                    call: call.clone(),
+                    tool: "plan".to_owned(),
+                    args,
+                });
+                out(&Event::ToolEnd {
+                    call,
+                    output: String::new(),
+                    is_error: false,
+                });
+            }
+            // Commands, modes: nothing the transcript shows.
             _ => {}
         }
     }
@@ -573,6 +611,7 @@ fn start(program: &str, args: &[String]) -> io::Result<(Child, Bridge, mpsc::Rec
         permissions: HashMap::new(),
         questions: 0,
         started: Vec::new(),
+        plans: 0,
         aborted: false,
     };
     Ok((child, bridge, rx))

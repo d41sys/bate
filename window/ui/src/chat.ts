@@ -48,6 +48,16 @@ function put(items: Item[], { seq: id, entry }: Row) {
       break;
     }
     case "tool_start":
+      // A newer plan takes the place of the same agent's older one in this turn: one checklist, kept current.
+      if (entry.tool === "plan") {
+        for (let i = items.length - 1; i >= 0 && items[i].kind !== "user"; i--) {
+          const item = items[i];
+          if (item.kind === "tool" && item.tool === "plan" && scope(item.call) === scope(entry.call)) {
+            items.splice(i, 1);
+            break;
+          }
+        }
+      }
       items.push({ id, kind: "tool", call: entry.call, tool: entry.tool, args: entry.args });
       break;
     case "tool_end": {
@@ -76,6 +86,19 @@ function put(items: Item[], { seq: id, entry }: Row) {
       items.push({ id, kind: "forked" });
       break;
   }
+}
+
+/** Whose call it is: empty for the conversation's own, `agent<n>/` for a sub-agent's. */
+const scope = (call: string) => call.slice(0, call.lastIndexOf("/") + 1);
+
+export type Step = { step: string; status: "pending" | "in_progress" | "done" };
+
+/** The steps of a `plan` call; nothing when the arguments are not a plan (they are then shown as they are). */
+export function planSteps(args: unknown): Step[] | undefined {
+  const steps = (args as { steps?: unknown } | null)?.steps;
+  if (!Array.isArray(steps) || steps.length === 0) return undefined;
+  const ok = steps.every((s) => typeof s?.step === "string" && ["pending", "in_progress", "done"].includes(s?.status));
+  return ok ? (steps as Step[]) : undefined;
 }
 
 /** The chat a run of entries makes; linear, for a history of any length. */
