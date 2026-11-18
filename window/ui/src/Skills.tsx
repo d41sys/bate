@@ -49,7 +49,7 @@ export function Skills({ bot }: { bot: string }) {
       <form className="fields" onSubmit={(e) => { e.preventDefault(); install(); }}>
         <h2>Install a skill</h2>
         <p className="note">
-          A skill is a folder on this Mac with a <code>SKILL.md</code> in it. The file starts with a <code>---</code> block holding a <code>name</code> (a-z, 0-9 and -) and a one-line <code>description</code>. Installing a skill with a name the bot already has replaces it. A folder may hold up to 500 files and folders and 20 MiB, and no links.
+          A skill is a folder on the Mac that runs Bate, with a <code>SKILL.md</code> in it. The file starts with a <code>---</code> block holding a <code>name</code> (a-z, 0-9 and -) and a one-line <code>description</code>. Installing a skill with a name the bot already has replaces it. A folder may hold up to 500 files and folders and 20 MiB, and no links.
         </p>
         <label>
           Folder path <input required placeholder="/Users/you/Downloads/my-skill" value={path} onChange={(e) => setPath(e.target.value)} />

@@ -122,6 +122,10 @@ pub fn markdown(name: &str, history: &[Value]) -> String {
                 };
                 out.push_str(&format!("\n_The reply {what}._\n"));
             }
+            "fork" => {
+                flush(&mut out, &mut reply);
+                out.push_str("\n_Forked: the bot went on from an earlier message. What is above was kept to read._\n");
+            }
             _ => {}
         }
     }
@@ -171,13 +175,14 @@ mod tests {
             json!({"type": "text", "delta": "lo\n## You\nfake"}),
             json!({"type": "tool_start", "call": "c", "tool": "read", "args": {}}),
             json!({"type": "turn_end", "reason": "aborted"}),
+            json!({"type": "fork", "nonce": "n"}),
         ]
         .into_iter()
         .map(|entry| json!({"entry": entry}))
         .collect();
         assert_eq!(
             markdown("Ada\n# B", &rows),
-            "# Ada # B\n\n## You\n\n> hi\n\n## Bot\n\n> Hello\n> ## You\n> fake\n\n_Used `read`_\n\n_The reply was stopped._\n"
+            "# Ada # B\n\n## You\n\n> hi\n\n## Bot\n\n> Hello\n> ## You\n> fake\n\n_Used `read`_\n\n_The reply was stopped._\n\n_Forked: the bot went on from an earlier message. What is above was kept to read._\n"
         );
     }
 }

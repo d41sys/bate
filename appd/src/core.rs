@@ -250,8 +250,9 @@ enum Settles {
     Prompt(Outgoing),
     /// The answered question is closed, and an "Always" answer is remembered as this grant.
     Question(String, Option<(Kind, String)>),
-    /// The transcript goes back to before the prompt with this nonce.
-    Rewind(String),
+    /// The transcript goes back to before the prompt with this nonce; or, for a fork (true),
+    /// keeps everything and notes where the bot went on from.
+    Rewind(String, bool),
     /// The bot stops counting as busy with this compaction.
     Compact,
 }
@@ -844,7 +845,7 @@ impl Core {
                     }
                 }
                 let settles = match &op {
-                    Op::Rewind { entry, .. } => Settles::Rewind(entry.clone()),
+                    Op::Rewind { entry, fork } => Settles::Rewind(entry.clone(), *fork),
                     Op::Compact => Settles::Compact,
                     _ => Settles::Nothing,
                 };
@@ -2848,8 +2849,13 @@ impl Core {
                             }
                         }
                     }
+                    // A fork left the old conversation as it was: history keeps it and says
+                    // from where the bot goes on.
+                    (Settles::Rewind(nonce, true), None) => {
+                        self.record(bot, json!({"type": "fork", "nonce": nonce}));
+                    }
                     // The engine's conversation no longer has these entries, so history must not show them.
-                    (Settles::Rewind(nonce), None) => {
+                    (Settles::Rewind(nonce, false), None) => {
                         match self.store.rewind_transcript(bot, nonce) {
                             Ok(()) => {
                                 self.broadcast(&json!({"type": "history_changed", "bot": bot}))
