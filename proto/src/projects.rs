@@ -17,4 +17,7 @@ pub struct Project {
     /// The bots in the project, at most 20. A bot is in at most one project.
     #[serde(default)]
     pub bots: Vec<String>,
+    /// Instructions every bot of the project gets after its own, at most 8000 characters.
+    #[serde(default)]
+    pub instructions: String,
 }

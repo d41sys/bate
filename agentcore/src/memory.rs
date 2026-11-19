@@ -1,7 +1,7 @@
 //! Memory: what a bot keeps across conversations, as Markdown files in `memory/` in its folder.
 //! The user reads and edits the same files; the model sees them at the start of every turn.
 
-use proto::memory::{DIR, is_note_name};
+use proto::memory::{DIR, PROJECT, is_note_name};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -23,17 +23,39 @@ const MOST: usize = 16 * 1024;
 /// `named`: the folder the notes are named under; empty when `folder` is where the tools work.
 pub fn prompt(folder: &Path, named: &Path) -> String {
     let shown = named.join(DIR);
-    let shown = shown.display();
     let mut text = format!(
-        "\n\nYou keep notes across conversations in the folder `{shown}`: Markdown files, one topic \
+        "\n\nYou keep notes across conversations in the folder `{}`: Markdown files, one topic \
          each, short facts. When you learn something worth keeping (who the user is, what they \
          prefer, what was decided), write it there with the write or edit tool. The user reads \
-         and edits these files too."
+         and edits these files too.",
+        shown.display()
     );
+    notes(&folder.join(DIR), &shown, &mut text);
+    text
+}
+
+/// The part about the notes of the project the bot works in (`work`), which all its bots share.
+pub fn project_prompt(work: &Path) -> String {
+    let shown = Path::new(PROJECT).join(DIR);
+    let mut text = format!(
+        "\n\nThe project's notes, shared with its other bots, are in the folder `{}`: write \
+         there what all of them should know (what was decided for the project, its \
+         conventions), the same way as your own notes.",
+        shown.display()
+    );
+    // A link in place of `.bate` would show the model what it points to, as one for `memory` would.
+    if fs::symlink_metadata(work.join(PROJECT)).is_ok_and(|meta| meta.is_dir()) {
+        notes(&work.join(&shown), &shown, &mut text);
+    }
+    text
+}
+
+/// Appends the notes in `dir`, named under `shown`, up to `MOST` bytes.
+fn notes(dir: &Path, shown: &Path, text: &mut String) {
+    let shown = shown.display();
     // Notes go to the model with no question asked, so only plain files in a plain folder
     // count: a link would send whatever it points to. (`DirEntry::metadata` follows no link.)
-    let dir = folder.join(DIR);
-    let plain = fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir());
+    let plain = fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir());
     let mut files: Vec<_> = fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -76,7 +98,6 @@ pub fn prompt(folder: &Path, named: &Path) -> String {
             unread.join(", ")
         ));
     }
-    text
 }
 
 #[cfg(test)]

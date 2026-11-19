@@ -2507,6 +2507,8 @@ fn a_bot_in_a_project_works_in_the_projects_folder_and_keeps_its_own() {
     fs::write(work.join("a.txt"), "from the project\n").unwrap();
     fs::create_dir_all(own.join("memory")).unwrap();
     fs::write(own.join("memory/user.md"), "Called Ada.\n").unwrap();
+    fs::create_dir_all(work.join(".bate/memory")).unwrap();
+    fs::write(work.join(".bate/memory/plan.md"), "Ship on Friday.\n").unwrap();
     let model = Model::serve(vec![
         vec![call("c1", "read", json!({"path": "a.txt"}))],
         vec![call("c2", "run", json!({"command": "pwd > here.txt"}))],
@@ -2545,4 +2547,10 @@ fn a_bot_in_a_project_works_in_the_projects_folder_and_keeps_its_own() {
     let own = own.canonicalize().unwrap();
     let note = format!("## {}/memory/user.md\nCalled Ada.", own.display());
     assert!(system.contains(&note), "{system}");
+    // The project's notes come after the bot's own, named in the project's folder.
+    let shared = system.find("## .bate/memory/plan.md\nShip on Friday.");
+    assert!(
+        shared.is_some_and(|at| at > system.find(&note).unwrap()),
+        "{system}"
+    );
 }
