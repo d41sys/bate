@@ -134,6 +134,17 @@ const CATCH_UP_MS: u64 = 6 * 3600 * 1000;
 const TICK: Duration = Duration::from_secs(30);
 /// Prompts that may wait for one bot.
 const QUEUE_MAX: usize = 20;
+/// Messages from other bots that may wait for one bot.
+const MAIL_MAX: usize = 20;
+
+/// Shortens `text` to at most `max` bytes, at a character's edge.
+fn cut(text: &mut String, max: usize) {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
 
 fn updates_off() -> Refusal {
     (
@@ -357,14 +368,17 @@ struct Running {
 
 /// Who, other than the windows, a turn's last words go to.
 enum Caller {
-    /// The bot `from`, which sent `message`.
+    /// A bot that waits for the answer to its message `mail`, sent while the other bot was free.
     Bot {
-        from: String,
-        /// Which engine of `from` waits: a later one numbers its messages from the start
+        /// Which engine of the sender waits: a later one numbers its messages from the start
         /// again, and must not get this one's reply.
         generation: u64,
         message: String,
+        mail: i64,
     },
+    /// The message `seq`, which waited in the bot's inbox: its sender is not waiting, and gets
+    /// the answer as a new prompt.
+    Mail { seq: i64 },
     /// A chat on one of the bot's own channels; `routine` when its message started one.
     Chat {
         kind: &'static str,
@@ -517,8 +531,18 @@ impl Core {
     }
 
     pub fn run(mut self, rx: Receiver<Msg>) {
-        // Prompts that were waiting when the service stopped go on now.
-        for bot in self.store.queued_bots().unwrap_or_default() {
+        // A message a bot was working on when the service stopped has lost its turn: its
+        // sender is told. Messages and prompts that were waiting go on now.
+        for mail in self.store.mail_in("working", None).unwrap_or_default() {
+            let lost = "the service restarted before it answered".to_owned();
+            self.answer_mail(mail.seq, Err(lost), None);
+        }
+        let mut bots = self.store.queued_bots().unwrap_or_default();
+        let inboxes = self.store.mail_in("waiting", None).unwrap_or_default();
+        bots.extend(inboxes.into_iter().map(|m| m.to));
+        bots.sort();
+        bots.dedup();
+        for bot in bots {
             self.drain_queue(&bot);
         }
         loop {
@@ -1118,6 +1142,26 @@ impl Core {
                 let roles = self.read_roles(f)?;
                 Ok(Some(json!({"bots": self.add_roles(&id, &roles, raise)?})))
             }
+            "list_mail" => {
+                let bot = self.bot_of(f)?;
+                Ok(Some(
+                    json!({"mail": self.store.mail_of(&bot).map_err(internal)?}),
+                ))
+            }
+            "cancel_mail" => {
+                let seq = f
+                    .get("seq")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| bad("`seq` must be a message's number"))?;
+                match self.store.mail(seq).map_err(internal)? {
+                    Some(mail) if mail.state == "waiting" => {
+                        self.answer_mail(seq, Err("the user cancelled it".into()), None);
+                        Ok(Some(json!({})))
+                    }
+                    Some(_) => Err(("not_waiting", "the bot already has that message".into())),
+                    None => Err(("no_such_message", "no such message".into())),
+                }
+            }
             "list_skills" => {
                 let bot = self.bot_of(f)?;
                 Ok(Some(
@@ -1458,6 +1502,14 @@ impl Core {
                     )
                 })?;
                 self.on_engine_gone(&bot);
+                // Its senders were told an answer would come: they hear why none will.
+                for mail in self
+                    .store
+                    .mail_in("waiting", Some(&bot))
+                    .map_err(internal)?
+                {
+                    self.answer_mail(mail.seq, Err("the bot was deleted".into()), None);
+                }
                 // Its Chrome closes with the handle.
                 self.browsers.remove(&bot);
                 let profile = paths::home().join("browsers").join(&bot);
@@ -2609,7 +2661,9 @@ impl Core {
                 Ok(queue) => queue.into_iter().next(),
                 Err(e) => return log!("bot {bot}: queue not read: {e}"),
             };
-            let Some((nonce, text)) = first else { return };
+            let Some((nonce, text)) = first else {
+                return self.deliver_mail(bot);
+            };
             match self.store.ledger(bot, &nonce) {
                 Ok(None) => {
                     let sent = self.send_prompt(bot, Outgoing { nonce, text }, |prompt| {
@@ -2632,41 +2686,164 @@ impl Core {
         }
     }
 
-    /// The engine of `from` has a message for the bot `to`: sent on as a prompt. The reply
-    /// follows when that bot's turn ends; a message that cannot be sent is answered at once.
+    /// The prompt that gives a bot the message `seq` from the bot named `sender`.
+    fn mail_prompt(seq: i64, sender: &str, text: &str) -> Outgoing {
+        Outgoing {
+            nonce: format!("mail-{seq}"),
+            text: format!(
+                "[Message from the bot {sender:?}. It is another bot, not your user. What you say last goes back to it as your reply.]\n{text}"
+            ),
+        }
+    }
+
+    fn name_of(&self, bot: &str) -> String {
+        match self.store.bot(bot) {
+            Ok(Some(row)) => row.name,
+            _ => bot.to_owned(),
+        }
+    }
+
+    /// The engine of `from` has a message for the bot `to`. A free bot gets it as a prompt now
+    /// and the sender waits for the reply; a busy one finds it in its inbox when it is free,
+    /// and the sender goes on and gets the answer as a new prompt.
     fn on_message(&mut self, from: &str, message: String, to: &str, text: &str) {
         let generation = self.engines.get(from).map_or(0, |engine| engine.generation);
-        let sent = self
-            .peers_of(from)
-            .map_err(|e| e.to_string())
-            .and_then(|(peers, _)| {
-                if !peers.iter().any(|p| p.id == to) {
-                    return Err("that bot is not in a group or a project with you".to_owned());
-                }
-                if self.occupied(to) {
-                    return Err("it is busy with something else; try again later".to_owned());
-                }
-                let name = match self.store.bot(from) {
-                    Ok(Some(row)) => row.name,
-                    _ => from.to_owned(),
-                };
-                let prompt = Outgoing {
-                    nonce: format!("bot-{from}-{}", sys::random_hex(4)),
-                    text: format!(
-                        "[Message from the bot {name:?}. It is another bot, not your user. What you say last goes back to it as your reply.]\n{text}"
-                    ),
-                };
-                let caller = Caller::Bot {
-                    from: from.to_owned(),
-                    generation,
-                    message: message.clone(),
-                };
-                self.send_prompt(to, prompt, |p| Waiter::Peer { caller, prompt: p })
-                .map_err(|(_, e)| e)
-            });
-        if let Err(e) = sent {
-            self.send_reply(from, generation, message, Err(e));
+        match self.deliver_message(from, generation, &message, to, text) {
+            Ok(None) => {}
+            Ok(Some(note)) => {
+                self.send_reply(from, generation, message, Ok(note));
+            }
+            Err(e) => {
+                self.send_reply(from, generation, message, Err(e));
+            }
         }
+    }
+
+    /// `Some`: the message waits, and what the sender is told.
+    fn deliver_message(
+        &mut self,
+        from: &str,
+        generation: u64,
+        message: &str,
+        to: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
+        if from == to {
+            return Err("a bot cannot message itself".into());
+        }
+        let (peers, _) = self.peers_of(from).map_err(|e| e.to_string())?;
+        let Some(peer) = peers.iter().find(|p| p.id == to) else {
+            return Err("that bot is not in a group or a project with you".into());
+        };
+        let name = peer.name.clone();
+        let waiting = self
+            .store
+            .mail_in("waiting", Some(to))
+            .map_err(|e| e.to_string())?;
+        let queued = self.store.queue(to).map_err(|e| e.to_string())?;
+        // In order: behind its user's prompts and the messages already waiting.
+        if !self.free(to) || !queued.is_empty() || !waiting.is_empty() {
+            if waiting.len() >= MAIL_MAX {
+                return Err(format!(
+                    "{MAIL_MAX} messages already wait for it; try again later"
+                ));
+            }
+            self.store
+                .put_mail(from, to, text, "waiting", now_ms())
+                .map_err(|e| e.to_string())?;
+            self.broadcast(&json!({"type": "mail_changed"}));
+            return Ok(Some(format!(
+                "{name} is busy, so your message waits in its inbox. Its answer will come to you as a new message once it is done; do not wait for it."
+            )));
+        }
+        let seq = self
+            .store
+            .put_mail(from, to, text, "working", now_ms())
+            .map_err(|e| e.to_string())?;
+        self.broadcast(&json!({"type": "mail_changed"}));
+        let prompt = Self::mail_prompt(seq, &self.name_of(from), text);
+        let caller = Caller::Bot {
+            generation,
+            message: message.to_owned(),
+            mail: seq,
+        };
+        if let Err((_, e)) = self.send_prompt(to, prompt, |p| Waiter::Peer { caller, prompt: p }) {
+            self.answer_mail(seq, Err(e.clone()), None);
+            return Err(e);
+        }
+        Ok(None)
+    }
+
+    /// Gives the free bot the first message waiting in its inbox.
+    fn deliver_mail(&mut self, bot: &str) {
+        let mail = match self.store.mail_in("waiting", Some(bot)) {
+            Ok(waiting) => waiting.into_iter().next(),
+            Err(e) => return log!("bot {bot}: inbox not read: {e}"),
+        };
+        let Some(mail) = mail else { return };
+        let prompt = Self::mail_prompt(mail.seq, &self.name_of(&mail.from), &mail.text);
+        let caller = Caller::Mail { seq: mail.seq };
+        match self.send_prompt(bot, prompt, |p| Waiter::Peer { caller, prompt: p }) {
+            Ok(()) => {
+                if let Err(e) = self.store.set_mail(mail.seq, "working", None, None) {
+                    log!("bot {bot}: message {} not updated: {e}", mail.seq);
+                }
+                self.broadcast(&json!({"type": "mail_changed"}));
+            }
+            Err((_, e)) => self.answer_mail(mail.seq, Err(e), None),
+        }
+    }
+
+    /// Keeps what came of the message `seq` and hands it to its sender: as the reply its engine
+    /// waits for (`waiting`: that engine's generation and message), or else as a new prompt in
+    /// the sender's queue, which goes when the sender is free.
+    fn answer_mail(
+        &mut self,
+        seq: i64,
+        mut reply: Result<String, String>,
+        waiting: Option<(u64, String)>,
+    ) {
+        let mail = match self.store.mail(seq) {
+            Ok(Some(mail)) => mail,
+            Ok(None) => return,
+            Err(e) => return log!("message {seq} not read: {e}"),
+        };
+        if let Ok(text) = &mut reply {
+            cut(text, MAX_REPLY);
+        }
+        let (answer, error) = match &reply {
+            Ok(text) => (Some(text.as_str()), None),
+            Err(e) => (None, Some(e.as_str())),
+        };
+        if let Err(e) = self.store.set_mail(seq, "answered", answer, error) {
+            log!("message {seq} not updated: {e}");
+        }
+        self.broadcast(&json!({"type": "mail_changed"}));
+        let replied = waiting.is_some_and(|(generation, message)| {
+            self.send_reply(&mail.from, generation, message, reply.clone())
+        });
+        if replied {
+            return;
+        }
+        let name = self.name_of(&mail.to);
+        let mut asked = mail.text.clone();
+        cut(&mut asked, 300);
+        let text = match reply {
+            Ok(answer) => format!(
+                "[Answer from the bot {name:?} to your message: {asked:?}. It is another bot, not your user.]\n{answer}"
+            ),
+            Err(e) => {
+                format!("[Your message to the bot {name:?} got no answer: {e}. It was: {asked:?}]")
+            }
+        };
+        if let Err(e) = self
+            .store
+            .enqueue(&mail.from, &format!("answer-{seq}"), &text, false)
+        {
+            return log!("bot {}: answer {seq} not queued: {e}", mail.from);
+        }
+        self.broadcast(&json!({"type": "queue_changed", "bot": mail.from}));
+        self.drain_queue(&mail.from);
     }
 
     /// Stops the reader of a channel and forgets what was known of its state.
@@ -2777,10 +2954,11 @@ impl Core {
     fn answer_caller(&mut self, bot: &str, caller: Caller, reply: Result<String, String>) {
         match caller {
             Caller::Bot {
-                from,
                 generation,
                 message,
-            } => self.send_reply(&from, generation, message, reply),
+                mail,
+            } => self.answer_mail(mail, reply, Some((generation, message))),
+            Caller::Mail { seq } => self.answer_mail(seq, reply, None),
             Caller::Chat { kind, chat, .. } => {
                 // The reasons are worded for another bot: `it` and `its` are this bot.
                 let text = reply.unwrap_or_else(|e| {
@@ -2796,24 +2974,21 @@ impl Core {
         }
     }
 
-    /// Tells the engine of `to` what came of its `message`, if that very engine still runs.
+    /// Tells the engine of `to` what came of its `message`, if that very engine still runs;
+    /// whether it was sent.
     fn send_reply(
         &mut self,
         to: &str,
         generation: u64,
         message: String,
         reply: Result<String, String>,
-    ) {
+    ) -> bool {
         if self.engines.get(to).map(|engine| engine.generation) != Some(generation) {
-            return;
+            return false;
         }
         let (text, error) = match reply {
             Ok(mut text) => {
-                let mut end = text.len().min(MAX_REPLY);
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                text.truncate(end);
+                cut(&mut text, MAX_REPLY);
                 (Some(text), None)
             }
             Err(e) => (None, Some(e)),
@@ -2823,8 +2998,12 @@ impl Core {
             text,
             error,
         };
-        if let Err((_, e)) = self.send_op(to, op, Waiter::Quiet) {
-            log!("bot {to}: reply not sent: {e}");
+        match self.send_op(to, op, Waiter::Quiet) {
+            Ok(()) => true,
+            Err((_, e)) => {
+                log!("bot {to}: reply not sent: {e}");
+                false
+            }
         }
     }
 
@@ -3567,7 +3746,7 @@ impl Core {
                     None => {
                         let routine = match &caller {
                             Caller::Chat { routine, .. } => routine.clone(),
-                            Caller::Bot { .. } => None,
+                            Caller::Bot { .. } | Caller::Mail { .. } => None,
                         };
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.routine = routine;

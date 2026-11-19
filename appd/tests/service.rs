@@ -3167,20 +3167,23 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
         "{got}"
     );
     assert!(got.contains("\\ncount the tests\""), "{got}");
-    assert!(got.contains(&format!("\"nonce\":\"bot-{a}-")), "{got}");
+    assert!(got.contains("\"nonce\":\"mail-"), "{got}");
 
-    // A bot does one thing at a time: the lead is told, and cannot break in.
+    // A bot does one thing at a time: the lead's message waits, and the lead goes on.
     w.ok(
         "prompt",
         json!({"bot": b, "nonce": "n-own", "text": "work for the user"}),
     );
     let said = tell(&mut w, "n3", &b, "drop that and do this");
-    assert_eq!(
-        said,
-        "error: it is busy with something else; try again later"
+    assert!(
+        said.contains("is busy, so your message waits in its inbox"),
+        "{said}"
     );
     assert!(!prompts_of(&b).contains("drop that"));
-    w.wait_for(|f| f["bot"] == b.as_str() && f["entry"]["type"] == "turn_end");
+    eventually("the answer to come to the lead", || {
+        prompts_of(&a).contains("[Answer from the bot")
+    });
+    w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
 
     // A bot whose engine stops over the message leaves the lead with that, not waiting.
     assert_eq!(
@@ -6184,6 +6187,112 @@ fn a_queued_prompt_survives_a_restart_and_goes_when_the_service_is_back() {
     let mut w = Window::connect(&home);
     eventually("the queue to be empty", || {
         w.ok("list_queue", json!({"bot": bot}))["queue"] == json!([])
+    });
+}
+
+#[test]
+fn a_message_to_a_busy_bot_waits_in_its_inbox_and_the_answer_comes_as_a_new_message() {
+    let home = home("mail");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    w.ok(
+        "set_group",
+        json!({"group": {"name": "Team", "lead": a, "members": [b]}}),
+    );
+    let prompts_of = |bot: &str| {
+        fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
+    };
+    let tell = |w: &mut Window, nonce: &str, to: &str, words: &str| {
+        w.ok(
+            "prompt",
+            json!({"bot": a, "nonce": nonce, "text": format!("tell {to} {words}")}),
+        );
+        let said = w.wait_for(|f| {
+            f["type"] == "transcript" && f["bot"] == a.as_str() && f["entry"]["type"] == "text"
+        })["entry"]["delta"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+        said
+    };
+    assert_eq!(
+        tell(&mut w, "n0", &a, "hi"),
+        "error: a bot cannot message itself"
+    );
+
+    // `b` works for its user and does not finish: messages wait for it, in order.
+    w.send("prompt", json!({"bot": b, "nonce": "b1", "text": "hang"}));
+    eventually("b to be at work", || prompts_received(&home, &b, "b1") == 1);
+    for (nonce, words) in [("n1", "first"), ("n2", "second")] {
+        let said = tell(&mut w, nonce, &b, words);
+        assert!(
+            said.contains("is busy, so your message waits in its inbox"),
+            "{said}"
+        );
+    }
+    let mail = w.ok("list_mail", json!({"bot": b}))["mail"].clone();
+    let texts: Vec<_> = mail
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (&m["text"], &m["state"]))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            (&json!("first"), &json!("waiting")),
+            (&json!("second"), &json!("waiting"))
+        ]
+    );
+
+    // The person cancels one; its sender hears so.
+    let second = mail[1]["seq"].clone();
+    w.ok("cancel_mail", json!({"seq": second}));
+    let id = w.send("cancel_mail", json!({"seq": second}));
+    let again = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(again["code"], "not_waiting");
+    eventually("the sender to hear of the cancel", || {
+        prompts_of(&a).contains("got no answer: the user cancelled it")
+    });
+
+    // Across a restart the waiting message reaches `b`, and its answer reaches `a` as a new
+    // prompt.
+    drop(w);
+    service.kill();
+    let _service = Service::start(&home);
+    eventually("the message to reach b", || {
+        prompts_of(&b).contains("\\nfirst\"")
+    });
+    eventually("the answer to reach a", || {
+        prompts_of(&a).contains("[Answer from the bot") && prompts_of(&a).contains("\\nhello")
+    });
+    let mut w = Window::connect(&home);
+    let mail = w.ok("list_mail", json!({"bot": a}))["mail"].clone();
+    assert_eq!(mail[0]["state"], "answered");
+    assert_eq!(mail[0]["answer"], "hello");
+    assert_eq!(mail[1]["error"], "the user cancelled it");
+
+    // A bot deleted with a message waiting for it: the sender hears so.
+    w.send("prompt", json!({"bot": b, "nonce": "b2", "text": "hang"}));
+    eventually("b to be at work again", || {
+        prompts_received(&home, &b, "b2") == 1
+    });
+    w.send(
+        "prompt",
+        json!({"bot": a, "nonce": "n3", "text": format!("tell {b} third")}),
+    );
+    eventually("the third message to wait", || {
+        w.ok("list_mail", json!({"bot": b}))["mail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["text"] == "third" && m["state"] == "waiting")
+    });
+    w.ok("delete_bot", json!({"bot": b}));
+    eventually("the sender to hear the bot is gone", || {
+        prompts_of(&a).contains("got no answer: the bot was deleted")
     });
 }
 

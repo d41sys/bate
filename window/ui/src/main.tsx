@@ -5,6 +5,7 @@ import { Pair } from "./Devices.tsx";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
+import { Mail } from "./Mail.tsx";
 import { Pane } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
@@ -201,6 +202,7 @@ function App() {
             </header>
             {/* An installed agent chooses its own model. */}
             {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
+            {tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {tab === "chat" && <Chat
                 key={`${bot.id}-${connection}`}
                 bot={bot}

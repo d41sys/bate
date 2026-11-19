@@ -107,7 +107,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_prompt`, `queue_full`, `cannot_steer`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_prompt`, `queue_full`, `cannot_steer`, `no_such_message`, `not_waiting`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -124,6 +124,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `steer` | `bot`, `text` | `{}` once the engine took it; `{queued:true}` when there was no turn to steer or it ended first (see Queue and steer). `cannot_steer` for a bot run by an installed agent. |
 | `list_queue` | `bot` | `{queue:[{nonce, text}]}`, in the order they go |
 | `remove_queued` | `bot`, `nonce` | `{}`; `no_such_prompt` if that prompt is not waiting (it may have gone to the engine already) |
+| `list_mail` | `bot` | `{mail:[{seq, from, to, text, state, answer?, error?, atMs}]}`: the last 50 messages between this bot and other bots, oldest first; `state` is `waiting`, `working` or `answered` (`error` instead of `answer` when none came) |
+| `cancel_mail` | `seq` | `{}`; the sender is told the message got no answer. `no_such_message`; `not_waiting` once the bot took it |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model` (empty: back to the engine's default, with no `effort`), `effort?` (`minimal`, `low`, `medium`, `high`) | `{}`; kept for the bot, so each new engine of it starts with them; `bots_changed` follows |
 | `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. Without `fork`, the service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy, the engine keeps the old conversation file, and the history keeps everything: the service appends `{"type":"fork","nonce"}` to the transcript, and the prompts from `nonce` up to that entry are for reading only (the bot no longer has them, and they cannot be rewound to). The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
@@ -193,6 +195,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"queue_changed","bot"}` | Re-run `list_queue`. |
+| `{"type":"mail_changed"}` | Re-run `list_mail`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"update_changed"}` | Re-run `get_update`. |
 | `{"type":"chatgpt_changed","error?"}` | Re-run `get_chatgpt`. `error` says why a sign-in failed. |
@@ -230,7 +233,7 @@ A `prompt` for a bot that is in a turn, has a prompt the engine has not answered
 
 Same shapes as `proto::groups`. A group is `{id, name, lead, members}`: `name` is 1 to 80 characters, `lead` a bot's id, `members` 1 to 20 other bots; there are at most 50 groups, and a bot may be in several. The bots of a group may message each other, and so may the bots of a project (see Projects); no other bots can. The service tells each running engine its bot's peers (`peers`) when it starts and after every change to the groups or the projects.
 
-A message (`message` from an engine) is passed on by the service as a prompt to the other bot, with nonce `bot-<from>-<random>` and a first line that says which bot it is from and that it is not the user. What that bot says after its last tool call is the reply, sent back (`reply`) when its turn ends. No reply, and the reason instead, when: the two share no group and no project; the other bot is in a turn or has an unanswered prompt (nothing is queued, and nothing interrupts it); its turn is stopped by its user or fails; its engine stops; or it says nothing. A reply is cut at 100 000 bytes.
+A message (`message` from an engine) to another bot that shares a group or a project with the sender (not to itself) is stored in the service's database. When the other bot is free (no turn, no unanswered prompt, no prompt of its user waiting, no older message waiting), it goes at once as a prompt with nonce `mail-<seq>` and a first line that says which bot it is from and that it is not the user; what that bot says after its last tool call is the reply, sent back (`reply`) when its turn ends. Otherwise the message waits in the bot's inbox (at most 20) and the sender is answered at once that it waits; the bot takes it after its user's waiting prompts, and its answer comes to the sender later as a prompt of its own (nonce `answer-<seq>`, queued like a user's prompt). Waiting messages survive a restart; a message whose turn was running when the service stopped is answered that the service restarted. No answer, and the reason instead, when: its turn is stopped by its user or fails; its engine stops; its user cancels it (`cancel_mail`); or it says nothing. A reply is cut at 100 000 bytes.
 
 A lead differs from a member in what its engine tells the model: that it leads, and to hand out tasks and put the results together. It has no way to stop or redirect another bot; only the user stops a bot. Each bot acts with its own permissions and its own folder limit, whoever messaged it, and its questions go to the user as always.
 

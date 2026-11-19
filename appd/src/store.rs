@@ -28,6 +28,38 @@ pub struct BotRow {
     pub created_at: u64,
 }
 
+/// A message from one bot to another, kept until it is answered and after.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mail {
+    pub seq: i64,
+    pub from: String,
+    pub to: String,
+    pub text: String,
+    /// `waiting` for the bot `to`, `working` with it, or `answered`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub at_ms: u64,
+}
+
+const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at FROM mail";
+
+fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
+    Ok(Mail {
+        seq: r.get(0)?,
+        from: r.get(1)?,
+        to: r.get(2)?,
+        text: r.get(3)?,
+        state: r.get(4)?,
+        answer: r.get(5)?,
+        error: r.get(6)?,
+        at_ms: r.get(7)?,
+    })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Profile {
     pub instructions: String,
@@ -89,6 +121,8 @@ CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url 
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
+CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
@@ -580,6 +614,7 @@ impl Store {
             let column = if table == "bots" { "id" } else { "bot" };
             tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [bot])?;
         }
+        tx.execute("DELETE FROM mail WHERE from_bot = ?1 OR to_bot = ?1", [bot])?;
         tx.commit()
     }
 
@@ -798,6 +833,52 @@ impl Store {
             "DELETE FROM queue WHERE bot = ?1 AND nonce = ?2",
             [bot, nonce],
         )? > 0)
+    }
+
+    /// Stores a message; its number.
+    pub fn put_mail(&self, from: &str, to: &str, text: &str, state: &str, at: u64) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO mail(from_bot, to_bot, text, state, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![from, to, text, state, at],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    pub fn mail(&self, seq: i64) -> Result<Option<Mail>> {
+        self.0
+            .query_row(&format!("{MAIL} WHERE seq = ?1"), [seq], mail_row)
+            .optional()
+    }
+
+    /// The messages in `state`, oldest first; for one bot `to` if given.
+    pub fn mail_in(&self, state: &str, to: Option<&str>) -> Result<Vec<Mail>> {
+        let mut stmt = self.0.prepare_cached(&format!(
+            "{MAIL} WHERE state = ?1 AND (?2 IS NULL OR to_bot = ?2) ORDER BY seq"
+        ))?;
+        stmt.query_map(params![state, to], mail_row)?.collect()
+    }
+
+    /// The last 50 messages the bot sent or got, oldest first.
+    pub fn mail_of(&self, bot: &str) -> Result<Vec<Mail>> {
+        let mut stmt = self.0.prepare_cached(&format!(
+            "SELECT * FROM ({MAIL} WHERE from_bot = ?1 OR to_bot = ?1 ORDER BY seq DESC LIMIT 50) ORDER BY seq"
+        ))?;
+        stmt.query_map([bot], mail_row)?.collect()
+    }
+
+    pub fn set_mail(
+        &self,
+        seq: i64,
+        state: &str,
+        answer: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE mail SET state = ?2, answer = ?3, error = ?4 WHERE seq = ?1",
+                params![seq, state, answer, error],
+            )
+            .map(drop)
     }
 
     pub fn put_question(&self, bot: &str, question: &str, entry: &Value) -> Result<()> {
