@@ -163,9 +163,15 @@ fn read(folder: &Dir) -> Result<Manifest, String> {
 }
 
 /// SHA-256 over the folder's entries, each folder's in order of name, depth first: for each,
-/// its path from `root`, its kind, and for a file whether it runs, its length and its bytes.
-/// A link or special file counts as itself, so one added later changes it.
+/// its path from `root`, its kind, and for a file whether it runs, its length and the SHA-256
+/// of its bytes. A link or special file counts as itself, so one added later changes it.
+/// A file's bytes are read again only when its inode, length, mtime or ctime moved: the
+/// service's one thread checks a workplace at each listing and each start of its program, and
+/// ctime cannot be set back by the file's owner.
 pub fn fingerprint(root: &Path) -> io::Result<String> {
+    type Key = (u64, u64, u64, i64, i64, i64, i64);
+    type Sums = std::collections::HashMap<PathBuf, (Key, Vec<u8>)>;
+    static READ: std::sync::Mutex<Option<Sums>> = std::sync::Mutex::new(None);
     fn walk(
         root: &Path,
         at: &Path,
@@ -200,17 +206,37 @@ pub fn fingerprint(root: &Path) -> io::Result<String> {
             } else if meta.is_file() {
                 hash.update(&[b'f', (meta.mode() & 0o111 != 0) as u8]);
                 hash.update(&meta.len().to_le_bytes());
-                let mut file = fs::File::open(&path)?;
-                let mut buf = [0u8; 64 * 1024];
-                let mut left = meta.len();
-                while left > 0 {
-                    let take = buf.len().min(left as usize);
-                    let n = file.read(&mut buf[..take])?;
-                    if n == 0 {
-                        return Err(io::Error::other("a file got shorter"));
+                let key = (
+                    meta.dev(),
+                    meta.ino(),
+                    meta.len(),
+                    meta.mtime(),
+                    meta.mtime_nsec(),
+                    meta.ctime(),
+                    meta.ctime_nsec(),
+                );
+                let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+                let read = read.get_or_insert_default();
+                match read.get(&path) {
+                    Some((k, sum)) if *k == key => hash.update(sum),
+                    _ => {
+                        let mut file = fs::File::open(&path)?;
+                        let mut sum = digest::Context::new(&digest::SHA256);
+                        let mut buf = [0u8; 64 * 1024];
+                        let mut left = meta.len();
+                        while left > 0 {
+                            let take = buf.len().min(left as usize);
+                            let n = file.read(&mut buf[..take])?;
+                            if n == 0 {
+                                return Err(io::Error::other("a file got shorter"));
+                            }
+                            sum.update(&buf[..n]);
+                            left -= n as u64;
+                        }
+                        let sum = sum.finish().as_ref().to_vec();
+                        hash.update(&sum);
+                        read.insert(path.clone(), (key, sum));
                     }
-                    hash.update(&buf[..n]);
-                    left -= n as u64;
                 }
             } else {
                 hash.update(b"o");
