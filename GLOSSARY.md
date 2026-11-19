@@ -1,0 +1,52 @@
+# Bate
+
+A personal bot app for the Mac: a host where a person and bots work on projects together.
+
+## Language
+
+### People and bots
+
+**Bot**:
+A named assistant with its own instructions, memory, permissions and conversation.
+_Avoid_: agent, assistant
+
+**Engine**:
+The program that runs a bot's turns: Bate's own, or an installed agent.
+_Avoid_: harness, driver, runtime
+
+**Installed agent**:
+Another maker's agent program used as a bot's engine.
+_Avoid_: external agent, CLI
+
+**Group**:
+Bots that may message each other, one of them the lead.
+_Avoid_: team, room
+
+**Role**:
+A ready-made definition of a bot that a project can add as one of its bots.
+_Avoid_: persona, template
+
+### Work
+
+**Project**:
+One piece of work: a folder that a person and the project's bots share, with shared instructions and memory. A bot is in at most one project.
+_Avoid_: workspace, room
+
+**Workplace**:
+An installed feature that equips a project for one kind of work, such as coding or reverse engineering.
+_Avoid_: plugin, extension, feature, app
+
+**Surface**:
+Something in the window that the person and the bots both see and act on.
+_Avoid_: pane, panel, view, block
+
+**Connector**:
+A tool server that a bot can call.
+_Avoid_: integration, plugin
+
+**Skill**:
+A folder of instructions that a bot reads when a task calls for it.
+
+**Routine**:
+A prompt that a bot runs on a schedule or when something triggers it.
+_Avoid_: job, automation, cron
