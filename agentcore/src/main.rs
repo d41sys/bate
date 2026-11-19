@@ -69,6 +69,8 @@ struct Engine {
     connectors: Vec<proto::connectors::Connector>,
     /// The bots this one may message, and whether it leads a group.
     peers: (Vec<proto::groups::Peer>, bool),
+    /// Folders whose `skills/` are offered beside the bot's own; set by the service.
+    skill_folders: Vec<PathBuf>,
     /// From the user, through the service; first in the system prompt.
     instructions: String,
     /// Tool rounds a turn may take; set by the service.
@@ -140,6 +142,7 @@ fn main() {
         mcp: mcp::Servers::default(),
         connectors: Vec::new(),
         peers: (Vec::new(), false),
+        skill_folders: Vec::new(),
         instructions: String::new(),
         steps: proto::STEP_LIMIT,
         running: None,
@@ -333,6 +336,10 @@ impl Engine {
                 self.peers = (peers, leads);
                 self.respond(id, Ok(()));
             }
+            Op::SkillFolders { folders } => {
+                self.skill_folders = folders;
+                self.respond(id, Ok(()));
+            }
             Op::Instructions { text } => {
                 self.instructions = text;
                 self.respond(id, Ok(()));
@@ -476,6 +483,7 @@ impl Engine {
             connectors: self.connectors.clone(),
             peers: self.peers.0.clone(),
             leads: self.peers.1,
+            skill_folders: self.skill_folders.clone(),
             instructions: self.instructions.clone(),
             steps: self.steps,
             control,

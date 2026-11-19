@@ -39,6 +39,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `connectors` | `connectors` | The bot's MCP servers (`proto::connectors`), the whole list each time. The engine uses the enabled ones from its next turn on. |
 | `instructions` | `text` | What the user told the bot to be and do, sent at start (when set) and on each change. The engine puts it first in its system prompt; empty: none. An installed agent (ACP) ignores it. |
 | `step_limit` | `steps` | How many tool rounds a turn may take, 1 or more (`0` is refused); sent at start (when set) and on each change. Without it the engine allows 100. An installed agent (ACP) ignores it. |
+| `skill_folders` | `folders` | Folders besides the bot's own whose `skills/` the model is told about (a workplace's, see Workplaces), the whole list each time; sent when the engine starts (when not empty) and when the list changes. The model sees them as the bot's own, named by their full paths. An installed agent (ACP) ignores it. |
 | `peers` | `peers`, `leads` | The bots this one may message (`proto::groups::Peer`: `id`, `name`, `lead`), the whole list each time, and whether this bot leads a group. |
 | `reply` | `message`, `text?`, `error?` | What came of the open `message`: the other bot's reply, or why there is none. |
 | `browser_result` | `request`, `output?`, `error?` | What came of the open `browser` request: the page after the action, or why not. |
@@ -107,7 +108,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_prompt`, `queue_full`, `cannot_steer`, `no_such_message`, `not_waiting`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_workplace`, `invalid_workplace`, `workplace_in_use`, `no_such_prompt`, `queue_full`, `cannot_steer`, `no_such_message`, `not_waiting`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -144,6 +145,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_projects` | none | `{projects:[Project]}` |
 | `set_project` | `project` | `{project}`; creates when `project.id` is missing. `invalid_project`, `no_such_project`. Refused (`forbidden`) for a device on the network |
 | `delete_project` | `projectId` | `{}`: the project is forgotten; its folder and its bots stay. `no_such_project`. Refused (`forbidden`) for a device on the network |
+| `list_workplaces` | none | `{workplaces:[Workplace]}` (see Workplaces). Looks at the files now: a workplace that changed is switched off everywhere first |
+| `install_workplace` | `path` | `{workplace}`; copies the folder at `path` in, in place of one of the same name. `invalid_workplace`; `workplace_in_use` when a project has that name on. Refused (`forbidden`) for a device on the network |
+| `approve_workplace` | `name` | `{}`: records the files as they are now and starts the workplace again in the projects that have it on. `no_such_workplace`, `invalid_workplace`. Refused (`forbidden`) for a device on the network |
+| `remove_workplace` | `name`, `force?` | `{}`: forgets the workplace and deletes its folder. `workplace_in_use` while a project has it on, unless `force` is true, which switches it off in those projects first; `project-data/<id>/` stays. `no_such_workplace`. Refused (`forbidden`) for a device on the network |
 | `read_roles` | `paths` | `{roles:[{path, name, instructions, model, effort, skills, levels, raises}]}`: what each role file (whole paths, 1 to 20) would create; `raises` names the kinds whose level allows more than a new bot's. `invalid_role` with the file and the reason. Refused (`forbidden`) for a device on the network |
 | `add_roles` | `projectId`, `paths`, `raise` | `{bots:[id]}`: a bot for each role, in the project; levels in `raises` are applied only with `raise: true`. All or none: `invalid_role` or `no_such_project` and no bot is created. Refused (`forbidden`) for a device on the network |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
@@ -204,6 +209,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"projects_changed"}` | Re-run `list_projects`. |
+| `{"type":"workplaces_changed"}` | Re-run `list_workplaces`: one was installed, approved or removed. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` or `{"type":"memory_changed","projectId"}` | A window changed a note of the bot or of the project: re-run `list_memory`. What a bot writes itself is not announced. |
 
@@ -241,7 +247,7 @@ Whether a bot may message another is asked like a connector's tool: a `question`
 
 ### Projects
 
-Same shape as `proto::projects`. A project is `{id, name, folder, bots, instructions, connector, connectorError}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids, `instructions` at most 8000 characters, `connector` (optional) `{name, command, args}` (see A project's connector), `connectorError` output only; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
+Same shape as `proto::projects`. A project is `{id, name, folder, bots, instructions, connector, workplace, connectorError}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids, `instructions` at most 8000 characters, `connector` (optional) `{name, command, args}` (see A project's connector), `workplace` (optional) the name of an installed workplace (see Workplaces; not together with `connector`), `connectorError` output only; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
 
 - **The folder:** the user names it (`~/` stands for their home). It must be there, and it is kept by its real path. It is refused (`invalid_project`) when it is the user's home or a folder above it, when it holds the service's home, or when it is inside the service's home. With `folder` empty a new project gets `projects/<id>` in the service's home, made by the service, and a project that has a folder keeps it. `delete_project` never deletes a folder.
 - **Working there:** the engine of a bot in a project is told the folder in `BATE_WORK_DIR`. Its tools take a relative path from there and run commands there. The bot's own folder stays where its conversations, notes, skills and attachments are; the engine tells the model that folder, and names notes and skills by their full paths.
@@ -250,6 +256,20 @@ Same shape as `proto::projects`. A project is `{id, name, folder, bots, instruct
 - **Files in the window:** `work/<bot>` in the service's home is a link the service keeps to the folder of the bot's project. For `botfile://localhost/<bot>/<path>` the window looks in that folder first, then in the bot's own.
 - **Instructions and notes:** the engine of each bot of a project is sent, as its `instructions`, the bot's own followed by the project's, again whenever either changes; it follows them from its next turn. The project's notes are the Markdown files in `.bate/memory/` in its folder, under the same rules as a bot's own (see Memory); the engine puts them before the model after the bot's own, with a budget of their own, and the bots add notes there with their `write` tool. An installed agent (see ACP) gets neither.
 - **Roles:** a role file describes a ready-made bot: name, instructions, permission levels, an optional model and the skills it needs as folders beside it. The format is in `docs/roles.md`. `add_roles` re-reads the files, creates each bot with its instructions, model, skills and levels, then adds them to the project as `set_project` would; when anything fails, every bot it made is taken back.
+
+### Workplaces
+
+A workplace is a folder with a `workplace.json` and a program (format and example in `docs/workplaces.md`; the idea in `docs/adr/0001-workplaces-are-separate-programs.md`). `install_workplace` validates the manifest, copies the folder as a skill is copied (into the service's `staging/`, no links or special files, at most 2000 files and folders, 200 MiB and 12 folders deep; `invalid_workplace` otherwise) and moves it to `workplaces/<name>/` in the service's home, which no bot or program can write. A program named by a path in the folder must be there and runnable. The service records the name, the version and a fingerprint of the files in its database. Installing a name again replaces it, unless a project has it on (`workplace_in_use`).
+
+`Workplace`, as `list_workplaces` gives it: `{name, version, manifest, skills, roles, changed, error?, usedBy}`. `manifest` is `{name, version, description?, program: {command, args}, needs: {folders, hosts, commands}}`, or `null` when the manifest is malformed (`error` says how, or that the files cannot be read). `needs` is shown to the person before a workplace is switched on and stored; the hosts are not yet enforced. `skills` are the valid skills in its `skills/` (`{name, description}`), `roles` the whole paths of its `roles/*.md` files, which `read_roles` and `add_roles` take like any role file (a role's skills are folders beside the role file). `changed` is true when the files differ from what was approved. `usedBy` is the ids of the projects that have it on.
+
+- **The fingerprint:** SHA-256, as 64 hex characters, over the folder's entries, each folder's in order of name, depth first: the path from the workplace's folder, a zero byte, the kind, and for a file whether it can run, its length (8 bytes, little-endian) and its bytes. A link or a special file counts as such, so one added later changes it.
+- **Switching on:** `set_project` with `workplace: "<name>"`. It is refused (`invalid_project`) when the workplace is not installed, its manifest is malformed, its files changed since they were approved, or the project also has a `connector`. The window shows `needs` and asks for a confirmation before it sends this; the service does not. Switching a workplace on or off, or changing it, stops the idle engines of the project's bots (a busy one when its turn ends), as any change of the folder limit does.
+- **The program:** it is the project's connector under the workplace's `name`: started once per project, with `project-data/<projectId>/` as its data folder, `BATE_MCP_SOCKET`, `HOME`, `TMPDIR` and `BATE_WORK_DIR` as for a project's connector, but its working directory is the workplace's folder, where a relative `command` and the `args` start. A `command` without `/` is looked up on the service's `PATH` (`python3`). It may read its own folder and the project's; it may write the data folder and the project's folder.
+- **Skills and roles:** while the workplace may run, the engine of each bot of the project is sent `skill_folders` with the workplace's folder, may read it, and tells the model its skills beside the bot's own (a skill of the bot's own with the same name stays listed too, each with its own path). Nothing is copied into the bot's folder.
+- **Changed files:** the files are compared with the fingerprint when the program starts (including each start after it ended) and when `list_workplaces` runs, and a mismatch, or a manifest that no longer parses, switches the workplace off in every project that has it on: the program stops, `connectorError` says so and that the person has to look and approve, the bots get no tools from it (`connectors`) and no skills (`skill_folders` with none) from their next turn, and the project and its bots go on. `approve_workplace` records the files as they are (after checking the manifest again) and starts the program again. A new version is another matter: while a project has the workplace on, `install_workplace` is refused, so switch it off in the project, install, and switch it on. A change made while the program runs is noticed at the next of those two moments, not at once.
+- **A program that does not start:** reported in `connectorError` as for any project connector; the project opens and its bots answer without its tools.
+- **Removing:** see `remove_workplace`. Deleting a project, or switching a workplace off in it, stops the program but never deletes `project-data/<projectId>/`.
 
 ### Skills
 
@@ -281,7 +301,7 @@ The memory commands are for the window's panel; with `projectId` they work on th
 A bot is kept inside its folder (`bots/<id>` under the service's home), and the folder of its project if it is in one, by the operating system unless `wholeDisk` is true; a new bot is limited. The service starts a limited bot's engine under macOS `sandbox-exec`, so the rule holds for the engine and for every program it starts, whatever was approved:
 
 - **Writing:** only inside the folder and the project's folder.
-- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder, the project's folder and the engine's program. System files stay readable.
+- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder, the project's folder, the engine's program and, for the engine of a bot whose project has a workplace and for the workplace's own program, that workplace's folder. System files stay readable.
 - **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to or looks at processes outside (so no `pgrep`), no drivers, no shared memory, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), no preferences (`defaults` would write into the user's home), and only the system services needed to look up names and check certificates (so not the keychain, the clipboard or the file index).
 - **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings except `BATE_MODEL_API_KEY`; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
 - **Network:** open, local ports included: the engine has to reach its model.
@@ -351,6 +371,8 @@ An access token within 30 s of its end is renewed before use; an answer of 401 f
 Tokens are kept in the Keychain (see Secrets), not in `app.db`. Connector values are plain text in `app.db`. A bot limited to its folder cannot read that file or use the Keychain.
 
 #### A project's connector
+
+(A project that has a `workplace` has no connector of its own: the workplace's program is its connector, with everything below, under the workplace's name. See Workplaces.)
 
 A project may have a `connector`, `{name, command, args}`: `name` follows the rules above (`invalid_project` otherwise), `command` is not empty and is a path (a relative one starts in the project's folder) or a name found on the service's `PATH`. The service runs that program once for the project, and every bot of the project gets its tools, whether it runs on Bate's own engine or on an installed agent that accepts http connectors (see ACP). No engine starts a copy. A program that only speaks over standard input stays a per-bot `stdio` connector.
 

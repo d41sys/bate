@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Read};
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +31,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, desktop, oauth, project_server};
+use crate::{apple, browser, desktop, oauth, project_server, workplaces};
 use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
@@ -473,6 +474,8 @@ pub struct Core {
     engines: HashMap<String, Running>,
     /// The connector program of each project that has one, by project id.
     servers: HashMap<String, ProjectServer>,
+    /// Projects whose workplace may not run, by project id, and why.
+    workplaces_off: HashMap<String, String>,
     /// Bots whose project change takes effect after the turn now running.
     project_restarts: HashSet<String>,
     /// Engine request ids and engine generations.
@@ -484,6 +487,8 @@ pub struct Core {
 /// A project's connector program, as the service keeps track of it.
 struct ProjectServer {
     spec: ProjectConnector,
+    /// The workplace's folder, for a program that is one's.
+    home: Option<PathBuf>,
     /// The project's folder it was started for.
     folder: String,
     generation: u64,
@@ -559,6 +564,7 @@ impl Core {
             clients: HashMap::new(),
             engines: HashMap::new(),
             servers: HashMap::new(),
+            workplaces_off: HashMap::new(),
             project_restarts: HashSet::new(),
             counter: 0,
             next_due: 0,
@@ -1181,12 +1187,43 @@ impl Core {
                 self.store.delete_project(id).map_err(internal)?;
                 self.stop_server(id);
                 // Its Always answers were for that program.
-                if let Some(c) = &project.connector {
+                if let Some(name) = project.connector_name() {
                     for bot in &project.bots {
-                        self.forget_connector_grants(bot, &c.name);
+                        self.forget_connector_grants(bot, name);
                     }
                 }
                 self.projects_changed(&project.bots);
+                Ok(Some(json!({})))
+            }
+            "list_workplaces" => Ok(Some(json!({"workplaces": self.list_workplaces()?}))),
+            "install_workplace" => {
+                let projects = self.store.projects().map_err(internal)?;
+                let in_use = |name: &str| {
+                    projects
+                        .iter()
+                        .any(|p| p.workplace.as_deref() == Some(name))
+                };
+                let row = workplaces::install(std::path::Path::new(str_field(f, "path")?), in_use)?;
+                self.store.put_workplace(&row).map_err(internal)?;
+                self.broadcast(&json!({"type": "workplaces_changed"}));
+                let listed = workplaces::inspect(&row, Vec::new());
+                Ok(Some(json!({"workplace": listed})))
+            }
+            "approve_workplace" => {
+                let name = str_field(f, "name")?;
+                if self.store.workplace(name).map_err(internal)?.is_none() {
+                    return Err(("no_such_workplace", format!("no workplace `{name}`")));
+                }
+                let row = workplaces::approve(name).map_err(|e| ("invalid_workplace", e))?;
+                self.store.put_workplace(&row).map_err(internal)?;
+                self.workplace_approved(name);
+                self.broadcast(&json!({"type": "workplaces_changed"}));
+                Ok(Some(json!({})))
+            }
+            "remove_workplace" => {
+                let name = str_field(f, "name")?;
+                let force = f.get("force").and_then(Value::as_bool).unwrap_or(false);
+                self.remove_workplace(name, force)?;
                 Ok(Some(json!({})))
             }
             "read_roles" => Ok(Some(json!({"roles": self.read_roles(f)?}))),
@@ -2076,7 +2113,14 @@ impl Core {
         if let Some(project) = &project {
             self.ensure_server(project);
         }
+        // Its project's workplace is a folder it may read: the skills offered are files there.
+        let read = project
+            .as_ref()
+            .and_then(|p| p.workplace.as_deref())
+            .map(workplaces::folder)
+            .filter(|folder| folder.is_dir());
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
+        let skill_folders = self.skill_folders_of(bot).map_err(internal)?;
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
@@ -2103,7 +2147,7 @@ impl Core {
             input,
             mut output,
             stderr,
-        } = limit::command(&engine_program(), &dir, &work, whole_disk)
+        } = limit::command(&engine_program(), &dir, &work, read.as_deref(), whole_disk)
             .map(|mut command| {
                 // The engine program's other half: it runs the agent and translates.
                 if let Some(agent) = &agent {
@@ -2201,6 +2245,15 @@ impl Core {
         if let Some((model, effort)) = model {
             self.send_op(bot, Op::SetModel { model, effort }, Waiter::Quiet)?;
         }
+        if !skill_folders.is_empty() {
+            self.send_op(
+                bot,
+                Op::SkillFolders {
+                    folders: skill_folders,
+                },
+                Waiter::Quiet,
+            )?;
+        }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
 
@@ -2280,17 +2333,24 @@ impl Core {
     }
 
     fn server_error(&self, p: &Project) -> Option<String> {
-        let server = self.servers.get(p.id.as_deref()?)?;
-        server.error.clone()
+        let id = p.id.as_deref()?;
+        if let Some(why) = self.workplaces_off.get(id) {
+            return Some(why.clone());
+        }
+        self.servers.get(id)?.error.clone()
     }
 
     /// Makes sure the program of `project`'s connector runs for its bots, once.
     fn ensure_server(&mut self, project: &Project) {
-        let (Some(id), Some(spec)) = (&project.id, &project.connector) else {
-            return;
+        let Some(id) = &project.id else { return };
+        let (spec, home) = match self.program_of(project) {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            Err(why) => return self.switch_off(id, why),
         };
+        self.workplaces_off.remove(id);
         if let Some(s) = self.servers.get(id) {
-            let same = s.spec == *spec && s.folder == project.folder;
+            let same = s.spec == spec && s.home == home && s.folder == project.folder;
             // A program that died is started again by its backoff; one that was never
             // started, or is not the one asked for, is started now.
             if same && (s.program.is_some() || s.retrying) {
@@ -2298,13 +2358,64 @@ impl Core {
             }
             self.stop_server(id);
         }
-        self.start_server(id, spec.clone(), project.folder.clone(), 0);
+        self.start_server(id, spec, home, project.folder.clone(), 0);
     }
 
-    fn start_server(&mut self, id: &str, spec: ProjectConnector, folder: String, failures: u32) {
+    /// What runs as `project`'s connector: its own program, or its workplace's, which is the
+    /// workplace's folder too. `Err`: the workplace may not run, and why.
+    fn program_of(
+        &self,
+        project: &Project,
+    ) -> Result<Option<(ProjectConnector, Option<PathBuf>)>, String> {
+        let Some(name) = &project.workplace else {
+            return Ok(project.connector.clone().map(|c| (c, None)));
+        };
+        let m = self.workplace_ready(name)?;
+        let spec = ProjectConnector {
+            name: m.name,
+            command: m.program.command,
+            args: m.program.args,
+        };
+        Ok(Some((spec, Some(workplaces::folder(name)))))
+    }
+
+    /// The manifest of workplace `name`, if it is installed, well-formed and as approved.
+    fn workplace_ready(&self, name: &str) -> Result<workplaces::Manifest, String> {
+        let row = self.store.workplace(name).map_err(|e| e.to_string())?;
+        let Some(row) = row else {
+            return Err(format!("the workplace {name} is not installed"));
+        };
+        workplaces::inspect(&row, Vec::new()).ready().cloned()
+    }
+
+    /// The program of project `id` may not run: it is stopped, and the window sees why.
+    fn switch_off(&mut self, id: &str, why: String) {
+        if self.workplaces_off.get(id) == Some(&why) {
+            return;
+        }
+        self.stop_server(id);
+        self.workplaces_off.insert(id.to_owned(), why);
+        self.server_changed(id);
+    }
+
+    fn start_server(
+        &mut self,
+        id: &str,
+        spec: ProjectConnector,
+        home: Option<PathBuf>,
+        folder: String,
+        failures: u32,
+    ) {
         self.counter += 1;
         let generation = self.counter;
-        let started = project_server::start(id, &spec, &folder, generation, self.tx.clone());
+        let started = project_server::start(
+            id,
+            &spec,
+            &folder,
+            home.as_deref(),
+            generation,
+            self.tx.clone(),
+        );
         let (program, error) = match started {
             Ok(program) => (Some(program), None),
             Err(e) => {
@@ -2314,6 +2425,7 @@ impl Core {
         };
         let server = ProjectServer {
             spec,
+            home,
             folder,
             generation,
             program,
@@ -2328,6 +2440,7 @@ impl Core {
 
     /// Ends the program of project `id`, if there is one. Tells nobody.
     fn stop_server(&mut self, id: &str) {
+        self.workplaces_off.remove(id);
         if let Some(server) = self.servers.remove(id)
             && let Some(program) = server.program
         {
@@ -2347,8 +2460,109 @@ impl Core {
         for bot in bots.iter().flat_map(|p| &p.bots) {
             if self.engines.contains_key(bot) {
                 self.connectors_changed(bot);
+                self.send_skill_folders(bot);
             }
         }
+    }
+
+    /// The folders besides the bot's own whose skills it is told about: its project's workplace,
+    /// while that may run.
+    fn skill_folders_of(&self, bot: &str) -> rusqlite::Result<Vec<PathBuf>> {
+        let project = self.project_of(bot)?;
+        Ok(match project {
+            Some(Project {
+                id: Some(id),
+                workplace: Some(name),
+                ..
+            }) if !self.workplaces_off.contains_key(&id) => vec![workplaces::folder(&name)],
+            _ => Vec::new(),
+        })
+    }
+
+    fn send_skill_folders(&mut self, bot: &str) {
+        let sent = self
+            .skill_folders_of(bot)
+            .map_err(internal)
+            .and_then(|folders| self.send_op(bot, Op::SkillFolders { folders }, Waiter::Quiet));
+        if let Err((_, e)) = sent {
+            log!("bot {bot}: skill folders not sent: {e}");
+        }
+    }
+
+    /// The workplaces with what is on disk now. One that may not run is switched off in every
+    /// project that has it on.
+    fn list_workplaces(&mut self) -> Result<Vec<workplaces::Listed>, Refusal> {
+        let projects = self.store.projects().map_err(internal)?;
+        let mut all = Vec::new();
+        for row in self.store.workplaces().map_err(internal)? {
+            let used: Vec<String> = projects
+                .iter()
+                .filter(|p| p.workplace.as_deref() == Some(&row.name))
+                .filter_map(|p| p.id.clone())
+                .collect();
+            let listed = workplaces::inspect(&row, used);
+            if let Err(why) = listed.ready() {
+                for id in &listed.used_by {
+                    self.switch_off(id, why.clone());
+                }
+            }
+            all.push(listed);
+        }
+        Ok(all)
+    }
+
+    /// The files of workplace `name` were approved again: its projects start its program.
+    fn workplace_approved(&mut self, name: &str) {
+        let Ok(projects) = self.store.projects() else {
+            return log!("workplace {name}: projects not read after approval");
+        };
+        for p in projects
+            .iter()
+            .filter(|p| p.workplace.as_deref() == Some(name))
+        {
+            let Some(id) = &p.id else { continue };
+            self.stop_server(id);
+            if p.bots.iter().any(|bot| self.engines.contains_key(bot)) {
+                self.ensure_server(p);
+            } else {
+                self.server_changed(id);
+            }
+        }
+    }
+
+    /// Takes workplace `name` away. While a project has it on that needs `force`, and then the
+    /// workplace goes off in those projects (their data in `project-data` stays).
+    fn remove_workplace(&mut self, name: &str, force: bool) -> Result<(), Refusal> {
+        if self.store.workplace(name).map_err(internal)?.is_none() {
+            return Err(("no_such_workplace", format!("no workplace `{name}`")));
+        }
+        let using: Vec<Project> = self
+            .store
+            .projects()
+            .map_err(internal)?
+            .into_iter()
+            .filter(|p| p.workplace.as_deref() == Some(name))
+            .collect();
+        if !using.is_empty() && !force {
+            let names: Vec<&str> = using.iter().map(|p| p.name.as_str()).collect();
+            return Err((
+                "workplace_in_use",
+                format!(
+                    "the workplace {name} is switched on in: {}",
+                    names.join(", ")
+                ),
+            ));
+        }
+        for mut project in using {
+            project.workplace = None;
+            // The folder it has, unchanged.
+            project.folder.clear();
+            self.set_project(serde_json::to_value(&project).expect("serializable"))?;
+        }
+        self.store.delete_workplace(name).map_err(internal)?;
+        workplaces::remove(name).map_err(|e| ("internal", e.to_string()))?;
+        self.broadcast(&json!({"type": "workplaces_changed"}));
+        Ok(())
     }
 
     fn on_project_exited(&mut self, id: &str, generation: u64, why: &str) {
@@ -2389,8 +2603,15 @@ impl Core {
         let Some(s) = self.servers.get(id).filter(|s| s.generation == generation) else {
             return;
         };
-        let (spec, folder, failures) = (s.spec.clone(), s.folder.clone(), s.failures);
-        self.start_server(id, spec, folder, failures);
+        let (spec, home, folder, failures) =
+            (s.spec.clone(), s.home.clone(), s.folder.clone(), s.failures);
+        // A workplace is looked at again before each start: it may have changed meanwhile.
+        if home.is_some()
+            && let Err(why) = self.workplace_ready(&spec.name)
+        {
+            return self.switch_off(id, why);
+        }
+        self.start_server(id, spec, home, folder, failures);
     }
 
     /// What the engine of `bot` is told to follow: its own instructions, then its project's.
@@ -2585,6 +2806,11 @@ impl Core {
                 return Err(invalid("`connector.command` is empty".into()));
             }
         }
+        if p.workplace.is_some() && p.connector.is_some() {
+            return Err(invalid(
+                "a project has either its own connector or a workplace, not both".into(),
+            ));
+        }
         p.bots.sort();
         p.bots.dedup();
         if p.bots.len() > MAX_MEMBERS {
@@ -2619,6 +2845,12 @@ impl Core {
                 )));
             }
         }
+        // Switching a workplace on needs it installed, well-formed and as approved.
+        if let Some(name) = &p.workplace
+            && old.is_none_or(|o| o.workplace.as_ref() != Some(name))
+        {
+            self.workplace_ready(name).map_err(invalid)?;
+        }
         // No folder named: the one it has, or for a new project one the service makes.
         let folder = match (p.folder.trim(), old) {
             ("", old) => old.map(|o| o.folder.clone()),
@@ -2633,7 +2865,10 @@ impl Core {
         // The bots whose folder limit changes: all when the folder does, else those that came
         // or went.
         let before = old.map_or(&[][..], |o| &o.bots[..]);
-        let same_folder = old.is_some_and(|o| Some(&o.folder) == folder.as_ref());
+        // The workplace's folder is readable by the engine only from its start, so a change
+        // of it is a move too.
+        let same_folder =
+            old.is_some_and(|o| Some(&o.folder) == folder.as_ref() && o.workplace == p.workplace);
         let moved: Vec<String> = before
             .iter()
             .chain(&p.bots)
@@ -2655,13 +2890,12 @@ impl Core {
         self.store.put_project(&p).map_err(internal)?;
         self.projects_changed(&moved);
         // The program and what the bots may call are for the connector as it is now.
-        let was = old.and_then(|o| o.connector.as_ref());
-        let changed = was != p.connector.as_ref();
+        let was = old.map(|o| (&o.connector, &o.workplace));
+        let changed = was.unwrap_or((&None, &None)) != (&p.connector, &p.workplace);
         let shifted = |bot: &String| before.contains(bot) != p.bots.contains(bot);
-        let names: Vec<&str> = [was, p.connector.as_ref()]
+        let names: Vec<&str> = [old.and_then(|o| o.connector_name()), p.connector_name()]
             .into_iter()
             .flatten()
-            .map(|c| c.name.as_str())
             .collect();
         // An Always answer was for one program under one name, for these bots.
         for bot in before
@@ -3253,18 +3487,16 @@ impl Core {
         // The project's connector is one the service runs: the engine reaches it, as it does a
         // signed-in one, through the local port. It takes the place of a bot's own of its name.
         if let Some(project) = self.project_of(bot)?
-            && let Some(spec) = &project.connector
+            && let Some(name) = project.connector_name()
         {
-            connectors.retain(|c| c.name != spec.name);
-            let key = self
-                .store
-                .oauth_key(bot, &spec.name, &sys::random_hex(16))?;
+            connectors.retain(|c| c.name != name);
+            let key = self.store.oauth_key(bot, name, &sys::random_hex(16))?;
             let up = project
                 .id
                 .as_deref()
                 .is_some_and(|id| self.servers.get(id).is_some_and(|s| s.program.is_some()));
             connectors.push(Connector {
-                name: spec.name.clone(),
+                name: name.to_owned(),
                 enabled: up && self.hook_port.is_some(),
                 transport: Transport::Http {
                     url: format!("http://127.0.0.1:{}/mcp/{key}", self.hook_port.unwrap_or(0)),
@@ -3407,7 +3639,7 @@ impl Core {
                     .and_then(|(bot, name)| {
                         let project = self.project_of(&bot).ok().flatten();
                         if let Some(p) =
-                            project.filter(|p| p.connector.as_ref().is_some_and(|c| c.name == name))
+                            project.filter(|p| p.connector_name() == Some(name.as_str()))
                         {
                             // Not while the program is not running: no engine waits on it.
                             let program = self.servers.get(p.id.as_deref()?)?.program.as_ref()?;
@@ -4445,7 +4677,7 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
     }
 }
 
-fn check_connector_name(name: &str) -> Result<(), String> {
+pub fn check_connector_name(name: &str) -> Result<(), String> {
     let name_ok = (1..=40).contains(&name.len())
         && name
             .bytes()

@@ -36,6 +36,8 @@ pub struct Turn {
     /// The bots this one may message, and whether it leads a group.
     pub peers: Vec<Peer>,
     pub leads: bool,
+    /// Folders whose `skills/` are offered beside the bot's own.
+    pub skill_folders: Vec<PathBuf>,
     /// What the user told this bot to be and do.
     pub instructions: String,
     /// Tool rounds a turn may take.
@@ -500,7 +502,7 @@ impl Turn {
             "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{own}{instructions}{}{}{}{project}",
             self.work.display(),
             self.peers_prompt(),
-            crate::skills::prompt(&self.dir, named),
+            crate::skills::prompt(&self.dir, named, &self.skill_folders),
             crate::memory::prompt(&self.dir, named)
         )
     }
