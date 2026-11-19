@@ -23,6 +23,7 @@ mod oauth;
 mod paths;
 mod proxy;
 mod report;
+mod roles;
 mod schedule;
 mod skills;
 mod store;

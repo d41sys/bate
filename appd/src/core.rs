@@ -31,7 +31,7 @@ use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{apple, browser, desktop, oauth};
-use crate::{limit, memory, paths, schedule, skills, update};
+use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
     ClientConnected {
@@ -247,6 +247,20 @@ fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
 
 /// Thinking efforts a model server takes (`reasoning_effort`).
 const EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
+
+/// A model's name and thinking effort as `set_model` takes them.
+fn check_model(model: &str, effort: Option<&str>) -> Result<(), String> {
+    if model.trim() != model || model.len() > 200 || model.chars().any(char::is_control) {
+        return Err("`model` must be a model's name".into());
+    }
+    if effort.is_some_and(|e| !EFFORTS.contains(&e)) {
+        return Err(format!("`effort` must be one of {}", EFFORTS.join(", ")));
+    }
+    if model.is_empty() && effort.is_some() {
+        return Err("an empty `model` (the default) takes no `effort`".into());
+    }
+    Ok(())
+}
 
 /// A field with a fixed set of values (`kind`, `level`).
 fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refusal> {
@@ -971,21 +985,7 @@ impl Core {
                     _ => serde_json::from_value(f.clone()).map_err(|e| bad(e.to_string()))?,
                 };
                 if let Op::SetModel { model, effort } = &op {
-                    if model.trim() != model
-                        || model.len() > 200
-                        || model.chars().any(char::is_control)
-                    {
-                        return Err(bad("`model` must be a model's name"));
-                    }
-                    if effort.as_deref().is_some_and(|e| !EFFORTS.contains(&e)) {
-                        return Err(bad(format!(
-                            "`effort` must be one of {}",
-                            EFFORTS.join(", ")
-                        )));
-                    }
-                    if model.is_empty() && effort.is_some() {
-                        return Err(bad("an empty `model` (the default) takes no `effort`"));
-                    }
+                    check_model(model, effort.as_deref()).map_err(bad)?;
                 }
                 let settles = match &op {
                     Op::Rewind { entry, fork } => Settles::Rewind(entry.clone(), *fork),
@@ -1110,6 +1110,13 @@ impl Core {
                 self.store.delete_project(id).map_err(internal)?;
                 self.projects_changed(&project.bots);
                 Ok(Some(json!({})))
+            }
+            "read_roles" => Ok(Some(json!({"roles": self.read_roles(f)?}))),
+            "add_roles" => {
+                let id = str_field(f, "projectId")?.to_owned();
+                let raise = f.get("raise").and_then(Value::as_bool).unwrap_or(false);
+                let roles = self.read_roles(f)?;
+                Ok(Some(json!({"bots": self.add_roles(&id, &roles, raise)?})))
             }
             "list_skills" => {
                 let bot = self.bot_of(f)?;
@@ -2205,6 +2212,122 @@ impl Core {
             }
         }
         self.peers_changed("projects_changed");
+    }
+
+    /// The role files at `paths`, all valid, or the reason one is not.
+    fn read_roles(&self, f: &Value) -> Result<Vec<roles::Role>, Refusal> {
+        let paths: Vec<String> = field(f, "paths")?;
+        if paths.is_empty() || paths.len() > MAX_MEMBERS {
+            return Err(bad(format!(
+                "`paths` must name 1 to {MAX_MEMBERS} role files"
+            )));
+        }
+        let invalid = |e: String| ("invalid_role", e);
+        let mut found = Vec::new();
+        for path in paths {
+            let role = roles::read(std::path::Path::new(&path)).map_err(invalid)?;
+            if let Some(model) = &role.model {
+                check_model(model, role.effort.as_deref())
+                    .map_err(|e| invalid(format!("{path}: {e}")))?;
+            } else if role.effort.is_some() {
+                return Err(invalid(format!("{path}: `effort` goes with a `model`")));
+            }
+            found.push(role);
+        }
+        Ok(found)
+    }
+
+    /// Creates a bot for each role and adds them to the project, all or none. Levels above a new
+    /// bot's are applied only with `raise`.
+    fn add_roles(
+        &mut self,
+        id: &str,
+        roles: &[roles::Role],
+        raise: bool,
+    ) -> Result<Vec<String>, Refusal> {
+        let projects = self.store.projects().map_err(internal)?;
+        let Some(mut project) = projects.into_iter().find(|p| p.id.as_deref() == Some(id)) else {
+            return Err(("no_such_project", "no such project".into()));
+        };
+        if project.bots.len() + roles.len() > MAX_MEMBERS {
+            return Err((
+                "invalid_role",
+                format!("a project has at most {MAX_MEMBERS} bots"),
+            ));
+        }
+        let mut made = Vec::new();
+        for role in roles {
+            let id = sys::random_hex(4);
+            let created = self.store.create_bot(&id, &role.name, now_ms());
+            let filled = created.map_err(internal).and_then(|_| {
+                made.push(id.clone());
+                self.fill_role_bot(&id, role, raise)
+            });
+            if let Err(e) = filled {
+                self.unmake(&made);
+                return Err(e);
+            }
+        }
+        project.bots.extend(made.iter().cloned());
+        // The folder it has, unchanged.
+        project.folder.clear();
+        if let Err(e) = self.set_project(serde_json::to_value(&project).expect("serializable")) {
+            self.unmake(&made);
+            return Err(e);
+        }
+        self.broadcast(&json!({"type": "bots_changed"}));
+        Ok(made)
+    }
+
+    fn fill_role_bot(&mut self, bot: &str, role: &roles::Role, raise: bool) -> Result<(), Refusal> {
+        let failed = |e: io::Error| ("internal", e.to_string());
+        sys::create_private_dir(&paths::bot_dir(bot)).map_err(failed)?;
+        let beside = role.path.parent().expect("a whole path");
+        for name in &role.skills {
+            let invalid = |e: String| {
+                (
+                    "invalid_role",
+                    format!("{}: skill `{name}`: {e}", role.path.display()),
+                )
+            };
+            let skill = skills::install(bot, &beside.join(name)).map_err(invalid)?;
+            if skill.name != *name {
+                return Err(invalid(format!(
+                    "its folder holds the skill `{}`",
+                    skill.name
+                )));
+            }
+        }
+        let profile = store::Profile {
+            instructions: role.instructions.clone(),
+            ..Default::default()
+        };
+        self.store.set_profile(bot, &profile).map_err(internal)?;
+        if let Some(model) = &role.model {
+            let effort = role.effort.as_deref();
+            self.store.set_model(bot, model, effort).map_err(internal)?;
+        }
+        for (kind, level) in &role.levels {
+            if raise || !role.raises.contains(kind) {
+                self.store.set_level(bot, *kind, *level).map_err(internal)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes back bots `add_roles` made: nothing in them is the user's yet.
+    fn unmake(&mut self, bots: &[String]) {
+        for bot in bots {
+            if let Err(e) = self.store.delete_bot(bot) {
+                log!("bot {bot}: not taken back: {e}");
+            }
+            let dir = paths::bot_dir(bot);
+            if let Err(e) = std::fs::remove_dir_all(&dir)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                log!("bot {bot}: {} not removed: {e}", dir.display());
+            }
+        }
     }
 
     /// Validates and stores a project from `set_project`.

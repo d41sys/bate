@@ -2613,6 +2613,104 @@ fn a_projects_instructions_and_notes_reach_all_its_bots() {
 }
 
 #[test]
+fn roles_add_ready_made_bots_to_a_project_all_or_none() {
+    let home = home("roles");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    let dir = home.join("roles");
+    fs::create_dir_all(dir.join("code-review")).unwrap();
+    fs::write(
+        dir.join("code-review/SKILL.md"),
+        "---\nname: code-review\ndescription: Review code.\n---\nHow to.\n",
+    )
+    .unwrap();
+    let role = |name: &str, text: &str| {
+        fs::write(dir.join(name), text).unwrap();
+        dir.join(name).to_str().unwrap().to_owned()
+    };
+    let reviewer = role(
+        "reviewer.md",
+        "---\nname: Reviewer\nmodel: gpt-5\neffort: high\nskills: code-review\nwrite: never\nrun: always\n---\nReview every change.\n",
+    );
+    let writer = role("writer.md", "---\nname: Writer\n---\nWrite the docs.\n");
+    let malformed = role("bad.md", "---\nname: Bad\nwirte: always\n---\n");
+    let missing = role("missing.md", "---\nname: Missing\nskills: not-here\n---\n");
+    let project = json!({"name": "Site", "bots": []});
+    let id = w.ok("set_project", json!({"project": project}))["project"]["id"].clone();
+
+    // What each role will create, and which levels it raises.
+    let read = w.ok("read_roles", json!({"paths": [reviewer, writer]}))["roles"].clone();
+    assert_eq!(read[0]["name"], "Reviewer");
+    assert_eq!(read[0]["skills"], json!(["code-review"]));
+    assert_eq!(read[0]["raises"], json!(["run"]));
+    assert_eq!(read[1]["raises"], json!([]));
+
+    // A malformed role, or one whose skill is not there, creates nothing at all.
+    let bots = |w: &mut Window| {
+        w.ok("list_bots", json!({}))["bots"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let folders = || fs::read_dir(home.join("bots")).map_or(0, |d| d.count());
+    for paths in [json!([writer, malformed]), json!([writer, missing])] {
+        let args = json!({"projectId": id, "paths": paths});
+        assert_eq!(refused(&mut w, "add_roles", args), "invalid_role");
+        assert_eq!((bots(&mut w), folders()), (0, 0));
+    }
+
+    // Without the person's agreement a raised level stays a new bot's; lower ones apply.
+    let args = json!({"projectId": id, "paths": [reviewer, writer]});
+    let made = w.ok("add_roles", args)["bots"].clone();
+    let (rev, wri) = (made[0].as_str().unwrap(), made[1].as_str().unwrap());
+    let projects = w.ok("list_projects", json!({}))["projects"].clone();
+    let mut members: Vec<_> = projects[0]["bots"].as_array().unwrap().clone();
+    members.sort_by_key(|b| b.as_str().unwrap().to_owned());
+    let mut expected = vec![json!(rev), json!(wri)];
+    expected.sort_by_key(|b| b.as_str().unwrap().to_owned());
+    assert_eq!(members, expected);
+    let levels =
+        |w: &mut Window, bot: &str| w.ok("get_permissions", json!({"bot": bot}))["levels"].clone();
+    let given = levels(&mut w, rev);
+    assert_eq!(
+        (&given["write"], &given["run"]),
+        (&json!("never"), &json!("ask"))
+    );
+    let skills = w.ok("list_skills", json!({"bot": rev}))["skills"].clone();
+    assert_eq!(skills[0]["name"], "code-review");
+    let rows = w.ok("list_bots", json!({}))["bots"].clone();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == rev)
+        .unwrap();
+    assert_eq!(
+        (
+            &row["name"],
+            &row["instructions"],
+            &row["model"],
+            &row["effort"]
+        ),
+        (
+            &json!("Reviewer"),
+            &json!("Review every change."),
+            &json!("gpt-5"),
+            &json!("high")
+        )
+    );
+
+    // With it, the raised level applies.
+    let args = json!({"projectId": id, "paths": [reviewer], "raise": true});
+    let again = w.ok("add_roles", args)["bots"][0].clone();
+    assert_eq!(levels(&mut w, again.as_str().unwrap())["run"], "always");
+}
+
+#[test]
 fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
     let home = home("memory");
     let _service = Service::start(&home);

@@ -79,6 +79,19 @@ export type Project = {
   instructions?: string;
 };
 
+/** What a role file would create (`read_roles`). */
+export type Role = {
+  path: string;
+  name: string;
+  instructions: string;
+  model?: string;
+  effort?: string;
+  skills: string[];
+  levels: Record<string, string>;
+  /** Kinds whose level allows more than a new bot's: applied only with `raise`. */
+  raises: string[];
+};
+
 export type Skill = { name: string; description: string };
 
 /** A prompt the service holds until the bot is free. */

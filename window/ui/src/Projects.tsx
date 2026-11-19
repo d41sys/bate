@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
-import type { Bot, Project } from "./types.ts";
+import type { Bot, Project, Role } from "./types.ts";
 
 const blank: Project = { name: "", folder: "", bots: [] };
 
@@ -58,6 +58,7 @@ export function Projects({ bots }: { bots: Bot[] }) {
             ) : (
               <button onClick={() => setDeleting(p.id)}>Delete…</button>
             )}
+            <Roles project={p} />
           </li>
         ))}
       </ul>
@@ -90,5 +91,52 @@ export function Projects({ bots }: { bots: Bot[] }) {
       </form>
       {error && <p className="error" role="alert">{error}</p>}
     </section>
+  );
+}
+
+/** Adds ready-made bots to the project from role files (format: docs/roles.md). */
+function Roles({ project }: { project: Project }) {
+  const [paths, setPaths] = useState("");
+  const [roles, setRoles] = useState<Role[]>();
+  const [raise, setRaise] = useState(false);
+  const [error, setError] = useState("");
+  const list = paths.split("\n").map((s) => s.trim()).filter(Boolean);
+  const raised = (roles ?? []).flatMap((r) => r.raises.map((k) => `${r.name}: ${k}`));
+  const fail = (e: Error) => (setRoles(undefined), setError(e.message));
+  const preview = () =>
+    request<{ roles: Role[] }>("read_roles", { paths: list }).then((d) => (setRoles(d.roles), setRaise(false), setError("")), fail);
+  const add = () =>
+    request("add_roles", { projectId: project.id, paths: list, raise }).then(() => (setPaths(""), setRoles(undefined), setError("")), fail);
+
+  return (
+    <details>
+      <summary>Add bots from role files</summary>
+      <label>
+        Role files, one whole path per line{" "}
+        <textarea rows={3} placeholder="/Users/you/roles/reviewer.md" value={paths} onChange={(e) => (setPaths(e.target.value), setRoles(undefined))} />
+      </label>
+      <button type="button" disabled={!list.length} onClick={preview}>Show what they create</button>
+      {roles && (
+        <>
+          <ul>
+            {roles.map((r) => (
+              <li key={r.path}>
+                <strong>{r.name}</strong>
+                {r.model && ` · ${r.model}${r.effort ? ` (${r.effort})` : ""}`}
+                {r.skills.length > 0 && ` · skills: ${r.skills.join(", ")}`}
+                {Object.keys(r.levels).length > 0 && ` · ${Object.entries(r.levels).map(([k, v]) => `${k}: ${v}`).join(", ")}`}
+              </li>
+            ))}
+          </ul>
+          {raised.length > 0 && (
+            <label>
+              <input type="checkbox" checked={raise} onChange={(e) => setRaise(e.target.checked)} /> Let them do without asking: {raised.join("; ")}. Left unchecked, these stay on ask.
+            </label>
+          )}
+          <button type="button" onClick={add}>Create {roles.length === 1 ? "1 bot" : `${roles.length} bots`} in {project.name}</button>
+        </>
+      )}
+      {error && <p className="error" role="alert">{error}</p>}
+    </details>
   );
 }
