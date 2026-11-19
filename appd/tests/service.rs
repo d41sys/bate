@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
+/// A prompt `work` starts a turn that runs until `abort`. Each `steer` is logged to `steers.log` and
+/// answered; unless its text has `late` in it, the engine then takes it into the turn (`steered`).
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
 echo '{"type":"ready","protocol":1}'
@@ -92,6 +94,9 @@ while IFS= read -r line; do
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
+        *'"text":"work"'*)
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo '{"type":"text","delta":"working"}' ;;
         *)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"text","delta":"hel"}'; sleep 1
@@ -101,6 +106,13 @@ while IFS= read -r line; do
     *'"type":"answer"'*)
       choice=$(printf '%s' "$line" | sed 's/.*"choice":"\([^"]*\)".*/\1/')
       echo "$ok"; echo "{\"type\":\"text\",\"delta\":\"chose $choice\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
+    *'"type":"steer"'*)
+      printf '%s\n' "$line" >> steers.log
+      echo "$ok"
+      case "$line" in
+        *late*) ;;
+        *) text=$(printf '%s' "$line" | sed 's/.*"text":"\([^"]*\)".*/\1/'); echo "{\"type\":\"steered\",\"text\":\"$text\"}" ;;
+      esac ;;
     *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
@@ -5970,4 +5982,183 @@ fn from_an_app_the_install_replaces_the_whole_app_and_the_programs_beside_it_sta
     let beside: Vec<_> = fs::read_dir(&apps).unwrap().flatten().collect();
     assert_eq!(beside.len(), 1, "{beside:?}");
     assert!(u.untouched());
+}
+
+fn prompts_log(home: &Path, bot: &str) -> String {
+    fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_prompt_for_a_busy_bot_waits_in_a_queue_the_window_can_edit() {
+    let home = home("queue");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let waiting = |w: &mut Window| -> Vec<String> {
+        w.ok("list_queue", json!({"bot": bot}))["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["nonce"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+
+    // The turn runs: the service holds the next prompts, in order, and the engine sees none.
+    for (nonce, text) in [("n2", "second"), ("n3", "third")] {
+        let sent = w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": text}));
+        assert_eq!(sent, json!({"queued": true}));
+    }
+    let again = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "second"}),
+    );
+    assert_eq!(again, json!({"duplicate": true, "queued": true}));
+    assert_eq!(waiting(&mut w), ["n2", "n3"]);
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["queue"][0]["text"],
+        "second"
+    );
+    assert_eq!(prompts_received(&home, &bot, "n2"), 0);
+
+    // The window is told when the queue changes.
+    let removing = w.send("remove_queued", json!({"bot": bot, "nonce": "n3"}));
+    w.wait_for(|f| f["type"] == "queue_changed" && f["bot"] == bot.as_str());
+    w.wait_for(|f| f["type"] == "response" && f["id"] == removing.as_str());
+    assert_eq!(waiting(&mut w), ["n2"]);
+    let gone = w.send("remove_queued", json!({"bot": bot, "nonce": "n3"}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == gone.as_str());
+    assert_eq!(refused["code"], "no_such_prompt", "{refused}");
+
+    // When the turn ends the next prompt goes by itself, and only that one.
+    w.ok("abort", json!({"bot": bot}));
+    w.wait_for(|f| {
+        f["type"] == "transcript" && f["entry"]["type"] == "prompt" && f["entry"]["nonce"] == "n2"
+    });
+    assert_eq!(waiting(&mut w), Vec::<String>::new());
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["reason"] == "done");
+    assert_eq!(prompts_received(&home, &bot, "n2"), 1);
+    assert_eq!(prompts_received(&home, &bot, "n3"), 0);
+
+    // Twenty may wait; a twenty-first is refused by the service, not by the engine.
+    w.ok("prompt", json!({"bot": bot, "nonce": "w", "text": "work"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+    for i in 0..20 {
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": format!("q{i}"), "text": "x"}),
+        );
+    }
+    let id = w.send("prompt", json!({"bot": bot, "nonce": "q20", "text": "x"}));
+    let full = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(full["code"], "queue_full", "{full}");
+}
+
+#[test]
+fn a_queued_prompt_survives_a_restart_and_goes_when_the_service_is_back() {
+    let home = home("queue-restart");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // The engine takes n1 and never answers, so the bot stays occupied.
+    w.send("prompt", json!({"bot": bot, "nonce": "n1", "text": "hang"}));
+    eventually("the engine to receive n1", || {
+        prompts_received(&home, &bot, "n1") == 1
+    });
+    let sent = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "after"}),
+    );
+    assert_eq!(sent, json!({"queued": true}));
+    drop(w);
+    service.kill();
+
+    let _service = Service::start(&home);
+    eventually("the queued prompt to reach the new engine", || {
+        prompts_received(&home, &bot, "n2") == 1
+    });
+    assert_eq!(prompts_received(&home, &bot, "n1"), 1);
+    let mut w = Window::connect(&home);
+    eventually("the queue to be empty", || {
+        w.ok("list_queue", json!({"bot": bot}))["queue"] == json!([])
+    });
+}
+
+#[test]
+fn a_steer_is_kept_where_it_was_taken_and_one_that_misses_the_turn_is_the_next_prompt() {
+    let home = home("steer");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+
+    assert_eq!(
+        w.ok("steer", json!({"bot": bot, "text": "go left"})),
+        json!({})
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "steered");
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let kinds: Vec<_> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["entry"]["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["session", "prompt", "turn_start", "text", "steered"]
+    );
+    assert_eq!(history[4]["entry"]["text"], "go left");
+
+    // The engine answers this one and never takes it in: when the turn ends, it is a prompt.
+    w.ok("steer", json!({"bot": bot, "text": "late go right"}));
+    w.ok("abort", json!({"bot": bot}));
+    eventually("the missed steer to go as a prompt", || {
+        prompts_log(&home, &bot).contains("\"text\":\"late go right\"")
+    });
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["reason"] == "done");
+
+    // With no turn there is nothing to steer: the words are a prompt.
+    assert_eq!(
+        w.ok("steer", json!({"bot": bot, "text": "after"})),
+        json!({"queued": true})
+    );
+    eventually("the words to go as a prompt", || {
+        prompts_log(&home, &bot).contains("\"text\":\"after\"")
+    });
+    let steers = fs::read_to_string(home.join("bots").join(&bot).join("steers.log")).unwrap();
+    assert_eq!(steers.lines().count(), 2, "{steers}");
+}
+
+#[test]
+fn a_bot_on_an_installed_agent_refuses_steer_and_still_queues() {
+    let home = home("queue-agent");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "set_agent",
+        json!({"bot": bot, "command": ["opencode", "acp"]}),
+    );
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+
+    let id = w.send("steer", json!({"bot": bot, "text": "go left"}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "cannot_steer", "{refused}");
+    // Refused by the service: the agent was never asked.
+    assert!(!home.join("bots").join(&bot).join("steers.log").exists());
+
+    let sent = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "later"}),
+    );
+    assert_eq!(sent, json!({"queued": true}));
+    w.ok("abort", json!({"bot": bot}));
+    eventually("the queued prompt to reach the agent", || {
+        prompts_received(&home, &bot, "n2") == 1
+    });
 }

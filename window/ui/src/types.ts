@@ -78,3 +78,6 @@ export type Project = {
 };
 
 export type Skill = { name: string; description: string };
+
+/** A prompt the service holds until the bot is free. */
+export type QueuedPrompt = { nonce: string; text: string };

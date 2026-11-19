@@ -86,3 +86,21 @@ test("only a well-formed plan is shown as a checklist", () => {
   for (const args of [null, {}, { steps: [] }, { steps: "Fix it" }, { steps: [{ step: "Fix it", status: "started" }] }, { steps: [null] }])
     assert.equal(planSteps(args), undefined);
 });
+
+test("a steer stays in the chat where the bot took it and splits the reply around it", () => {
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "go" },
+    { type: "text", delta: "Walking." },
+    { type: "steered", text: "go left" },
+    { type: "text", delta: "Left." },
+    { type: "turn_end", reason: "done" },
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  assert.deepEqual(build(rows), [
+    { id: 1, kind: "user", text: "go", nonce: "n1" },
+    { id: 2, kind: "reply", text: "Walking." },
+    { id: 3, kind: "steered", text: "go left" },
+    { id: 4, kind: "reply", text: "Left." },
+  ]);
+  assert.deepEqual(rows.reduce(add, []), build(rows));
+});

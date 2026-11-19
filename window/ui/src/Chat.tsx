@@ -5,9 +5,9 @@ import { add, build, planSteps, type Entry, type Item, type Question, type Row }
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
-import type { Bot } from "./types.ts";
+import type { Bot, QueuedPrompt } from "./types.ts";
 
-type Opened = { history: Row[]; more: boolean; questions: Question[] };
+type Opened = { history: Row[]; more: boolean; questions: Question[]; queue: QueuedPrompt[] };
 
 /** Entries asked for at a time; a reply is many of them (one per delta). */
 const PAGE = 2000;
@@ -26,6 +26,8 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
   // Opens a file of the bot's in the pane; absent where there is no pane (other devices).
   showFile?: (path: string) => void;
 }) {
+  // Prompts the service holds until the bot is free, in the order they go.
+  const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
@@ -85,6 +87,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         setMore(d.more);
         setItems(build(entries.current));
         setQuestions(d.questions);
+        setWaiting(d.queue);
       }, (e) => {
         live = undefined;
         setError(e.message);
@@ -129,6 +132,11 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         setQuestions((qs) => qs.filter((q) => q.question !== frame.question));
       } else if (frame.type === "engine_stopped") {
         setQuestions([]);
+      } else if (frame.type === "queue_changed") {
+        request<{ queue: QueuedPrompt[] }>("list_queue", { bot: bot.id }).then(
+          (d) => gone || setWaiting(d.queue),
+          (e: Error) => gone || setError(e.message),
+        );
       } else if (frame.type === "history_changed") {
         open();
       }
@@ -263,9 +271,10 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
       await request("compact", { bot: bot.id });
       setCompacted(true);
     });
-  const send = async () => {
+  /** `steer`: into the turn that runs; otherwise a prompt, which the service queues while the bot is busy. */
+  const send = async (steer = false) => {
     // The text stays until the service has it.
-    if (!message || uploading || bot.busy || inFlight.current) return;
+    if (!message || uploading || (bot.busy && editing) || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     try {
@@ -274,7 +283,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         // Gone from the chat: a second try only sends.
         setEditing(undefined);
       }
-      await prompt(message);
+      await (steer ? request("steer", { bot: bot.id, text: message }) : prompt(message));
       setText("");
       setCompacted(false);
       setFiles([]);
@@ -393,6 +402,16 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
           ))}
         </ul>
       )}
+      {waiting.length > 0 && (
+        <ol className="queue" aria-label="Waiting to be sent">
+          {waiting.map((p) => (
+            <li key={p.nonce}>
+              {p.text}{" "}
+              <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, nonce: p.nonce }))}>×</button>
+            </li>
+          ))}
+        </ol>
+      )}
       <form onSubmit={(e) => { e.preventDefault(); send(); }}>
         <input
           ref={picker}
@@ -439,7 +458,15 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
           <button type="button" disabled={sending} title="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole" onClick={compact}>Compact</button>
         )}
         {bot.busy ? (
-          <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
+          <>
+            <button disabled={!message || uploading || sending} title="Send this when the bot is done with what it is doing">Queue</button>
+            {bot.agent?.length ? (
+              <span className="note">This agent takes no message while it works.</span>
+            ) : (
+              <button type="button" disabled={!message || uploading || sending} title="Put this into the turn that is running" onClick={() => send(true)}>Steer</button>
+            )}
+            <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
+          </>
         ) : (
           <button disabled={!message || uploading || sending}>Send</button>
         )}
@@ -505,6 +532,8 @@ function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopRe
     }
     case "ended":
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
+    case "steered":
+      return <p className="steered">You steered: {item.text}</p>;
     case "forked":
       return <p>Forked here. The bot goes on from before the greyed messages above; they are kept to read.</p>;
     default:

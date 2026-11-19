@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created
 CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, at INTEGER NOT NULL, entry TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
+CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
 CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY, command TEXT NOT NULL);
@@ -90,9 +91,10 @@ CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEX
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 16] = [
+const BOT_TABLES: [&str; 17] = [
     "transcript",
     "ledger",
+    "queue",
     "questions",
     "access",
     "agents",
@@ -737,6 +739,44 @@ impl Store {
                 [bot],
             )
             .map(drop)
+    }
+
+    /// Prompts waiting for the bot, in the order they go.
+    pub fn queue(&self, bot: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT nonce, text FROM queue WHERE bot = ?1 ORDER BY seq")?;
+        stmt.query_map([bot], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
+    /// Bots with a prompt waiting.
+    pub fn queued_bots(&self) -> Result<Vec<String>> {
+        let mut stmt = self.0.prepare_cached("SELECT DISTINCT bot FROM queue")?;
+        stmt.query_map([], |r| r.get(0))?.collect()
+    }
+
+    /// Adds a prompt, at the back, or (`front`) as the next one to go.
+    pub fn enqueue(&self, bot: &str, nonce: &str, text: &str, front: bool) -> Result<()> {
+        let seq = if front {
+            "(SELECT COALESCE(MIN(seq), 1) - 1 FROM queue)"
+        } else {
+            "(SELECT COALESCE(MAX(seq), 0) + 1 FROM queue)"
+        };
+        self.0
+            .execute(
+                &format!("INSERT INTO queue(seq, bot, nonce, text) VALUES ({seq}, ?1, ?2, ?3)"),
+                [bot, nonce, text],
+            )
+            .map(drop)
+    }
+
+    /// Removes a waiting prompt; `false` if it was not waiting.
+    pub fn dequeue(&self, bot: &str, nonce: &str) -> Result<bool> {
+        Ok(self.0.execute(
+            "DELETE FROM queue WHERE bot = ?1 AND nonce = ?2",
+            [bot, nonce],
+        )? > 0)
     }
 
     pub fn put_question(&self, bot: &str, question: &str, entry: &Value) -> Result<()> {

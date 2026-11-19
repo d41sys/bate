@@ -129,6 +129,8 @@ const MAX_REPLY: usize = 100_000;
 const CATCH_UP_MS: u64 = 6 * 3600 * 1000;
 /// The core wakes at least this often while a routine is enabled.
 const TICK: Duration = Duration::from_secs(30);
+/// Prompts that may wait for one bot.
+const QUEUE_MAX: usize = 20;
 
 fn updates_off() -> Refusal {
     (
@@ -284,6 +286,11 @@ enum Waiter {
         caller: Caller,
         prompt: Outgoing,
     },
+    /// A prompt from the bot's queue, sent now that the bot is free; it leaves the queue once
+    /// the engine admits it.
+    Queued {
+        prompt: Outgoing,
+    },
     /// The service's own `peers` or `reply`: a refusal changes nothing (the turn that waited
     /// for the reply may be over).
     Quiet,
@@ -303,6 +310,8 @@ enum Settles {
     Rewind(String, bool),
     /// The bot stops counting as busy with this compaction.
     Compact,
+    /// A steer: if the engine refuses it (the turn has just ended), it is the bot's next prompt.
+    Steer(String),
 }
 
 struct Running {
@@ -322,6 +331,9 @@ struct Running {
     /// The browser action the running turn waits on: set when the turn ends, so that an
     /// action still waiting for the user's hand-back is not run.
     browsing: Option<Arc<AtomicBool>>,
+    /// Steers sent to the running turn that it has not taken in yet. One still here when the
+    /// turn ends never reached it, and goes to the bot as the next prompt.
+    steered: Vec<String>,
 }
 
 /// Who, other than the windows, a turn's last words go to.
@@ -486,6 +498,10 @@ impl Core {
     }
 
     pub fn run(mut self, rx: Receiver<Msg>) {
+        // Prompts that were waiting when the service stopped go on now.
+        for bot in self.store.queued_bots().unwrap_or_default() {
+            self.drain_queue(&bot);
+        }
         loop {
             self.install_if_idle();
             let wait = self.run_due_routines();
@@ -815,6 +831,7 @@ impl Core {
                     "history": history,
                     "more": more,
                     "questions": self.store.questions(&bot).map_err(internal)?,
+                    "queue": self.queue_of(&bot)?,
                 })))
             }
             "prompt" => {
@@ -833,6 +850,26 @@ impl Core {
                         Ok(Some(json!({"duplicate": true, "uncertain": true})))
                     }
                     None => {
+                        // One at a time and in order: a bot that is busy, or has prompts waiting,
+                        // takes this one into its queue.
+                        let waiting = self.store.queue(&bot).map_err(internal)?;
+                        if waiting.iter().any(|(n, _)| n == nonce) {
+                            return Ok(Some(json!({"duplicate": true, "queued": true})));
+                        }
+                        if !waiting.is_empty() || !self.free(&bot) {
+                            if waiting.len() >= QUEUE_MAX {
+                                return Err((
+                                    "queue_full",
+                                    format!("{QUEUE_MAX} prompts are already waiting"),
+                                ));
+                            }
+                            self.store
+                                .enqueue(&bot, nonce, text, false)
+                                .map_err(internal)?;
+                            self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                            self.drain_queue(&bot);
+                            return Ok(Some(json!({"queued": true})));
+                        }
                         let prompt = Outgoing {
                             nonce: nonce.into(),
                             text: text.into(),
@@ -890,7 +927,38 @@ impl Core {
                 )?;
                 Ok(None)
             }
-            "steer" | "abort" | "set_model" | "rewind" | "compact" => {
+            "steer" => {
+                let bot = self.bot_of(f)?;
+                let text = str_field(f, "text")?.trim();
+                if text.is_empty() {
+                    return Err(bad("`text` must not be empty"));
+                }
+                if self.store.agent(&bot).map_err(internal)?.is_some() {
+                    return Err((
+                        "cannot_steer",
+                        "an installed agent takes no message while it works; queue it instead"
+                            .into(),
+                    ));
+                }
+                if !self.engines.get(&bot).is_some_and(|r| r.busy) {
+                    // No turn to steer: the message is the bot's next prompt.
+                    self.requeue(&bot, vec![text.to_owned()]);
+                    self.drain_queue(&bot);
+                    return Ok(Some(json!({"queued": true})));
+                }
+                let waiter = Waiter::Window {
+                    client,
+                    id: id.clone(),
+                    command: command.into(),
+                    settles: Settles::Steer(text.into()),
+                };
+                self.send_op(&bot, Op::Steer { text: text.into() }, waiter)?;
+                if let Some(r) = self.engines.get_mut(&bot) {
+                    r.steered.push(text.into());
+                }
+                Ok(None)
+            }
+            "abort" | "set_model" | "rewind" | "compact" => {
                 let bot = self.bot_of(f)?;
                 let op = match command {
                     "abort" => Op::Abort,
@@ -946,6 +1014,22 @@ impl Core {
                     self.broadcast(&json!({"type": "bots_changed"}));
                 }
                 Ok(None)
+            }
+            "list_queue" => {
+                let bot = self.bot_of(f)?;
+                Ok(Some(json!({"queue": self.queue_of(&bot)?})))
+            }
+            "remove_queued" => {
+                let bot = self.bot_of(f)?;
+                let nonce = str_field(f, "nonce")?;
+                // A prompt that has gone to the engine is no longer the queue's to take back.
+                if self.store.ledger(&bot, nonce).map_err(internal)?.is_some()
+                    || !self.store.dequeue(&bot, nonce).map_err(internal)?
+                {
+                    return Err(("no_such_prompt", "that prompt is not waiting".into()));
+                }
+                self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                Ok(Some(json!({})))
             }
             "list_routines" => {
                 let bot = self.bot_of(f)?;
@@ -1952,6 +2036,7 @@ impl Core {
                 compacting: 0,
                 call: None,
                 browsing: None,
+                steered: Vec::new(),
             },
         );
         self.send_op(bot, open, Waiter::Service)?;
@@ -2323,6 +2408,7 @@ impl Core {
                         waiter,
                         Waiter::Routine { .. }
                             | Waiter::Peer { .. }
+                            | Waiter::Queued { .. }
                             | Waiter::Window {
                                 settles: Settles::Prompt(_),
                                 ..
@@ -2330,6 +2416,63 @@ impl Core {
                     )
                 })
         })
+    }
+
+    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction.
+    fn free(&self, bot: &str) -> bool {
+        !self.occupied(bot) && self.engines.get(bot).is_none_or(|r| r.compacting == 0)
+    }
+
+    fn queue_of(&self, bot: &str) -> Result<Value, Refusal> {
+        let queue = self.store.queue(bot).map_err(internal)?;
+        Ok(queue
+            .into_iter()
+            .map(|(nonce, text)| json!({"nonce": nonce, "text": text}))
+            .collect())
+    }
+
+    /// Puts steers that never reached a turn first in the queue, in the order they were sent.
+    fn requeue(&mut self, bot: &str, texts: Vec<String>) {
+        for text in texts.iter().rev() {
+            let nonce = format!("steer-{}", sys::random_hex(4));
+            if let Err(e) = self.store.enqueue(bot, &nonce, text, true) {
+                log!("bot {bot}: steer not queued: {e}");
+            }
+        }
+        if !texts.is_empty() {
+            self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+        }
+    }
+
+    /// Sends the bot's first queued prompt if the bot is free; the next one goes when its
+    /// turn ends.
+    fn drain_queue(&mut self, bot: &str) {
+        while self.free(bot) {
+            let first = match self.store.queue(bot) {
+                Ok(queue) => queue.into_iter().next(),
+                Err(e) => return log!("bot {bot}: queue not read: {e}"),
+            };
+            let Some((nonce, text)) = first else { return };
+            match self.store.ledger(bot, &nonce) {
+                Ok(None) => {
+                    let sent = self.send_prompt(bot, Outgoing { nonce, text }, |prompt| {
+                        Waiter::Queued { prompt }
+                    });
+                    if let Err((_, e)) = sent {
+                        log!("bot {bot}: queued prompt not sent: {e}");
+                    }
+                    return;
+                }
+                // An earlier try reached an engine that stopped: it may have the prompt, and
+                // the ledger never sends a nonce twice.
+                Ok(Some(_)) => {
+                    log!("bot {bot}: queued prompt {nonce} may have been sent; dropped");
+                    let _ = self.store.dequeue(bot, &nonce);
+                    self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                }
+                Err(e) => return log!("bot {bot}: ledger not read: {e}"),
+            }
+        }
     }
 
     /// The engine of `from` has a message for the bot `to`: sent on as a prompt. The reply
@@ -3062,6 +3205,11 @@ impl Core {
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
+            Event::Steered { text } => {
+                if let Some(i) = r.steered.iter().position(|t| t == text) {
+                    r.steered.remove(i);
+                }
+            }
             Event::Session { session } => {
                 if let Err(e) = self.store.set_session(bot, session) {
                     log!("bot {bot}: session not stored: {e}");
@@ -3090,6 +3238,13 @@ impl Core {
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
         if matches!(ev, Event::TurnEnd { .. }) && self.project_restarts.contains(bot) {
             self.on_engine_gone(bot);
+        }
+        if matches!(ev, Event::TurnEnd { .. }) {
+            if let Some(r) = self.engines.get_mut(bot) {
+                let steered = std::mem::take(&mut r.steered);
+                self.requeue(bot, steered);
+            }
+            self.drain_queue(bot);
         }
     }
 
@@ -3188,12 +3343,23 @@ impl Core {
                             r.compacting = r.compacting.saturating_sub(1);
                             self.broadcast(&json!({"type": "bots_changed"}));
                         }
+                        self.drain_queue(bot);
+                    }
+                    (Settles::Steer(text), Some(_)) => {
+                        if let Some(r) = self.engines.get_mut(bot)
+                            && let Some(i) = r.steered.iter().position(|t| t == text)
+                        {
+                            r.steered.remove(i);
+                        }
+                        self.requeue(bot, vec![text.clone()]);
+                        self.drain_queue(bot);
                     }
                     _ => {}
                 }
-                let result = match error {
-                    Some(e) => Err(("engine_error", e)),
-                    None => Ok(json!({})),
+                let result = match (&settles, error) {
+                    (Settles::Steer(_), Some(_)) => Ok(json!({"queued": true})),
+                    (_, Some(e)) => Err(("engine_error", e)),
+                    (_, None) => Ok(json!({})),
                 };
                 self.reply(client, &id, &command, result);
             }
@@ -3223,6 +3389,19 @@ impl Core {
                             });
                         }
                     }
+                }
+            }
+            Waiter::Queued { prompt } => {
+                self.settle_prompt(bot, &prompt, error.is_none());
+                match error {
+                    None => {
+                        if let Err(e) = self.store.dequeue(bot, &prompt.nonce) {
+                            log!("bot {bot}: queue not updated: {e}");
+                        }
+                        self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                    }
+                    // It stays first in line: the next time the bot is free it is tried again.
+                    Some(e) => log!("bot {bot}: engine refused a queued prompt: {e}"),
                 }
             }
             Waiter::Quiet => {}
@@ -3279,6 +3458,8 @@ impl Core {
                 log!("bot {bot}: store: {e}");
             }
         }
+        let steered = std::mem::take(&mut r.steered);
+        self.requeue(bot, steered);
         // Prompts still queued were never written: the engine cannot have them.
         let unwritten: Vec<String> = r.queued.iter().map(|(id, _)| id.clone()).collect();
         for (req, waiter) in r.waiting {
@@ -3287,7 +3468,8 @@ impl Core {
                 ..
             }
             | Waiter::Routine { prompt: p, .. }
-            | Waiter::Peer { prompt: p, .. } = &waiter
+            | Waiter::Peer { prompt: p, .. }
+            | Waiter::Queued { prompt: p } = &waiter
                 && unwritten.contains(&req)
                 && let Err(e) = self.store.forget_ledger(bot, &p.nonce)
             {
@@ -3315,7 +3497,11 @@ impl Core {
                     self.chat_routine_failed(bot, &caller, "the engine stopped");
                     self.answer_caller(bot, caller, Err("its engine stopped".into()))
                 }
-                Waiter::Service | Waiter::Connectors | Waiter::Decision | Waiter::Quiet => {}
+                Waiter::Service
+                | Waiter::Connectors
+                | Waiter::Decision
+                | Waiter::Quiet
+                | Waiter::Queued { .. } => {}
             }
         }
         if let Some(call) = r.call {
