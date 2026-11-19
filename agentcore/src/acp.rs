@@ -274,6 +274,7 @@ impl Bridge {
             // shortcut: an installed agent keeps its own instructions; Bate's are not passed on until ACP has a place for them.
             Op::SetModel { .. }
             | Op::Peers { .. }
+            | Op::SkillFolders { .. }
             | Op::Instructions { .. }
             | Op::StepLimit { .. } => respond(id, Ok(())),
             Op::Steer { .. } => {

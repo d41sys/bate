@@ -120,6 +120,7 @@ while IFS= read -r line; do
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
+    *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
@@ -6682,4 +6683,358 @@ fn a_project_connector_that_will_not_start_is_reported_and_the_bots_still_answer
         w.ok("delete_project", json!({"projectId": made["id"]}));
         assert_eq!(error(&mut w), Value::Null);
     }
+}
+
+/// The example workplace of the repository.
+fn example_workplace() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/workplaces/counter")
+}
+
+/// A copy of the example in a folder of its own, to break in some way.
+fn copied_workplace(name: &str) -> Home {
+    let copy = Home(std::env::temp_dir().join(format!("appd-{}-{name}", std::process::id())));
+    let _ = fs::remove_dir_all(&copy.0);
+    let done = Command::new("cp")
+        .arg("-R")
+        .arg(example_workplace())
+        .arg(&copy.0)
+        .status()
+        .unwrap();
+    assert!(done.success());
+    copy
+}
+
+fn install_refused(w: &mut Window, path: &Path) -> Value {
+    let id = w.send("install_workplace", json!({"path": path}));
+    w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())
+}
+
+/// The bot's last `connectors` and `skill_folders` operations, as logged by the fake engine.
+fn last_logged(home: &Path, bot: &str, log: &str) -> String {
+    let all = fs::read_to_string(home.join("bots").join(bot).join(log)).unwrap_or_default();
+    all.lines().last().unwrap_or_default().to_owned()
+}
+
+fn ask_prompt(w: &mut Window, bot: &str, nonce: &str) {
+    w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+}
+
+#[test]
+fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
+    let home = home("wp-install");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+
+    // What is wrong with a package is said at the install, and nothing is installed.
+    let linked = copied_workplace("wp-link");
+    std::os::unix::fs::symlink("server.py", linked.join("alias.py")).unwrap();
+    let many = copied_workplace("wp-many");
+    fs::create_dir(many.join("many")).unwrap();
+    for n in 0..2001 {
+        fs::write(many.join("many").join(n.to_string()), "").unwrap();
+    }
+    let broken = |edit: &dyn Fn(&Path)| {
+        let copy = copied_workplace("wp-broken");
+        edit(&copy);
+        copy
+    };
+    let manifest = |copy: &Path, from: &str, to: &str| {
+        let file = copy.join("workplace.json");
+        let text = fs::read_to_string(&file).unwrap();
+        fs::write(file, text.replace(from, to)).unwrap();
+    };
+    let cases: Vec<(&str, Home)> = vec![
+        ("a link", linked),
+        ("too many files", many),
+        (
+            "a bad name",
+            broken(&|c| manifest(c, "\"counter\"", "\"Bad Name\"")),
+        ),
+        (
+            "no program",
+            broken(&|c| manifest(c, "\"program\"", "\"programs\"")),
+        ),
+        (
+            "a path out",
+            broken(&|c| manifest(c, "\"python3\"", "\"../server.py\"")),
+        ),
+        (
+            "a missing file",
+            broken(&|c| manifest(c, "\"python3\"", "\"nope.sh\"")),
+        ),
+        (
+            "not json",
+            broken(&|c| fs::write(c.join("workplace.json"), "{").unwrap()),
+        ),
+        (
+            "no manifest",
+            broken(&|c| fs::remove_file(c.join("workplace.json")).unwrap()),
+        ),
+    ];
+    for (what, copy) in &cases {
+        let refused = install_refused(&mut w, copy);
+        assert_eq!(refused["code"], "invalid_workplace", "{what}: {refused}");
+    }
+    let refused = install_refused(&mut w, &home.join("no-such-folder"));
+    assert_eq!(refused["code"], "invalid_workplace");
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+    assert!(!home.join("workplaces").join("counter").exists());
+    // The copies made on the way are taken away.
+    eventually("the staging folder to be empty", || {
+        fs::read_dir(home.join("staging")).map_or(true, |mut d| d.next().is_none())
+    });
+
+    let made = w.ok("install_workplace", json!({"path": example_workplace()}))["workplace"].clone();
+    assert_eq!(made["name"], "counter");
+    assert_eq!(made["manifest"]["program"]["command"], "python3");
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
+    let one = &listed[0];
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(one["version"], "1.0.0");
+    assert_eq!(one["manifest"]["needs"]["commands"], json!(["python3"]));
+    assert_eq!(one["skills"][0]["name"], "count-things");
+    assert_eq!(one["roles"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        (one["changed"].clone(), one["usedBy"].clone()),
+        (json!(false), json!([]))
+    );
+    assert!(one["error"].is_null());
+    // Run bits stay; the copy is the service's.
+    use std::os::unix::fs::MetadataExt;
+    let installed = home.join("workplaces").join("counter");
+    assert_eq!(
+        fs::metadata(installed.join("server.py")).unwrap().mode() & 0o111,
+        0o111
+    );
+
+    // Installed again, it is replaced: the new version shows.
+    let newer = copied_workplace("wp-newer");
+    let text = fs::read_to_string(newer.join("workplace.json")).unwrap();
+    fs::write(newer.join("workplace.json"), text.replace("1.0.0", "2.0.0")).unwrap();
+    w.ok("install_workplace", json!({"path": &newer.0}));
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
+    assert_eq!(
+        (
+            listed.as_array().unwrap().len(),
+            listed[0]["version"].clone()
+        ),
+        (1, json!("2.0.0"))
+    );
+}
+
+#[test]
+fn a_workplace_that_is_on_runs_as_the_projects_connector_and_gives_its_skills_and_roles() {
+    let home = home("wp");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpsite", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let refused = |w: &mut Window, project: Value| {
+        let id = w.send("set_project", json!({"project": project}));
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+
+    // Not installed: it cannot be switched on.
+    let project = json!({"name": "Site", "folder": real, "bots": [a, b], "workplace": "counter"});
+    assert_eq!(refused(&mut w, project.clone()), "invalid_project");
+    w.ok("install_workplace", json!({"path": example_workplace()}));
+    // Its program or a program of the project's own, not both.
+    let both = json!({"name": "Site", "folder": real, "bots": [a], "workplace": "counter",
+        "connector": {"name": "x", "command": "python3"}});
+    assert_eq!(refused(&mut w, both), "invalid_project");
+
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    assert_eq!(made["workplace"], "counter");
+    let id = made["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        w.ok("list_workplaces", json!({}))["workplaces"][0]["usedBy"],
+        json!([id])
+    );
+
+    // The bots are told of the program through the service's address, and of the skills.
+    let told = |w: &mut Window, bot: &str, nonce: &str| {
+        ask_prompt(w, bot, nonce);
+        let last = last_logged(&home, bot, "connectors.log");
+        assert!(
+            last.contains("\"name\":\"counter\"") && last.contains("\"enabled\":true"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("workplaces") && !last.contains(".py"),
+            "{last}"
+        );
+        let url = last.split("\"url\":\"http://").nth(1).unwrap();
+        url.split('"').next().unwrap().to_owned()
+    };
+    let (url_a, url_b) = (told(&mut w, &a, "n1"), told(&mut w, &b, "n2"));
+    let skills = last_logged(&home, &a, "skills.log");
+    assert!(skills.contains("workplaces/counter"), "{skills}");
+    let tick = |url: &str| {
+        let (host, path) = url.split_once('/').unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call"}"#;
+        let answer = raw_http(
+            host,
+            &format!(
+                "POST /{path} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str::<Value>(body).unwrap()["result"]["count"].clone()
+    };
+    // Two bots, one program, one count.
+    assert_eq!(tick(&url_a), 1);
+    assert_eq!(tick(&url_b), 2);
+    let data = home.canonicalize().unwrap().join("project-data").join(&id);
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    assert!(alive(&pid));
+
+    // Its roles are added as bots through the usual flow.
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"][0].clone();
+    let role = listed["roles"][0].clone();
+    let role = w.ok("read_roles", json!({"paths": [role]}))["roles"][0].clone();
+    assert_eq!(role["name"], "Counter keeper");
+    let added = w.ok(
+        "add_roles",
+        json!({"projectId": id, "paths": [role["path"]], "raise": false}),
+    );
+    assert_eq!(added["bots"].as_array().unwrap().len(), 1);
+
+    // Off: the program stops, and the bots lose its tools at their next turn (the engine starts
+    // again without the folder it could read).
+    let mut off = made.clone();
+    off["workplace"] = Value::Null;
+    off["bots"] = json!([a, b]);
+    w.ok("set_project", json!({"project": off}));
+    eventually("the program to stop", || !alive(&pid));
+    ask_prompt(&mut w, &a, "n3");
+    assert!(last_logged(&home, &a, "connectors.log").contains("\"connectors\":[]"));
+}
+
+#[test]
+fn a_workplace_whose_files_change_is_off_until_it_is_approved() {
+    let home = home("wp-change");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpchange", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    w.ok("install_workplace", json!({"path": example_workplace()}));
+    let project = json!({"name": "Site", "folder": real, "bots": [a], "workplace": "counter"});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    ask_prompt(&mut w, &a, "n1");
+    let data = home.canonicalize().unwrap().join("project-data").join(&id);
+    eventually("the program to run", || data.join("pid").exists());
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    assert!(alive(&pid));
+    let error =
+        |w: &mut Window| w.ok("list_projects", json!({}))["projects"][0]["connectorError"].clone();
+    assert_eq!(error(&mut w), Value::Null);
+
+    // A file changed on disk: listed so, and off in every project that has it on.
+    let file = home.join("workplaces").join("counter").join("server.py");
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("# changed\n");
+    fs::write(&file, text).unwrap();
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"][0].clone();
+    assert_eq!(listed["changed"], true);
+    eventually("the program to stop", || !alive(&pid));
+    assert!(
+        error(&mut w)
+            .as_str()
+            .is_some_and(|e| e.contains("approve"))
+    );
+    // The project still opens and the bot answers, without the tools and the skills.
+    ask_prompt(&mut w, &a, "n2");
+    assert!(last_logged(&home, &a, "connectors.log").contains("\"enabled\":false"));
+    assert!(last_logged(&home, &a, "skills.log").contains("\"folders\":[]"));
+    // A changed workplace cannot be switched on anywhere.
+    let other = json!({"name": "Other", "folder": real, "bots": [], "workplace": "counter"});
+    let id2 = w.send("set_project", json!({"project": other}));
+    let refusal = w.wait_for(|f| f["type"] == "response" && f["id"] == id2.as_str());
+    assert_eq!(refusal["code"], "invalid_project");
+
+    // Approved after a look: it runs again.
+    w.ok("approve_workplace", json!({"name": "counter"}));
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"][0].clone();
+    assert_eq!(listed["changed"], false);
+    assert_eq!(error(&mut w), Value::Null);
+    eventually("the program to start again", || {
+        let now = fs::read_to_string(data.join("pid")).unwrap_or_default();
+        now != pid && !now.is_empty() && alive(&now)
+    });
+    ask_prompt(&mut w, &a, "n3");
+    assert!(last_logged(&home, &a, "connectors.log").contains("\"enabled\":true"));
+    assert!(last_logged(&home, &a, "skills.log").contains("workplaces/counter"));
+}
+
+#[test]
+fn a_workplace_that_a_project_has_on_is_removed_only_when_forced_and_keeps_the_projects_data() {
+    let home = home("wp-remove");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpremove", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    w.ok("install_workplace", json!({"path": example_workplace()}));
+    let project = json!({"name": "Site", "folder": real, "bots": [a], "workplace": "counter"});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    ask_prompt(&mut w, &a, "n1");
+    let data = home.canonicalize().unwrap().join("project-data").join(&id);
+    eventually("the program to run", || data.join("pid").exists());
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+
+    let code = |w: &mut Window, command: &str, fields: Value| {
+        let id = w.send(command, fields);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    assert_eq!(
+        code(&mut w, "remove_workplace", json!({"name": "counter"})),
+        "workplace_in_use"
+    );
+    assert_eq!(
+        code(
+            &mut w,
+            "install_workplace",
+            json!({"path": example_workplace()})
+        ),
+        "workplace_in_use"
+    );
+    assert_eq!(
+        code(&mut w, "remove_workplace", json!({"name": "no-such"})),
+        "no_such_workplace"
+    );
+    assert_eq!(
+        code(&mut w, "approve_workplace", json!({"name": "no-such"})),
+        "no_such_workplace"
+    );
+    assert!(home.join("workplaces").join("counter").exists());
+
+    w.ok(
+        "remove_workplace",
+        json!({"name": "counter", "force": true}),
+    );
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+    eventually("the program to stop", || !alive(&pid));
+    eventually("the folder to go", || {
+        !home.join("workplaces").join("counter").exists()
+    });
+    // What it kept for the project stays, and the project works without it.
+    assert!(data.join("pid").exists());
+    let projects = w.ok("list_projects", json!({}))["projects"].clone();
+    assert!(projects[0]["workplace"].is_null() && projects[0]["connectorError"].is_null());
+    ask_prompt(&mut w, &a, "n2");
+    assert!(last_logged(&home, &a, "connectors.log").contains("\"connectors\":[]"));
 }

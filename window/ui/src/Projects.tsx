@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
-import type { Bot, Project, Role } from "./types.ts";
+import type { Bot, Project, Role, Workplace } from "./types.ts";
+import { Workplaces } from "./Workplaces.tsx";
+import { needsLines, unusable } from "./workplaces.ts";
 
 const blank: Project = { name: "", folder: "", bots: [] };
 
 export function Projects({ bots }: { bots: Bot[] }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [form, setForm] = useState<Project>(blank);
+  const [workplaces, setWorkplaces] = useState<Workplace[]>([]);
+  /** The person has read what the chosen workplace needs. */
+  const [confirmed, setConfirmed] = useState(false);
   const [deleting, setDeleting] = useState<string>();
   const [error, setError] = useState("");
   /** The connector's program and arguments, as one line to type. */
@@ -14,9 +19,13 @@ export function Projects({ bots }: { bots: Bot[] }) {
 
   useEffect(() => {
     const load = () => request<{ projects: Project[] }>("list_projects").then((d) => setProjects(d.projects), (e) => setError(e.message));
+    const loadWorkplaces = () =>
+      request<{ workplaces: Workplace[] }>("list_workplaces").then((d) => setWorkplaces(d.workplaces), (e) => setError(e.message));
     load();
+    loadWorkplaces();
     return listen((frame) => {
       if (frame.type === "projects_changed") load();
+      if (frame.type === "workplaces_changed" || frame.type === "projects_changed") loadWorkplaces();
     });
   }, []);
 
@@ -32,13 +41,18 @@ export function Projects({ bots }: { bots: Bot[] }) {
     p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
   const edit = (p: Project) => {
     setForm(p);
+    setConfirmed(false);
     setLine(p.connector ? [p.connector.command, ...p.connector.args].join(" ") : "");
   };
   const save = async () => {
     const [command, ...args] = line.trim().split(/\s+/);
-    const connector = line.trim() ? { name: form.connector?.name ?? "", command, args } : undefined;
+    const connector = line.trim() && !form.workplace ? { name: form.connector?.name ?? "", command, args } : undefined;
     if (await run(request("set_project", { project: { ...form, connector, connectorError: undefined } }))) edit(blank);
   };
+  const saved = projects.find((p) => p.id === form.id);
+  const chosen = workplaces.find((w) => w.name === form.workplace);
+  /** A workplace that this project does not have on yet: the person confirms what it needs first. */
+  const switchingOn = !!chosen && saved?.workplace !== chosen.name;
   const toggle = (id: string, on: boolean) =>
     setForm({ ...form, bots: on ? [...form.bots, id] : form.bots.filter((b) => b !== id) });
 
@@ -59,6 +73,7 @@ export function Projects({ bots }: { bots: Bot[] }) {
             {p.connector && (
               <span className="note"> · Connector <code>{p.connector.name}</code>: <code>{[p.connector.command, ...p.connector.args].join(" ")}</code></span>
             )}
+            {p.workplace && <span className="note"> · Workplace <code>{p.workplace}</code></span>}
             {p.connectorError && <span className="error" role="alert"> · {p.connectorError}</span>}
             <button onClick={() => edit(p)}>Edit</button>
             {deleting === p.id ? (
@@ -87,6 +102,32 @@ export function Projects({ bots }: { bots: Bot[] }) {
           <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
         </label>
         <fieldset>
+          <legend>Workplace</legend>
+          <label>
+            Workplace{" "}
+            <select value={form.workplace ?? ""} onChange={(e) => (setConfirmed(false), setForm({ ...form, workplace: e.target.value || undefined }))}>
+              <option value="">None</option>
+              {workplaces.map((w) => (
+                <option key={w.name} value={w.name} disabled={!!unusable(w) && w.name !== saved?.workplace}>
+                  {w.name} {w.version}{unusable(w) ? " (cannot be switched on now)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          {chosen && (
+            <>
+              <p className="note">{chosen.name} needs: {needsLines(chosen).join("; ")}.</p>
+              <p className="note">Its program runs as this project's connector, and its skills go to every bot of the project.</p>
+              {switchingOn && (
+                <label>
+                  <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I have read what {chosen.name} needs, and I switch it on for this project
+                </label>
+              )}
+            </>
+          )}
+          {form.workplace && <p className="note">A project has a workplace or a connector of its own, not both.</p>}
+        </fieldset>
+        <fieldset disabled={!!form.workplace}>
           <legend>Connector for all its bots</legend>
           <label>
             Name{" "}
@@ -110,10 +151,11 @@ export function Projects({ bots }: { bots: Bot[] }) {
             );
           })}
         </fieldset>
-        <button disabled={form.bots.length > 20}>{form.id ? "Save" : "Add"}</button>
+        <button disabled={form.bots.length > 20 || (switchingOn && !confirmed)}>{form.id ? "Save" : "Add"}</button>
         {form.id && <button type="button" onClick={() => edit(blank)}>Cancel</button>}
       </form>
       {error && <p className="error" role="alert">{error}</p>}
+      <Workplaces workplaces={workplaces} projects={projects} />
     </section>
   );
 }

@@ -6,23 +6,21 @@ use crate::memory::open;
 use proto::skills::{DIR, FILE, parse};
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Most skills listed, and most bytes read of one `SKILL.md` to find its description.
 const MOST: usize = 50;
 const MAX_FILE: u64 = 64 * 1024;
 
-/// The part of the system prompt about skills; empty when the bot has none. `named`: the
-/// folder the skills are named under; empty when `folder` is where the tools work.
-pub fn prompt(folder: &Path, named: &Path) -> String {
+/// The skills in `folder/skills`, each with the folder it is named under in the prompt.
+fn found(folder: &Path, named: &Path) -> Vec<(proto::skills::Skill, String)> {
     let dir = folder.join(DIR);
-    let shown = named.join(DIR);
-    let shown = shown.display();
+    let shown = named.join(DIR).display().to_string();
     // As with memory: only plain folders and files count, never what a link points to.
     if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
-        return String::new();
+        return Vec::new();
     }
-    let mut found: Vec<_> = fs::read_dir(dir)
+    fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -33,20 +31,31 @@ pub fn prompt(folder: &Path, named: &Path) -> String {
             file.take(MAX_FILE).read_to_string(&mut text).ok()?;
             let skill = parse(&text).ok()?;
             // The folder is how the model finds the file, so it has to carry the name.
-            (entry.file_name().to_str() == Some(skill.name.as_str())).then_some(skill)
+            (entry.file_name().to_str() == Some(skill.name.as_str()))
+                .then_some((skill, shown.clone()))
         })
-        .collect();
+        .collect()
+}
+
+/// The part of the system prompt about skills; empty when the bot has none. `named`: the
+/// folder the skills are named under; empty when `folder` is where the tools work. `more`:
+/// other folders with a `skills/` (a workplace's), named by their full paths.
+pub fn prompt(folder: &Path, named: &Path, more: &[PathBuf]) -> String {
+    let mut found = found(folder, named);
+    for other in more {
+        found.extend(self::found(other, other));
+    }
     if found.is_empty() {
         return String::new();
     }
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     let more = found.len().saturating_sub(MOST);
     found.truncate(MOST);
     let mut text = String::from(
         "\n\nYou have skills: instructions for kinds of task. Before you start a task that one \
          of them is for, read its file with the read tool and follow it.",
     );
-    for skill in found {
+    for (skill, shown) in found {
         text.push_str(&format!(
             "\n- {} ({shown}/{}/{FILE}): {}",
             skill.name, skill.name, skill.description
@@ -54,7 +63,7 @@ pub fn prompt(folder: &Path, named: &Path) -> String {
     }
     if more > 0 {
         text.push_str(&format!(
-            "\n({more} more are not listed; their folders are in {shown}/.)"
+            "\n({more} more are not listed; their folders are beside the listed ones.)"
         ));
     }
     text
@@ -68,7 +77,7 @@ mod tests {
     fn installed_skills_are_listed_by_name_with_where_to_read_them() {
         let folder = std::env::temp_dir().join(format!("agentcore-skills-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
-        let prompt = |folder: &Path| prompt(folder, Path::new(""));
+        let prompt = |folder: &Path| prompt(folder, Path::new(""), &[]);
         assert_eq!(prompt(&folder), "");
         let skill = |name: &str, text: &str| {
             fs::create_dir_all(folder.join(DIR).join(name)).unwrap();
@@ -100,6 +109,22 @@ mod tests {
         );
         // Only the description: the instructions are read when needed.
         assert!(!text.contains("secretly") && !text.contains("Lies"));
+        // A workplace's skills are named by their full paths.
+        let other = folder.join("workplace");
+        fs::create_dir_all(other.join(DIR).join("w-skill")).unwrap();
+        fs::write(
+            other.join(DIR).join("w-skill").join(FILE),
+            "---\nname: w-skill\ndescription: For W.\n---\nDo W.",
+        )
+        .unwrap();
+        let text = super::prompt(&folder, Path::new(""), std::slice::from_ref(&other));
+        assert!(
+            text.ends_with(&format!(
+                "\n- b-skill (skills/b-skill/SKILL.md): For B.\n- w-skill ({}/skills/w-skill/SKILL.md): For W.",
+                other.display()
+            )),
+            "{text}"
+        );
         fs::remove_dir_all(&folder).unwrap();
     }
 }

@@ -12,7 +12,8 @@ use std::{fs, io};
 /// - Writing: only inside the bot's folder and its project's folder.
 /// - Reading: not the users' files, other disks, temporary files, logs, Homebrew's data, other
 ///   terminals' input, or the service's own data (other bots, stored connector secrets); the
-///   bot's folder, project folder and engine program are let through again.
+///   bot's folder, project folder, engine program and the one more folder named for the run
+///   (a workplace's) are let through again.
 /// - No way round through another program: no Apple events, no opening apps, no launchd jobs,
 ///   no signals to or looks at processes outside, no drivers, no shared memory, no preferences (the preferences service writes into the
 ///   user's home for whoever asks: an app's startup settings are a way out), and only the
@@ -34,6 +35,7 @@ const PROFILE: &str = r#"(version 1)
 (deny file-read-data (regex #"^/dev/ttys[0-9]+$"))
 (allow file-read-metadata)
 (allow file-read* (literal (param "ENGINE")))
+(allow file-read* (subpath (param "READ")))
 (allow file-read* file-write* (subpath (param "FOLDER")))
 (allow file-read* file-write* (subpath (param "WORK")))
 (allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper"))
@@ -78,13 +80,15 @@ const PASSED: [&str; 7] = ["PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL",
 const WORK: &str = "BATE_WORK_DIR";
 
 /// The command that starts engine `program` in `folder`, limited to it and to `work` (the
-/// folder of the bot's project, or `folder` again) unless `whole_disk`.
+/// folder of the bot's project, or `folder` again) unless `whole_disk`. `read`: one more
+/// folder it may read, which the service has checked (a workplace's).
 // shortcut: macOS only; elsewhere a limited bot's engine does not start. Add the system's own
 // mechanism (Landlock on Linux) when the service runs there.
 pub fn command(
     program: &Path,
     folder: &Path,
     work: &Path,
+    read: Option<&Path>,
     whole_disk: bool,
 ) -> io::Result<Command> {
     if whole_disk {
@@ -107,6 +111,8 @@ pub fn command(
         param.push(path);
         param
     };
+    // Without one, the program again: the sandbox needs a value, and that is let through anyway.
+    let read = read.map_or(Ok(program.clone()), Path::canonicalize)?;
     let mut command = Command::new("/usr/bin/sandbox-exec");
     command
         .args(["-p", PROFILE, "-D"])
@@ -115,6 +121,8 @@ pub fn command(
         .arg(param("APP", &app))
         .arg("-D")
         .arg(param("WORK", work))
+        .arg("-D")
+        .arg(param("READ", &read))
         .arg("-D")
         .arg(param("ENGINE", &program))
         .arg(&program)

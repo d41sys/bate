@@ -48,8 +48,8 @@ impl Program {
     }
 }
 
-/// The program as the person wrote it: a path (relative ones start in the project's folder)
-/// or a name looked up in the service's `PATH`.
+/// The program as the person wrote it: a path (relative ones start in `work`: the project's
+/// folder, or a workplace's) or a name looked up in the service's `PATH`.
 fn resolve(command: &str, work: &std::path::Path) -> io::Result<PathBuf> {
     if command.contains('/') {
         return Ok(work.join(command));
@@ -61,11 +61,14 @@ fn resolve(command: &str, work: &std::path::Path) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other(format!("`{command}` is not on the service's PATH")))
 }
 
-/// Starts the program for project `id` in `work`, its folder. `Msg::ProjectExited` follows when it ends.
+/// Starts the program for project `id` for `work`, its folder. A workplace's program (`home`:
+/// its folder) starts there and may read it; else it starts in `work`. `Msg::ProjectExited`
+/// follows when it ends.
 pub fn start(
     id: &str,
     spec: &ProjectConnector,
     work: &str,
+    home: Option<&std::path::Path>,
     generation: u64,
     tx: Sender<Msg>,
 ) -> io::Result<Program> {
@@ -82,12 +85,13 @@ pub fn start(
     }
     // A socket left by an earlier run would look like the program being ready.
     let _ = fs::remove_file(&socket);
-    let program = resolve(&spec.command, &work)?;
-    let mut command = limit::command(&program, &data, &work, false)?;
+    let start = home.unwrap_or(&work);
+    let program = resolve(&spec.command, start)?;
+    let mut command = limit::command(&program, &data, &work, home, false)?;
     command
         .args(&spec.args)
         .env("BATE_MCP_SOCKET", &socket)
-        .current_dir(&work)
+        .current_dir(start)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

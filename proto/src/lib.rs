@@ -79,6 +79,8 @@ pub enum Op {
     },
     /// What the user told the bot to be and do, put first in its system prompt; empty: nothing.
     Instructions { text: String },
+    /// Folders, beside the bot's own, whose `skills/` the model is told about: the whole list each time, empty for none.
+    SkillFolders { folders: Vec<PathBuf> },
     /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
     StepLimit { steps: u32 },
     /// The bots this one may message: the whole list each time. `leads`: it leads a group.

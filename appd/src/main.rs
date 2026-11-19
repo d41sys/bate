@@ -30,6 +30,7 @@ mod skills;
 mod store;
 mod sys;
 mod update;
+mod workplaces;
 
 use std::fs;
 use std::io;

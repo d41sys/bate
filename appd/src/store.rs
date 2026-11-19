@@ -60,6 +60,15 @@ fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
     })
 }
 
+/// An installed workplace: what was approved of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workplace {
+    pub name: String,
+    pub version: String,
+    /// SHA-256 of its files, as hex (see `workplaces::fingerprint`).
+    pub fingerprint: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Profile {
     pub instructions: String,
@@ -113,6 +122,7 @@ CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
@@ -1160,6 +1170,39 @@ impl Store {
                 "INSERT OR REPLACE INTO projects(id, project) VALUES (?1, ?2)",
                 params![id, json(project)],
             )
+            .map(drop)
+    }
+
+    pub fn workplaces(&self) -> Result<Vec<Workplace>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT name, version, fingerprint FROM workplaces ORDER BY name")?;
+        stmt.query_map([], |r| {
+            Ok(Workplace {
+                name: r.get(0)?,
+                version: r.get(1)?,
+                fingerprint: r.get(2)?,
+            })
+        })?
+        .collect()
+    }
+
+    pub fn workplace(&self, name: &str) -> Result<Option<Workplace>> {
+        Ok(self.workplaces()?.into_iter().find(|w| w.name == name))
+    }
+
+    pub fn put_workplace(&self, w: &Workplace) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO workplaces(name, version, fingerprint) VALUES (?1, ?2, ?3)",
+                params![w.name, w.version, w.fingerprint],
+            )
+            .map(drop)
+    }
+
+    pub fn delete_workplace(&self, name: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM workplaces WHERE name = ?1", [name])
             .map(drop)
     }
 

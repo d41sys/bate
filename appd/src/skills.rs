@@ -13,10 +13,21 @@ use std::io::{self, Read};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Limits of one skill folder: a mistaken choice (a home folder) must not be copied.
-const MAX_FILES: usize = 500;
-const MAX_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_DEPTH: usize = 12;
+/// Limits of one folder copied in: a mistaken choice (a home folder) must not be copied.
+pub struct Limits {
+    pub files: usize,
+    pub bytes: u64,
+    pub depth: usize,
+    /// What the folder is, for the refusals.
+    pub what: &'static str,
+}
+
+const SKILL: Limits = Limits {
+    files: 500,
+    bytes: 20 * 1024 * 1024,
+    depth: 12,
+    what: "skill",
+};
 /// Most bytes read of a `SKILL.md`.
 const MAX_FILE: u64 = 64 * 1024;
 
@@ -30,9 +41,14 @@ fn parse(file: fs::File) -> Result<Skill, String> {
 
 /// The installed skills, by name. A folder that is not a skill is left out.
 pub fn list(bot: &str) -> io::Result<Vec<Skill>> {
-    let Some(dir) = folder(bot, DIR)? else {
-        return Ok(Vec::new());
-    };
+    match folder(bot, DIR)? {
+        Some(dir) => list_in(&dir),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The skills in the folder `dir` (a `skills/`), by name.
+pub fn list_in(dir: &Dir) -> io::Result<Vec<Skill>> {
     let mut found = Vec::new();
     for name in dir.names()? {
         // A link, a file, a folder without a plain `SKILL.md`: not a skill.
@@ -50,7 +66,7 @@ pub fn list(bot: &str) -> io::Result<Vec<Skill>> {
 }
 
 /// A new path in the service's own staging folder, which no bot can reach.
-fn staging() -> io::Result<PathBuf> {
+pub fn staging() -> io::Result<PathBuf> {
     let dir = paths::home().join("staging");
     sys::create_private_dir(&dir)?;
     Ok(dir.join(sys::random_hex(8)))
@@ -68,7 +84,7 @@ pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
     };
     let failed = |e: io::Error| format!("cannot install the skill: {e}");
     let staged = staging().map_err(failed)?;
-    let installed = copy(&from, &staged, 0, &mut (0, 0)).and_then(|()| {
+    let installed = copy(&from, &staged, &SKILL, 0, &mut (0, 0)).and_then(|()| {
         let dir = made(bot, DIR).map_err(failed)?;
         let old = remove(&dir, &skill.name).map_err(failed)?;
         let moved = dir.take(&staged, &skill.name).map_err(failed);
@@ -83,28 +99,40 @@ pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
 
 /// Copies a folder of plain files and folders to the new folder `to`. `seen` counts entries
 /// and bytes so far.
-fn copy(from: &Dir, to: &Path, depth: usize, seen: &mut (usize, u64)) -> Result<(), String> {
-    let failed = |e: io::Error| format!("cannot copy the skill folder: {e}");
+pub fn copy(
+    from: &Dir,
+    to: &Path,
+    limits: &Limits,
+    depth: usize,
+    seen: &mut (usize, u64),
+) -> Result<(), String> {
+    let Limits {
+        files,
+        bytes,
+        depth: deepest,
+        what,
+    } = *limits;
+    let failed = |e: io::Error| format!("cannot copy the {what} folder: {e}");
     let too_big = || {
         format!(
-            "the skill folder has more than {MAX_FILES} files and folders or {} MiB",
-            MAX_BYTES / (1024 * 1024)
+            "the {what} folder has more than {files} files and folders or {} MiB",
+            bytes / (1024 * 1024)
         )
     };
-    if depth > MAX_DEPTH {
+    if depth > deepest {
         return Err(format!(
-            "the skill folder is more than {MAX_DEPTH} folders deep"
+            "the {what} folder is more than {deepest} folders deep"
         ));
     }
     fs::DirBuilder::new().create(to).map_err(failed)?;
     for name in from.names().map_err(failed)? {
         seen.0 += 1;
-        if seen.0 > MAX_FILES {
+        if seen.0 > files {
             return Err(too_big());
         }
         let target = to.join(&name);
         if let Ok(folder) = from.subdir(&name, false) {
-            copy(&folder, &target, depth + 1, seen)?;
+            copy(&folder, &target, limits, depth + 1, seen)?;
         } else if let Some(input) = from.regular(&name).map_err(failed)? {
             let mode = input.metadata().map_err(failed)?.permissions().mode();
             let mut output = fs::OpenOptions::new()
@@ -115,14 +143,14 @@ fn copy(from: &Dir, to: &Path, depth: usize, seen: &mut (usize, u64)) -> Result<
                 .open(&target)
                 .map_err(failed)?;
             // One byte past what is left: the file may grow while it is copied.
-            let left = MAX_BYTES - seen.1 + 1;
+            let left = bytes - seen.1 + 1;
             seen.1 += io::copy(&mut input.take(left), &mut output).map_err(failed)?;
-            if seen.1 > MAX_BYTES {
+            if seen.1 > bytes {
                 return Err(too_big());
             }
         } else {
             return Err(format!(
-                "{name} is a link or a special file; a skill has only files and folders"
+                "{name} is a link or a special file; a {what} has only files and folders"
             ));
         }
     }
@@ -138,7 +166,7 @@ fn remove(dir: &Dir, name: &str) -> io::Result<Option<PathBuf>> {
 
 /// Deletes what was moved out or staged, off the service's one thread: the bot decides how
 /// much there is. What is left goes when the service next starts (`sweep`).
-fn discard(path: Option<PathBuf>) {
+pub fn discard(path: Option<PathBuf>) {
     let Some(path) = path else { return };
     std::thread::spawn(move || {
         if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {

@@ -1,0 +1,7 @@
+{
+  "name": "counter",
+  "version": "1.0.0",
+  "description": "A counter that every bot of a project shares: the tool `tick` adds one and says the total.",
+  "program": { "command": "python3", "args": ["server.py"] },
+  "needs": { "folders": [], "hosts": [], "commands": ["python3"] }
+}

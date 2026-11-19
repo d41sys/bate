@@ -23,9 +23,20 @@ pub struct Project {
     /// A program the service runs once for the whole project; every bot gets its tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector: Option<ProjectConnector>,
+    /// An installed workplace whose program is the project's connector; not together with `connector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workplace: Option<String>,
     /// Output only: why that program is not running now, if it is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector_error: Option<String>,
+}
+
+impl Project {
+    /// The name the project's connector goes by: its own, or its workplace's.
+    pub fn connector_name(&self) -> Option<&str> {
+        let own = self.connector.as_ref().map(|c| c.name.as_str());
+        own.or(self.workplace.as_deref())
+    }
 }
 
 /// The program of a project's connector. `name` follows the rules of a bot connector's.

@@ -79,8 +79,32 @@ export type Project = {
   instructions?: string;
   /** A program the service runs once for the whole project; every bot gets its tools. */
   connector?: { name: string; command: string; args: string[] };
+  /** The name of an installed workplace whose program is the project's connector; not together with `connector`. */
+  workplace?: string;
   /** Output only: why that program is not running now. */
   connectorError?: string;
+};
+
+/** An installed workplace (`list_workplaces`). */
+export type Workplace = {
+  name: string;
+  version: string;
+  /** `null`: the manifest is malformed; `error` says how. */
+  manifest: {
+    name: string;
+    version: string;
+    description?: string;
+    program: { command: string; args: string[] };
+    needs: { folders: string[]; hosts: string[]; commands: string[] };
+  } | null;
+  skills: Skill[];
+  /** Whole paths of its role files, for "Add bots from role files". */
+  roles: string[];
+  /** The files are not what was approved. */
+  changed: boolean;
+  error?: string;
+  /** Ids of the projects that have it on. */
+  usedBy: string[];
 };
 
 /** What a role file would create (`read_roles`). */
