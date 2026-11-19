@@ -142,6 +142,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_projects` | none | `{projects:[Project]}` |
 | `set_project` | `project` | `{project}`; creates when `project.id` is missing. `invalid_project`, `no_such_project`. Refused (`forbidden`) for a device on the network |
 | `delete_project` | `projectId` | `{}`: the project is forgotten; its folder and its bots stay. `no_such_project`. Refused (`forbidden`) for a device on the network |
+| `read_roles` | `paths` | `{roles:[{path, name, instructions, model, effort, skills, levels, raises}]}`: what each role file (whole paths, 1 to 20) would create; `raises` names the kinds whose level allows more than a new bot's. `invalid_role` with the file and the reason. Refused (`forbidden`) for a device on the network |
+| `add_roles` | `projectId`, `paths`, `raise` | `{bots:[id]}`: a bot for each role, in the project; levels in `raises` are applied only with `raise: true`. All or none: `invalid_role` or `no_such_project` and no bot is created. Refused (`forbidden`) for a device on the network |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
 | `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
 | `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
@@ -244,6 +246,7 @@ Same shape as `proto::projects`. A project is `{id, name, folder, bots, instruct
 - **Changes:** the limit is set when an engine starts, so `set_project` and `delete_project` stop the idle engine of every bot that came, went, or whose project's folder changed; a bot in a turn finishes under its old rule and stops then. Its next turn starts under the new rule. The window's project-file link changes with the engine, never during its turn. `projects_changed` follows, and every running engine gets its peers for its next turn.
 - **Files in the window:** `work/<bot>` in the service's home is a link the service keeps to the folder of the bot's project. For `botfile://localhost/<bot>/<path>` the window looks in that folder first, then in the bot's own.
 - **Instructions and notes:** the engine of each bot of a project is sent, as its `instructions`, the bot's own followed by the project's, again whenever either changes; it follows them from its next turn. The project's notes are the Markdown files in `.bate/memory/` in its folder, under the same rules as a bot's own (see Memory); the engine puts them before the model after the bot's own, with a budget of their own, and the bots add notes there with their `write` tool. An installed agent (see ACP) gets neither.
+- **Roles:** a role file describes a ready-made bot: name, instructions, permission levels, an optional model and the skills it needs as folders beside it. The format is in `docs/roles.md`. `add_roles` re-reads the files, creates each bot with its instructions, model, skills and levels, then adds them to the project as `set_project` would; when anything fails, every bot it made is taken back.
 
 ### Skills
 
