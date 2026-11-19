@@ -450,7 +450,7 @@ The same page is reachable from the user's own Tailscale network (no relay of Ba
 - All API requests require the `X-Bate: 1` header.
 - Each paired web client opens a session via `POST /api/session`, which connects to Bate's Unix domain socket as an independent window connection. Commands are sent via `POST /api/send?session=…` and received via long-polling `GET /api/recv?session=…`.
 - Removing a device in Settings terminates its sessions and revokes its cookie immediately.
-- Files (`botfile://`) open in Bate's native window frames only and are not served to LAN devices.
+- Files (`botfile://`) open in the pane of Bate's native window only and are not served to LAN devices.
 
 ### Speech (the window, not the service)
 
