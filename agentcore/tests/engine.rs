@@ -2554,3 +2554,47 @@ fn a_bot_in_a_project_works_in_the_projects_folder_and_keeps_its_own() {
         "{system}"
     );
 }
+
+#[test]
+fn a_steer_is_taken_in_between_model_calls_announced_and_kept_in_the_conversation() {
+    let dir = workdir("steer");
+    let slow = call("r1", "run", json!({"command": "sleep 1"}));
+    let model = Model::serve(vec![vec![slow], vec![text("Left.")], vec![text("Again.")]]);
+    let mut engine = Engine::start(&dir, &model);
+    let session = engine.open_new();
+    engine.prompt("go");
+    let q = question(&engine.until(is_question));
+    assert_eq!(
+        engine.request(Op::Answer {
+            question: q,
+            choice: "Approve".into()
+        }),
+        None
+    );
+    // The command runs; the steer waits for the next model call.
+    assert_eq!(
+        engine.request(Op::Steer {
+            text: "go left".into()
+        }),
+        None
+    );
+    let events = engine.until(is_turn_end);
+    let steered = events
+        .iter()
+        .position(|e| {
+            *e == Event::Steered {
+                text: "go left".into(),
+            }
+        })
+        .unwrap_or_else(|| panic!("no steered event: {events:?}"));
+    let result = events
+        .iter()
+        .position(|e| matches!(e, Event::ToolEnd { .. }))
+        .unwrap();
+    assert!(result < steered, "{events:?}");
+    assert!(sent(&model, 1).contains("go left"));
+
+    let mut engine = engine.reopen(&dir, &model, &session);
+    engine.exchange("n2", "next");
+    assert!(sent(&model, 2).contains("go left"));
+}

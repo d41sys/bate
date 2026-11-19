@@ -40,6 +40,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .item .actions button { font-size: 12px; }
 .attached { list-style: none; padding: 0; margin: .25rem 0; }
 .attached li { display: inline-flex; gap: .25rem; align-items: center; margin-right: .75rem; }
+.queue { margin: .25rem 0; padding-left: 1.5rem; opacity: .8; }
+.steered { font-style: italic; opacity: .8; }
 .fields textarea { display: block; width: 100%; box-sizing: border-box; }
 .pane { position: relative; display: flex; flex-direction: column; border-left: 1px solid color-mix(in srgb, currentColor 15%, transparent); min-width: 0; padding: 0 .5rem .5rem; box-sizing: border-box; }
 .pane.overlay { position: fixed; top: 0; right: 0; bottom: 0; background: Canvas; box-shadow: 0 0 24px #0006; }

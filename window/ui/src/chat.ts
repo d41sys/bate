@@ -9,6 +9,7 @@ export type Entry =
   | { type: "tool_end"; call: string; output: string; isError: boolean }
   | ({ type: "question" } & Question)
   | { type: "turn_end"; reason: string; error?: string }
+  | { type: "steered"; text: string }
   | { type: "fork"; nonce: string };
 
 /** An entry as the service numbers it. */
@@ -22,6 +23,8 @@ export type Item = { id: number } & (
   | { kind: "thinking"; text: string }
   | { kind: "tool"; call: string; tool: string; args: unknown; output?: string; isError?: boolean }
   | { kind: "ended"; reason: string; error?: string }
+  // A message the user put into the running turn; the bot saw it at this point.
+  | { kind: "steered"; text: string }
   | { kind: "forked" }
 );
 
@@ -39,6 +42,9 @@ function put(items: Item[], { seq: id, entry }: Row) {
   switch (entry.type) {
     case "prompt":
       items.push({ id, kind: "user", text: entry.text, nonce: entry.nonce });
+      break;
+    case "steered":
+      items.push({ id, kind: "steered", text: entry.text });
       break;
     case "text":
     case "thinking": {

@@ -243,9 +243,7 @@ impl Turn {
             .map_err(saved)?;
         loop {
             while let Ok(text) = self.steer.try_recv() {
-                session
-                    .push(json!({"role": "user", "content": text}))
-                    .map_err(saved)?;
+                self.steered(session, text)?;
             }
             if self.control.aborted() {
                 return Ok(TurnEnd::Aborted);
@@ -326,9 +324,7 @@ impl Turn {
                     return Ok(TurnEnd::Done);
                 }
                 for text in late {
-                    session
-                        .push(json!({"role": "user", "content": text}))
-                        .map_err(saved)?;
+                    self.steered(session, text)?;
                 }
             }
             // Every call gets a result, even after an abort: the conversation must stay well-formed.
@@ -338,6 +334,15 @@ impl Turn {
                     .map_err(saved)?;
             }
         }
+    }
+
+    /// Puts a `steer` message into the conversation and tells the service where it was taken.
+    fn steered(&self, session: &mut Session, text: String) -> Result<(), String> {
+        session
+            .push(json!({"role": "user", "content": text}))
+            .map_err(saved)?;
+        self.out.send(&Event::Steered { text });
+        Ok(())
     }
 
     /// Runs one tool call and gives the message with its result. `shown` goes before the

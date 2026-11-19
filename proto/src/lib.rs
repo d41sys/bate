@@ -161,6 +161,10 @@ pub enum Event {
     TurnStart {
         nonce: String,
     },
+    /// The running turn took a `steer` message into the conversation, between its model calls.
+    Steered {
+        text: String,
+    },
     Text {
         delta: String,
     },

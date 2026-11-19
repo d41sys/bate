@@ -30,7 +30,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 | `start` | `bot` | Begin a new conversation. The engine sends `session`. The engine works in `BATE_WORK_DIR`, without it in its working directory, the bot's folder. |
 | `open` | `bot`, `session` | Reopen an earlier conversation. The engine sends `session`. |
 | `prompt` | `nonce`, `text` | Send a user message. `nonce` is the prompt ledger's key and comes back in `turn_start`. |
-| `steer` | `text` | Add a message to the turn that is running. |
+| `steer` | `text` | Add a message to the turn that is running. The engine puts it into the conversation (and so into the saved session) before its next model call, and then sends `steered`. Without a turn it answers an error. |
 | `abort` | none | End the running turn now. It ends with `turn_end` reason `aborted`. |
 | `answer` | `question`, `choice` | Answer an open `question`. `choice` is one of its `options`. |
 | `set_model` | `model`, `effort?` | Model and thinking effort for the following model calls; an empty `model` goes back to `BATE_MODEL`. |
@@ -56,6 +56,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `response` | `id`, `error?` | Outcome of a request. |
 | `session` | `session` | The conversation now open. |
 | `turn_start` | `nonce` | The prompt with this nonce started a turn. |
+| `steered` | `text` | The running turn took a `steer` message into the conversation, at this point of the turn. |
 | `text` | `delta` | Reply text, appended to the current reply. |
 | `thinking` | `delta` | Thinking text, appended to the current thinking. |
 | `tool_start` | `call`, `tool`, `args` | A tool call began. `args` is a JSON object. |
@@ -78,7 +79,7 @@ A killed engine sends nothing more.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
 - **Plan:** the tool `plan {steps}` takes the whole list of a task's steps, each `{step, status}` with status `pending`, `in_progress` or `done`, and answers "Plan updated.". A list that is empty, or has a step without text or with another status, is refused. It asks no `question` and the engine keeps nothing: the steps are the `args` of the call's `tool_start`. The window shows them as a checklist, the newest of a turn in place of the older ones (a sub-agent's apart from the conversation's).
 - **Other bots:** when `peers` is not empty the tool `message_bot {bot, text}` is offered and the system prompt names the peers (and says so when the bot leads a group). A call first asks a `question` of kind `connector` with target `bot:<id>`, then sends `message` and waits for `reply`; an abort ends the wait, not the other bot's work.
-- **Turns:** `prompt` while a turn runs is refused (use `steer`). `abort` kills the running command, gives up a model call or connector call that is under way (within about 0.1 s, also when the server is sending nothing) and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
+- **Turns:** `prompt` while a turn runs is refused (the service queues it instead, see Queue and steer). A `steer` is taken in between model calls, and once more before a turn with nothing left to run would end. `abort` kills the running command, gives up a model call or connector call that is under way (within about 0.1 s, also when the server is sending nothing) and ends the turn `aborted`; calls not yet run get "Not run" results. `stop` during a turn aborts it and waits up to 5 s for its `turn_end` before answering.
 - **Conversations:** `.agentcore/sessions/<session>.jsonl` in the bot's folder, one line per chat message or marker (where a prompt starts, where a compaction happened), written before it is used. On `open`, a tool call with no result (the engine was killed mid-call) gets the result "Interrupted: …", and the engine sends `tool_end` with `isError` for it after `session`.
 - **Compaction:** the engine asks the model for a summary of all but the 4 most recent messages and shows the model the summary in their place. It does this on `compact`, and by itself before a model call when the context is over four fifths of the model's size (size is estimated at 4 bytes per token). The model's size is `BATE_MODEL_CONTEXT` (tokens) when set, else the `context` of the `token` answer, else 32000; a model server (not a ChatGPT sign-in) is not asked for it. It also does it when the model server refuses a call because the conversation is more than the model holds (recognised by the server's words, such as `context_length_exceeded`): the call is then made once more with the summary; if nothing was old enough to summarise, or the summary fails, the turn ends with the server's refusal. The summary is not streamed as a reply. If the model gives no summary, an automatic compaction is skipped and the turn goes on; `compact` answers with an error, also when it was aborted (`aborted`). The conversation file keeps every message.
 - **Rewind:** `entry` is a prompt's `nonce`. In place, the file loses that prompt and what followed. With `fork`, the part before it is copied to a new conversation and the engine continues there. Refused while a turn runs.
@@ -103,7 +104,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_prompt`, `queue_full`, `cannot_steer`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -114,10 +115,12 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `order_bots` | `bots`: every bot's id once, in the new order | `{}`; `list_bots` lists them so from then on |
 | `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes) and its project, everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
 | `search` | `text` (1 to 200 bytes), `bot?`, `limit?` (default 50, at most 200) | `{hits: [{bot, seq, kind, snippet}]}`: prompts (`kind` `user`) and replies (`reply`) holding `text` in any case, of `bot` or of all bots, newest first. A reply is searched whole, as the chat joins its pieces; `seq` is its first piece's, the chat item's `id`. |
-| `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` is `true` when there are older ones |
-| `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
+| `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event], queue:[{nonce, text}]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` is `true` when there are older ones; `queue` is the prompts waiting for the bot (see Queue and steer) |
+| `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{queued:true}` when the bot is busy or has prompts waiting (see Queue and steer); `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger), `{duplicate:true, queued:true}` for one still waiting. `queue_full` when 20 prompts already wait. |
 | `answer` | `bot`, `question`, `choice` | `{}` once the engine took it; `no_such_question` if that question is not open. `Always` on a question about an action: see Permissions. |
-| `steer` | `bot`, `text` | `{}` |
+| `steer` | `bot`, `text` | `{}` once the engine took it; `{queued:true}` when there was no turn to steer or it ended first (see Queue and steer). `cannot_steer` for a bot run by an installed agent. |
+| `list_queue` | `bot` | `{queue:[{nonce, text}]}`, in the order they go |
+| `remove_queued` | `bot`, `nonce` | `{}`; `no_such_prompt` if that prompt is not waiting (it may have gone to the engine already) |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model` (empty: back to the engine's default, with no `effort`), `effort?` (`minimal`, `low`, `medium`, `high`) | `{}`; kept for the bot, so each new engine of it starts with them; `bots_changed` follows |
 | `rewind` | `bot`, `entry` (a prompt's `nonce`), `fork` | `{}` once the engine went back. Without `fork`, the service then removes that prompt and what followed from the bot's history and sends `history_changed`. With `fork` the bot continues on a copy, the engine keeps the old conversation file, and the history keeps everything: the service appends `{"type":"fork","nonce"}` to the transcript, and the prompts from `nonce` up to that entry are for reading only (the bot no longer has them, and they cannot be rewound to). The removed prompts' nonces stay used in the ledger, so a late retry of one is answered `duplicate` and does not undo the rewind: send new prompts with new nonces. |
@@ -184,6 +187,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"engine_stopped","bot"}` | The bot's engine exited. Its open questions are dropped. |
 | `{"type":"history_changed","bot"}` | Entries were removed (`rewind`). Re-run `open_bot`. |
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
+| `{"type":"queue_changed","bot"}` | Re-run `list_queue`. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"update_changed"}` | Re-run `get_update`. |
 | `{"type":"chatgpt_changed","error?"}` | Re-run `get_chatgpt`. `error` says why a sign-in failed. |
@@ -210,6 +214,12 @@ Every prompt has a `nonce`. The service writes the nonce to the ledger (`sending
 | uncertain: the engine or the service stopped while it was `sending` | `{duplicate:true, uncertain:true}`; nothing is sent. The window should tell the user and let them send it again under a new nonce |
 
 A nonce the engine refused (`engine_error`), or that could not be sent because the engine did not start (`engine_failed`), is forgotten, so it may be sent again.
+
+### Queue and steer
+
+A `prompt` for a bot that is in a turn, has a prompt the engine has not answered, is being compacted, or already has prompts waiting is not sent. The service stores it in its database (so it survives a closed window and a restart), answers `{queued:true}` and sends `queue_changed`. At most 20 prompts wait for a bot; more are refused `queue_full`. Prompts go one at a time, in order: when a turn ends or a compaction is done the first one is sent as an ordinary prompt through the ledger, and it enters the transcript and leaves the queue when the engine admits it; the next goes when that turn ends. A service that starts sends the first waiting prompt of each bot at once. A prompt whose nonce the ledger already knows (an engine stopped while it was `sending`) is dropped from the queue, never sent twice. `remove_queued` takes a waiting prompt back.
+
+`steer` puts a message into the turn that runs; the engine announces it with `steered`, which the service records in the transcript at that point, so the window shows it where the bot took it, and it is part of the saved conversation. A steer that the turn did not take in, because it ended first (the engine refuses it, or ends the turn without taking it, or stops), is not lost: it becomes the bot's next prompt, in front of the others waiting, under a nonce `steer-<random>`. A `steer` while no turn runs is the same: the next prompt. A bot run by an installed agent (`agent` set on the `Bot`) cannot be steered: `steer` is refused `cannot_steer` without asking the agent, and a window offers only `prompt` (which queues) for it.
 
 ### Bots together
 
