@@ -20,4 +20,20 @@ pub struct Project {
     /// Instructions every bot of the project gets after its own, at most 8000 characters.
     #[serde(default)]
     pub instructions: String,
+    /// A program the service runs once for the whole project; every bot gets its tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<ProjectConnector>,
+    /// Output only: why that program is not running now, if it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_error: Option<String>,
+}
+
+/// The program of a project's connector. `name` follows the rules of a bot connector's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectConnector {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }

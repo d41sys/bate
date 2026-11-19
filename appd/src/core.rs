@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use proto::connectors::{Connector, Transport};
 use proto::groups::{Group, Peer};
 use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
-use proto::projects::Project;
+use proto::projects::{Project, ProjectConnector};
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{
     Engine, EngineInput, Event, MAX_STEP_LIMIT, Op, PROTOCOL, STEP_LIMIT, WINDOW_PROTOCOL,
@@ -30,7 +30,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, desktop, oauth};
+use crate::{apple, browser, desktop, oauth, project_server};
 use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
@@ -110,6 +110,19 @@ pub enum Msg {
     },
     /// The helper app connected, quit, or its permissions changed.
     HelperChanged,
+    /// A project's connector program ended; `why` says how.
+    ProjectExited {
+        id: String,
+        generation: u64,
+        why: String,
+    },
+    /// The wait before starting a project's connector program again is over.
+    ProjectRetry {
+        id: String,
+        generation: u64,
+    },
+    /// The service was asked to stop.
+    Shutdown,
     /// `event: None`: the engine closed its output (it exited or broke the protocol).
     Engine {
         bot: String,
@@ -458,6 +471,8 @@ pub struct Core {
     tx: Sender<Msg>,
     clients: HashMap<u64, Client>,
     engines: HashMap<String, Running>,
+    /// The connector program of each project that has one, by project id.
+    servers: HashMap<String, ProjectServer>,
     /// Bots whose project change takes effect after the turn now running.
     project_restarts: HashSet<String>,
     /// Engine request ids and engine generations.
@@ -465,6 +480,25 @@ pub struct Core {
     /// Earliest `nextRunMs` of any enabled routine; 0 forces a recheck.
     next_due: u64,
 }
+
+/// A project's connector program, as the service keeps track of it.
+struct ProjectServer {
+    spec: ProjectConnector,
+    /// The project's folder it was started for.
+    folder: String,
+    generation: u64,
+    /// `None`: not running; `error` says why.
+    program: Option<project_server::Program>,
+    error: Option<String>,
+    /// A start waits out its backoff.
+    retrying: bool,
+    /// Starts in a row that did not last `STABLE`.
+    failures: u32,
+    started: Instant,
+}
+
+/// A program that ran this long is not one that dies at once: its next death restarts quickly.
+const STABLE: Duration = Duration::from_secs(30);
 
 impl Core {
     pub fn new(
@@ -524,6 +558,7 @@ impl Core {
             tx,
             clients: HashMap::new(),
             engines: HashMap::new(),
+            servers: HashMap::new(),
             project_restarts: HashSet::new(),
             counter: 0,
             next_due: 0,
@@ -584,6 +619,18 @@ impl Core {
                 let _ = hit.answer.send(answer);
             }
             Msg::Proxy(ask) => self.on_proxy(ask),
+            Msg::ProjectExited {
+                id,
+                generation,
+                why,
+            } => self.on_project_exited(&id, generation, &why),
+            Msg::ProjectRetry { id, generation } => self.on_project_retry(&id, generation),
+            Msg::Shutdown => {
+                for id in self.servers.keys().cloned().collect::<Vec<_>>() {
+                    self.stop_server(&id);
+                }
+                std::process::exit(0);
+            }
             Msg::Browsed {
                 bot,
                 generation,
@@ -1118,7 +1165,7 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_projects" => Ok(Some(
-                json!({"projects": self.store.projects().map_err(internal)?}),
+                json!({"projects": self.projects().map_err(internal)?}),
             )),
             "set_project" => {
                 let project = self.set_project(f.get("project").cloned().unwrap_or(Value::Null))?;
@@ -1132,6 +1179,13 @@ impl Core {
                 };
                 // Its folder stays: the files in it are the user's.
                 self.store.delete_project(id).map_err(internal)?;
+                self.stop_server(id);
+                // Its Always answers were for that program.
+                if let Some(c) = &project.connector {
+                    for bot in &project.bots {
+                        self.forget_connector_grants(bot, &c.name);
+                    }
+                }
                 self.projects_changed(&project.bots);
                 Ok(Some(json!({})))
             }
@@ -2004,7 +2058,8 @@ impl Core {
         sys::create_private_dir(&dir).map_err(failed)?;
         // A bot in a project works in the project's folder. It is checked again: the folder
         // may have been moved or replaced since it was chosen.
-        let work = match self.project_of(bot).map_err(internal)? {
+        let project = self.project_of(bot).map_err(internal)?;
+        let work = match &project {
             Some(project) => limit::project_folder(&project.folder).map_err(|e| {
                 (
                     "engine_failed",
@@ -2016,6 +2071,11 @@ impl Core {
             })?,
             None => dir.canonicalize().map_err(failed)?,
         };
+        // Started when a bot first needs it; a program that will not start leaves the bot
+        // without its tools, not without its engine.
+        if let Some(project) = &project {
+            self.ensure_server(project);
+        }
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
@@ -2210,6 +2270,129 @@ impl Core {
         Ok(projects.find(|p| p.bots.iter().any(|b| b == bot)))
     }
 
+    /// The projects as a window sees them: with why a connector's program is not running.
+    fn projects(&self) -> rusqlite::Result<Vec<Project>> {
+        let mut projects = self.store.projects()?;
+        for p in &mut projects {
+            p.connector_error = self.server_error(p);
+        }
+        Ok(projects)
+    }
+
+    fn server_error(&self, p: &Project) -> Option<String> {
+        let server = self.servers.get(p.id.as_deref()?)?;
+        server.error.clone()
+    }
+
+    /// Makes sure the program of `project`'s connector runs for its bots, once.
+    fn ensure_server(&mut self, project: &Project) {
+        let (Some(id), Some(spec)) = (&project.id, &project.connector) else {
+            return;
+        };
+        if let Some(s) = self.servers.get(id) {
+            let same = s.spec == *spec && s.folder == project.folder;
+            // A program that died is started again by its backoff; one that was never
+            // started, or is not the one asked for, is started now.
+            if same && (s.program.is_some() || s.retrying) {
+                return;
+            }
+            self.stop_server(id);
+        }
+        self.start_server(id, spec.clone(), project.folder.clone(), 0);
+    }
+
+    fn start_server(&mut self, id: &str, spec: ProjectConnector, folder: String, failures: u32) {
+        self.counter += 1;
+        let generation = self.counter;
+        let started = project_server::start(id, &spec, &folder, generation, self.tx.clone());
+        let (program, error) = match started {
+            Ok(program) => (Some(program), None),
+            Err(e) => {
+                log!("project {id}: connector not started: {e}");
+                (None, Some(format!("the program cannot start: {e}")))
+            }
+        };
+        let server = ProjectServer {
+            spec,
+            folder,
+            generation,
+            program,
+            error,
+            retrying: false,
+            failures,
+            started: Instant::now(),
+        };
+        self.servers.insert(id.to_owned(), server);
+        self.server_changed(id);
+    }
+
+    /// Ends the program of project `id`, if there is one. Tells nobody.
+    fn stop_server(&mut self, id: &str) {
+        if let Some(server) = self.servers.remove(id)
+            && let Some(program) = server.program
+        {
+            program.stop();
+            log!("project {id}: connector stopped");
+        }
+    }
+
+    /// The program started, ended or failed: windows see why, and running engines get their
+    /// tools back or lose them.
+    fn server_changed(&mut self, id: &str) {
+        self.broadcast(&json!({"type": "projects_changed"}));
+        let bots = match self.store.projects() {
+            Ok(all) => all.into_iter().find(|p| p.id.as_deref() == Some(id)),
+            Err(e) => return log!("project {id}: not read after its connector changed: {e}"),
+        };
+        for bot in bots.iter().flat_map(|p| &p.bots) {
+            if self.engines.contains_key(bot) {
+                self.connectors_changed(bot);
+            }
+        }
+    }
+
+    fn on_project_exited(&mut self, id: &str, generation: u64, why: &str) {
+        let Some(s) = self
+            .servers
+            .get_mut(id)
+            .filter(|s| s.generation == generation)
+        else {
+            return;
+        };
+        s.program = None;
+        s.failures = if s.started.elapsed() > STABLE {
+            1
+        } else {
+            s.failures + 1
+        };
+        // 1, 2, 4, 8, 16, 30 seconds.
+        let wait = Duration::from_secs((1u64 << (s.failures - 1).min(5)).min(30));
+        s.error = Some(format!(
+            "the program {why}; starting it again in {} s",
+            wait.as_secs()
+        ));
+        s.retrying = true;
+        log!("project {id}: connector {why}");
+        let tx = self.tx.clone();
+        let owned = id.to_owned();
+        thread::spawn(move || {
+            thread::sleep(wait);
+            let _ = tx.send(Msg::ProjectRetry {
+                id: owned,
+                generation,
+            });
+        });
+        self.server_changed(id);
+    }
+
+    fn on_project_retry(&mut self, id: &str, generation: u64) {
+        let Some(s) = self.servers.get(id).filter(|s| s.generation == generation) else {
+            return;
+        };
+        let (spec, folder, failures) = (s.spec.clone(), s.folder.clone(), s.failures);
+        self.start_server(id, spec, folder, failures);
+    }
+
     /// What the engine of `bot` is told to follow: its own instructions, then its project's.
     fn instructions_of(&self, bot: &str) -> rusqlite::Result<String> {
         let own = self.store.profile(bot)?.instructions;
@@ -2395,6 +2578,13 @@ impl Core {
                 "`instructions` may be at most 8000 characters".into(),
             ));
         }
+        p.connector_error = None;
+        if let Some(c) = &p.connector {
+            check_connector_name(&c.name).map_err(invalid)?;
+            if c.command.trim().is_empty() {
+                return Err(invalid("`connector.command` is empty".into()));
+            }
+        }
         p.bots.sort();
         p.bots.dedup();
         if p.bots.len() > MAX_MEMBERS {
@@ -2454,7 +2644,7 @@ impl Core {
         p.folder = match folder {
             Some(folder) => folder,
             None => {
-                let made = paths::projects_dir().join(id);
+                let made = paths::projects_dir().join(&id);
                 sys::create_private_dir(&made)
                     .and_then(|()| made.canonicalize())
                     .map_err(|e| ("internal", e.to_string()))?
@@ -2464,6 +2654,34 @@ impl Core {
         };
         self.store.put_project(&p).map_err(internal)?;
         self.projects_changed(&moved);
+        // The program and what the bots may call are for the connector as it is now.
+        let was = old.and_then(|o| o.connector.as_ref());
+        let changed = was != p.connector.as_ref();
+        let shifted = |bot: &String| before.contains(bot) != p.bots.contains(bot);
+        let names: Vec<&str> = [was, p.connector.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|c| c.name.as_str())
+            .collect();
+        // An Always answer was for one program under one name, for these bots.
+        for bot in before
+            .iter()
+            .chain(&p.bots)
+            .filter(|b| changed || shifted(b))
+        {
+            for name in &names {
+                self.forget_connector_grants(bot, name);
+            }
+        }
+        if changed {
+            self.stop_server(&id);
+            // A running bot needs it now; the others when their engines start.
+            if p.bots.iter().any(|bot| self.engines.contains_key(bot)) {
+                self.ensure_server(&p);
+            } else {
+                self.server_changed(&id);
+            }
+        }
         // Its bots follow the project's instructions from their next turn, as they do their own.
         for bot in &p.bots {
             if self.engines.contains_key(bot) {
@@ -2473,6 +2691,7 @@ impl Core {
                 }
             }
         }
+        p.connector_error = self.server_error(&p);
         Ok(p)
     }
 
@@ -2596,6 +2815,9 @@ impl Core {
                 // shortcut: a pause for the answer to `install_update` to leave the socket;
                 // windows reconnect either way.
                 thread::sleep(Duration::from_millis(200));
+                for id in self.servers.keys().cloned().collect::<Vec<_>>() {
+                    self.stop_server(&id);
+                }
                 std::process::exit(update::RESTART_CODE);
             }
             Err(e) => {
@@ -3028,6 +3250,31 @@ impl Core {
                 None => c.enabled = false,
             }
         }
+        // The project's connector is one the service runs: the engine reaches it, as it does a
+        // signed-in one, through the local port. It takes the place of a bot's own of its name.
+        if let Some(project) = self.project_of(bot)?
+            && let Some(spec) = &project.connector
+        {
+            connectors.retain(|c| c.name != spec.name);
+            let key = self
+                .store
+                .oauth_key(bot, &spec.name, &sys::random_hex(16))?;
+            let up = project
+                .id
+                .as_deref()
+                .is_some_and(|id| self.servers.get(id).is_some_and(|s| s.program.is_some()));
+            connectors.push(Connector {
+                name: spec.name.clone(),
+                enabled: up && self.hook_port.is_some(),
+                transport: Transport::Http {
+                    url: format!("http://127.0.0.1:{}/mcp/{key}", self.hook_port.unwrap_or(0)),
+                    headers: Default::default(),
+                },
+                oauth: false,
+                client_id: None,
+                signed_in: None,
+            });
+        }
         Ok(connectors)
     }
 
@@ -3158,6 +3405,21 @@ impl Core {
                     .ok()
                     .flatten()
                     .and_then(|(bot, name)| {
+                        let project = self.project_of(&bot).ok().flatten();
+                        if let Some(p) =
+                            project.filter(|p| p.connector.as_ref().is_some_and(|c| c.name == name))
+                        {
+                            // Not while the program is not running: no engine waits on it.
+                            let program = self.servers.get(p.id.as_deref()?)?.program.as_ref()?;
+                            return Some(Upstream {
+                                socket: Some(program.socket.clone()),
+                                headers: Vec::new(),
+                                tokens: None,
+                                url: String::new(),
+                                bot,
+                                name,
+                            });
+                        }
                         let (c, url) = self.oauth_connector(&bot, &name).ok()?;
                         let Transport::Http { headers, .. } = c.transport else {
                             return None;
@@ -3165,6 +3427,7 @@ impl Core {
                         Some(Upstream {
                             tokens: self.store.tokens(&bot, &name).ok().flatten(),
                             headers: headers.into_iter().collect(),
+                            socket: None,
                             bot,
                             name,
                             url,
@@ -3172,9 +3435,11 @@ impl Core {
                     });
                 let _ = answer.send(found.filter(|up| {
                     // Only while the connector is on: turning it off stops the engine's use.
-                    self.store
-                        .connectors(&up.bot)
-                        .is_ok_and(|all| all.iter().any(|c| c.name == up.name && c.enabled))
+                    up.socket.is_some()
+                        || self
+                            .store
+                            .connectors(&up.bot)
+                            .is_ok_and(|all| all.iter().any(|c| c.name == up.name && c.enabled))
                 }));
             }
             proxy::Ask::Take(state, answer) => {
@@ -4180,15 +4445,20 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
     }
 }
 
-fn check_connector(c: &Connector) -> Result<(), String> {
-    let name_ok = (1..=40).contains(&c.name.len())
-        && c.name
+fn check_connector_name(name: &str) -> Result<(), String> {
+    let name_ok = (1..=40).contains(&name.len())
+        && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
     // `<name>__<tool>` names a connector's tool: a name with `__` could pass for another's.
-    if !name_ok || c.name.contains("__") {
+    if !name_ok || name.contains("__") {
         return Err("`name` must be 1 to 40 characters of a-z, 0-9, _ and -, without `__`".into());
     }
+    Ok(())
+}
+
+fn check_connector(c: &Connector) -> Result<(), String> {
+    check_connector_name(&c.name)?;
     match &c.transport {
         Transport::Stdio { command, .. } if command.trim().is_empty() => {
             Err("`transport.command` is empty".into())

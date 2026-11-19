@@ -21,6 +21,7 @@ mod login_item;
 mod memory;
 mod oauth;
 mod paths;
+mod project_server;
 mod proxy;
 mod report;
 mod roles;
@@ -101,6 +102,9 @@ fn serve() -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let accept_tx = tx.clone();
     thread::spawn(move || clients::accept_loop(listener, accept_tx));
+    // The connectors' programs must not outlive the service.
+    let stop_tx = tx.clone();
+    sys::on_terminate(move || drop(stop_tx.send(core::Msg::Shutdown)))?;
     log!("serving {} (pid {})", home.display(), std::process::id());
     let hook_port = hooks::start(tx.clone())
         .inspect_err(|e| log!("webhooks are off: {e}"))

@@ -23,6 +23,41 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
+/// Runs `then` once, on a thread of its own, when the service is asked to stop (SIGTERM, SIGINT).
+/// A handler may only write to a pipe; the thread reads it.
+pub fn on_terminate(then: impl FnOnce() + Send + 'static) -> io::Result<()> {
+    static WRITE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+    extern "C" fn handler(_: libc::c_int) {
+        let (fd, byte) = (WRITE.load(std::sync::atomic::Ordering::Relaxed), 0u8);
+        // SAFETY: `write` is async-signal-safe; the byte outlives the call.
+        unsafe { libc::write(fd, (&raw const byte).cast(), 1) };
+    }
+    let mut ends = [0; 2];
+    {
+        let _spawning = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: `ends` has room for the two descriptors.
+        if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for fd in ends {
+            // SAFETY: a descriptor made above.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+    WRITE.store(ends[1], std::sync::atomic::Ordering::Relaxed);
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: the handler does only what a handler may.
+        unsafe { libc::signal(signal, handler as *const () as libc::sighandler_t) };
+    }
+    // SAFETY: the read end belongs to nobody else.
+    let mut read = unsafe { File::from_raw_fd(ends[0]) };
+    std::thread::spawn(move || {
+        let _ = io::Read::read(&mut read, &mut [0]);
+        then();
+    });
+    Ok(())
+}
+
 /// Takes an exclusive, non-blocking `flock`. `Ok(None)`: another process holds
 /// it. The lock lives as long as the returned file.
 pub fn try_lock(path: &Path) -> io::Result<Option<File>> {
