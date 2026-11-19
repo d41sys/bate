@@ -43,6 +43,11 @@ export function Projects({ bots }: { bots: Bot[] }) {
           <li key={p.id}>
             <strong>{p.name}</strong>
             <span className="note"><code>{p.folder}</code> · Bots: {p.bots.map(name).join(", ") || "none"}</span>
+            {p.bots.some((id) => bots.find((b) => b.id === id)?.agent) && (
+              <span className="note">
+                {" "}· {p.bots.filter((id) => bots.find((b) => b.id === id)?.agent).map(name).join(", ")}: an installed agent gets neither the project's instructions nor its notes.
+              </span>
+            )}
             <button onClick={() => setForm(p)}>Edit</button>
             {deleting === p.id ? (
               <span>
@@ -64,6 +69,10 @@ export function Projects({ bots }: { bots: Bot[] }) {
           <input size={50} placeholder="~/code/my-site" value={form.folder} onChange={(e) => setForm({ ...form, folder: e.target.value })} />
         </label>
         {!form.id && <p className="note">The folder's full path. Leave it empty and Bate makes one.</p>}
+        <label>
+          Instructions for all its bots, after their own{" "}
+          <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+        </label>
         <fieldset>
           <legend>Bots</legend>
           {bots.map((b) => {

@@ -1,12 +1,14 @@
-//! A bot's memory, for the window's panel: the Markdown files in `memory/` in the bot's folder.
-//! The bot writes there too and can swap anything for a link at any moment, so the folder is
-//! held open (`sys::Dir`) and only plain files directly in it are listed, read or replaced.
+//! Memory, for the window's panel: the Markdown files in `memory/` in a bot's folder, or in
+//! `.bate/memory/` in a project's. A bot writes there too and can swap anything for a link at
+//! any moment, so the folder is held open (`sys::Dir`) and only plain files directly in it are
+//! listed, read or replaced.
 
 use crate::paths;
 use crate::sys::Dir;
-use proto::memory::{DIR, is_note_name};
+use proto::memory::{DIR, PROJECT, is_note_name};
 use serde::Serialize;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 /// Most bytes of a note the panel is given: the bot may have written more.
@@ -58,9 +60,36 @@ pub fn made(bot: &str, name: &str) -> io::Result<Dir> {
     open(bot, name, true)
 }
 
+/// Where notes are kept: a folder and the folders in it down to the notes'.
+pub struct Place(PathBuf, &'static [&'static str]);
+
+impl Place {
+    pub fn bot(bot: &str) -> Place {
+        Place(paths::bot_dir(bot), &[DIR])
+    }
+
+    /// `folder`: the project's, kept by its real path, so nothing above it is a link.
+    pub fn project(folder: &str) -> Place {
+        Place(folder.into(), &[PROJECT, DIR])
+    }
+
+    /// The notes' folder held open, made first if `create`; `None`: there is none.
+    fn dir(&self, create: bool) -> io::Result<Option<Dir>> {
+        let mut dir = Dir::open(&self.0)?;
+        for part in self.1 {
+            dir = match dir.subdir(part, create) {
+                Ok(dir) => dir,
+                Err(e) if e.kind() == io::ErrorKind::NotFound && !create => return Ok(None),
+                Err(e) => return Err(io::Error::other(format!("`{part}` is not a folder: {e}"))),
+            };
+        }
+        Ok(Some(dir))
+    }
+}
+
 /// The notes, by name.
-pub fn list(bot: &str) -> io::Result<Vec<Note>> {
-    let Some(dir) = folder(bot, DIR)? else {
+pub fn list(place: &Place) -> io::Result<Vec<Note>> {
+    let Some(dir) = place.dir(false)? else {
         return Ok(Vec::new());
     };
     let mut notes = Vec::new();
@@ -85,8 +114,9 @@ pub fn list(bot: &str) -> io::Result<Vec<Note>> {
 }
 
 /// The note's text; `None` if there is no such note.
-pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
-    let Some(file) = folder(bot, DIR)?
+pub fn read(place: &Place, name: &str) -> io::Result<Option<String>> {
+    let Some(file) = place
+        .dir(false)?
         .map(|dir| dir.read(name))
         .transpose()?
         .flatten()
@@ -100,8 +130,8 @@ pub fn read(bot: &str, name: &str) -> io::Result<Option<String>> {
 
 /// Creates or replaces the note. The new file takes the name's place, so a link the bot left
 /// under that name is replaced, not followed.
-pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
-    let dir = made(bot, DIR)?;
+pub fn write(place: &Place, name: &str, text: &str) -> io::Result<()> {
+    let dir = place.dir(true)?.expect("made");
     let tmp = format!(".{}.{name}", crate::sys::random_hex(4));
     let written = dir
         .create(&tmp)
@@ -114,8 +144,8 @@ pub fn write(bot: &str, name: &str, text: &str) -> io::Result<()> {
 }
 
 /// Removes the note (or the link under its name); false if there was none.
-pub fn delete(bot: &str, name: &str) -> io::Result<bool> {
-    match folder(bot, DIR)? {
+pub fn delete(place: &Place, name: &str) -> io::Result<bool> {
+    match place.dir(false)? {
         Some(dir) => dir.remove(name),
         None => Ok(false),
     }

@@ -4,6 +4,10 @@
 /// The folder in a bot's folder that holds its notes.
 pub const DIR: &str = "memory";
 
+/// The folder in a project's folder that holds what Bate keeps there; the project's notes are
+/// in `DIR` inside it.
+pub const PROJECT: &str = ".bate";
+
 /// Whether a file name is a note's: ending in `.md`, at most 100 bytes, no `/` or control
 /// character, not starting with a dot. The engine shows the model exactly the notes the
 /// window's panel lists, so both ask here.

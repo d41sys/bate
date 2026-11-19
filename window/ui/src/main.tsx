@@ -63,7 +63,7 @@ function App() {
         load();
       } else if (frame.type === "failed") {
         setState(`The connection failed: ${frame.error}`);
-      } else if (frame.type === "bots_changed") {
+      } else if (frame.type === "bots_changed" || frame.type === "projects_changed") {
         load();
       }
     });
@@ -210,7 +210,18 @@ function App() {
               />}
             {tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
-            {tab === "memory" && <Memory key={`${bot.id}-${connection}`} bot={bot.id} />}
+            {tab === "memory" && (
+              <>
+                {bot.agent && <p className="note">An installed agent keeps its own memory: these notes, and the project's notes and instructions, do not reach it.</p>}
+                <Memory key={`${bot.id}-${connection}`} target={{ bot: bot.id }} />
+                {bot.project && (
+                  <>
+                    <h2>Notes of the project {bot.project.name}, shared by its bots</h2>
+                    <Memory key={`${bot.project.id}-${connection}`} target={{ projectId: bot.project.id }} />
+                  </>
+                )}
+              </>
+            )}
             {tab === "skills" && <Skills key={`${bot.id}-${connection}`} bot={bot.id} />}
             {tab === "groups" && <Groups key={connection} bots={bots} />}
             {tab === "projects" && <Projects key={connection} bots={bots} />}

@@ -4,7 +4,8 @@ import { size } from "./memory.ts";
 
 type Note = { name: string; bytes: number; modifiedMs: number };
 
-export function Memory({ bot }: { bot: string }) {
+/** Whose notes: a bot's own, or those of a project, which all its bots share. */
+export function Memory({ target }: { target: { bot: string } | { projectId: string } }) {
   const [notes, setNotes] = useState<Note[]>([]);
   // The note in the editor; empty: a new one, named in the field.
   const [open, setOpen] = useState("");
@@ -17,13 +18,14 @@ export function Memory({ bot }: { bot: string }) {
   const dirty = text !== saved;
 
   const load = () =>
-    request<{ notes: Note[] }>("list_memory", { bot }).then((d) => setNotes(d.notes), (e) => setError(e.message));
+    request<{ notes: Note[] }>("list_memory", target).then((d) => setNotes(d.notes), (e) => setError(e.message));
   useEffect(() => {
     load();
     return listen((frame) => {
-      if (frame.type === "memory_changed" && frame.bot === bot) load();
+      if (frame.type !== "memory_changed") return;
+      if ("bot" in target ? frame.bot === target.bot : frame.projectId === target.projectId) load();
     });
-  }, [bot]);
+  }, ["bot" in target ? target.bot : target.projectId]);
 
   /** Whether it worked; if not, the error shows. */
   const run = (p: Promise<unknown>) =>
@@ -31,7 +33,7 @@ export function Memory({ bot }: { bot: string }) {
   const show = (n: string, t: string) => (setOpen(n), setName(n), setText(t), setSaved(t));
   const read = async (n: string) => {
     try {
-      const d = await request<{ text: string }>("read_memory", { bot, name: n });
+      const d = await request<{ text: string }>("read_memory", { ...target, name: n });
       show(n, d.text);
       setError("");
     } catch (e) {
@@ -44,14 +46,14 @@ export function Memory({ bot }: { bot: string }) {
     if (open && !dirty) read(open);
   };
   const save = async () => {
-    if (await run(request("write_memory", { bot, name, text }))) {
+    if (await run(request("write_memory", { ...target, name, text }))) {
       show(name, text);
       load();
     }
   };
   const remove = async (n: string) => {
     setDeleting("");
-    if (await run(request("delete_memory", { bot, name: n }))) {
+    if (await run(request("delete_memory", { ...target, name: n }))) {
       if (n === open) show("", "");
       load();
     }
@@ -61,7 +63,7 @@ export function Memory({ bot }: { bot: string }) {
     <section>
       <button onClick={reload}>Reload</button>
       {notes.length === 0 ? (
-        <p>No notes yet. The bot writes its own, or add one below.</p>
+        <p>No notes yet. {"bot" in target ? "The bot writes its own" : "The project's bots write them"}, or add one below.</p>
       ) : (
         <ul className="rows">
           {notes.map((n) => (

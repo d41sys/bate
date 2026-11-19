@@ -139,10 +139,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
 | `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
 | `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
-| `list_memory` | `bot` | `{notes:[{name, bytes, modifiedMs}]}`, by name |
-| `read_memory` | `bot`, `name` | `{text}`, or `no_such_note` |
-| `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
-| `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
+| `list_memory` | `bot` or `projectId` | `{notes:[{name, bytes, modifiedMs}]}`, by name; with `projectId` the project's notes, or `no_such_project` |
+| `read_memory` | `bot` or `projectId`, `name` | `{text}`, or `no_such_note` |
+| `write_memory` | `bot` or `projectId`, `name`, `text` | `{}`; creates or replaces the note |
+| `delete_memory` | `bot` or `projectId`, `name` | `{}`, or `no_such_note` |
 | `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit. Refused (`forbidden`) for a device on the network |
 | `hand_back_browser` | `bot` | `{}`; the user gives the bot's browser back (see Browser) |
 | `get_helper` | none | `{installed, path, connected, accessibility, screenRecording, fullDiskAccess}`: Bate Helper (see Desktop). The three permissions are `null` until the helper has connected. |
@@ -172,7 +172,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `pair_channel` | `bot`, `kind` | `{code, expiresAt}`: a 6-digit code that lets one chat in; it lasts 5 minutes or 5 wrong guesses. Code `no_channel` without a token |
 | `remove_chat` | `bot`, `kind`, `chat` | `{}`: the chat is no longer let in. Code `no_such_chat` |
 
-`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color, model, effort}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, wholeDisk, agent, browserTaken, instructions, avatar, color, model, effort, project}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true; `project`, `{id, name}`, only for a bot in a project): `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes, and `projects_changed` each time `project` does. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
 ### Events (service → every window that said hello)
 
@@ -193,7 +193,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"projects_changed"}` | Re-run `list_projects`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
-| `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
+| `{"type":"memory_changed","bot"}` or `{"type":"memory_changed","projectId"}` | A window changed a note of the bot or of the project: re-run `list_memory`. What a bot writes itself is not announced. |
 
 ### Transcript
 
@@ -223,13 +223,14 @@ Whether a bot may message another is asked like a connector's tool: a `question`
 
 ### Projects
 
-Same shape as `proto::projects`. A project is `{id, name, folder, bots}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
+Same shape as `proto::projects`. A project is `{id, name, folder, bots, instructions}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids, `instructions` at most 8000 characters; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
 
 - **The folder:** the user names it (`~/` stands for their home). It must be there, and it is kept by its real path. It is refused (`invalid_project`) when it is the user's home or a folder above it, when it holds the service's home, or when it is inside the service's home. With `folder` empty a new project gets `projects/<id>` in the service's home, made by the service, and a project that has a folder keeps it. `delete_project` never deletes a folder.
 - **Working there:** the engine of a bot in a project is told the folder in `BATE_WORK_DIR`. Its tools take a relative path from there and run commands there. The bot's own folder stays where its conversations, notes, skills and attachments are; the engine tells the model that folder, and names notes and skills by their full paths.
 - **The limit:** a bot kept in its folder may read and change everything in the project's folder as well, and nothing else (see Folder limit). The folder is checked again each time an engine starts; one that is gone or no longer allowed leaves the bot without an engine (`engine_failed`) until the project is changed.
 - **Changes:** the limit is set when an engine starts, so `set_project` and `delete_project` stop the idle engine of every bot that came, went, or whose project's folder changed; a bot in a turn finishes under its old rule and stops then. Its next turn starts under the new rule. The window's project-file link changes with the engine, never during its turn. `projects_changed` follows, and every running engine gets its peers for its next turn.
 - **Files in the window:** `work/<bot>` in the service's home is a link the service keeps to the folder of the bot's project. For `botfile://localhost/<bot>/<path>` the window looks in that folder first, then in the bot's own.
+- **Instructions and notes:** the engine of each bot of a project is sent, as its `instructions`, the bot's own followed by the project's, again whenever either changes; it follows them from its next turn. The project's notes are the Markdown files in `.bate/memory/` in its folder, under the same rules as a bot's own (see Memory); the engine puts them before the model after the bot's own, with a budget of their own, and the bots add notes there with their `write` tool. An installed agent (see ACP) gets neither.
 
 ### Skills
 
@@ -254,7 +255,7 @@ As with memory, the service never follows a link in the bot's folder: it holds t
 
 A bot's memory is the Markdown files in `memory/` in its folder: plain files the user can open in any editor. The engine puts them before the model at the start of every turn, in every conversation, in name order and up to 16 KiB; a note that does not fit, or is not text, is only named. The bot adds and changes notes with its ordinary `write` and `edit` tools, so the bot's `write` permission applies.
 
-The memory commands are for the window's panel. A `name` is a file name ending in `.md`, at most 100 bytes, without `/` and not starting with a dot (`bad_request` otherwise); `text` is at most 64 KiB. The bot can write in its folder, so the service trusts nothing there: only plain files directly in a plain `memory` folder are listed, read or replaced, never what a link points to (a file with a second name elsewhere counts as one), and the engine shows the model exactly the notes `list_memory` lists.
+The memory commands are for the window's panel; with `projectId` they work on the project's notes instead of a bot's. A `name` is a file name ending in `.md`, at most 100 bytes, without `/` and not starting with a dot (`bad_request` otherwise); `text` is at most 64 KiB. The bot can write in its folder, and every bot of a project in the project's, so the service trusts nothing there: only plain files directly in a plain `memory` folder (for a project, in a plain `.bate` folder) are listed, read or replaced, never what a link points to (a file with a second name elsewhere counts as one), and the engine shows the model exactly the notes `list_memory` lists.
 
 ### Folder limit
 

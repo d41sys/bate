@@ -2523,6 +2523,80 @@ fn bots_of_a_project_work_in_its_folder_and_message_each_other() {
 }
 
 #[test]
+fn a_projects_instructions_and_notes_reach_all_its_bots() {
+    let home = home("project-memory");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"));
+    });
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    w.ok(
+        "set_bot",
+        json!({"bot": a, "instructions": "Answer in French."}),
+    );
+    let project = json!({"name": "Site", "bots": [a, b], "instructions": "Use British spelling."});
+    let mut project = w.ok("set_project", json!({"project": project}))["project"].clone();
+    let id = project["id"].as_str().unwrap().to_owned();
+    let rows = w.ok("list_bots", json!({}))["bots"].clone();
+    for row in rows.as_array().unwrap() {
+        assert_eq!(row["project"], json!({"id": id, "name": "Site"}));
+    }
+    let mut long = project.clone();
+    long["instructions"] = json!("x".repeat(8001));
+    assert_eq!(
+        refused(&mut w, "set_project", json!({"project": long})),
+        "invalid_project"
+    );
+
+    // The engine is told the bot's own instructions, then the project's; a change reaches it
+    // while it runs.
+    let told = || {
+        fs::read_to_string(home.join("bots").join(&a).join("instructions.log")).unwrap_or_default()
+    };
+    w.ok("prompt", json!({"bot": a, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+    let first = told();
+    let (own, shared) = (
+        first.find("Answer in French.").unwrap(),
+        first.find("Use British spelling.").unwrap(),
+    );
+    assert!(own < shared, "{first}");
+    project["instructions"] = json!("Use American spelling.");
+    w.ok("set_project", json!({"project": project}));
+    eventually("the project's new instructions", || {
+        told().contains("Use American spelling.")
+    });
+
+    // The project's notes are files in its folder, apart from each bot's own.
+    let note = json!({"projectId": id, "name": "plan.md", "text": "Ship on Friday."});
+    // The windows are told before the answer comes.
+    let sent = w.send("write_memory", note);
+    w.wait_for(|f| f["type"] == "memory_changed" && f["projectId"] == id.as_str());
+    let done = w.wait_for(|f| f["type"] == "response" && f["id"] == sent.as_str());
+    assert_eq!(done["success"], true, "{done}");
+    let folder = Path::new(project["folder"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(folder.join(".bate/memory/plan.md")).unwrap(),
+        "Ship on Friday."
+    );
+    let listed = w.ok("list_memory", json!({"projectId": id}))["notes"].clone();
+    assert_eq!(listed[0]["name"], "plan.md");
+    let read = json!({"projectId": id, "name": "plan.md"});
+    assert_eq!(w.ok("read_memory", read.clone())["text"], "Ship on Friday.");
+    assert_eq!(w.ok("list_memory", json!({"bot": b}))["notes"], json!([]));
+    w.ok("delete_memory", read.clone());
+    assert_eq!(refused(&mut w, "read_memory", read), "no_such_note");
+    assert_eq!(
+        refused(&mut w, "list_memory", json!({"projectId": "nope"})),
+        "no_such_project"
+    );
+}
+
+#[test]
 fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
     let home = home("memory");
     let _service = Service::start(&home);

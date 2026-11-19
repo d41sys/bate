@@ -17,6 +17,8 @@ export type Bot = {
   /** Chosen with `set_model`; absent: the engine's default. */
   model?: string;
   effort?: string;
+  /** The project the bot is in, if any. */
+  project?: { id: string; name: string };
 };
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
@@ -71,6 +73,8 @@ export type Project = {
   folder: string;
   /** The ids of the bots in it, at most 20. A bot is in at most one project. */
   bots: string[];
+  /** What every bot of the project follows after its own instructions, at most 8000 characters. */
+  instructions?: string;
 };
 
 export type Skill = { name: string; description: string };

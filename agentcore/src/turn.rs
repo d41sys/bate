@@ -439,9 +439,9 @@ impl Turn {
             text => format!("\n\nThe user's instructions for you:\n{text}"),
         };
         // In a project the bot's own folder is not where it works: what is in it is named
-        // by its full path.
-        let (own, named) = if self.work == self.dir {
-            (String::new(), Path::new(""))
+        // by its full path, and the project's notes come after its own.
+        let (own, named, project) = if self.work == self.dir {
+            (String::new(), Path::new(""), String::new())
         } else {
             (
                 format!(
@@ -449,10 +449,11 @@ impl Turn {
                     self.dir.display()
                 ),
                 self.dir.as_path(),
+                crate::memory::project_prompt(&self.work),
             )
         };
         format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{own}{instructions}{}{}{}",
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{own}{instructions}{}{}{}{project}",
             self.work.display(),
             self.peers_prompt(),
             crate::skills::prompt(&self.dir, named),

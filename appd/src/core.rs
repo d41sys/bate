@@ -1046,20 +1046,20 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_memory" => {
-                let bot = self.bot_of(f)?;
+                let (place, _) = self.notes_of(f)?;
                 Ok(Some(
-                    json!({"notes": memory::list(&bot).map_err(|e| ("internal", e.to_string()))?}),
+                    json!({"notes": memory::list(&place).map_err(|e| ("internal", e.to_string()))?}),
                 ))
             }
             "read_memory" | "write_memory" | "delete_memory" => {
-                let bot = self.bot_of(f)?;
+                let (place, changed) = self.notes_of(f)?;
                 let name = str_field(f, "name")?;
                 memory::check_name(name).map_err(bad)?;
                 let failed = |e: io::Error| ("internal", e.to_string());
                 let missing = || ("no_such_note", format!("no note `{name}`"));
                 match command {
                     "read_memory" => {
-                        let text = memory::read(&bot, name).map_err(failed)?;
+                        let text = memory::read(&place, name).map_err(failed)?;
                         Ok(Some(json!({"text": text.ok_or_else(missing)?})))
                     }
                     "write_memory" => {
@@ -1070,15 +1070,15 @@ impl Core {
                                 memory::MAX_NOTE
                             )));
                         }
-                        memory::write(&bot, name, text).map_err(failed)?;
-                        self.broadcast(&json!({"type": "memory_changed", "bot": bot}));
+                        memory::write(&place, name, text).map_err(failed)?;
+                        self.broadcast(&changed);
                         Ok(Some(json!({})))
                     }
                     _ => {
-                        if !memory::delete(&bot, name).map_err(failed)? {
+                        if !memory::delete(&place, name).map_err(failed)? {
                             return Err(missing());
                         }
-                        self.broadcast(&json!({"type": "memory_changed", "bot": bot}));
+                        self.broadcast(&changed);
                         Ok(Some(json!({})))
                     }
                 }
@@ -1302,7 +1302,7 @@ impl Core {
                 }
                 self.store.set_profile(&bot, &profile).map_err(internal)?;
                 if instructions.is_some() && self.engines.contains_key(&bot) {
-                    let text = profile.instructions.clone();
+                    let text = self.instructions_of(&bot).map_err(internal)?;
                     self.send_op(&bot, Op::Instructions { text }, Waiter::Quiet)?;
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
@@ -1762,6 +1762,9 @@ impl Core {
             row["model"] = json!(model);
             row["effort"] = json!(effort);
         }
+        if let Ok(Some(project)) = self.project_of(bot) {
+            row["project"] = json!({"id": project.id, "name": project.name});
+        }
         row
     }
 
@@ -1844,7 +1847,7 @@ impl Core {
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
-        let instructions = self.store.profile(bot).map_err(internal)?.instructions;
+        let instructions = self.instructions_of(bot).map_err(internal)?;
         let model = self.store.model(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
@@ -2029,6 +2032,35 @@ impl Core {
         Ok(projects.find(|p| p.bots.iter().any(|b| b == bot)))
     }
 
+    /// What the engine of `bot` is told to follow: its own instructions, then its project's.
+    fn instructions_of(&self, bot: &str) -> rusqlite::Result<String> {
+        let own = self.store.profile(bot)?.instructions;
+        Ok(match self.project_of(bot)? {
+            Some(p) if !p.instructions.trim().is_empty() => format!(
+                "{own}\n\nThe instructions of the project {}, for all its bots:\n{}",
+                p.name, p.instructions
+            ),
+            _ => own,
+        })
+    }
+
+    /// Where a memory command works: the notes of the project `projectId` if given, else the
+    /// bot's own. Also the frame that tells the windows of a change there.
+    fn notes_of(&self, f: &Value) -> Result<(memory::Place, Value), Refusal> {
+        if f.get("projectId").is_none() {
+            let bot = self.bot_of(f)?;
+            let changed = json!({"type": "memory_changed", "bot": bot});
+            return Ok((memory::Place::bot(&bot), changed));
+        }
+        let id = str_field(f, "projectId")?;
+        let projects = self.store.projects().map_err(internal)?;
+        let Some(project) = projects.into_iter().find(|p| p.id.as_deref() == Some(id)) else {
+            return Err(("no_such_project", "no such project".into()));
+        };
+        let changed = json!({"type": "memory_changed", "projectId": id});
+        Ok((memory::Place::project(&project.folder), changed))
+    }
+
     /// Whether a path in the bot's own folder must be full because relative paths start in a
     /// project. A store failure is logged; the action can still return its old relative path.
     fn full_attachment_paths(&self, bot: &str) -> bool {
@@ -2063,6 +2095,11 @@ impl Core {
         p.name = p.name.trim().to_owned();
         if p.name.is_empty() || p.name.chars().count() > 80 {
             return Err(invalid("`name` must be 1 to 80 characters".into()));
+        }
+        if p.instructions.chars().count() > 8000 {
+            return Err(invalid(
+                "`instructions` may be at most 8000 characters".into(),
+            ));
         }
         p.bots.sort();
         p.bots.dedup();
@@ -2133,6 +2170,15 @@ impl Core {
         };
         self.store.put_project(&p).map_err(internal)?;
         self.projects_changed(&moved);
+        // Its bots follow the project's instructions from their next turn, as they do their own.
+        for bot in &p.bots {
+            if self.engines.contains_key(bot) {
+                let text = self.instructions_of(bot).map_err(internal)?;
+                if let Err((_, e)) = self.send_op(bot, Op::Instructions { text }, Waiter::Quiet) {
+                    log!("bot {bot}: project instructions not sent: {e}");
+                }
+            }
+        }
         Ok(p)
     }
 
