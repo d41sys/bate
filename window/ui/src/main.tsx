@@ -5,6 +5,7 @@ import { Pair } from "./Devices.tsx";
 import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
+import { Pane } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { Memory } from "./Memory.tsx";
@@ -37,6 +38,8 @@ function App() {
   const [palette, setPalette] = useState(false);
   const [jump, setJump] = useState<{ seq: number }>();
   const [find, setFind] = useState(false);
+  // A file a bot shows, in the pane beside the conversation.
+  const [shown, setShown] = useState<{ bot: string; path: string }>();
   const newName = useRef<HTMLInputElement>(null);
   // What the shell says of starting the service with the app (macOS may want an approval).
   const [note, setNote] = useState<string | null>(null);
@@ -203,6 +206,8 @@ function App() {
                 bot={bot}
                 jump={jump}
                 find={find}
+                // Bots' files open in the window's pane only, not on other devices.
+                showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
                 used={() => {
                   setJump(undefined);
                   setFind(false);
@@ -231,6 +236,7 @@ function App() {
           !state && <p className="note">{bots.length ? "Choose a bot." : "Create a bot to begin."}</p>
         )}
       </main>
+      {shown && <Pane bot={shown.bot} path={shown.path} close={() => setShown(undefined)} />}
       {palette && (
         <Palette
           choices={choices}

@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation } from "./service.ts";
 import { add, build, planSteps, type Entry, type Item, type Question, type Row } from "./chat.ts";
-import { SANDBOX, fileUrl } from "./frame.ts";
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
@@ -19,19 +18,19 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, jump, find = false, used = () => {} }: {
+export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
   bot: Bot;
   jump?: { seq: number };
   find?: boolean;
   used?: () => void;
+  // Opens a file of the bot's in the pane; absent where there is no pane (other devices).
+  showFile?: (path: string) => void;
 }) {
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [compacted, setCompacted] = useState(false);
-  // A file of the bot's, shown in a frame of its own.
-  const [shown, setShown] = useState<string>();
   const [sending, setSending] = useState(false);
   // State is only read again at the next render; a second click in the same moment must see it now.
   const inFlight = useRef(false);
@@ -355,8 +354,7 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
                 reading={reading === items[row.index].id}
                 read={canRead ? read : undefined}
                 stopReading={stopReading}
-                // Bots' files open in the window's frames only, not on other devices.
-                open={inShell ? setShown : undefined}
+                open={showFile}
                 edit={(item) => {
                   setEditing(item.nonce);
                   setText(item.text);
@@ -394,14 +392,6 @@ export function Chat({ bot, jump, find = false, used = () => {} }: {
             </li>
           ))}
         </ul>
-      )}
-      {shown && (
-        <div className="shown">
-          <div className="tools">
-            <code>{shown}</code> <button type="button" onClick={() => setShown(undefined)}>Close</button>
-          </div>
-          <iframe title={shown} sandbox={SANDBOX} src={fileUrl(bot.id, shown)} />
-        </div>
       )}
       <form onSubmit={(e) => { e.preventDefault(); send(); }}>
         <input
