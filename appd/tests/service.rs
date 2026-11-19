@@ -6434,3 +6434,252 @@ fn a_bots_step_limit_is_kept_sent_to_the_engine_and_marked_on_a_routine_run_that
     let runs = w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"].clone();
     assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
 }
+
+/// A program that serves MCP over HTTP on the unix socket the service gives it, with a tool
+/// that counts. It leaves its pid and what the system let it do in files, and ends when its
+/// input closes (the service went).
+const COUNTING_SERVER: &str = r#"
+import json, os, socketserver, sys, threading
+from http.server import BaseHTTPRequestHandler
+sock = os.environ["BATE_MCP_SOCKET"]
+data = os.path.dirname(sock)
+open(os.path.join(data, "pid"), "w").write(str(os.getpid()))
+try:
+    open(os.path.join(os.path.dirname(os.environ["BATE_WORK_DIR"]), "escaped"), "w")
+    sandbox = "ok"
+except OSError:
+    sandbox = "refused"
+open(os.path.join(data, "sandbox"), "w").write(sandbox)
+count = 0
+lock = threading.Lock()
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *args): pass
+    def address_string(self): return "unix"
+    def do_POST(self):
+        global count
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        with lock:
+            if body.get("method") == "tools/call":
+                count += 1
+            now = count
+        out = json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": {"count": now}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+threading.Thread(target=lambda: (sys.stdin.read(), os._exit(0)), daemon=True).start()
+Server(sock, Handler).serve_forever()
+"#;
+
+fn alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn a_project_connector_runs_once_and_every_bot_of_the_project_shares_it() {
+    // Short names: a unix socket's path may have 103 bytes.
+    let home = home("pc");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-pcsite", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    fs::write(real.join("server.py"), COUNTING_SERVER).unwrap();
+    let service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let connector = |args: &[&str]| json!({"name": "count", "command": "python3", "args": args});
+    let refused = |w: &mut Window, project: Value| {
+        let id = w.send("set_project", json!({"project": project}));
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    for bad in [
+        json!({"name": "count__x", "command": "python3"}),
+        json!({"name": "count", "command": " "}),
+    ] {
+        let project = json!({"name": "Site", "folder": real, "bots": [a], "connector": bad});
+        assert_eq!(refused(&mut w, project), "invalid_project");
+    }
+
+    let project = json!({"name": "Site", "folder": real, "bots": [a, b], "connector": connector(&["server.py"])});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    assert_eq!(made["connector"], connector(&["server.py"]));
+    let id = made["id"].as_str().unwrap().to_owned();
+    let data = home.canonicalize().unwrap().join("project-data").join(&id);
+    // Nothing runs until a bot of the project needs it.
+    assert!(!data.exists());
+
+    // Each bot's engine is given an address of the service's, never the program's.
+    let told = |w: &mut Window, bot: &str, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+        let log = home.join("bots").join(bot).join("connectors.log");
+        let all = fs::read_to_string(log).unwrap();
+        let last = all.lines().last().unwrap().to_owned();
+        assert!(
+            last.contains("\"name\":\"count\"") && last.contains("\"enabled\":true"),
+            "{last}"
+        );
+        assert!(
+            !last.contains("project-data") && !last.contains(".py"),
+            "{last}"
+        );
+        let url = last.split("\"url\":\"http://").nth(1).unwrap();
+        url.split('"').next().unwrap().to_owned()
+    };
+    let url_a = told(&mut w, &a, "n1");
+    let url_b = told(&mut w, &b, "n2");
+    assert_ne!(url_a, url_b);
+    let call = |url: &str| {
+        let (host, path) = url.split_once('/').unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call"}"#;
+        raw_http(
+            host,
+            &format!(
+                "POST /{path} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let counted = |answer: String| {
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+        serde_json::from_str::<Value>(body).unwrap()["result"]["count"].clone()
+    };
+    // Two bots, one program, one state.
+    assert_eq!(counted(call(&url_a)), 1);
+    assert_eq!(counted(call(&url_b)), 2);
+    assert_eq!(counted(call(&url_a)), 3);
+
+    // No other way in: not under another key, not on a port of its own, not from a bot's sandbox.
+    let (host, _) = url_a.split_once('/').unwrap();
+    assert!(call(&format!("{host}/mcp/0000")).starts_with("HTTP/1.1 404"));
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    let ports = Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid, "-i"])
+        .output()
+        .unwrap();
+    assert!(
+        ports.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&ports.stdout)
+    );
+    assert_eq!(
+        probe(
+            &mut w,
+            &a,
+            "n3",
+            &format!("connect {}", data.join("mcp").display())
+        ),
+        "refused"
+    );
+    // The program itself is kept to its folders, and its own folder is the user's alone.
+    assert_eq!(fs::read_to_string(data.join("sandbox")).unwrap(), "refused");
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(fs::metadata(&data).unwrap().mode() & 0o777, 0o700);
+
+    // Its tools ask as a connector's do, and an Always answer is kept for that tool.
+    let granted = |w: &mut Window| w.ok("get_permissions", json!({"bot": a}))["grants"].clone();
+    assert_eq!(
+        act(&mut w, &a, "n4", "connector count__tick", Some("Always")),
+        "chose Approve"
+    );
+    assert_eq!(granted(&mut w)[0]["target"], "count__tick");
+
+    // Killed, it is started again, and the bots go on through the same address.
+    assert!(
+        Command::new("kill")
+            .args(["-9", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    eventually("the program to be started again", || {
+        let now = fs::read_to_string(data.join("pid")).unwrap_or_default();
+        now != pid && !now.is_empty() && alive(&now)
+    });
+    assert_eq!(counted(call(&url_b)), 1);
+    assert_eq!(counted(call(&url_a)), 2);
+
+    // Another program: another server, so the old Always answer does not carry over.
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    let mut changed = made.clone();
+    changed["connector"] = connector(&["server.py", "--other"]);
+    w.ok("set_project", json!({"project": changed}));
+    eventually("the old program to stop", || !alive(&pid));
+    assert_eq!(granted(&mut w), json!([]));
+    // A call just after the start waits for the program to listen.
+    assert_eq!(counted(call(&url_a)), 1);
+
+    // Deleting the project stops its program.
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    w.ok("delete_project", json!({"projectId": id}));
+    eventually("the program to stop", || !alive(&pid));
+
+    // And so does the service going.
+    let project = json!({"name": "Again", "folder": real, "bots": [a], "connector": connector(&["server.py"])});
+    let again = w.ok("set_project", json!({"project": project}))["project"].clone();
+    told(&mut w, &a, "n5");
+    let data = home
+        .canonicalize()
+        .unwrap()
+        .join("project-data")
+        .join(again["id"].as_str().unwrap());
+    eventually("the program to run", || data.join("sandbox").exists());
+    let pid = fs::read_to_string(data.join("pid")).unwrap();
+    assert!(alive(&pid));
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &service.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    eventually("the program to stop", || !alive(&pid));
+}
+
+#[test]
+fn a_project_connector_that_will_not_start_is_reported_and_the_bots_still_answer() {
+    let home = home("pc-fail");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-pcfail", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    let error =
+        |w: &mut Window| w.ok("list_projects", json!({}))["projects"][0]["connectorError"].clone();
+
+    // Not on the service's path, and one that starts but ends at once.
+    for (command, why) in [("no-such-program-pc", "cannot start"), ("false", "stopped")] {
+        let project = json!({"name": "Site", "folder": real, "bots": [a],
+            "connector": {"name": "count", "command": command}});
+        let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+        w.ok("prompt", json!({"bot": a, "nonce": command, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+        eventually("the window to be told why", || {
+            error(&mut w).as_str().is_some_and(|e| e.contains(why))
+        });
+        // The bot answered. Without the connector's tools: one that never started is off (one
+        // that ends at once is started again after a wait, so its state moves).
+        if why == "cannot start" {
+            let log = home.join("bots").join(&a).join("connectors.log");
+            let told = fs::read_to_string(log).unwrap();
+            assert!(
+                told.lines().last().unwrap().contains("\"enabled\":false"),
+                "{told}"
+            );
+        }
+        w.ok("delete_project", json!({"projectId": made["id"]}));
+        assert_eq!(error(&mut w), Value::Null);
+    }
+}

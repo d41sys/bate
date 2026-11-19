@@ -1,7 +1,9 @@
-//! Signed-in MCP servers, as the bot's engine reaches them: through the service's local port,
-//! which adds the token. The engine is given `http://127.0.0.1:<port>/mcp/<key>` in place of
-//! the server's address, so no token is ever in the engine or in the bot's folder. The
-//! browser's way back from a sign-in ends here too.
+//! MCP servers, as the bot's engine reaches them: through the service's local port. The
+//! engine is given `http://127.0.0.1:<port>/mcp/<key>` in place of the server's address.
+//! - A signed-in server: the service adds the token, so none is ever in the engine or in the
+//!   bot's folder. The browser's way back from a sign-in ends here too.
+//! - A project's connector: the program listens on a unix socket in a folder only the service
+//!   (and the program) can reach, and this is the one way to it.
 
 use crate::core::Msg;
 use crate::hooks::{Answer, Request};
@@ -9,6 +11,8 @@ use crate::oauth::{self, Pending, Tokens};
 use crate::sys::now_ms;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
@@ -34,6 +38,8 @@ pub struct Upstream {
     pub bot: String,
     pub name: String,
     pub url: String,
+    /// A project's connector: the socket its program listens on, in place of `url`.
+    pub socket: Option<PathBuf>,
     /// The connector's own headers.
     pub headers: Vec<(String, String)>,
     pub tokens: Option<Tokens>,
@@ -130,6 +136,9 @@ pub fn forward(
     let Some(mut up) = ask(tx, |answer| Ask::Upstream(key.to_owned(), answer)) else {
         return Err((404, "not found".into()));
     };
+    if let Some(socket) = &up.socket {
+        return forward_unix(socket, request, stream);
+    }
     let signed_out = || (401, "sign in to this connector in Bate first".to_owned());
     let mut tokens = up.tokens.take().ok_or_else(signed_out)?;
     let renewed = |up: &Upstream, old: &Tokens| match oauth::renew(old) {
@@ -182,15 +191,63 @@ pub fn forward(
     Ok(())
 }
 
+/// How long a program just started may take to listen.
+const LISTEN: Duration = Duration::from_secs(5);
+
+/// Sends the engine's message to a project's program on its socket and its answer back, head
+/// and all, as it comes. No token: the program is not reachable but through here.
+fn forward_unix(socket: &Path, request: &Request, stream: &TcpStream) -> Result<(), Answer> {
+    let down = |e: io::Error| (502, format!("cannot reach the project's connector: {e}"));
+    let until = std::time::Instant::now() + LISTEN;
+    let mut up = loop {
+        match UnixStream::connect(socket) {
+            Ok(up) => break up,
+            // Not listening yet (or no more): a started program is given its time.
+            Err(e)
+                if std::time::Instant::now() < until
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
+                std::thread::sleep(Duration::from_millis(50))
+            }
+            Err(e) => return Err(down(e)),
+        }
+    };
+    let mut head = format!(
+        "POST /mcp HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: {}\r\n",
+        request.body.len()
+    );
+    for name in PASSED {
+        if let Some(value) = request.header(name) {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str("\r\n");
+    up.set_read_timeout(Some(CALL)).map_err(down)?;
+    up.write_all(head.as_bytes())
+        .and_then(|()| up.write_all(&request.body))
+        .map_err(down)?;
+    let mut out: &TcpStream = stream;
+    let _ = out.set_write_timeout(Some(CALL));
+    // The engine went away, or the program stopped mid-answer: nothing more to say to either.
+    match copy_flushing(&mut up.take(MAX_ANSWER), &mut out) {
+        Ok(0) => Err((502, "the project's connector sent no answer".into())),
+        _ => Ok(()),
+    }
+}
+
 /// Copies as the bytes come: an event of a stream must not wait for the next one.
-fn copy_flushing(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
-    let mut buf = [0; 8192];
+fn copy_flushing(from: &mut impl Read, to: &mut impl Write) -> io::Result<u64> {
+    let (mut buf, mut total) = ([0; 8192], 0);
     loop {
         match from.read(&mut buf)? {
-            0 => return Ok(()),
+            0 => return Ok(total),
             n => {
                 to.write_all(&buf[..n])?;
                 to.flush()?;
+                total += n as u64;
             }
         }
     }

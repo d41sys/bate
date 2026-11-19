@@ -9,6 +9,8 @@ export function Projects({ bots }: { bots: Bot[] }) {
   const [form, setForm] = useState<Project>(blank);
   const [deleting, setDeleting] = useState<string>();
   const [error, setError] = useState("");
+  /** The connector's program and arguments, as one line to type. */
+  const [line, setLine] = useState("");
 
   useEffect(() => {
     const load = () => request<{ projects: Project[] }>("list_projects").then((d) => setProjects(d.projects), (e) => setError(e.message));
@@ -28,8 +30,14 @@ export function Projects({ bots }: { bots: Bot[] }) {
   /** Whether it worked; if not, the error shows. */
   const run = (p: Promise<unknown>) =>
     p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
+  const edit = (p: Project) => {
+    setForm(p);
+    setLine(p.connector ? [p.connector.command, ...p.connector.args].join(" ") : "");
+  };
   const save = async () => {
-    if (await run(request("set_project", { project: form }))) setForm(blank);
+    const [command, ...args] = line.trim().split(/\s+/);
+    const connector = line.trim() ? { name: form.connector?.name ?? "", command, args } : undefined;
+    if (await run(request("set_project", { project: { ...form, connector, connectorError: undefined } }))) edit(blank);
   };
   const toggle = (id: string, on: boolean) =>
     setForm({ ...form, bots: on ? [...form.bots, id] : form.bots.filter((b) => b !== id) });
@@ -48,7 +56,11 @@ export function Projects({ bots }: { bots: Bot[] }) {
                 {" "}· {p.bots.filter((id) => bots.find((b) => b.id === id)?.agent).map(name).join(", ")}: an installed agent gets neither the project's instructions nor its notes.
               </span>
             )}
-            <button onClick={() => setForm(p)}>Edit</button>
+            {p.connector && (
+              <span className="note"> · Connector <code>{p.connector.name}</code>: <code>{[p.connector.command, ...p.connector.args].join(" ")}</code></span>
+            )}
+            {p.connectorError && <span className="error" role="alert"> · {p.connectorError}</span>}
+            <button onClick={() => edit(p)}>Edit</button>
             {deleting === p.id ? (
               <span>
                 Delete {p.name}? Its folder and its bots stay.{" "}
@@ -75,6 +87,18 @@ export function Projects({ bots }: { bots: Bot[] }) {
           <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
         </label>
         <fieldset>
+          <legend>Connector for all its bots</legend>
+          <label>
+            Name{" "}
+            <input maxLength={40} pattern="[a-z0-9_\-]*" placeholder="notes" value={form.connector?.name ?? ""} onChange={(e) => setForm({ ...form, connector: { command: "", args: [], ...form.connector, name: e.target.value } })} />
+          </label>
+          <label>
+            Program and arguments{" "}
+            <input size={50} placeholder="python3 server.py" value={line} onChange={(e) => setLine(e.target.value)} />
+          </label>
+          <p className="note">Bate runs this program once for the project, limited to the project's folder and a folder of its own, and every bot of the project gets its tools. It serves MCP over HTTP on the unix socket named in <code>BATE_MCP_SOCKET</code>. Arguments are split at spaces; leave the program empty for no connector.</p>
+        </fieldset>
+        <fieldset>
           <legend>Bots</legend>
           {bots.map((b) => {
             const other = elsewhere(b.id);
@@ -87,7 +111,7 @@ export function Projects({ bots }: { bots: Bot[] }) {
           })}
         </fieldset>
         <button disabled={form.bots.length > 20}>{form.id ? "Save" : "Add"}</button>
-        {form.id && <button type="button" onClick={() => setForm(blank)}>Cancel</button>}
+        {form.id && <button type="button" onClick={() => edit(blank)}>Cancel</button>}
       </form>
       {error && <p className="error" role="alert">{error}</p>}
     </section>

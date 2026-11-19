@@ -77,6 +77,10 @@ export type Project = {
   bots: string[];
   /** What every bot of the project follows after its own instructions, at most 8000 characters. */
   instructions?: string;
+  /** A program the service runs once for the whole project; every bot gets its tools. */
+  connector?: { name: string; command: string; args: string[] };
+  /** Output only: why that program is not running now. */
+  connectorError?: string;
 };
 
 /** What a role file would create (`read_roles`). */
