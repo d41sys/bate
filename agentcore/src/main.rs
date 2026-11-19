@@ -71,6 +71,8 @@ struct Engine {
     peers: (Vec<proto::groups::Peer>, bool),
     /// From the user, through the service; first in the system prompt.
     instructions: String,
+    /// Tool rounds a turn may take; set by the service.
+    steps: u32,
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -139,6 +141,7 @@ fn main() {
         connectors: Vec::new(),
         peers: (Vec::new(), false),
         instructions: String::new(),
+        steps: proto::STEP_LIMIT,
         running: None,
         model: default_model(),
         effort: None,
@@ -334,6 +337,13 @@ impl Engine {
                 self.instructions = text;
                 self.respond(id, Ok(()));
             }
+            Op::StepLimit { steps } => match steps {
+                0 => self.respond(id, Err("`steps` must be at least 1".into())),
+                steps => {
+                    self.steps = steps;
+                    self.respond(id, Ok(()));
+                }
+            },
             Op::Reply {
                 message,
                 text,
@@ -467,6 +477,7 @@ impl Engine {
             peers: self.peers.0.clone(),
             leads: self.peers.1,
             instructions: self.instructions.clone(),
+            steps: self.steps,
             control,
             answers: answers_rx,
             steer: steer_rx,

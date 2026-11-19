@@ -37,6 +37,9 @@ while IFS= read -r line; do
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
       case "$line" in
+        *'limit-turn'*)
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo '{"type":"turn_end","reason":"limit","error":"stopped after 3 tool rounds"}' ;;
         *'"text":"hang"'*) ;;
         *'"text":"probe '*)
           what=$(printf '%s' "$line" | sed 's/.*"text":"probe \([a-z]*\) .*/\1/')
@@ -118,6 +121,7 @@ while IFS= read -r line; do
     *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
+    *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
     *'"type":"apple_result"'*) printf '%s\n' "$line" >> apple.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -6161,4 +6165,65 @@ fn a_bot_on_an_installed_agent_refuses_steer_and_still_queues() {
     eventually("the queued prompt to reach the agent", || {
         prompts_received(&home, &bot, "n2") == 1
     });
+}
+
+#[test]
+fn a_bots_step_limit_is_kept_sent_to_the_engine_and_marked_on_a_routine_run_that_hit_it() {
+    let home = home("step-limit");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let limits = || {
+        fs::read_to_string(home.join("bots").join(&bot).join("step_limits.log")).unwrap_or_default()
+    };
+    let limit = |w: &mut Window| {
+        let bots = w.ok("list_bots", json!({}))["bots"].clone();
+        bots.as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == bot.as_str())
+            .unwrap()["stepLimit"]
+            .clone()
+    };
+
+    assert_eq!(limit(&mut w), proto::STEP_LIMIT);
+    for bad in [json!(0), json!(1001), json!("5"), json!(2.5)] {
+        let id = w.send("set_bot", json!({"bot": bot, "stepLimit": bad}));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["code"], "bad_request");
+    }
+    w.ok("set_bot", json!({"bot": bot, "stepLimit": 3}));
+    assert_eq!(limit(&mut w), 3);
+
+    // The engine has it from its start, and each change.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert!(limits().contains("\"steps\":3"), "{}", limits());
+    w.ok("set_bot", json!({"bot": bot, "stepLimit": 7}));
+    eventually("the new limit", || limits().contains("\"steps\":7"));
+
+    // A turn that stops at it says so in the chat, and a routine's run in its history.
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Long", "prompt": "limit-turn", "enabled": true,
+            "webhook": true}}),
+    )["routine"]
+        .clone();
+    let (id, url) = (
+        routine["id"].as_str().unwrap(),
+        routine["hookUrl"].as_str().unwrap(),
+    );
+    assert_eq!(http(url, "POST", None, "content-length: 0\r\n", ""), 202);
+    let end = w.wait_for(|f| {
+        f["type"] == "transcript"
+            && f["entry"]["type"] == "turn_end"
+            && f["entry"]["reason"] == "limit"
+    });
+    assert_eq!(end["entry"]["error"], "stopped after 3 tool rounds");
+    eventually("the run marked", || {
+        let runs = w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"].clone();
+        runs[0]["outcome"] == "limit" && runs[0]["error"] == "stopped after 3 tool rounds"
+    });
+    let runs = w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"].clone();
+    assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
 }

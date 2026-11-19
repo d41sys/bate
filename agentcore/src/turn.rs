@@ -1,7 +1,7 @@
 //! One turn: model call, tool calls, model call, … until the model stops calling tools.
 
 use crate::mcp::Servers;
-use crate::model::{Api, Ask, Delta, Provider, Reply};
+use crate::model::{Api, Ask, Delta, Provider, RETRIES, Reply};
 use crate::session::Session;
 use crate::tools::{self, Control, lock};
 use crate::{Out, Work};
@@ -38,6 +38,8 @@ pub struct Turn {
     pub leads: bool,
     /// What the user told this bot to be and do.
     pub instructions: String,
+    /// Tool rounds a turn may take.
+    pub steps: u32,
     /// From `answer` and `reply`, already checked against what the turn waits on.
     pub answers: Receiver<Answer>,
     pub steer: Receiver<String>,
@@ -206,6 +208,24 @@ fn saved(e: std::io::Error) -> String {
     format!("cannot save the conversation: {e}")
 }
 
+/// What the model sent, as the event that shows it.
+fn event(d: Delta) -> Event {
+    match d {
+        Delta::Text(t) => Event::Text { delta: t.into() },
+        Delta::Thinking(t) => Event::Thinking { delta: t.into() },
+        Delta::Retry {
+            attempt,
+            wait,
+            error,
+        } => Event::Retry {
+            attempt,
+            of: RETRIES,
+            wait_ms: wait.as_millis() as u64,
+            error: error.into(),
+        },
+    }
+}
+
 impl Turn {
     /// Runs the turn and returns its `turn_end`; the caller sends it once the conversation is back.
     pub fn run(&self, work: &mut Work, nonce: String, text: String) -> Event {
@@ -218,6 +238,10 @@ impl Turn {
             .map_err(saved)
             .and_then(|()| self.turn(session, mcp, &nonce, text));
         let (reason, error) = match turn {
+            Ok(TurnEnd::Limit) => (
+                TurnEnd::Limit,
+                Some(format!("stopped after {} tool rounds", self.steps)),
+            ),
             Ok(reason) => (reason, None),
             Err(e) => (TurnEnd::Error, Some(e)),
         };
@@ -233,6 +257,8 @@ impl Turn {
     ) -> Result<TurnEnd, String> {
         // Numbers the tool calls a server sent without an id.
         let mut unnamed = 0;
+        // Model replies that called tools, run so far.
+        let mut rounds = 0;
         // Whether the conversation was already summarised for the model call that comes next.
         let mut shrunk = false;
         let system = self.system();
@@ -247,6 +273,10 @@ impl Turn {
             }
             if self.control.aborted() {
                 return Ok(TurnEnd::Aborted);
+            }
+            // The conversation ends on tool results, so one more prompt goes on from here.
+            if rounds >= self.steps {
+                return Ok(TurnEnd::Limit);
             }
             // Asked for first: with it comes how much the model holds.
             let mut token = self.get_token();
@@ -268,19 +298,9 @@ impl Turn {
                 Err(e) => return Err(e),
             };
             let ask = self.ask_model(&model, &system, &session.messages, None, &tools);
-            let reply = match self.provider.stream(
-                &url,
-                key.as_deref(),
-                api,
-                &ask,
-                self.control.aborted_flag(),
-                |d| {
-                    self.out.send(&match d {
-                        Delta::Text(t) => Event::Text { delta: t.into() },
-                        Delta::Thinking(t) => Event::Thinking { delta: t.into() },
-                    })
-                },
-            ) {
+            let reply = match self.stream(&url, key.as_deref(), api, &ask, |d| {
+                self.out.send(&event(d))
+            }) {
                 // More than the model holds, whatever size was taken for it: the older part
                 // becomes a summary and the model is asked once more.
                 Err(e)
@@ -327,6 +347,7 @@ impl Turn {
                     self.steered(session, text)?;
                 }
             }
+            rounds += u32::from(!calls.is_empty());
             // Every call gets a result, even after an abort: the conversation must stay well-formed.
             for call in &calls {
                 session
@@ -396,9 +417,16 @@ impl Turn {
         let tools = self.tools(mcp, depth);
         let mut messages = vec![json!({"role": "user", "content": task})];
         let mut unnamed = 0;
+        let mut rounds = 0;
         loop {
             if self.control.aborted() {
                 return Err("Aborted by the user".into());
+            }
+            if rounds >= self.steps {
+                return Err(format!(
+                    "The sub-agent stopped after {} tool rounds.",
+                    self.steps
+                ));
             }
             let (url, key, api, model, _) = self.get_token()?;
             let ask = self.ask_model(&model, &system, &messages, None, &tools);
@@ -406,14 +434,7 @@ impl Turn {
                 text,
                 mut calls,
                 aborted,
-            } = self.provider.stream(
-                &url,
-                key.as_deref(),
-                api,
-                &ask,
-                self.control.aborted_flag(),
-                |_| {},
-            )?;
+            } = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;
             if aborted {
                 return Err("Aborted by the user".into());
             }
@@ -427,11 +448,29 @@ impl Turn {
                     answer => Ok(answer.to_owned()),
                 };
             }
+            rounds += 1;
             messages.push(assistant(&text, &calls));
             for call in &calls {
                 messages.push(self.run_call(mcp, call, depth, &format!("agent{n}/")));
             }
         }
+    }
+
+    /// A model call; each wait before it is asked again is shown.
+    fn stream(
+        &self,
+        url: &str,
+        key: Option<&str>,
+        api: Api,
+        ask: &Ask,
+        mut on: impl FnMut(Delta),
+    ) -> Result<Reply, String> {
+        let abort = self.control.aborted_flag();
+        self.provider
+            .stream(url, key, api, ask, abort, |d| match d {
+                Delta::Retry { .. } => self.out.send(&event(d)),
+                d => on(d),
+            })
     }
 
     fn tools(&self, mcp: &Servers, depth: usize) -> Value {
@@ -574,14 +613,7 @@ impl Turn {
         let instruction = json!({"role": "user", "content": SUMMARISE});
         let (url, key, api, model, _) = self.get_token()?;
         let ask = self.ask_model(&model, system, &messages[..cut], Some(&instruction), tools);
-        let reply = self.provider.stream(
-            &url,
-            key.as_deref(),
-            api,
-            &ask,
-            self.control.aborted_flag(),
-            |_| {},
-        )?;
+        let reply = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;
         if reply.aborted {
             return Err("aborted".into());
         }

@@ -16,7 +16,10 @@ use proto::groups::{Group, Peer};
 use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
 use proto::projects::Project;
 use proto::routines::{Routine, RoutineRun, RunOutcome};
-use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_program};
+use proto::{
+    Engine, EngineInput, Event, MAX_STEP_LIMIT, Op, PROTOCOL, STEP_LIMIT, WINDOW_PROTOCOL,
+    engine_program,
+};
 use serde_json::{Value, json};
 
 use crate::attach;
@@ -328,6 +331,8 @@ struct Running {
     compacting: u32,
     /// The message from another bot, or from a chat, that the running turn answers.
     call: Option<Call>,
+    /// The routine whose prompt the running turn answers: its run is marked if the turn stops at its step limit.
+    routine: Option<String>,
     /// The browser action the running turn waits on: set when the turn ends, so that an
     /// action still waiting for the user's hand-back is not run.
     browsing: Option<Arc<AtomicBool>>,
@@ -1345,6 +1350,17 @@ impl Core {
             }
             "set_bot" => {
                 let bot = self.bot_of(f)?;
+                let steps = match f.get("stepLimit").filter(|v| !v.is_null()) {
+                    None => None,
+                    Some(v) => match v.as_u64() {
+                        Some(n) if (1..=u64::from(MAX_STEP_LIMIT)).contains(&n) => Some(n as u32),
+                        _ => {
+                            return Err(bad(format!(
+                                "`stepLimit` must be a whole number from 1 to {MAX_STEP_LIMIT}"
+                            )));
+                        }
+                    },
+                };
                 let mut profile = self.store.profile(&bot).map_err(internal)?;
                 let text = |key: &str| {
                     f.get(key).filter(|v| !v.is_null()).map(|v| {
@@ -1388,6 +1404,12 @@ impl Core {
                 if instructions.is_some() && self.engines.contains_key(&bot) {
                     let text = self.instructions_of(&bot).map_err(internal)?;
                     self.send_op(&bot, Op::Instructions { text }, Waiter::Quiet)?;
+                }
+                if let Some(steps) = steps {
+                    self.store.set_step_limit(&bot, steps).map_err(internal)?;
+                    if self.engines.contains_key(&bot) {
+                        self.send_op(&bot, Op::StepLimit { steps }, Waiter::Quiet)?;
+                    }
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
@@ -1840,6 +1862,13 @@ impl Core {
         }
         let profile = self.store.profile(bot).unwrap_or_default();
         row["instructions"] = json!(profile.instructions);
+        row["stepLimit"] = json!(
+            self.store
+                .step_limit(bot)
+                .ok()
+                .flatten()
+                .unwrap_or(STEP_LIMIT)
+        );
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
         if let Ok(Some((model, effort))) = self.store.model(bot) {
@@ -1932,6 +1961,7 @@ impl Core {
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
+        let steps = self.store.step_limit(bot).map_err(internal)?;
         let model = self.store.model(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
@@ -2035,6 +2065,7 @@ impl Core {
                 busy: false,
                 compacting: 0,
                 call: None,
+                routine: None,
                 browsing: None,
                 steered: Vec::new(),
             },
@@ -2044,6 +2075,9 @@ impl Core {
         if !instructions.is_empty() {
             let text = instructions;
             self.send_op(bot, Op::Instructions { text }, Waiter::Quiet)?;
+        }
+        if let Some(steps) = steps {
+            self.send_op(bot, Op::StepLimit { steps }, Waiter::Quiet)?;
         }
         if let Some((model, effort)) = model {
             self.send_op(bot, Op::SetModel { model, effort }, Waiter::Quiet)?;
@@ -3187,6 +3221,7 @@ impl Core {
                     browsing.store(true, Ordering::SeqCst);
                 }
                 let answered = if r.busy { None } else { r.call.take() };
+                let routine = if r.busy { None } else { r.routine.take() };
                 if !r.busy {
                     // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
                     self.close_questions(bot);
@@ -3200,8 +3235,27 @@ impl Core {
                             "its turn failed: {}",
                             error.as_deref().unwrap_or("no reason given")
                         )),
+                        (proto::TurnEnd::Limit, _) => Err(format!(
+                            "its turn stopped: {}",
+                            error.as_deref().unwrap_or("it reached its step limit")
+                        )),
                     };
                     self.answer_caller(bot, call.caller, reply);
+                }
+                if let (
+                    Some(id),
+                    Event::TurnEnd {
+                        reason: proto::TurnEnd::Limit,
+                        error,
+                    },
+                ) = (routine, &ev)
+                {
+                    self.routine_ended(
+                        bot,
+                        &id,
+                        RunOutcome::Limit,
+                        error.clone().unwrap_or_default(),
+                    );
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
@@ -3365,8 +3419,14 @@ impl Core {
             }
             Waiter::Routine { routine, prompt } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
-                if let Some(e) = error {
-                    self.routine_failed(bot, &routine, e);
+                match error {
+                    Some(e) => self.routine_failed(bot, &routine, e),
+                    // Told at the end of the turn, if it stopped at its step limit.
+                    None => {
+                        if let Some(r) = self.engines.get_mut(bot) {
+                            r.routine = Some(routine);
+                        }
+                    }
                 }
             }
             Waiter::Connectors => {
@@ -3382,7 +3442,12 @@ impl Core {
                         self.answer_caller(bot, caller, Err(e))
                     }
                     None => {
+                        let routine = match &caller {
+                            Caller::Chat { routine, .. } => routine.clone(),
+                            Caller::Bot { .. } => None,
+                        };
                         if let Some(r) = self.engines.get_mut(bot) {
+                            r.routine = routine;
                             r.call = Some(Call {
                                 caller,
                                 reply: String::new(),
@@ -3774,6 +3839,11 @@ impl Core {
     }
 
     fn routine_failed(&mut self, bot: &str, id: &str, error: String) {
+        self.routine_ended(bot, id, RunOutcome::Failed, error);
+    }
+
+    /// Marks the newest run of routine `id` with how its turn ended.
+    fn routine_ended(&mut self, bot: &str, id: &str, outcome: RunOutcome, error: String) {
         let Ok(routines) = self.store.routines(bot) else {
             return;
         };
@@ -3782,7 +3852,7 @@ impl Core {
         };
         r.last_run = Some(RoutineRun {
             at_ms: now_ms(),
-            outcome: RunOutcome::Failed,
+            outcome,
             error: Some(error),
         });
         // shortcut: the refusal is taken to belong to the newest run; give runs an id if a

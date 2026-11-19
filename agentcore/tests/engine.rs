@@ -25,22 +25,24 @@ struct Model {
     headers: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
 }
 
+/// A scripted reply as the body of a stream.
+fn stream_body(chunks: Vec<Value>) -> Vec<u8> {
+    let mut body = String::new();
+    for chunk in chunks {
+        // `null` holds the reply open until the engine hangs up.
+        if chunk.is_null() {
+            return body.into_bytes();
+        }
+        body.push_str(&format!("data: {chunk}\n\n"));
+    }
+    (body + "data: [DONE]\n\n").into_bytes()
+}
+
 impl Model {
     fn serve(replies: Vec<Vec<Value>>) -> Model {
-        let body = |chunks: Vec<Value>| {
-            let mut body = String::new();
-            for chunk in chunks {
-                // `null` holds the reply open until the engine hangs up.
-                if chunk.is_null() {
-                    return body.into_bytes();
-                }
-                body.push_str(&format!("data: {chunk}\n\n"));
-            }
-            (body + "data: [DONE]\n\n").into_bytes()
-        };
         // Like a server that keeps the body open: the engine must hang up by itself, or the
         // next request is never served.
-        Model::send(replies.into_iter().map(body).collect(), true)
+        Model::send(replies.into_iter().map(stream_body).collect(), true)
     }
 
     /// Sends recorded reply bodies byte for byte, one per request, and closes after each. A body
@@ -50,6 +52,15 @@ impl Model {
     }
 
     fn send(bodies: Vec<Vec<u8>>, keep_open: bool) -> Model {
+        Model::spawn(bodies, keep_open, false)
+    }
+
+    /// As `serve`, but a reply the engine hangs up on does not stop the next one being served.
+    fn stalling(replies: Vec<Vec<Value>>) -> Model {
+        Model::spawn(replies.into_iter().map(stream_body).collect(), true, true)
+    }
+
+    fn spawn(bodies: Vec<Vec<u8>>, keep_open: bool, detach: bool) -> Model {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -87,7 +98,16 @@ impl Model {
                 }
                 let _ = stream.write_all(&reply);
                 if keep_open {
-                    let _ = reader.read(&mut [0]);
+                    let hold = move || {
+                        let _ = reader.read(&mut [0]);
+                        drop(stream);
+                    };
+                    // A reply the engine gives up on (it idled) must not hold the retry back.
+                    if detach {
+                        thread::spawn(hold);
+                    } else {
+                        hold();
+                    }
                 }
             }
         });
@@ -2597,4 +2617,215 @@ fn a_steer_is_taken_in_between_model_calls_announced_and_kept_in_the_conversatio
     let mut engine = engine.reopen(&dir, &model, &session);
     engine.exchange("n2", "next");
     assert!(sent(&model, 2).contains("go left"));
+}
+
+/// Short waits, so a retry or an idle call does not slow the test.
+const QUICK: [(&str, &str); 2] = [("BATE_MODEL_RETRY_MS", "20"), ("BATE_MODEL_IDLE_MS", "500")];
+
+fn refusal(status: &str, headers: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\n{headers}\r\n\
+         {{\"error\":{{\"message\":\"not now\"}}}}"
+    )
+    .into_bytes()
+}
+
+fn whole(t: &str) -> Vec<u8> {
+    stream_body(vec![text(t)])
+}
+
+fn retries(events: &[Event]) -> Vec<(u32, u64)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Retry {
+                attempt, wait_ms, ..
+            } => Some((*attempt, *wait_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_server_error_is_asked_again_and_the_conversation_shows_it() {
+    let dir = workdir("retry");
+    let model = Model::replay(vec![refusal("503 Service Unavailable", ""), whole("Back.")]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::Retry { attempt: 1, of: 5, wait_ms: 20, error } if error.contains("503")),
+        "{events:?}"
+    );
+    assert_eq!(
+        events[1],
+        Event::Text {
+            delta: "Back.".into()
+        }
+    );
+    assert_eq!(
+        events[2],
+        Event::TurnEnd {
+            reason: TurnEnd::Done,
+            error: None
+        }
+    );
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[test]
+fn a_wait_the_server_asks_for_is_honoured() {
+    let dir = workdir("retry-after");
+    let model = Model::replay(vec![
+        refusal("429 Too Many Requests", "retry-after: 1\r\n"),
+        whole("Back."),
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    let start = std::time::Instant::now();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert_eq!(retries(&events), [(1, 1000)]);
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd { error: None, .. })
+    ));
+}
+
+#[test]
+fn a_refusal_that_will_not_go_away_is_not_asked_again() {
+    let dir = workdir("no-retry");
+    let model = Model::replay(vec![refusal("401 Unauthorized", ""), whole("never")]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert!(retries(&events).is_empty(), "{events:?}");
+    let Some(Event::TurnEnd {
+        reason: TurnEnd::Error,
+        error: Some(e),
+    }) = events.last()
+    else {
+        panic!("{events:?}")
+    };
+    assert!(e.contains("401"), "{e}");
+    assert_eq!(model.requests().len(), 1);
+}
+
+#[test]
+fn a_call_that_keeps_failing_is_given_up_after_five_retries_with_growing_waits() {
+    let dir = workdir("give-up");
+    let model = Model::replay(vec![refusal("500 Internal Server Error", ""); 6]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        retries(&events),
+        [(1, 20), (2, 40), (3, 80), (4, 160), (5, 320)]
+    );
+    assert!(
+        matches!(events.last(), Some(Event::TurnEnd { reason: TurnEnd::Error, error: Some(e) }) if e.contains("500"))
+    );
+    assert_eq!(model.requests().len(), 6);
+}
+
+#[test]
+fn a_call_that_sends_nothing_is_ended_and_asked_again() {
+    let dir = workdir("idle");
+    let model = Model::stalling(vec![vec![Value::Null], vec![text("Back.")]]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::Retry { attempt: 1, error, .. } if error.contains("sent nothing")),
+        "{events:?}"
+    );
+    assert_eq!(
+        events[1],
+        Event::Text {
+            delta: "Back.".into()
+        }
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd { error: None, .. })
+    ));
+}
+
+#[test]
+fn stopping_the_turn_during_a_wait_ends_it_at_once() {
+    let dir = workdir("stop-wait");
+    let model = Model::replay(vec![
+        refusal("503 Service Unavailable", "retry-after: 30\r\n"),
+        whole("never"),
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(|e| matches!(e, Event::Retry { .. }));
+    assert_eq!(retries(&events), [(1, 30_000)]);
+    let start = std::time::Instant::now();
+    assert_eq!(engine.request(Op::Abort), None);
+    let events = engine.until(is_turn_end);
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd {
+            reason: TurnEnd::Aborted,
+            ..
+        })
+    ));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert_eq!(model.requests().len(), 1);
+}
+
+#[test]
+fn a_turn_stops_after_its_tool_rounds_and_one_more_prompt_goes_on() {
+    let dir = workdir("steps");
+    let plan = |id| {
+        call(
+            id,
+            "plan",
+            json!({"steps": [{"step": "x", "status": "pending"}]}),
+        )
+    };
+    let model = Model::serve(vec![
+        vec![plan("c1")],
+        vec![plan("c2")],
+        vec![text("Finished.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    assert!(engine.request(Op::StepLimit { steps: 0 }).is_some());
+    assert_eq!(engine.request(Op::StepLimit { steps: 2 }), None);
+    engine.prompt("go");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        events.last(),
+        Some(&Event::TurnEnd {
+            reason: TurnEnd::Limit,
+            error: Some("stopped after 2 tool rounds".into())
+        })
+    );
+    assert_eq!(model.requests().len(), 2);
+
+    engine.prompt_as("n2", "Continue.");
+    let events = engine.until(is_turn_end);
+    assert!(events.contains(&Event::Text {
+        delta: "Finished.".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd {
+            reason: TurnEnd::Done,
+            ..
+        })
+    ));
+    // The model sees the two rounds and the prompt after them.
+    let last = model.requests()[2]["messages"].as_array().unwrap().clone();
+    assert_eq!(last.iter().filter(|m| m["role"] == "tool").count(), 2);
+    assert_eq!(last.last().unwrap()["content"], "Continue.");
 }

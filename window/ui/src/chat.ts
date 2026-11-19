@@ -8,6 +8,7 @@ export type Entry =
   | { type: "tool_start"; call: string; tool: string; args: unknown }
   | { type: "tool_end"; call: string; output: string; isError: boolean }
   | ({ type: "question" } & Question)
+  | { type: "retry"; attempt: number; of: number; waitMs: number; error: string }
   | { type: "turn_end"; reason: string; error?: string }
   | { type: "steered"; text: string }
   | { type: "fork"; nonce: string };
@@ -25,6 +26,7 @@ export type Item = { id: number } & (
   | { kind: "ended"; reason: string; error?: string }
   // A message the user put into the running turn; the bot saw it at this point.
   | { kind: "steered"; text: string }
+  | { kind: "retrying"; attempt: number; of: number; waitMs: number; error: string }
   | { kind: "forked" }
 );
 
@@ -77,6 +79,9 @@ function put(items: Item[], { seq: id, entry }: Row) {
       }
       break;
     }
+    case "retry":
+      items.push({ id, kind: "retrying", attempt: entry.attempt, of: entry.of, waitMs: entry.waitMs, error: entry.error });
+      break;
     case "turn_end":
       // A turn that ended as it should needs no line of its own.
       if (entry.reason !== "done") items.push({ id, kind: "ended", reason: entry.reason, error: entry.error });

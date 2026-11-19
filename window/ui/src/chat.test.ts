@@ -104,3 +104,18 @@ test("a steer stays in the chat where the bot took it and splits the reply aroun
   ]);
   assert.deepEqual(rows.reduce(add, []), build(rows));
 });
+
+test("a retry and a turn that hit its step limit each get a line", () => {
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "go" },
+    { type: "retry", attempt: 1, of: 5, waitMs: 2000, error: "the model server answered 503" },
+    { type: "text", delta: "ok" },
+    { type: "turn_end", reason: "limit", error: "stopped after 100 tool rounds" },
+  ];
+  const chat = build(entries.map((entry, i) => ({ seq: i + 1, entry })));
+  assert.deepEqual(chat.slice(1), [
+    { id: 2, kind: "retrying", attempt: 1, of: 5, waitMs: 2000, error: "the model server answered 503" },
+    { id: 3, kind: "reply", text: "ok" },
+    { id: 4, kind: "ended", reason: "limit", error: "stopped after 100 tool rounds" },
+  ]);
+});
