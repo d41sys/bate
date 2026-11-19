@@ -2499,3 +2499,50 @@ fn a_desktop_question_names_the_whole_action_so_a_grant_covers_only_that() {
         assert_eq!(title, &format!("Desktop: {target}"));
     }
 }
+
+#[test]
+fn a_bot_in_a_project_works_in_the_projects_folder_and_keeps_its_own() {
+    let own = workdir("own");
+    let work = workdir("project");
+    fs::write(work.join("a.txt"), "from the project\n").unwrap();
+    fs::create_dir_all(own.join("memory")).unwrap();
+    fs::write(own.join("memory/user.md"), "Called Ada.\n").unwrap();
+    let model = Model::serve(vec![
+        vec![call("c1", "read", json!({"path": "a.txt"}))],
+        vec![call("c2", "run", json!({"command": "pwd > here.txt"}))],
+        vec![text("Done.")],
+    ]);
+    let env = [("BATE_WORK_DIR", work.to_str().unwrap())];
+    let mut engine = Engine::start_with(&own, &model, &env);
+    engine.open_new();
+    engine.prompt("go");
+    let mut events = answer(&mut engine, "Approve");
+    events.extend(answer(&mut engine, "Approve"));
+    events.extend(engine.until(is_turn_end));
+    // A relative path is in the project's folder, and commands run there.
+    assert!(events.iter().any(
+        |e| matches!(e, Event::ToolEnd { output, is_error: false, .. } if output.contains("from the project"))
+    ));
+    let here = fs::read_to_string(work.join("here.txt")).unwrap();
+    assert_eq!(
+        Path::new(here.trim()).canonicalize().unwrap(),
+        work.canonicalize().unwrap()
+    );
+    // The conversation stays in the bot's own folder, and the model is told where its notes
+    // are by their full path: `memory/…` alone would be in the project.
+    assert!(own.join(".agentcore/sessions").is_dir());
+    assert!(!work.join(".agentcore").exists());
+    let system = model.requests()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let working = format!(
+        "Your working folder is {}.",
+        work.canonicalize().unwrap().display()
+    );
+    assert!(system.contains(&working), "{system}");
+    // The engine knows its own folder by its real path.
+    let own = own.canonicalize().unwrap();
+    let note = format!("## {}/memory/user.md\nCalled Ada.", own.display());
+    assert!(system.contains(&note), "{system}");
+}

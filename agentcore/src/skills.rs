@@ -12,9 +12,12 @@ use std::path::Path;
 const MOST: usize = 50;
 const MAX_FILE: u64 = 64 * 1024;
 
-/// The part of the system prompt about skills; empty when the bot has none.
-pub fn prompt(folder: &Path) -> String {
+/// The part of the system prompt about skills; empty when the bot has none. `named`: the
+/// folder the skills are named under; empty when `folder` is where the tools work.
+pub fn prompt(folder: &Path, named: &Path) -> String {
     let dir = folder.join(DIR);
+    let shown = named.join(DIR);
+    let shown = shown.display();
     // As with memory: only plain folders and files count, never what a link points to.
     if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
         return String::new();
@@ -45,13 +48,13 @@ pub fn prompt(folder: &Path) -> String {
     );
     for skill in found {
         text.push_str(&format!(
-            "\n- {} ({DIR}/{}/{FILE}): {}",
+            "\n- {} ({shown}/{}/{FILE}): {}",
             skill.name, skill.name, skill.description
         ));
     }
     if more > 0 {
         text.push_str(&format!(
-            "\n({more} more are not listed; their folders are in {DIR}/.)"
+            "\n({more} more are not listed; their folders are in {shown}/.)"
         ));
     }
     text
@@ -65,6 +68,7 @@ mod tests {
     fn installed_skills_are_listed_by_name_with_where_to_read_them() {
         let folder = std::env::temp_dir().join(format!("agentcore-skills-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
+        let prompt = |folder: &Path| prompt(folder, Path::new(""));
         assert_eq!(prompt(&folder), "");
         let skill = |name: &str, text: &str| {
             fs::create_dir_all(folder.join(DIR).join(name)).unwrap();

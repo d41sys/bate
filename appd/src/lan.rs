@@ -426,8 +426,8 @@ impl Lan {
     }
 }
 
-/// A paired device may do what the window does, but not change network settings, add devices
-/// or install an update.
+/// A paired device may do what the window does, but not change local credentials, file access
+/// or network settings, add devices, or install an update.
 const FORBIDDEN_OVER_LAN: &[&str] = &[
     "lan_status",
     "set_lan",
@@ -436,6 +436,9 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "get_provider",
     "set_provider",
     "install_update",
+    "set_disk_access",
+    "set_project",
+    "delete_project",
     "get_chatgpt",
     "sign_in_chatgpt",
     "sign_out_chatgpt",

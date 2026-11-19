@@ -64,4 +64,13 @@ export type Group = {
   members: string[];
 };
 
+export type Project = {
+  id?: string;
+  name: string;
+  /** The folder's full path; empty in a new project for one Bate makes. */
+  folder: string;
+  /** The ids of the bots in it, at most 20. A bot is in at most one project. */
+  bots: string[];
+};
+
 export type Skill = { name: string; description: string };

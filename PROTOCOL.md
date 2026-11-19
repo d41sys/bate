@@ -8,7 +8,7 @@ The service (`appd`) runs one engine program per bot and talks to it over the pr
 
 For a bot that runs on an installed agent (`set_agent`), the same program is started with the arguments `acp <agent program> [arguments]`: see Installed agents.
 
-The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`). The service copies each line of the engine's standard error into its log, tagged with the bot.
+The service starts the program with the bot's folder as its working directory (`proto::Engine::spawn`), and names the folder the bot works in in `BATE_WORK_DIR`: the folder of the bot's project, or the bot's folder again (see Projects). An engine keeps its own files (conversations, notes, skills) in its working directory, and runs its tools, and an installed agent, in `BATE_WORK_DIR`. The service copies each line of the engine's standard error into its log, tagged with the bot.
 
 ## Frames
 
@@ -27,7 +27,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `start` | `bot` | Begin a new conversation. The engine sends `session`. The engine works in its working directory, the bot's folder. |
+| `start` | `bot` | Begin a new conversation. The engine sends `session`. The engine works in `BATE_WORK_DIR`, without it in its working directory, the bot's folder. |
 | `open` | `bot`, `session` | Reopen an earlier conversation. The engine sends `session`. |
 | `prompt` | `nonce`, `text` | Send a user message. `nonce` is the prompt ledger's key and comes back in `turn_start`. |
 | `steer` | `text` | Add a message to the turn that is running. |
@@ -73,7 +73,7 @@ A killed engine sends nothing more.
 ## `agentcore` (Bate's own engine)
 
 - **Model:** two providers. With `api: "responses"` in the `token` answer (a ChatGPT sign-in), the engine calls OpenAI's Responses API: `POST <base>/responses` with `store: false`, `stream: true`, the system prompt as `instructions`, the conversation as `input` items (a tool call as `function_call`, its result as `function_call_output`) and the tools as functions in one `namespace` named `bate`. `response.output_text.delta` becomes `text`; a `function_call` item that is done becomes a tool call; the reply is whole at `response.completed`, and `response.failed`, `response.incomplete` or `error` ends the turn with that reason. Thinking is not shown on this route. Otherwise the engine calls the OpenAI-compatible streaming chat API (`POST <base>/chat/completions`, `stream: true`). The service stores the model server base URL and optional API key (`set_provider`/`get_provider`), falling back to `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Before each model call, the engine asks the service for the endpoint and token (`token` event and operation), so a token cannot expire mid-turn. `appd launch` passes `BATE_MODEL_BASE_URL`, `BATE_MODEL` and `BATE_MODEL_CONTEXT` on to the service; the key is not written into the launchd plist. The model is `set_model`'s, else `BATE_MODEL`. `delta.content` becomes `text`; `delta.reasoning_content` or `delta.reasoning` becomes `thinking`.
-- **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the bot's folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the bot's folder.
+- **Tools:** `read` (numbered lines, `offset`, `limit`), `write`, `edit` (`old` must appear exactly once), `run` (`/bin/sh -c` in the working folder, `timeoutSecs` 120 by default and at most 600, output capped at 64 KiB), `search` (`grep -rnEI`). Relative paths resolve against the working folder: the project's for a bot in one, otherwise the bot's.
 - **Approval:** every tool call asks first (the Apple app tools: see Apple apps; `plan` never asks): a `question` with an id of its own, options `Approve` and `Deny`, with `kind` and `target`: `read` and `search` are `read` (the path; `.` for a search with none), `write` and `edit` are `write` (the path), `run` is `run` (the command), a connector's tool is `connector` (`<connector>__<tool>`). The engine itself allows nothing. A question takes one answer; a second is refused. `answer` with another question or choice is refused. A denied call returns "The user denied this action." to the model.
 - **Sub-agents:** the tool `agent {task}` starts a sub-agent: the same model, tools and folder, and a conversation of its own that begins with `task` and is not kept. Its last message is the tool's result. Its tool calls are asked about and shown like any other (their `call` ids begin `agent<n>/`); what it says in between is not sent. A sub-agent may start another, 5 levels deep at most: at level 5 the tool is not offered and a call to it is refused. A sub-agent's conversation is not compacted and cannot be steered.
 - **Plan:** the tool `plan {steps}` takes the whole list of a task's steps, each `{step, status}` with status `pending`, `in_progress` or `done`, and answers "Plan updated.". A list that is empty, or has a step without text or with another status, is refused. It asks no `question` and the engine keeps nothing: the steps are the `args` of the call's `tool_start`. The window shows them as a checklist, the newest of a turn in place of the older ones (a sub-agent's apart from the conversation's).
@@ -103,7 +103,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -112,7 +112,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
 | `set_bot` | `bot`, `name?`, `instructions?` (at most 8000 characters), `avatar?` (at most 8 characters, such as an emoji), `color?` (`#rrggbb` or empty) | `{}`; what is given changes; `bots_changed` follows |
 | `order_bots` | `bots`: every bot's id once, in the new order | `{}`; `list_bots` lists them so from then on |
-| `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes), everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
+| `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its groups (a group it led, or left with no member, goes) and its project, everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
 | `search` | `text` (1 to 200 bytes), `bot?`, `limit?` (default 50, at most 200) | `{hits: [{bot, seq, kind, snippet}]}`: prompts (`kind` `user`) and replies (`reply`) holding `text` in any case, of `bot` or of all bots, newest first. A reply is searched whole, as the chat joins its pieces; `seq` is its first piece's, the chat item's `id`. |
 | `open_bot` | `bot`, `limit?`, `before?` | `{bot: Bot, history:[Entry], more, questions:[question event]}`: the last `limit` entries (all without it) with `seq` below `before`, oldest first; `more` is `true` when there are older ones |
 | `prompt` | `bot`, `nonce`, `text` | `{}` once the engine admitted it; `{duplicate:true}` or `{duplicate:true, uncertain:true}` for a known nonce (see Prompt ledger) |
@@ -133,6 +133,9 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_groups` | none | `{groups:[Group]}` |
 | `set_group` | `group` | `{group}`; creates when `group.id` is missing. `invalid_group`, `no_such_group` |
 | `delete_group` | `groupId` | `{}`, or `no_such_group` |
+| `list_projects` | none | `{projects:[Project]}` |
+| `set_project` | `project` | `{project}`; creates when `project.id` is missing. `invalid_project`, `no_such_project`. Refused (`forbidden`) for a device on the network |
+| `delete_project` | `projectId` | `{}`: the project is forgotten; its folder and its bots stay. `no_such_project`. Refused (`forbidden`) for a device on the network |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
 | `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
 | `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
@@ -140,7 +143,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `read_memory` | `bot`, `name` | `{text}`, or `no_such_note` |
 | `write_memory` | `bot`, `name`, `text` | `{}`; creates or replaces the note |
 | `delete_memory` | `bot`, `name` | `{}`, or `no_such_note` |
-| `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit |
+| `set_disk_access` | `bot`, `wholeDisk` | `{}`; see Folder limit. Refused (`forbidden`) for a device on the network |
 | `hand_back_browser` | `bot` | `{}`; the user gives the bot's browser back (see Browser) |
 | `get_helper` | none | `{installed, path, connected, accessibility, screenRecording, fullDiskAccess}`: Bate Helper (see Desktop). The three permissions are `null` until the helper has connected. |
 | `open_helper_settings` | `pane` (`accessibility`, `screen_recording` or `full_disk_access`) | `{}`: opens that pane of System Settings, starting the helper first if it is not running, which is what makes macOS list it there. Not for devices on the network. Code `bad_request` for another pane |
@@ -148,7 +151,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector, desktop, apple_read, apple_change}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}`. `always` for `apple_change` is refused (`bad_request`): see Apple apps |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
-| `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
+| `attach` | `bot`, `data` (base64), `name` (first part) or `upload` (later parts), `last?` | `{upload}` while `last` is not true, then `{path}`: the file, at most 25 MiB, is in `attachments/` in the bot's folder under `name`, or `1-name`, `2-name`… when taken. For a bot in a project `path` is full, so a tool resolves it in the bot's own folder; otherwise it stays relative as before. Parts go with the window that sent them; at most 4 files at once per window. Nothing is written through a link in the bot's folder. |
 | `export_chat` | `bot` | `{path}`: the whole chat as Markdown in `exports/` under the service's home |
 | `export_report` | none | `{path}`: a new bug-report archive (see below) |
 | `get_provider` | none | `{url, hasKey, fromEnv}`: the model server's URL (`null`: none) and whether it has an API key. `fromEnv`: nothing is saved, so both are the service's `BATE_MODEL_BASE_URL` and `BATE_MODEL_API_KEY`. Refused (`forbidden`) for a device on the network, as is `set_provider`. |
@@ -188,6 +191,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"helper_changed"}` | Re-run `get_helper`: the helper app connected, quit, or its permissions changed. |
 | `{"type":"channels_changed","bot"}` | Re-run `get_channels`: a channel was set or removed, connected or failed, a chat was paired or removed, or a wrong code was sent. |
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
+| `{"type":"projects_changed"}` | Re-run `list_projects`. |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` | A window changed a note: re-run `list_memory`. What the bot writes itself is not announced. |
 
@@ -209,13 +213,23 @@ A nonce the engine refused (`engine_error`), or that could not be sent because t
 
 ### Bots together
 
-Same shapes as `proto::groups`. A group is `{id, name, lead, members}`: `name` is 1 to 80 characters, `lead` a bot's id, `members` 1 to 20 other bots; there are at most 50 groups, and a bot may be in several. The bots of a group may message each other; no other bots can. The service tells each running engine its bot's peers (`peers`) when it starts and after every change to the groups.
+Same shapes as `proto::groups`. A group is `{id, name, lead, members}`: `name` is 1 to 80 characters, `lead` a bot's id, `members` 1 to 20 other bots; there are at most 50 groups, and a bot may be in several. The bots of a group may message each other, and so may the bots of a project (see Projects); no other bots can. The service tells each running engine its bot's peers (`peers`) when it starts and after every change to the groups or the projects.
 
-A message (`message` from an engine) is passed on by the service as a prompt to the other bot, with nonce `bot-<from>-<random>` and a first line that says which bot it is from and that it is not the user. What that bot says after its last tool call is the reply, sent back (`reply`) when its turn ends. No reply, and the reason instead, when: the two share no group; the other bot is in a turn or has an unanswered prompt (nothing is queued, and nothing interrupts it); its turn is stopped by its user or fails; its engine stops; or it says nothing. A reply is cut at 100 000 bytes.
+A message (`message` from an engine) is passed on by the service as a prompt to the other bot, with nonce `bot-<from>-<random>` and a first line that says which bot it is from and that it is not the user. What that bot says after its last tool call is the reply, sent back (`reply`) when its turn ends. No reply, and the reason instead, when: the two share no group and no project; the other bot is in a turn or has an unanswered prompt (nothing is queued, and nothing interrupts it); its turn is stopped by its user or fails; its engine stops; or it says nothing. A reply is cut at 100 000 bytes.
 
 A lead differs from a member in what its engine tells the model: that it leads, and to hand out tasks and put the results together. It has no way to stop or redirect another bot; only the user stops a bot. Each bot acts with its own permissions and its own folder limit, whoever messaged it, and its questions go to the user as always.
 
 Whether a bot may message another is asked like a connector's tool: a `question` of kind `connector`, target `bot:<id>`. `Always` remembers it for that bot; the `connector` level of the sender applies.
+
+### Projects
+
+Same shape as `proto::projects`. A project is `{id, name, folder, bots}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
+
+- **The folder:** the user names it (`~/` stands for their home). It must be there, and it is kept by its real path. It is refused (`invalid_project`) when it is the user's home or a folder above it, when it holds the service's home, or when it is inside the service's home. With `folder` empty a new project gets `projects/<id>` in the service's home, made by the service, and a project that has a folder keeps it. `delete_project` never deletes a folder.
+- **Working there:** the engine of a bot in a project is told the folder in `BATE_WORK_DIR`. Its tools take a relative path from there and run commands there. The bot's own folder stays where its conversations, notes, skills and attachments are; the engine tells the model that folder, and names notes and skills by their full paths.
+- **The limit:** a bot kept in its folder may read and change everything in the project's folder as well, and nothing else (see Folder limit). The folder is checked again each time an engine starts; one that is gone or no longer allowed leaves the bot without an engine (`engine_failed`) until the project is changed.
+- **Changes:** the limit is set when an engine starts, so `set_project` and `delete_project` stop the idle engine of every bot that came, went, or whose project's folder changed; a bot in a turn finishes under its old rule and stops then. Its next turn starts under the new rule. The window's project-file link changes with the engine, never during its turn. `projects_changed` follows, and every running engine gets its peers for its next turn.
+- **Files in the window:** `work/<bot>` in the service's home is a link the service keeps to the folder of the bot's project. For `botfile://localhost/<bot>/<path>` the window looks in that folder first, then in the bot's own.
 
 ### Skills
 
@@ -244,10 +258,10 @@ The memory commands are for the window's panel. A `name` is a file name ending i
 
 ### Folder limit
 
-A bot is kept inside its folder (`bots/<id>` under the service's home) by the operating system unless `wholeDisk` is true; a new bot is limited. The service starts a limited bot's engine under macOS `sandbox-exec`, so the rule holds for the engine and for every program it starts, whatever was approved:
+A bot is kept inside its folder (`bots/<id>` under the service's home), and the folder of its project if it is in one, by the operating system unless `wholeDisk` is true; a new bot is limited. The service starts a limited bot's engine under macOS `sandbox-exec`, so the rule holds for the engine and for every program it starts, whatever was approved:
 
-- **Writing:** only inside the folder.
-- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder and the engine's program. System files stay readable.
+- **Writing:** only inside the folder and the project's folder.
+- **Reading:** nothing under `/Users`, `/Volumes`, `/private/var/folders`, `/private/tmp`, `/cores`, Homebrew's `var`, the system's logs or the service's home, except the folder, the project's folder and the engine's program. System files stay readable.
 - **Other programs:** no Apple events, no opening apps, no launchd jobs, no signals to or looks at processes outside (so no `pgrep`), no drivers, no shared memory, no local sockets outside the folder (so not the service's own socket, nor the user's key agent), no preferences (`defaults` would write into the user's home), and only the system services needed to look up names and check certificates (so not the keychain, the clipboard or the file index).
 - **Environment:** `PATH`, `LANG`, `LC_ALL`, `USER`, `LOGNAME`, `SHELL`, `TERM` and the engine's own `BATE_` settings except `BATE_MODEL_API_KEY`; nothing else of the service's. `HOME` is the folder and `TMPDIR` is `.tmp` in it, so programs keep their settings and temporary files there.
 - **Network:** open, local ports included: the engine has to reach its model.
@@ -418,7 +432,7 @@ A bot can run on an agent installed on this Mac that speaks the [Agent Client Pr
 
 - `set_agent` stores the choice, forgets the bot's open conversation (the other engine could not reopen it; the transcript stays), and stops the bot's idle engine. `bots_changed` follows. During a turn it is refused with `busy`.
 - The agent's login is in the user's home, so such a bot runs only with `wholeDisk` true. Otherwise its engine does not start (`engine_failed`, saying so).
-- `agentcore acp` starts the agent in the bot's folder and translates: `start` is `session/new`, `open` is `session/load` (refused by an agent that cannot), `prompt` is `session/prompt`, `abort` is `session/cancel`. The agent's message and thought chunks become `text` and `thinking`; its tool calls become `tool_start` (`tool` is the agent's kind of tool; `args` holds `title`, `rawInput`, `locations`) and `tool_end`. Its plan becomes a `tool_start` and `tool_end` of the tool `plan` with the entries as `steps` (`completed` is `done`), so the window shows it as it shows the plan of Bate's own engine; an emptied plan is not sent.
+- `agentcore acp` starts the agent process in the bot's folder, gives `session/new` and `session/load` the project's folder when the bot is in one, and translates: `start` is `session/new`, `open` is `session/load` (refused by an agent that cannot), `prompt` is `session/prompt`, `abort` is `session/cancel`. The agent's message and thought chunks become `text` and `thinking`; its tool calls become `tool_start` (`tool` is the agent's kind of tool; `args` holds `title`, `rawInput`, `locations`) and `tool_end`. Its plan becomes a `tool_start` and `tool_end` of the tool `plan` with the entries as `steps` (`completed` is `done`), so the window shows it as it shows the plan of Bate's own engine; an emptied plan is not sent.
 - The agent's `session/request_permission` becomes a `question` with the options `Approve` and `Deny`. Its `kind` and `target` come from the agent's kind of tool (`read`, `search`: read; `edit`, `delete`, `move`: write; `execute`: run, with the command as target), so the bot's permission levels and grants apply; any other kind is asked of the user each time. The answer goes back as the agent's allow-once or reject-once option. What an agent does without asking, by its own settings, Bate does not see before it happens.
 - The bot's enabled connectors are given to the agent when a conversation starts or is reopened (those over http only to an agent that takes them). A connector that signs in is given with the service's local address, as to Bate's own engine.
 - Not offered to the agent: reading or writing files and running terminals through Bate (it does these itself). Refused by this engine: `steer`, `rewind`, `compact`. `set_model` is accepted and has no effect; choose the model in the agent. Memory, skills and messages between bots are Bate's own engine's and are not given to an agent.
@@ -474,7 +488,7 @@ A bot can be written to from a chat app. The user makes a bot there (Telegram: B
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, projects, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
 
 #### Secrets
 

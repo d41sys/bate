@@ -32,8 +32,8 @@ pub fn check_name(name: &str) -> Result<(), String> {
 }
 
 /// Writes the file under `name`, or `1-name`, `2-name`… when taken, and gives its path in the
-/// bot's folder. A link the bot left in the way is never followed (`sys::Dir`).
-pub fn save(bot: &str, name: &str, bytes: &[u8]) -> io::Result<String> {
+/// bot's folder (`full`: the full path). A link the bot left in the way is never followed.
+pub fn save(bot: &str, name: &str, bytes: &[u8], full: bool) -> io::Result<String> {
     let dir = memory::made(bot, DIR)?;
     for n in 0..1000 {
         let file = if n == 0 {
@@ -48,7 +48,15 @@ pub fn save(bot: &str, name: &str, bytes: &[u8]) -> io::Result<String> {
                     let _ = dir.remove(&file);
                     return Err(e);
                 }
-                return Ok(format!("{DIR}/{file}"));
+                let relative = format!("{DIR}/{file}");
+                return Ok(if full {
+                    paths::bot_dir(bot)
+                        .join(relative)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    relative
+                });
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),

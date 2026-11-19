@@ -1,4 +1,5 @@
-//! `botfile://localhost/<bot>/<path>`: a file from a bot's folder, for a sandboxed frame. The
+//! `botfile://localhost/<bot>/<path>`: a file from a bot's folder, or from the folder of its
+//! project, for a sandboxed frame. The
 //! page shows what a bot made (HTML, diagrams, pictures) without letting it reach the service:
 //! each answer carries a policy that makes it an origin of its own, with no network.
 
@@ -46,7 +47,8 @@ pub fn serve(home: &Path, url: &str) -> Response<Vec<u8>> {
     }
 }
 
-/// The file `url` names, if it is inside its bot's folder once links are followed.
+/// The file `url` names, if it is inside the folder of its bot's project, or inside the bot's
+/// own folder, once links are followed.
 fn locate(home: &Path, url: &str) -> Option<PathBuf> {
     let url = Url::parse(url).ok()?;
     if url.scheme() != "botfile" || url.host_str() != Some("localhost") {
@@ -69,9 +71,20 @@ fn locate(home: &Path, url: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    let dir = home.join("bots").join(bot).canonicalize().ok()?;
-    let file = dir.join(parts.as_path()).canonicalize().ok()?;
-    file.starts_with(&dir).then_some(file)
+    // A bot in a project works in the project's folder, so that is looked in first. Its
+    // attachments stay in its own folder and cannot be shadowed by a project file.
+    let own = home.join("bots").join(bot);
+    let work = home.join(proto::paths::WORK).join(bot);
+    let dirs = if parts.clone().next()?.as_os_str() == "attachments" {
+        [own, work]
+    } else {
+        [work, own]
+    };
+    dirs.into_iter().find_map(|dir| {
+        let dir = dir.canonicalize().ok()?;
+        let file = dir.join(parts.as_path()).canonicalize().ok()?;
+        file.starts_with(&dir).then_some(file)
+    })
 }
 
 fn kind(file: &Path) -> &'static str {
@@ -134,6 +147,30 @@ mod tests {
             let answer = serve(&home, refused);
             assert_eq!(answer.status(), StatusCode::NOT_FOUND, "{refused}");
             assert!(answer.body().is_empty(), "{refused}");
+        }
+
+        // A bot in a project: the project's files are served for it, and for no other bot.
+        let project = home.join("elsewhere");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("page.html"), "<p>project</p>").unwrap();
+        std::os::unix::fs::symlink(home.join("app.db"), project.join("db.html")).unwrap();
+        fs::create_dir_all(project.join("attachments")).unwrap();
+        fs::write(project.join("attachments/report.txt"), "project").unwrap();
+        fs::create_dir_all(bot.join("attachments")).unwrap();
+        fs::write(bot.join("attachments/report.txt"), "upload").unwrap();
+        fs::create_dir_all(home.join("work")).unwrap();
+        std::os::unix::fs::symlink(&project, home.join("work").join("b1")).unwrap();
+        let page = serve(&home, "botfile://localhost/b1/page.html");
+        assert_eq!(page.body(), b"<p>project</p>");
+        let own = serve(&home, "botfile://localhost/b1/out/chart%20one.html");
+        assert_eq!(own.body(), b"<p>hi</p>");
+        let attached = serve(&home, "botfile://localhost/b1/attachments/report.txt");
+        assert_eq!(attached.body(), b"upload");
+        for refused in [
+            "botfile://localhost/b2/page.html",
+            "botfile://localhost/b1/db.html",
+        ] {
+            assert_eq!(serve(&home, refused).status(), StatusCode::NOT_FOUND);
         }
         fs::remove_dir_all(&home).unwrap();
     }

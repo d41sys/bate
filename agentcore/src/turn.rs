@@ -10,7 +10,7 @@ use proto::groups::Peer;
 use proto::permissions::{APPROVE, DENY, Kind};
 use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -18,7 +18,10 @@ use std::time::Duration;
 
 pub struct Turn {
     pub out: Out,
+    /// The bot's own folder: its conversations, notes and skills.
     pub dir: PathBuf,
+    /// Where the tools work: the folder of the bot's project, or `dir`.
+    pub work: PathBuf,
     pub provider: Provider,
     /// The model chosen for the bot; without one, the service names it with the token.
     pub model: Option<String>,
@@ -435,12 +438,25 @@ impl Turn {
             "" => String::new(),
             text => format!("\n\nThe user's instructions for you:\n{text}"),
         };
+        // In a project the bot's own folder is not where it works: what is in it is named
+        // by its full path.
+        let (own, named) = if self.work == self.dir {
+            (String::new(), Path::new(""))
+        } else {
+            (
+                format!(
+                    " Your own folder is {}: attachments and screenshots are named by their full path there. To show one to the user, link it as `attachments/<name>`.",
+                    self.dir.display()
+                ),
+                self.dir.as_path(),
+            )
+        };
         format!(
-            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{instructions}{}{}{}",
-            self.dir.display(),
+            "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{own}{instructions}{}{}{}",
+            self.work.display(),
             self.peers_prompt(),
-            crate::skills::prompt(&self.dir),
-            crate::memory::prompt(&self.dir)
+            crate::skills::prompt(&self.dir, named),
+            crate::memory::prompt(&self.dir, named)
         )
     }
 
@@ -450,8 +466,8 @@ impl Turn {
             return String::new();
         }
         let mut text = format!(
-            "\n\nYou can message other bots with the {MESSAGE} tool. Each has its own folder, \
-             tools and conversation, and replies when it is done:"
+            "\n\nYou can message other bots with the {MESSAGE} tool. Each has its own tools and \
+             conversation, and replies when it is done:"
         );
         for peer in &self.peers {
             let role = if peer.lead { " (leads your group)" } else { "" };
@@ -617,7 +633,7 @@ impl Turn {
         }
         match connector {
             Some(_) => mcp.call(tool, args, &self.control),
-            None => tools::run(tool, args, &self.dir, &self.control),
+            None => tools::run(tool, args, &self.work, &self.control),
         }
     }
 

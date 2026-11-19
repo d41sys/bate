@@ -10,6 +10,7 @@ use crate::sys::log;
 use proto::connectors::Connector;
 use proto::groups::Group;
 use proto::permissions::{Grant, Kind, Level};
+use proto::projects::Project;
 use proto::routines::{Routine, RoutineRun};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -78,6 +79,7 @@ CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, b
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
@@ -1000,6 +1002,29 @@ impl Store {
 
     pub fn delete_group(&self, id: &str) -> Result<bool> {
         Ok(self.0.execute("DELETE FROM groups WHERE id = ?1", [id])? > 0)
+    }
+
+    pub fn projects(&self) -> Result<Vec<Project>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT project FROM projects ORDER BY id")?;
+        stmt.query_map([], |r| parse(r.get(0)?))?.collect()
+    }
+
+    pub fn put_project(&self, project: &Project) -> Result<()> {
+        let id = project.id.as_deref().expect("stored projects have an id");
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO projects(id, project) VALUES (?1, ?2)",
+                params![id, json(project)],
+            )
+            .map(drop)
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM projects WHERE id = ?1", [id])
+            .map(drop)
     }
 
     /// The key under which the engine reaches this connector through the service; `fresh` is
