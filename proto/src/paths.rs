@@ -21,6 +21,9 @@ pub fn run_dir() -> PathBuf {
     home().join("run")
 }
 
+/// In the home: a link per bot in a project, named for the bot, to the project's folder.
+pub const WORK: &str = "work";
+
 /// Where windows connect to the service.
 pub fn socket() -> PathBuf {
     run_dir().join("appd.sock")

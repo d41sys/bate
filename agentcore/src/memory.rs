@@ -20,9 +20,12 @@ pub fn open(path: &Path) -> io::Result<File> {
 const MOST: usize = 16 * 1024;
 
 /// The part of the system prompt about memory: how to keep notes, and the notes so far.
-pub fn prompt(folder: &Path) -> String {
+/// `named`: the folder the notes are named under; empty when `folder` is where the tools work.
+pub fn prompt(folder: &Path, named: &Path) -> String {
+    let shown = named.join(DIR);
+    let shown = shown.display();
     let mut text = format!(
-        "\n\nYou keep notes across conversations in the folder `{DIR}`: Markdown files, one topic \
+        "\n\nYou keep notes across conversations in the folder `{shown}`: Markdown files, one topic \
          each, short facts. When you learn something worth keeping (who the user is, what they \
          prefer, what was decided), write it there with the write or edit tool. The user reads \
          and edits these files too."
@@ -61,10 +64,10 @@ pub fn prompt(folder: &Path) -> String {
         match note {
             Some(note) => {
                 left -= note.len();
-                text.push_str(&format!("\n\n## {DIR}/{name}\n{}", note.trim_end()));
+                text.push_str(&format!("\n\n## {shown}/{name}\n{}", note.trim_end()));
             }
             // Too much for this turn, or not text: named, so the model can read it itself.
-            None => unread.push(format!("{DIR}/{name}")),
+            None => unread.push(format!("{shown}/{name}")),
         }
     }
     if !unread.is_empty() {
@@ -84,6 +87,7 @@ mod tests {
     fn notes_are_shown_in_name_order_and_what_does_not_fit_is_named() {
         let folder = std::env::temp_dir().join(format!("agentcore-memory-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
+        let prompt = |folder: &Path| prompt(folder, Path::new(""));
         assert!(!prompt(&folder).contains("##"));
         fs::create_dir_all(folder.join(DIR)).unwrap();
         fs::write(folder.join(DIR).join("b.md"), "likes tea\n").unwrap();

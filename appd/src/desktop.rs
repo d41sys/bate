@@ -210,8 +210,9 @@ impl Link {
     }
 
     /// Does one call of `bot` in the helper and gives the text for the bot. A screenshot is
-    /// saved in the bot's folder and its path given. Blocks: not for the core's thread.
-    pub fn call(&self, bot: &str, call: Call) -> Result<String, String> {
+    /// saved in the bot's folder and its path given (`full_path`: by its full path). Blocks:
+    /// not for the core's thread.
+    pub fn call(&self, bot: &str, call: Call, full_path: bool) -> Result<String, String> {
         self.start_helper()?;
         let (waiter, answer) = mpsc::channel();
         let id = {
@@ -244,7 +245,7 @@ impl Link {
                         .filter(|png| png.len() <= attach::MAX_BYTES)
                         .ok_or("Bate Helper sent a picture that is not usable.")?;
                     let name = format!("screenshot-{}.png", now_ms());
-                    let path = attach::save(bot, &name, &png)
+                    let path = attach::save(bot, &name, &png, full_path)
                         .map_err(|e| format!("The picture was not saved: {e}"))?;
                     Ok(format!("{output} Saved in your folder as {path}."))
                 }

@@ -21,6 +21,13 @@ pub fn bot_dir(bot: &str) -> PathBuf {
     home().join("bots").join(bot)
 }
 
+pub const PROJECTS: &str = "projects";
+
+/// Folders the service makes for projects whose user chose none.
+pub fn projects_dir() -> PathBuf {
+    home().join(PROJECTS)
+}
+
 /// The `Bate.app` this service runs from, if it does. A debug build takes it from `$BATE_BUNDLE`
 /// (a test cannot run from a real app).
 pub fn bundle() -> Option<PathBuf> {

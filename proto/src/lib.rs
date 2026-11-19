@@ -16,6 +16,7 @@ pub mod groups;
 pub mod memory;
 pub mod paths;
 pub mod permissions;
+pub mod projects;
 pub mod routines;
 pub mod signer;
 pub mod skills;

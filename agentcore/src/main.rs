@@ -59,7 +59,10 @@ struct Running {
 struct Engine {
     out: Out,
     inputs: Sender<Input>,
+    /// The bot's own folder: its conversations, notes and skills.
     dir: PathBuf,
+    /// Where its tools work: the folder of its project, or `dir`.
+    work: PathBuf,
     session: Option<Session>,
     /// Running MCP servers; they outlive a conversation.
     mcp: mcp::Servers,
@@ -76,6 +79,18 @@ struct Engine {
 /// The model from the environment (`BATE_MODEL`), if any.
 fn default_model() -> Option<String> {
     std::env::var("BATE_MODEL").ok().filter(|m| !m.is_empty())
+}
+
+/// The folder the tools work in: `BATE_WORK_DIR`, the folder of the bot's project, or else the
+/// one the engine was started in.
+fn work_dir() -> PathBuf {
+    match std::env::var_os("BATE_WORK_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            dir.canonicalize().unwrap_or(dir)
+        }
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    }
 }
 
 fn main() {
@@ -118,6 +133,7 @@ fn main() {
         out,
         inputs,
         dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        work: work_dir(),
         session: None,
         mcp: mcp::Servers::default(),
         connectors: Vec::new(),
@@ -442,6 +458,7 @@ impl Engine {
         let turn = turn::Turn {
             out: self.out.clone(),
             dir: self.dir.clone(),
+            work: self.work.clone(),
             provider,
             model,
             effort: self.effort.clone(),

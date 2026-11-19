@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
-/// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`.
+/// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
+/// `probe work <path>` says whether that is the folder the engine was told to work in.
 /// `apple <tool> <action> <field>=<word>…` asks the service to run that action in an Apple app; the
 /// `apple_result` is logged to `apple.log` and ends the turn.
 /// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
@@ -45,6 +46,7 @@ while IFS= read -r line; do
             signal) kill -0 "$path" 2>/dev/null && r=ok || r=refused ;;
             prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
             env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
+            work) [ "$BATE_WORK_DIR" = "$path" ] && r=ok || r=refused ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -1679,6 +1681,9 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("8", "get_channels"),
         ("9", "remove_chat"),
         ("10", "install_update"),
+        ("11", "set_disk_access"),
+        ("12", "set_project"),
+        ("13", "delete_project"),
     ] {
         send(
             &device,
@@ -2360,6 +2365,164 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
 }
 
 #[test]
+fn bots_of_a_project_work_in_its_folder_and_message_each_other() {
+    let home = home("projects");
+    let _service = Service::start_with(&home, |c| {
+        fs::create_dir_all(home.join("Trash")).unwrap();
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_TRASH", home.join("Trash"));
+    });
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    // What the bot `a` is told came of its message to `b`.
+    let tell = |w: &mut Window, nonce: &str| {
+        w.ok(
+            "prompt",
+            json!({"bot": a, "nonce": nonce, "text": format!("tell {b} hi")}),
+        );
+        let said = w.wait_for(|f| {
+            f["type"] == "transcript" && f["bot"] == a.as_str() && f["entry"]["type"] == "text"
+        })["entry"]["delta"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+        said
+    };
+    // A folder of the user's, outside the service's home.
+    let folder = Home(std::env::temp_dir().join(format!("appd-{}-site", std::process::id())));
+    let _ = fs::remove_dir_all(&folder.0);
+    fs::create_dir_all(&folder.0).unwrap();
+    let real = folder.canonicalize().unwrap();
+    let file = real.join("notes.txt");
+    let write = format!("write {}", file.display());
+    let read = format!("read {}", file.display());
+
+    // No project yet: the folder is as closed to a bot as the rest of the disk.
+    assert_eq!(probe(&mut w, &a, "n1", &write), "refused");
+
+    // A folder that would hand over the user's home or the service's own data is refused, and
+    // so is one that is not there.
+    let user_home = std::env::var("HOME").unwrap();
+    let inside = home.join("bots").join(&b);
+    for bad in [
+        Path::new(&user_home),
+        Path::new("/"),
+        &*home,
+        &inside,
+        home.parent().unwrap(),
+        Path::new("site"),
+        &real.join("missing"),
+    ] {
+        let project = json!({"name": "Site", "folder": bad, "bots": [a]});
+        assert_eq!(
+            refused(&mut w, "set_project", json!({"project": project})),
+            "invalid_project",
+            "{}",
+            bad.display()
+        );
+    }
+    assert_eq!(w.ok("list_projects", json!({}))["projects"], json!([]));
+
+    let project = json!({"name": " Site ", "folder": folder.0, "bots": [a, a]});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    assert_eq!(made["name"], "Site");
+    assert_eq!(made["folder"], json!(real));
+    assert_eq!(made["bots"], json!([a]));
+    assert_eq!(w.ok("list_projects", json!({}))["projects"], json!([made]));
+
+    // An attachment is named by its full path: relative tool paths now start in the project.
+    let attached = w.ok(
+        "attach",
+        json!({"bot": a, "name": "note.txt", "data": "eA==", "last": true}),
+    )["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let expected = home.join("bots").join(&a).join("attachments/note.txt");
+    assert_eq!(attached, expected.to_string_lossy());
+    assert_eq!(
+        probe(&mut w, &a, "n-attached", &format!("read {attached}")),
+        "ok"
+    );
+
+    // Its bot is told to work there and the system lets it; the rest of the disk stays closed,
+    // and so does the folder to a bot outside the project.
+    assert_eq!(probe(&mut w, &a, "n2", &write), "ok");
+    let work = format!("work {}", real.display());
+    assert_eq!(probe(&mut w, &a, "n3", &work), "ok");
+    let db = format!("read {}", home.join("app.db").display());
+    assert_eq!(probe(&mut w, &a, "n4", &db), "refused");
+    assert_eq!(probe(&mut w, &b, "n5", &read), "refused");
+    // The window finds the folder by a link the service lays.
+    assert_eq!(fs::read_link(home.join("work").join(&a)).unwrap(), real);
+
+    // A bot is in at most one project.
+    let second = json!({"name": "Other", "bots": [a]});
+    assert_eq!(
+        refused(&mut w, "set_project", json!({"project": second})),
+        "invalid_project"
+    );
+
+    // The bots of a project message each other with no group. With no folder named, the
+    // project keeps the one it has.
+    assert_eq!(
+        tell(&mut w, "n6"),
+        "error: that bot is not in a group or a project with you"
+    );
+    let mut both = made.clone();
+    both["bots"] = json!([a, b]);
+    both["folder"] = json!("");
+    let both = w.ok("set_project", json!({"project": both}))["project"].clone();
+    assert_eq!(both["folder"], json!(real));
+    assert_eq!(tell(&mut w, "n7"), "text: hello");
+    assert_eq!(probe(&mut w, &b, "n8", &read), "ok");
+
+    // A removal during a turn waits: the turn keeps the old folder, the next does not.
+    let mut only_b = both.clone();
+    only_b["bots"] = json!([b]);
+    w.ok("prompt", json!({"bot": a, "nonce": "n9", "text": "hi"}));
+    w.wait_for(|f| f["entry"]["type"] == "turn_start");
+    w.ok("set_project", json!({"project": only_b}));
+    // The turn still resolves files under the old rule, and the window's link stays with it.
+    assert_eq!(fs::read_link(home.join("work").join(&a)).unwrap(), real);
+    w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+    // At the next turn the old project folder is closed.
+    eventually("the old project link to go", || {
+        fs::symlink_metadata(home.join("work").join(&a)).is_err()
+    });
+    assert_eq!(probe(&mut w, &a, "n10", &read), "refused");
+
+    // Deleting the project leaves its folder and what is in it, and closes it to the bots.
+    w.ok("delete_project", json!({"projectId": both["id"]}));
+    assert_eq!(fs::read_to_string(&file).unwrap(), "x\n");
+    assert_eq!(probe(&mut w, &b, "n11", &read), "refused");
+    assert_eq!(
+        refused(&mut w, "delete_project", json!({"projectId": both["id"]})),
+        "no_such_project"
+    );
+
+    // With no folder named, a new project gets one the service makes in its home. A deleted
+    // bot leaves its project.
+    let notes = json!({"name": "Notes", "bots": [a, b]});
+    let notes = w.ok("set_project", json!({"project": notes}))["project"].clone();
+    let made_dir = home.canonicalize().unwrap().join("projects");
+    let made_dir = made_dir.join(notes["id"].as_str().unwrap());
+    assert_eq!(notes["folder"], json!(made_dir));
+    let inside = format!("write {}", made_dir.join("x.txt").display());
+    assert_eq!(probe(&mut w, &a, "n12", &inside), "ok");
+    w.ok("delete_bot", json!({"bot": a}));
+    assert_eq!(
+        w.ok("list_projects", json!({}))["projects"][0]["bots"],
+        json!([b])
+    );
+}
+
+#[test]
 fn memory_notes_are_plain_files_the_panel_lists_reads_writes_and_deletes() {
     let home = home("memory");
     let _service = Service::start(&home);
@@ -2785,7 +2948,10 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
 
     // No group: no bot to message.
     let said = tell(&mut w, "n1", &b, "anyone there");
-    assert_eq!(said, "error: that bot is not in a group with you");
+    assert_eq!(
+        said,
+        "error: that bot is not in a group or a project with you"
+    );
     assert!(prompts_of(&b).is_empty());
 
     let group = json!({"name": " Team ", "lead": a, "members": [b, b]});
@@ -2837,7 +3003,7 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
     // Outside the group nobody is reached.
     assert_eq!(
         tell(&mut w, "n4", &c, "hi"),
-        "error: that bot is not in a group with you"
+        "error: that bot is not in a group or a project with you"
     );
 
     // What a group cannot be.
@@ -2867,7 +3033,7 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
     );
     assert_eq!(
         tell(&mut w, "n5", &b, "still there"),
-        "error: that bot is not in a group with you"
+        "error: that bot is not in a group or a project with you"
     );
 }
 
@@ -5442,18 +5608,21 @@ fn a_bots_desktop_actions_go_to_the_helper_app_and_its_answers_come_back() {
         "Bate Helper is not allowed to control apps."
     );
 
-    // A picture is saved in the bot's folder; the bot gets its path.
+    // In a project, its full path still resolves to the bot's own folder.
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Desktop", "bots": [bot]}}),
+    );
+    // A picture is saved in the bot's folder; the bot gets its full path, so it can read it
+    // while its relative paths start in the project's folder.
     let shot = desk(&mut w, "n7", "screenshot TextEdit");
     let output = shot["output"].as_str().unwrap();
     let path = output
         .strip_prefix("A picture of window 5. Saved in your folder as ")
         .unwrap();
-    let path = path.strip_suffix('.').unwrap();
-    assert!(path.starts_with("attachments/screenshot-"), "{path}");
-    assert_eq!(
-        fs::read(home.join("bots").join(&bot).join(path)).unwrap(),
-        b"hello"
-    );
+    let path = Path::new(path.strip_suffix('.').unwrap());
+    assert!(path.starts_with(home.join("bots").join(&bot).join("attachments")));
+    assert_eq!(fs::read(path).unwrap(), b"hello");
 
     // What is not an action, or not the right shape, is refused here and never reaches the helper.
     let calls = helper.calls.lock().unwrap().len();

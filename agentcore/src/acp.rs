@@ -183,7 +183,7 @@ impl Bridge {
     }
 
     fn op(&mut self, id: String, op: Op) {
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = crate::work_dir();
         match op {
             Op::Start { .. } if self.turn => respond(id, Err("a turn is running".into())),
             Op::Open { .. } if self.turn => respond(id, Err("a turn is running".into())),

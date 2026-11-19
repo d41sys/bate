@@ -1,7 +1,7 @@
 //! The service core: one thread that owns the store, the window connections
 //! and one engine per active bot. Everything reaches it as a `Msg`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Read};
 use std::process::Child;
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use proto::connectors::{Connector, Transport};
 use proto::groups::{Group, Peer};
 use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
+use proto::projects::Project;
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{Engine, EngineInput, Event, Op, PROTOCOL, WINDOW_PROTOCOL, engine_program};
 use serde_json::{Value, json};
@@ -118,6 +119,7 @@ pub enum Msg {
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
 const MAX_GROUPS: usize = 50;
+const MAX_PROJECTS: usize = 50;
 /// How long the browser may take to come back from a sign-in.
 const SIGN_IN_MS: u64 = 10 * 60 * 1000;
 const MAX_MEMBERS: usize = 20;
@@ -143,6 +145,49 @@ type Reply = Result<Option<Value>, Refusal>;
 fn internal(e: rusqlite::Error) -> Refusal {
     log!("store: {e}");
     ("internal", e.to_string())
+}
+
+/// `work/<bot>` in the service's home is a link to the folder of the bot's project: how the
+/// window, which does not read `app.db`, finds a file that such a bot links to.
+fn link_work(store: &Store) {
+    let dir = paths::home().join(proto::paths::WORK);
+    let laid = sys::create_private_dir(&dir).and_then(|()| {
+        for old in fs::read_dir(&dir)? {
+            // Takes away the link, never what it points to.
+            fs::remove_file(old?.path())?;
+        }
+        for project in store.projects().map_err(io::Error::other)? {
+            for bot in &project.bots {
+                std::os::unix::fs::symlink(&project.folder, dir.join(bot))?;
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) = laid {
+        log!("projects' folders not linked for the window: {e}");
+    }
+}
+
+/// Updates the window's link for one bot after its project change takes effect.
+fn link_work_bot(store: &Store, bot: &str) {
+    let link = paths::home().join(proto::paths::WORK).join(bot);
+    let laid = (|| -> io::Result<()> {
+        if fs::symlink_metadata(&link).is_ok() {
+            fs::remove_file(&link)?;
+        }
+        if let Some(project) = store
+            .projects()
+            .map_err(io::Error::other)?
+            .into_iter()
+            .find(|p| p.bots.iter().any(|b| b == bot))
+        {
+            std::os::unix::fs::symlink(project.folder, link)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = laid {
+        log!("project folder not linked for bot {bot}: {e}");
+    }
 }
 
 fn bad(msg: impl Into<String>) -> Refusal {
@@ -368,6 +413,8 @@ pub struct Core {
     tx: Sender<Msg>,
     clients: HashMap<u64, Client>,
     engines: HashMap<String, Running>,
+    /// Bots whose project change takes effect after the turn now running.
+    project_restarts: HashSet<String>,
     /// Engine request ids and engine generations.
     counter: u64,
     /// Earliest `nextRunMs` of any enabled routine; 0 forces a recheck.
@@ -393,6 +440,7 @@ impl Core {
                 }
             }
         }
+        link_work(&store);
         let mut readers = HashMap::new();
         let stored = store.channels().unwrap_or_else(|e| {
             log!("channels not read: {e}");
@@ -431,6 +479,7 @@ impl Core {
             tx,
             clients: HashMap::new(),
             engines: HashMap::new(),
+            project_restarts: HashSet::new(),
             counter: 0,
             next_due: 0,
         }
@@ -941,7 +990,7 @@ impl Core {
             )),
             "set_group" => {
                 let group = self.set_group(f.get("group").cloned().unwrap_or(Value::Null))?;
-                self.groups_changed();
+                self.peers_changed("groups_changed");
                 Ok(Some(json!({"group": group})))
             }
             "delete_group" => {
@@ -952,7 +1001,25 @@ impl Core {
                 {
                     return Err(("no_such_group", "no such group".into()));
                 }
-                self.groups_changed();
+                self.peers_changed("groups_changed");
+                Ok(Some(json!({})))
+            }
+            "list_projects" => Ok(Some(
+                json!({"projects": self.store.projects().map_err(internal)?}),
+            )),
+            "set_project" => {
+                let project = self.set_project(f.get("project").cloned().unwrap_or(Value::Null))?;
+                Ok(Some(json!({"project": project})))
+            }
+            "delete_project" => {
+                let id = str_field(f, "projectId")?;
+                let projects = self.store.projects().map_err(internal)?;
+                let Some(project) = projects.iter().find(|p| p.id.as_deref() == Some(id)) else {
+                    return Err(("no_such_project", "no such project".into()));
+                };
+                // Its folder stays: the files in it are the user's.
+                self.store.delete_project(id).map_err(internal)?;
+                self.projects_changed(&project.bots);
                 Ok(Some(json!({})))
             }
             "list_skills" => {
@@ -1124,6 +1191,7 @@ impl Core {
             }
             "attach" => {
                 let bot = self.bot_of(f)?;
+                let full_path = self.project_of(&bot).map_err(internal)?.is_some();
                 let data = attach::base64(str_field(f, "data")?)
                     .ok_or_else(|| bad("`data` must be base64"))?;
                 let last = f.get("last").and_then(Value::as_bool).unwrap_or(false);
@@ -1171,7 +1239,7 @@ impl Core {
                     return Ok(Some(json!({"upload": id})));
                 }
                 let upload = uploads.remove(&id).expect("just used");
-                let path = attach::save(&bot, &upload.name, &upload.bytes)
+                let path = attach::save(&bot, &upload.name, &upload.bytes, full_path)
                     .map_err(|e| ("internal", format!("the file was not saved: {e}")))?;
                 Ok(Some(json!({"path": path})))
             }
@@ -1301,12 +1369,20 @@ impl Core {
                         self.store.put_group(&g).map_err(internal)?;
                     }
                 }
+                let project = self.project_of(&bot).map_err(internal)?;
+                if let Some(mut project) = project.clone() {
+                    project.bots.retain(|b| *b != bot);
+                    self.store.put_project(&project).map_err(internal)?;
+                }
                 self.store.delete_bot(&bot).map_err(internal)?;
                 for kind in channels::KINDS {
                     self.stop_channel(&(bot.clone(), kind));
                 }
                 if groups_changed {
-                    self.groups_changed();
+                    self.peers_changed("groups_changed");
+                }
+                if project.is_some() {
+                    self.projects_changed(std::slice::from_ref(&bot));
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
@@ -1751,6 +1827,20 @@ impl Core {
         let dir = paths::bot_dir(bot);
         let failed = |e: io::Error| ("engine_failed", format!("cannot start the engine: {e}"));
         sys::create_private_dir(&dir).map_err(failed)?;
+        // A bot in a project works in the project's folder. It is checked again: the folder
+        // may have been moved or replaced since it was chosen.
+        let work = match self.project_of(bot).map_err(internal)? {
+            Some(project) => limit::project_folder(&project.folder).map_err(|e| {
+                (
+                    "engine_failed",
+                    format!(
+                        "the folder of the project {} cannot be used: {e}",
+                        project.name
+                    ),
+                )
+            })?,
+            None => dir.canonicalize().map_err(failed)?,
+        };
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
@@ -1777,7 +1867,7 @@ impl Core {
             input,
             mut output,
             stderr,
-        } = limit::command(&engine_program(), &dir, whole_disk)
+        } = limit::command(&engine_program(), &dir, &work, whole_disk)
             .map(|mut command| {
                 // The engine program's other half: it runs the agent and translates.
                 if let Some(agent) = &agent {
@@ -1873,7 +1963,7 @@ impl Core {
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
 
-    /// The bots `bot` shares a group with, and whether it leads one.
+    /// The bots `bot` shares a group or a project with, and whether it leads a group.
     fn peers_of(&self, bot: &str) -> rusqlite::Result<(Vec<Peer>, bool)> {
         let mut peers: Vec<Peer> = Vec::new();
         let mut leads = false;
@@ -1899,11 +1989,25 @@ impl Core {
                 }
             }
         }
+        if let Some(project) = self.project_of(bot)? {
+            for id in project.bots.iter().filter(|id| *id != bot) {
+                if !peers.iter().any(|p| p.id == *id)
+                    && let Some(row) = self.store.bot(id)?
+                {
+                    peers.push(Peer {
+                        id: row.id,
+                        name: row.name,
+                        lead: false,
+                    });
+                }
+            }
+        }
         Ok((peers, leads))
     }
 
-    /// After a change to the groups: every running engine is told its bot's peers again.
-    fn groups_changed(&mut self) {
+    /// After a change to the groups or the projects: every running engine is told its bot's
+    /// peers again, and the windows are sent `event`.
+    fn peers_changed(&mut self, event: &str) {
         let running: Vec<String> = self.engines.keys().cloned().collect();
         for bot in running {
             let sent = self
@@ -1916,7 +2020,120 @@ impl Core {
                 log!("bot {bot}: peers not sent: {e}");
             }
         }
-        self.broadcast(&json!({"type": "groups_changed"}));
+        self.broadcast(&json!({"type": event}));
+    }
+
+    /// The project `bot` is in.
+    fn project_of(&self, bot: &str) -> rusqlite::Result<Option<Project>> {
+        let mut projects = self.store.projects()?.into_iter();
+        Ok(projects.find(|p| p.bots.iter().any(|b| b == bot)))
+    }
+
+    /// Whether a path in the bot's own folder must be full because relative paths start in a
+    /// project. A store failure is logged; the action can still return its old relative path.
+    fn full_attachment_paths(&self, bot: &str) -> bool {
+        match self.project_of(bot) {
+            Ok(project) => project.is_some(),
+            Err(e) => {
+                log!("bot {bot}: project not read for attachment path: {e}");
+                false
+            }
+        }
+    }
+
+    /// After a change to the projects. The folder limit is set when an engine starts, so an
+    /// idle engine stops now; a busy one stops when its turn ends. The next turn starts under
+    /// the new rule. Until then the window's link still names the old working folder.
+    fn projects_changed(&mut self, moved: &[String]) {
+        for bot in moved {
+            if self.occupied(bot) {
+                self.project_restarts.insert(bot.clone());
+            } else {
+                self.on_engine_gone(bot);
+                link_work_bot(&self.store, bot);
+            }
+        }
+        self.peers_changed("projects_changed");
+    }
+
+    /// Validates and stores a project from `set_project`.
+    fn set_project(&mut self, raw: Value) -> Result<Project, Refusal> {
+        let invalid = |e: String| ("invalid_project", e);
+        let mut p: Project = serde_json::from_value(raw).map_err(|e| invalid(e.to_string()))?;
+        p.name = p.name.trim().to_owned();
+        if p.name.is_empty() || p.name.chars().count() > 80 {
+            return Err(invalid("`name` must be 1 to 80 characters".into()));
+        }
+        p.bots.sort();
+        p.bots.dedup();
+        if p.bots.len() > MAX_MEMBERS {
+            return Err(invalid(format!("a project has at most {MAX_MEMBERS} bots")));
+        }
+        let existing = self.store.projects().map_err(internal)?;
+        let old = match &p.id {
+            Some(id) => Some(
+                existing
+                    .iter()
+                    .find(|o| o.id.as_ref() == Some(id))
+                    .ok_or(("no_such_project", format!("no project `{id}`")))?,
+            ),
+            None if existing.len() >= MAX_PROJECTS => {
+                return Err(invalid(format!(
+                    "there are at most {MAX_PROJECTS} projects"
+                )));
+            }
+            None => None,
+        };
+        for bot in &p.bots {
+            let Some(row) = self.store.bot(bot).map_err(internal)? else {
+                return Err(invalid(format!("no bot `{bot}`")));
+            };
+            if let Some(other) = existing
+                .iter()
+                .find(|o| o.id != p.id && o.bots.contains(bot))
+            {
+                return Err(invalid(format!(
+                    "{} is already in the project {}; a bot is in at most one",
+                    row.name, other.name
+                )));
+            }
+        }
+        // No folder named: the one it has, or for a new project one the service makes.
+        let folder = match (p.folder.trim(), old) {
+            ("", old) => old.map(|o| o.folder.clone()),
+            (chosen, _) => Some(
+                limit::project_folder(chosen)
+                    .map_err(invalid)?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| invalid("the folder's path is not text".into()))?,
+            ),
+        };
+        // The bots whose folder limit changes: all when the folder does, else those that came
+        // or went.
+        let before = old.map_or(&[][..], |o| &o.bots[..]);
+        let same_folder = old.is_some_and(|o| Some(&o.folder) == folder.as_ref());
+        let moved: Vec<String> = before
+            .iter()
+            .chain(&p.bots)
+            .filter(|bot| !same_folder || before.contains(bot) != p.bots.contains(bot))
+            .cloned()
+            .collect();
+        let id = p.id.get_or_insert_with(|| sys::random_hex(4)).clone();
+        p.folder = match folder {
+            Some(folder) => folder,
+            None => {
+                let made = paths::projects_dir().join(id);
+                sys::create_private_dir(&made)
+                    .and_then(|()| made.canonicalize())
+                    .map_err(|e| ("internal", e.to_string()))?
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        self.store.put_project(&p).map_err(internal)?;
+        self.projects_changed(&moved);
+        Ok(p)
     }
 
     /// Validates and stores a group from `set_group`.
@@ -2078,7 +2295,7 @@ impl Core {
             .map_err(|e| e.to_string())
             .and_then(|(peers, _)| {
                 if !peers.iter().any(|p| p.id == to) {
-                    return Err("that bot is not in a group with you".to_owned());
+                    return Err("that bot is not in a group or a project with you".to_owned());
                 }
                 if self.occupied(to) {
                     return Err("it is busy with something else; try again later".to_owned());
@@ -2363,9 +2580,10 @@ impl Core {
                 return;
             }
         };
+        let full_path = self.full_attachment_paths(bot);
         let (link, tx, bot) = (self.desktop.clone(), self.tx.clone(), bot.to_owned());
         std::thread::spawn(move || {
-            let result = link.call(&bot, call);
+            let result = link.call(&bot, call, full_path);
             let _ = tx.send(Msg::Desktopped {
                 bot,
                 generation,
@@ -2387,11 +2605,12 @@ impl Core {
         let Some(r) = self.engines.get(bot) else {
             return;
         };
+        let full_path = self.full_attachment_paths(bot);
         let (bot, generation, tx) = (bot.to_owned(), r.generation, self.tx.clone());
         let helper = self.desktop.clone();
         std::thread::spawn(move || {
             let result = match apple::history(&tool, &args) {
-                Some(Ok(call)) => helper.call(&bot, call),
+                Some(Ok(call)) => helper.call(&bot, call, full_path),
                 Some(Err(e)) => Err(e),
                 None => apple::run(&apple::Tools::system(), &tool, &args),
             };
@@ -2823,6 +3042,9 @@ impl Core {
             _ => {}
         }
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
+        if matches!(ev, Event::TurnEnd { .. }) && self.project_restarts.contains(bot) {
+            self.on_engine_gone(bot);
+        }
     }
 
     /// A grant is for the server the user saw: a connector that is changed or removed loses
@@ -3052,6 +3274,9 @@ impl Core {
         }
         if let Some(call) = r.call {
             self.answer_caller(bot, call.caller, Err("its engine stopped".into()));
+        }
+        if self.project_restarts.remove(bot) {
+            link_work_bot(&self.store, bot);
         }
         self.broadcast(&json!({"type": "engine_stopped", "bot": bot}));
         self.broadcast(&json!({"type": "bots_changed"}));
