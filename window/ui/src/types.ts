@@ -10,6 +10,8 @@ export type Bot = {
   agent?: string[];
   browserTaken?: boolean;
   instructions: string;
+  /** Tool rounds a turn may take before it stops and asks to continue. */
+  stepLimit: number;
   /** A few characters, such as an emoji; empty: none. */
   avatar: string;
   /** `#rrggbb`; empty: none. */
@@ -23,7 +25,7 @@ export type Bot = {
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 
-export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed"; error?: string };
+export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit"; error?: string };
 
 export type Routine = {
   id?: string;

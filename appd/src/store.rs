@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
+CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY, steps INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
@@ -91,7 +92,7 @@ CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEX
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 17] = [
+const BOT_TABLES: [&str; 18] = [
     "transcript",
     "ledger",
     "queue",
@@ -106,6 +107,7 @@ const BOT_TABLES: [&str; 17] = [
     "connectors",
     "profiles",
     "models",
+    "step_limits",
     "channels",
     "chats",
     "bots",
@@ -359,6 +361,25 @@ impl Store {
                 "INSERT INTO models(bot, model, effort) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(bot) DO UPDATE SET model = ?2, effort = ?3",
                 params![bot, model, effort],
+            )
+            .map(drop)
+    }
+
+    /// The tool rounds a turn of `bot` may take; `None`: the default.
+    pub fn step_limit(&self, bot: &str) -> Result<Option<u32>> {
+        self.0
+            .query_row("SELECT steps FROM step_limits WHERE bot = ?1", [bot], |r| {
+                r.get(0)
+            })
+            .optional()
+    }
+
+    pub fn set_step_limit(&self, bot: &str, steps: u32) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO step_limits(bot, steps) VALUES (?1, ?2) \
+                 ON CONFLICT(bot) DO UPDATE SET steps = ?2",
+                params![bot, steps],
             )
             .map(drop)
     }

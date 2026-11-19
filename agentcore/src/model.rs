@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The variable with the model server's key. The service keeps it from its engines; should an
 /// engine run by hand have it, what the model starts (commands, connectors) does not get it.
@@ -36,6 +36,47 @@ pub enum Api {
     Responses,
 }
 
+/// Why a model call failed.
+pub struct Fail {
+    pub why: String,
+    /// A network error, a rate limit or a server error: asking again may work.
+    transient: bool,
+    /// How long the server asked us to wait (`Retry-After`).
+    wait: Option<Duration>,
+}
+
+impl From<String> for Fail {
+    /// Anything else (a bad key, a refused request, bad data) will not go away by asking again.
+    fn from(why: String) -> Fail {
+        Fail {
+            why,
+            transient: false,
+            wait: None,
+        }
+    }
+}
+
+fn transient(why: String) -> Fail {
+    Fail {
+        transient: true,
+        ..Fail::from(why)
+    }
+}
+
+/// The lines of an answer, as the thread that reads them sends them.
+type Lines = mpsc::Receiver<Result<String, Fail>>;
+
+/// Tries a failed call is asked again.
+pub const RETRIES: u32 = 5;
+/// The first wait before a retry; each later one is twice the one before.
+const RETRY_WAIT: Duration = Duration::from_secs(2);
+/// The longest wait a server may ask for; one that asks for more is asked after this.
+// shortcut: a longer `Retry-After` is cut here and may be refused again; give up instead
+// when servers ask for minutes.
+const MAX_ASKED: Duration = Duration::from_secs(120);
+/// How long a call may send nothing before it counts as failed.
+const IDLE: Duration = Duration::from_secs(180);
+
 /// What a wait for the next line of the stream gave.
 enum Next {
     Line(String),
@@ -44,10 +85,8 @@ enum Next {
     End,
 }
 
-fn next(
-    lines: &mpsc::Receiver<Result<String, String>>,
-    abort: &AtomicBool,
-) -> Result<Next, String> {
+fn next(lines: &Lines, abort: &AtomicBool, idle: Duration) -> Result<Next, Fail> {
+    let since = Instant::now();
     loop {
         let received = lines.recv_timeout(POLL);
         if abort.load(Ordering::SeqCst) {
@@ -55,10 +94,20 @@ fn next(
         }
         match received {
             Ok(line) => return line.map(Next::Line),
+            Err(RecvTimeoutError::Timeout) if since.elapsed() >= idle => {
+                return Err(transient(format!(
+                    "the model server sent nothing for {idle:?}"
+                )));
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Next::End),
         }
     }
+}
+
+/// A body that just ends (a crashed server, a dropped proxy) is not a whole reply.
+fn cut_off() -> Fail {
+    transient("the model's reply was cut off".into())
 }
 
 /// Whether a line of a chat stream is its last.
@@ -152,11 +201,21 @@ fn responses_body(ask: &Ask) -> Value {
 
 pub struct Provider {
     agent: ureq::Agent,
+    /// How long a call may send nothing; `BATE_MODEL_IDLE_MS`.
+    idle: Duration,
+    /// The first wait before a retry; `BATE_MODEL_RETRY_MS`.
+    wait: Duration,
 }
 
 pub enum Delta<'a> {
     Text(&'a str),
     Thinking(&'a str),
+    /// The call failed in a way that may pass; it is asked again after `wait`.
+    Retry {
+        attempt: u32,
+        wait: Duration,
+        error: &'a str,
+    },
 }
 
 #[derive(Default)]
@@ -205,6 +264,25 @@ pub struct Ask<'a> {
     pub tools: &'a Value,
 }
 
+/// A time from the environment in milliseconds (the tests make these short).
+fn millis(var: &str, default: Duration) -> Duration {
+    let set = std::env::var(var).ok().and_then(|v| v.parse().ok());
+    set.map_or(default, Duration::from_millis)
+}
+
+/// Waits `wait`; false when `abort` was set first.
+fn pause(wait: Duration, abort: &AtomicBool) -> bool {
+    let end = Instant::now() + wait;
+    while !abort.load(Ordering::SeqCst) {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(POLL));
+    }
+    false
+}
+
 impl Provider {
     pub fn new() -> Provider {
         let config = ureq::Agent::config_builder()
@@ -212,14 +290,15 @@ impl Provider {
             .build();
         Provider {
             agent: ureq::Agent::new_with_config(config),
+            idle: millis("BATE_MODEL_IDLE_MS", IDLE),
+            wait: millis("BATE_MODEL_RETRY_MS", RETRY_WAIT),
         }
     }
 
-    /// `base_url` and `key` are the service's answer to this call's `token` request, and the
-    /// only source: a key in the engine's own environment may belong to another server.
-    // shortcut: after an abort the reading thread and its connection stay until the server next
-    // sends or closes (ureq has no idle timeout and cannot be closed from here); switch HTTP
-    // client if servers keep generating into it.
+    /// A call that fails with a network error, a rate limit or a server error before anything
+    /// came back is asked again up to `RETRIES` times, `on` told of each wait first.
+    // shortcut: a failure after text arrived is not retried, since the window shows that text
+    // already and would show it twice; make the window drop a retried reply to change that.
     pub fn stream(
         &self,
         base_url: &str,
@@ -227,8 +306,51 @@ impl Provider {
         api: Api,
         ask: &Ask,
         abort: &AtomicBool,
-        on: impl FnMut(Delta),
+        mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
+        let mut retries = 0;
+        loop {
+            let mut streamed = false;
+            let once = self.once(base_url, key, api, ask, abort, |d| {
+                streamed = true;
+                on(d)
+            });
+            let fail = match once {
+                Err(fail) if fail.transient && !streamed && retries < RETRIES => fail,
+                done => return done.map_err(|fail| fail.why),
+            };
+            let wait = fail
+                .wait
+                .map_or(self.wait * 2u32.pow(retries), |w| w.min(MAX_ASKED));
+            retries += 1;
+            on(Delta::Retry {
+                attempt: retries,
+                wait,
+                error: &fail.why,
+            });
+            if !pause(wait, abort) {
+                return Ok(Reply {
+                    aborted: true,
+                    ..Reply::default()
+                });
+            }
+        }
+    }
+
+    /// `base_url` and `key` are the service's answer to this call's `token` request, and the
+    /// only source: a key in the engine's own environment may belong to another server.
+    // shortcut: after an abort or an idle call the reading thread and its connection stay until
+    // the server next sends or closes (ureq cannot be closed from here); switch HTTP client if
+    // servers keep generating into it.
+    fn once(
+        &self,
+        base_url: &str,
+        key: Option<&str>,
+        api: Api,
+        ask: &Ask,
+        abort: &AtomicBool,
+        on: impl FnMut(Delta),
+    ) -> Result<Reply, Fail> {
         let base = base_url.trim_end_matches('/');
         match api {
             Api::Chat => {
@@ -242,30 +364,31 @@ impl Provider {
                 };
                 let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
                 let url = format!("{base}/chat/completions");
-                chat(&self.lines(url, key, body, chat_done), abort, on)
+                chat(&self.lines(url, key, body, chat_done), abort, self.idle, on)
             }
             Api::Responses => {
                 let body = serde_json::to_vec(&responses_body(ask)).map_err(|e| e.to_string())?;
                 let url = format!("{base}/responses");
-                responses(&self.lines(url, key, body, responses_done), abort, on).map_err(|e| {
+                let lines = self.lines(url, key, body, responses_done);
+                responses(&lines, abort, self.idle, on).map_err(|mut fail| {
+                    let e = &fail.why;
                     // Comes as a 429 or as `response.failed` mid-stream; it may be the plan's limit
                     // or one ChatGPT sets for Bate, and says nothing of when it ends.
                     if e.contains("subscription_sharing_usage_limit_exceeded") {
-                        format!(
+                        fail.why = format!(
                             "the ChatGPT plan's usage limit is reached (for the plan, or for \
                              Bate): see https://chatgpt.com/settings/usage ({e})"
-                        )
+                        );
                     } else if e
                         .contains("subscription_sharing_workplace_individual_usage_limit_exceeded")
                     {
                         // A ChatGPT Business plan: only the workspace's admin can raise it.
-                        format!(
+                        fail.why = format!(
                             "your ChatGPT workspace's usage limit is reached: ask its admin to \
                              raise it at admin.openai.com, Workspace, Usage limits ({e})"
-                        )
-                    } else {
-                        e
+                        );
                     }
+                    fail
                 })
             }
         }
@@ -279,36 +402,54 @@ impl Provider {
         key: Option<&str>,
         body: Vec<u8>,
         done: fn(&str) -> bool,
-    ) -> mpsc::Receiver<Result<String, String>> {
+    ) -> Lines {
         let key = key.map(String::from);
         let agent = self.agent.clone();
         // The request is made and read on its own thread: a server that sends nothing must not
         // hold `abort` up. Bounded, so a fast server waits for us.
-        let (tx, lines) = mpsc::sync_channel::<Result<String, String>>(64);
+        let (tx, lines) = mpsc::sync_channel::<Result<String, Fail>>(64);
         std::thread::spawn(move || {
-            let read = || -> Result<(), String> {
+            let read = || -> Result<(), Fail> {
                 let mut request = agent.post(&url).header("Content-Type", "application/json");
                 if let Some(key) = &key {
                     request = request.header("Authorization", format!("Bearer {key}"));
                 }
-                let response = request
-                    .send(&body[..])
-                    .map_err(|e| format!("cannot reach the model server at {url}: {e}"))?;
+                let response = request.send(&body[..]).map_err(|e| {
+                    let why = format!("cannot reach the model server at {url}: {e}");
+                    // An address that cannot be used stays so; anything else is the network.
+                    if matches!(e, ureq::Error::BadUri(_)) {
+                        Fail::from(why)
+                    } else {
+                        transient(why)
+                    }
+                })?;
                 let status = response.status();
+                // Seconds; the date form is not read.
+                let asked = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse().ok())
+                    .map(Duration::from_secs);
                 let mut reader = BufReader::new(response.into_body().into_reader());
                 if !status.is_success() {
                     let mut text = String::new();
                     let _ = reader.take(4096).read_to_string(&mut text);
-                    return Err(format!(
-                        "the model server answered {status}: {}",
-                        text.trim()
-                    ));
+                    // A rate limit that is a quota (the plan's or the account's) does not lift in minutes.
+                    let quota = ["usage_limit_exceeded", "insufficient_quota"]
+                        .iter()
+                        .any(|q| text.contains(q));
+                    return Err(Fail {
+                        why: format!("the model server answered {status}: {}", text.trim()),
+                        transient: (status.as_u16() == 429 && !quota) || status.is_server_error(),
+                        wait: asked,
+                    });
                 }
                 loop {
                     let mut line = String::new();
                     let n = reader
                         .read_line(&mut line)
-                        .map_err(|e| format!("the model stream broke: {e}"))?;
+                        .map_err(|e| transient(format!("the model stream broke: {e}")))?;
                     let done = n == 0 || done(&line);
                     // The end of the reply (a server may keep the body open after it), or nobody
                     // listens any more. Returning closes the connection.
@@ -327,20 +468,21 @@ impl Provider {
 
 /// Reads a Responses stream to its `response.completed`.
 fn responses(
-    lines: &mpsc::Receiver<Result<String, String>>,
+    lines: &Lines,
     abort: &AtomicBool,
+    idle: Duration,
     mut on: impl FnMut(Delta),
-) -> Result<Reply, String> {
+) -> Result<Reply, Fail> {
     let mut reply = Reply::default();
     loop {
-        let line = match next(lines, abort)? {
+        let line = match next(lines, abort, idle)? {
             Next::Line(line) => line,
             Next::Aborted => {
                 reply.calls.clear();
                 reply.aborted = true;
                 return Ok(reply);
             }
-            Next::End => return Err("the model's reply was cut off".into()),
+            Next::End => return Err(cut_off()),
         };
         let Some(event) = data(&line).and_then(|d| serde_json::from_str::<Value>(d).ok()) else {
             continue;
@@ -376,7 +518,7 @@ fn responses(
                     ),
                     None => reason.as_str().unwrap_or(kind).to_owned(),
                 };
-                return Err(format!("the model server failed: {why}"));
+                return Err(format!("the model server failed: {why}").into());
             }
             _ => {}
         }
@@ -385,16 +527,17 @@ fn responses(
 
 /// Reads a chat stream to its end.
 fn chat(
-    lines: &mpsc::Receiver<Result<String, String>>,
+    lines: &Lines,
     abort: &AtomicBool,
+    idle: Duration,
     mut on: impl FnMut(Delta),
-) -> Result<Reply, String> {
+) -> Result<Reply, Fail> {
     let mut reply = Reply::default();
     // Where the call of each server-side `index` is in `reply.calls`.
     let mut at = HashMap::<u64, usize>::new();
     let mut finished = false;
     loop {
-        let line = match next(lines, abort)? {
+        let line = match next(lines, abort, idle)? {
             Next::Line(line) => line,
             Next::Aborted => {
                 reply.calls.clear();
@@ -402,8 +545,7 @@ fn chat(
                 return Ok(reply);
             }
             Next::End if finished => break,
-            // A body that just ends (a crashed server, a dropped proxy) is not a whole reply.
-            Next::End => return Err("the model's reply was cut off".into()),
+            Next::End => return Err(cut_off()),
         };
         let Some(data) = data(&line) else {
             continue;
@@ -419,7 +561,8 @@ fn chat(
             return Err(format!(
                 "the model server failed: {}",
                 error["message"].as_str().unwrap_or(&error.to_string())
-            ));
+            )
+            .into());
         }
         let delta = &chunk["choices"][0]["delta"];
         if let Some(t) = delta["reasoning_content"]

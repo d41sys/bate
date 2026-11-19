@@ -18,13 +18,11 @@ const ACTIONS: Record<Kind, string> = {
 
 export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }) {
   const [permissions, setPermissions] = useState<Permissions>();
-  const [look, setLook] = useState({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color });
+  const looks = () => ({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color, stepLimit: bot.stepLimit });
+  const [look, setLook] = useState(looks);
   const [deleting, setDeleting] = useState(false);
   // Saved here or elsewhere: show what the service has.
-  useEffect(
-    () => setLook({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color }),
-    [bot.name, bot.instructions, bot.avatar, bot.color],
-  );
+  useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
   const [agent, setAgent] = useState((bot.agent ?? []).join(" "));
   const [report, setReport] = useState("");
   const [serverUrl, setServerUrl] = useState("");
@@ -74,6 +72,10 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           <textarea maxLength={8000} rows={6} placeholder="What this bot is for and how it should answer" value={look.instructions} onChange={(e) => setLook({ ...look, instructions: e.target.value })} />
         </label>
         <label>Avatar <input maxLength={8} placeholder="🙂" value={look.avatar} onChange={(e) => setLook({ ...look, avatar: e.target.value })} /></label>
+        <label>
+          Tool rounds per turn <input type="number" required min={1} max={1000} step={1} value={look.stepLimit} onChange={(e) => setLook({ ...look, stepLimit: Number(e.target.value) })} />
+          {" "}<span className="hint">A turn stops after this many; the chat then offers Continue.</span>
+        </label>
         <label>
           Colour <input type="color" value={look.color || "#888888"} onChange={(e) => setLook({ ...look, color: e.target.value })} />{" "}
           {look.color && <button type="button" onClick={() => setLook({ ...look, color: "" })}>No colour</button>}

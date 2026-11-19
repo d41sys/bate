@@ -266,6 +266,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
       setEditing(undefined);
       setText(item.text);
     });
+  const proceed = () => once(() => prompt("Continue."));
   const compact = () =>
     once(async () => {
       await request("compact", { bot: bot.id });
@@ -359,6 +360,8 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
                 // An installed agent cannot go back in a conversation.
                 fixed={!!bot.agent?.length}
                 retry={retry}
+                proceed={proceed}
+                latest={row.index === items.length - 1}
                 fork={fork}
                 reading={reading === items[row.index].id}
                 read={canRead ? read : undefined}
@@ -481,6 +484,10 @@ type Actions = {
   /** No going back from any message. */
   fixed: boolean;
   retry: (p: Prompt) => void;
+  /** Goes on after a turn that stopped at its step limit. */
+  proceed: () => void;
+  /** Whether this is the newest line of the chat. */
+  latest: boolean;
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
   open?: (path: string) => void;
@@ -490,7 +497,7 @@ type Actions = {
   stopReading: () => void;
 };
 
-function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopReading }: { item: Item } & Actions) {
+function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, reading, read, stopReading }: { item: Item } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -530,7 +537,25 @@ function Row({ item, busy, fixed, retry, edit, fork, open, reading, read, stopRe
         </details>
       );
     }
+    case "retrying":
+      return (
+        <p>
+          The model did not answer ({item.error}). Trying again in {Math.max(1, Math.round(item.waitMs / 1000))} s (retry {item.attempt} of {item.of}).
+        </p>
+      );
     case "ended":
+      if (item.reason === "limit") {
+        return (
+          <>
+            <p>The turn stopped: {item.error ?? "it reached its step limit"}.</p>
+            {latest && (
+              <div className="actions">
+                <button disabled={busy} onClick={proceed}>Continue</button>
+              </div>
+            )}
+          </>
+        );
+      }
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
     case "steered":
       return <p className="steered">You steered: {item.text}</p>;

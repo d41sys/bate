@@ -63,6 +63,8 @@ pub struct Schedule {
 pub enum RunOutcome {
     Sent,
     Failed,
+    /// The bot's turn stopped at its step limit.
+    Limit,
     /// The slot passed while the service could not run it and is too old to catch up.
     Missed,
 }

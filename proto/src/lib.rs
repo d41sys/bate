@@ -27,6 +27,10 @@ pub const PROTOCOL: u32 = 1;
 pub const MAX_OP_FRAME: usize = 1 << 20;
 /// Largest engine → service frame, newline included. Tool output is forwarded whole.
 pub const MAX_EVENT_FRAME: usize = 64 << 20;
+/// Tool rounds a turn may take unless the bot has its own limit.
+pub const STEP_LIMIT: u32 = 100;
+/// Most tool rounds a bot may be given.
+pub const MAX_STEP_LIMIT: u32 = 1000;
 /// Window protocol version this build speaks (`hello`).
 pub const WINDOW_PROTOCOL: u32 = 1;
 /// Largest window → service frame, newline included.
@@ -75,6 +79,8 @@ pub enum Op {
     },
     /// What the user told the bot to be and do, put first in its system prompt; empty: nothing.
     Instructions { text: String },
+    /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
+    StepLimit { steps: u32 },
     /// The bots this one may message: the whole list each time. `leads`: it leads a group.
     Peers {
         peers: Vec<groups::Peer>,
@@ -225,6 +231,14 @@ pub enum Event {
     Token {
         request: String,
     },
+    /// A model call failed in a way that may pass; the engine asks again after `wait_ms`.
+    /// This is retry `attempt` of at most `of`.
+    Retry {
+        attempt: u32,
+        of: u32,
+        wait_ms: u64,
+        error: String,
+    },
     TurnEnd {
         reason: TurnEnd,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +252,8 @@ pub enum TurnEnd {
     Done,
     Aborted,
     Error,
+    /// The turn used up its tool rounds; `error` says how many.
+    Limit,
 }
 
 /// Writes one frame. Frames over `limit` (newline included) are refused, not split.
