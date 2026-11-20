@@ -256,6 +256,29 @@ fn read(folder: &Dir) -> Result<Manifest, String> {
     parse(&text)
 }
 
+type Key = (u64, u64, u64, i64, i64, i64, i64);
+type Sums = std::collections::HashMap<PathBuf, (Key, Vec<u8>)>;
+/// What is known of each file the fingerprint read: where it was, and its SHA-256.
+static READ: std::sync::Mutex<Option<Sums>> = std::sync::Mutex::new(None);
+
+/// The folder `from` was renamed `to`: what is known of its files goes with it, so that big
+/// downloaded files, hashed while they were staged, are not read again at the first look.
+fn moved(from: &Path, to: &Path) {
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(read) = read.as_mut() else { return };
+    read.retain(|path, _| !path.starts_with(to));
+    let known: Vec<PathBuf> = read
+        .keys()
+        .filter(|p| p.starts_with(from))
+        .cloned()
+        .collect();
+    for path in known {
+        if let (Some(sum), Ok(rest)) = (read.remove(&path), path.strip_prefix(from)) {
+            read.insert(to.join(rest), sum);
+        }
+    }
+}
+
 /// SHA-256 over the folder's entries, each folder's in order of name, depth first: for each,
 /// its path from `root`, its kind, and for a file whether it runs, its length and the SHA-256
 /// of its bytes. A link or special file counts as itself, so one added later changes it.
@@ -263,9 +286,6 @@ fn read(folder: &Dir) -> Result<Manifest, String> {
 /// service's one thread checks a workplace at each listing and each start of its program, and
 /// ctime cannot be set back by the file's owner.
 pub fn fingerprint(root: &Path) -> io::Result<String> {
-    type Key = (u64, u64, u64, i64, i64, i64, i64);
-    type Sums = std::collections::HashMap<PathBuf, (Key, Vec<u8>)>;
-    static READ: std::sync::Mutex<Option<Sums>> = std::sync::Mutex::new(None);
     fn walk(
         root: &Path,
         at: &Path,
@@ -509,6 +529,7 @@ pub fn commit(prepared: Prepared, in_use: impl FnOnce(&str) -> bool) -> Result<W
                 }
                 return Err(failed(e));
             }
+            moved(&staged, &target);
             if moved_out {
                 skills::discard(Some(old));
             }
