@@ -1701,6 +1701,11 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("11", "set_disk_access"),
         ("12", "set_project"),
         ("13", "delete_project"),
+        // Surfaces are for the window on this Mac.
+        ("14", "list_surfaces"),
+        ("15", "read_surface"),
+        ("16", "act_surface"),
+        ("17", "watch_surfaces"),
     ] {
         send(
             &device,
@@ -6915,6 +6920,216 @@ fn a_workplace_that_is_on_runs_as_the_projects_connector_and_gives_its_skills_an
     eventually("the program to stop", || !alive(&pid));
     ask_prompt(&mut w, &a, "n3");
     assert!(last_logged(&home, &a, "connectors.log").contains("\"connectors\":[]"));
+}
+
+/// Calls a tool of the program behind a bot's connector `url` (as the bot's engine does).
+fn call_tool(url: &str, name: &str, arguments: Value) -> Value {
+    let (host, path) = url.split_once('/').unwrap();
+    let body = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}})
+    .to_string();
+    let answer = raw_http(
+        host,
+        &format!(
+            "POST /{path} HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    let (_, body) = answer.split_once("\r\n\r\n").unwrap();
+    serde_json::from_str::<Value>(body).unwrap()["result"].clone()
+}
+
+#[test]
+fn a_workplace_fills_a_table_a_tree_and_a_code_view_that_windows_read_in_parts_and_act_on() {
+    let home = home("wp-surf");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpsurf", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    w.ok("install_workplace", json!({"path": example_workplace()}));
+    let project = json!({"name": "Site", "folder": real, "bots": [a], "workplace": "counter"});
+    let id = w.ok("set_project", json!({"project": project}))["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (ticks, tens, report) = ("counter://ticks", "counter://tens", "counter://report");
+    let uris = |w: &mut Window| -> Vec<(String, String)> {
+        let listed = w.ok("list_surfaces", json!({"projectId": id}))["surfaces"].clone();
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["uri"].as_str().unwrap().into(),
+                    s["kind"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let pair = |u: &str, k: &str| (u.to_owned(), k.to_owned());
+
+    // Listing starts the program, even with no bot running; a tree of nothing is not offered yet.
+    assert_eq!(
+        uris(&mut w),
+        vec![pair(ticks, "table"), pair(report, "code")]
+    );
+    let none = w.ok("list_surfaces", json!({"projectId": id}));
+    assert_eq!(none["surfaces"][0]["name"], "Ticks");
+    w.ok("watch_surfaces", json!({"projectId": id, "uri": ticks}));
+    let table = w.ok("read_surface", json!({"projectId": id, "uri": ticks}));
+    assert_eq!(table["kind"], "table");
+    assert_eq!(table["columns"], json!(["Tick", "Picked"]));
+    assert_eq!(
+        (table["total"].clone(), table["rows"].clone()),
+        (json!(0), json!([]))
+    );
+    assert_eq!(table["select"], "pick");
+    assert_eq!(table["open"], "peek");
+    assert_eq!(
+        table["actions"][1],
+        json!({"tool": "reset", "label": "Reset"})
+    );
+
+    // A bot's tool call changes the content: the window that has the surface open hears of it,
+    // and of the new list.
+    ask_prompt(&mut w, &a, "n1");
+    let last = last_logged(&home, &a, "connectors.log");
+    let url = last.split("\"url\":\"http://").nth(1).unwrap();
+    let url = url.split('"').next().unwrap().to_owned();
+    assert_eq!(
+        call_tool(&url, "tick", json!({"times": 1200}))["count"],
+        1200
+    );
+    let heard = w.wait_for(|f| f["type"] == "surface_changed");
+    assert_eq!(
+        heard,
+        json!({"type": "surface_changed", "projectId": id, "uri": ticks})
+    );
+    w.wait_for(|f| f["type"] == "surfaces_changed" && f["projectId"] == id.as_str());
+    assert_eq!(
+        uris(&mut w),
+        vec![
+            pair(ticks, "table"),
+            pair(tens, "tree"),
+            pair(report, "code")
+        ]
+    );
+
+    // Large content comes in parts, and no part is larger than the service's cap, whether the
+    // program cuts it (the table) or sends all of it (the tree).
+    let part = |w: &mut Window, uri: &str, offset: u64, limit: u64| {
+        w.ok(
+            "read_surface",
+            json!({"projectId": id, "uri": uri, "offset": offset, "limit": limit}),
+        )
+    };
+    let rows = |v: &Value| v["rows"].as_array().unwrap().len();
+    let second = part(&mut w, ticks, 3, 2);
+    assert_eq!(
+        (second["offset"].clone(), second["total"].clone()),
+        (json!(3), json!(1200))
+    );
+    assert_eq!(second["rows"][0], json!({"id": "4", "cells": ["4", ""]}));
+    assert_eq!(rows(&second), 2);
+    assert_eq!(rows(&part(&mut w, ticks, 0, 1_000_000)), 500);
+    assert_eq!(rows(&part(&mut w, ticks, 1190, 100)), 10);
+    let default = w.ok("read_surface", json!({"projectId": id, "uri": ticks}));
+    assert_eq!(rows(&default), 100);
+    let nodes = |v: &Value| v["nodes"].as_array().unwrap().len();
+    let tree = w.ok("read_surface", json!({"projectId": id, "uri": tens}));
+    assert_eq!(
+        (tree["kind"].clone(), nodes(&tree), tree["total"].clone()),
+        (json!("tree"), 100, json!(1320))
+    );
+    assert_eq!(
+        tree["nodes"][0],
+        json!({"id": "g0", "label": "ticks 1 to 10", "depth": 0})
+    );
+    assert_eq!(tree["nodes"][1]["depth"], 1);
+    assert_eq!(nodes(&part(&mut w, tens, 0, 1_000_000)), 500);
+    assert_eq!(nodes(&part(&mut w, tens, 1300, 500)), 20);
+    let code = w.ok("read_surface", json!({"projectId": id, "uri": report}));
+    assert_eq!(code["language"], "json");
+    assert_eq!(code["lines"][1], "  \"count\": 1200,");
+
+    // The person's actions are tool calls; the result changes the surface. A second window on
+    // the project is told, and sees what the first does.
+    let mut other = Window::connect(&home);
+    other.ok("watch_surfaces", json!({"projectId": id, "uri": ticks}));
+    let act = |w: &mut Window, uri: &str, tool: &str, target: Option<&str>| {
+        w.ok(
+            "act_surface",
+            json!({"projectId": id, "uri": uri, "tool": tool, "target": target}),
+        )
+    };
+    let picked = act(&mut w, ticks, "pick", Some("5"));
+    assert_eq!(picked, json!({"ok": true, "text": "picked 5"}));
+    other.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == ticks);
+    let (mine, theirs) = (part(&mut w, ticks, 4, 2), part(&mut other, ticks, 4, 2));
+    assert_eq!(mine, theirs);
+    assert_eq!(mine["rows"][0], json!({"id": "5", "cells": ["5", "*"]}));
+    // On a tree's node, an open item, and what the program refuses.
+    assert_eq!(
+        act(&mut w, tens, "peek", Some("7"))["text"],
+        "tick 7 of 1200"
+    );
+    let refused = act(&mut w, ticks, "pick", Some("99999"));
+    assert_eq!(refused["ok"], false);
+    assert!(refused["text"].as_str().unwrap().contains("no tick 99999"));
+    let state = w.ok("read_surface", json!({"projectId": id, "uri": report}));
+    assert_eq!(state["lines"][2], "  \"picked\": 5,");
+    assert_eq!(state["lines"][3], "  \"opened\": 7");
+    // Only what the surface offers can be called, not any tool of the program.
+    let other_tool = w.send(
+        "act_surface",
+        json!({"projectId": id, "uri": ticks, "tool": "not_offered"}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == other_tool.as_str());
+    assert_eq!(reply["code"], "surface_failed");
+    assert!(reply["error"].as_str().unwrap().contains("does not offer"));
+    let unknown = w.send(
+        "read_surface",
+        json!({"projectId": id, "uri": "counter://nothing"}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == unknown.as_str());
+    assert_eq!(reply["code"], "surface_failed");
+    let no_project = w.send("list_surfaces", json!({"projectId": "nope"}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == no_project.as_str());
+    assert_eq!(reply["code"], "no_such_project");
+
+    // A named action that the surface offers.
+    act(&mut w, ticks, "reset", None);
+    other.wait_for(|f| f["type"] == "surfaces_changed");
+    assert_eq!(
+        uris(&mut other),
+        vec![pair(ticks, "table"), pair(report, "code")]
+    );
+}
+
+#[test]
+fn a_project_with_no_program_has_no_surfaces() {
+    let home = home("wp-nosurfaces");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-nosurf", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    let project = json!({"name": "Plain", "folder": real, "bots": [a]});
+    let id = w.ok("set_project", json!({"project": project}))["project"]["id"].clone();
+    assert_eq!(
+        w.ok("list_surfaces", json!({"projectId": id}))["surfaces"],
+        json!([])
+    );
+    let asked = w.send("read_surface", json!({"projectId": id, "uri": "x://y"}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == asked.as_str());
+    assert_eq!(reply["code"], "no_such_surface");
 }
 
 #[test]

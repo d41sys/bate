@@ -124,3 +124,21 @@ export type Skill = { name: string; description: string };
 
 /** A prompt the service holds until the bot is free. */
 export type QueuedPrompt = { nonce: string; text: string };
+
+/** A surface a project's program offers (`list_surfaces`). */
+export type Surface = { uri: string; name: string; description?: string; kind: "table" | "tree" | "code" };
+
+/** One part of a surface's content (`read_surface`): data, to be shown as text. */
+export type SurfacePart = {
+  /** Where this part begins in the whole, and how many items the whole has. */
+  offset: number;
+  total: number;
+  /** The tools the person's choosing and opening call, and the named actions on offer. */
+  select?: string;
+  open?: string;
+  actions: { tool: string; label: string }[];
+} & (
+  | { kind: "table"; columns: string[]; rows: { id: string; cells: string[] }[] }
+  | { kind: "tree"; nodes: { id: string; label: string; depth: number }[] }
+  | { kind: "code"; language: string; lines: string[] }
+);

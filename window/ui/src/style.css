@@ -46,6 +46,17 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .pane { position: relative; display: flex; flex-direction: column; border-left: 1px solid color-mix(in srgb, currentColor 15%, transparent); min-width: 0; padding: 0 .5rem .5rem; box-sizing: border-box; }
 .pane.overlay { position: fixed; top: 0; right: 0; bottom: 0; background: Canvas; box-shadow: 0 0 24px #0006; }
 .pane iframe { flex: 1; width: 100%; border: 1px solid #8884; background: white; }
+.pane.dragging iframe { pointer-events: none; }
+.surfaces { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; padding: .25rem 1rem; }
+.surface { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.surface .body { flex: 1; overflow: auto; border: 1px solid #8884; }
+.surface table { border-collapse: collapse; width: 100%; }
+.surface th, .surface td { text-align: left; padding: .15rem .5rem; border-bottom: 1px solid #8883; }
+.surface [aria-selected="true"] { background: color-mix(in srgb, Highlight 30%, transparent); }
+.surface .tree { list-style: none; margin: 0; padding: 0; }
+.surface .tree .gap { display: inline-block; width: 1.25rem; }
+.surface .code { margin: 0; white-space: pre; overflow-wrap: normal; }
+.surface .code .no { display: inline-block; min-width: 3.5ch; margin-right: 1ch; text-align: right; opacity: .5; user-select: none; }
 .pane .grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
 .pane .grip:hover, .pane .grip:focus-visible { background: color-mix(in srgb, Highlight 40%, transparent); }
 button.file { font: inherit; text-decoration: underline; background: none; border: none; padding: 0; cursor: pointer; color: inherit; }

@@ -1,16 +1,25 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { SANDBOX, fileUrl } from "./frame.ts";
 import { placePane } from "./pane.ts";
 
-/** A file a bot shows, in a pane to the right of the conversation. Resizable and closable. */
-export function Pane({ bot, path, close }: {
-  bot: string;
-  path: string;
+/** A bot's file, in the pane. */
+export function FilePane({ bot, path, close }: { bot: string; path: string; close: () => void }) {
+  return (
+    <Pane label="Shown file" title={path} close={close}>
+      <iframe title={path} sandbox={SANDBOX} src={fileUrl(bot, path)} />
+    </Pane>
+  );
+}
+
+/** What a bot shows or a program offers, in a pane to the right of the conversation. Resizable and closable. */
+export function Pane({ label, title, close, children }: {
+  label: string;
+  title: string;
   close: () => void;
+  children: ReactNode;
 }) {
   const [want, setWant] = useState(480);
   const [viewport, setViewport] = useState(innerWidth);
-  // The frame would swallow the pointer's moves while dragging over it.
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
     const resize = () => setViewport(innerWidth);
@@ -20,7 +29,8 @@ export function Pane({ bot, path, close }: {
   const { width, overlay } = placePane(want, viewport);
 
   return (
-    <aside className={overlay ? "pane overlay" : "pane"} style={{ width }} aria-label="Shown file">
+    // The frame would swallow the pointer's moves while dragging over it (see style.css).
+    <aside className={`pane${overlay ? " overlay" : ""}${dragging ? " dragging" : ""}`} style={{ width }} aria-label={label}>
       <div
         className="grip"
         role="separator"
@@ -40,9 +50,9 @@ export function Pane({ bot, path, close }: {
         }}
       />
       <div className="tools">
-        <code>{path}</code> <button type="button" onClick={close}>Close</button>
+        <code>{title}</code> <button type="button" onClick={close}>Close</button>
       </div>
-      <iframe title={path} sandbox={SANDBOX} src={fileUrl(bot, path)} style={dragging ? { pointerEvents: "none" } : undefined} />
+      {children}
     </aside>
   );
 }

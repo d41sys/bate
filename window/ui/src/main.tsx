@@ -6,7 +6,8 @@ import type { Bot } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
 import { Mail } from "./Mail.tsx";
-import { Pane } from "./Pane.tsx";
+import { FilePane, Pane } from "./Pane.tsx";
+import { SurfaceView, Surfaces } from "./Surfaces.tsx";
 import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { Memory } from "./Memory.tsx";
@@ -39,8 +40,8 @@ function App() {
   const [palette, setPalette] = useState(false);
   const [jump, setJump] = useState<{ seq: number }>();
   const [find, setFind] = useState(false);
-  // A file a bot shows, in the pane beside the conversation.
-  const [shown, setShown] = useState<{ bot: string; path: string }>();
+  // A file a bot shows, or a surface of a project's program, in the pane beside the conversation.
+  const [shown, setShown] = useState<{ bot: string; path: string } | { projectId: string; uri: string; name: string }>();
   const newName = useRef<HTMLInputElement>(null);
   // What the shell says of starting the service with the app (macOS may want an approval).
   const [note, setNote] = useState<string | null>(null);
@@ -52,6 +53,14 @@ function App() {
     const timer = setInterval(ask, 2000);
     return () => clearInterval(timer);
   }, [state]);
+
+  // The service tells a window of the surface it shows, and of the list of its project's.
+  const watched = shown && "uri" in shown ? shown : undefined;
+  const surfaceProject = watched?.projectId ?? bots.find((b) => b.id === selected)?.project?.id;
+  const surfaceUri = watched?.uri;
+  useEffect(() => {
+    if (inShell) request("watch_surfaces", { projectId: surfaceProject ?? null, uri: surfaceUri }).catch(() => {});
+  }, [surfaceProject, surfaceUri, connection]);
 
   useEffect(() => {
     const load = () => request<{ bots: Bot[] }>("list_bots").then((d) => setBots(d.bots), (e) => setError(e.message));
@@ -203,6 +212,14 @@ function App() {
             {/* An installed agent chooses its own model. */}
             {tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
             {tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
+            {/* Surfaces open in the window's pane only, not on other devices. */}
+            {tab === "chat" && inShell && bot.project && (
+              <Surfaces
+                key={`surfaces-${bot.project.id}-${connection}`}
+                projectId={bot.project.id}
+                open={(s) => setShown({ projectId: bot.project!.id, uri: s.uri, name: s.name })}
+              />
+            )}
             {tab === "chat" && <Chat
                 key={`${bot.id}-${connection}`}
                 bot={bot}
@@ -238,7 +255,12 @@ function App() {
           !state && <p className="note">{bots.length ? "Choose a bot." : "Create a bot to begin."}</p>
         )}
       </main>
-      {shown && <Pane bot={shown.bot} path={shown.path} close={() => setShown(undefined)} />}
+      {shown && "path" in shown && <FilePane bot={shown.bot} path={shown.path} close={() => setShown(undefined)} />}
+      {shown && "uri" in shown && (
+        <Pane label="Surface" title={shown.name} close={() => setShown(undefined)}>
+          <SurfaceView key={`${shown.projectId}-${shown.uri}`} projectId={shown.projectId} uri={shown.uri} />
+        </Pane>
+      )}
       {palette && (
         <Palette
           choices={choices}

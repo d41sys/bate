@@ -8,10 +8,10 @@
 use crate::core::Msg;
 use crate::hooks::{Answer, Request};
 use crate::oauth::{self, Pending, Tokens};
+use crate::project_server;
 use crate::sys::now_ms;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
@@ -191,30 +191,11 @@ pub fn forward(
     Ok(())
 }
 
-/// How long a program just started may take to listen.
-const LISTEN: Duration = Duration::from_secs(5);
-
 /// Sends the engine's message to a project's program on its socket and its answer back, head
 /// and all, as it comes. No token: the program is not reachable but through here.
 fn forward_unix(socket: &Path, request: &Request, stream: &TcpStream) -> Result<(), Answer> {
     let down = |e: io::Error| (502, format!("cannot reach the project's connector: {e}"));
-    let until = std::time::Instant::now() + LISTEN;
-    let mut up = loop {
-        match UnixStream::connect(socket) {
-            Ok(up) => break up,
-            // Not listening yet (or no more): a started program is given its time.
-            Err(e)
-                if std::time::Instant::now() < until
-                    && matches!(
-                        e.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                    ) =>
-            {
-                std::thread::sleep(Duration::from_millis(50))
-            }
-            Err(e) => return Err(down(e)),
-        }
-    };
+    let mut up = project_server::connect(socket).map_err(down)?;
     let mut head = format!(
         "POST /mcp HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: {}\r\n",
         request.body.len()
