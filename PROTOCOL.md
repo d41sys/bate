@@ -419,7 +419,7 @@ For a routine with `webhook: true` the service makes `hookToken` (32 hex charact
 |---|---|
 | 202 | Handed to the bot's engine. Whether the engine took it (it refuses while a turn runs) shows in the routine's runs. |
 | 404 | No enabled routine has this token, or the path is not `/hooks/<token>`. |
-| 409 | The bot is in a turn, or has a prompt its engine has not answered. Nothing is recorded; call again later. |
+| 409 | The bot is in a turn, has a prompt its engine has not answered, is compacting, or is switching conversation or cutting one back. Nothing is recorded; call again later. |
 | 403 | The request has an `Origin` header: web pages may not call webhooks. |
 | 405, 411, 413, 400 | Not `POST`; a chunked body; more than 64 KiB; a malformed request. |
 | 503 | The bot's engine could not be started, or the service did not answer in 5 s. |
@@ -603,7 +603,7 @@ A bot can be written to from a chat app. The user makes a bot there (Telegram: B
 - Only one-to-one chats with text are read: Telegram private chats, Discord direct messages from people. Groups, servers and other bots are passed over; a paired chat that sends a photo or a file is told that only text is read.
 - **Pairing:** a chat that is not paired gets a note on how to pair (unless 8 messages are already on their way out), and the bot hears nothing of it. The chat is let in by sending the code from `pair_channel`. A wrong 6-digit guess is answered and counted; a code is used up by the chat it lets in.
 - A paired chat's message is sent to the bot as a prompt, as written. When the turn ends, the text the bot wrote since its last tool call goes back to the chat, in pieces of at most 1900 characters, a second apart. A turn that ends otherwise is answered `No reply: <why>.`
-- While the bot is occupied, a message is answered that the bot is busy; it is not queued.
+- While the bot is occupied (as for a webhook's 409), a message is answered that the bot is busy; it is not queued.
 - `/run <name>` starts a routine that has `chat: true` (see Routines); any other message is a prompt.
 - Questions and approvals are answered in Bate's window only; the chat gets a note that one is waiting.
 - A new token for a channel keeps its paired chats (a Telegram chat is the same person for any bot; a Discord one is of no use to another bot and can be removed).

@@ -1786,6 +1786,112 @@ fn an_abort_sent_while_a_prompt_waits_for_its_conversation_stops_that_prompt() {
 }
 
 #[test]
+fn a_chat_message_during_a_switch_is_told_the_bot_is_busy() {
+    let (home, bot, _first, fork) = forked_bot("settling-chat");
+    set_session(&home, &fork, "slow-fork");
+    let telegram = Telegram::start();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_TELEGRAM_API", &telegram.base);
+    });
+    let mut w = Window::connect(&home);
+    let on = json!({"bot": bot, "kind": "telegram"});
+    let mut with_token = on.clone();
+    with_token["token"] = json!(Telegram::TOKEN);
+    w.ok("set_channel", with_token);
+    let code = w.ok("pair_channel", on)["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    telegram.say(7, &code);
+    assert!(telegram.heard(7, 1).contains("Paired"));
+
+    let rewind = w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    telegram.say(7, "hello");
+    assert!(telegram.heard(7, 2).contains("busy"));
+    assert_eq!(reply_to(&mut w, &rewind)["success"], true);
+}
+
+#[test]
+fn a_webhook_during_a_switch_is_told_the_bot_is_busy() {
+    let (home, bot, _first, fork) = forked_bot("settling-hook");
+    set_session(&home, &fork, "slow-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Deploys", "prompt": "Look.",
+            "enabled": true, "webhook": true}}),
+    )["routine"]
+        .clone();
+    let rewind = w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    let head = "content-length: 0\r\n";
+    assert_eq!(
+        http(routine["hookUrl"].as_str().unwrap(), "POST", None, head, ""),
+        409
+    );
+    assert_eq!(reply_to(&mut w, &rewind)["success"], true);
+}
+
+#[test]
+fn a_project_change_during_a_switch_stops_the_engine_once_the_switch_is_answered() {
+    let (home, bot, _first, fork) = forked_bot("settling-project");
+    set_session(&home, &fork, "slow-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let rewind = w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    let site = self::home("settling-project-site");
+    let project = json!({"name": "Site", "folder": site.canonicalize().unwrap(), "bots": [bot]});
+    w.ok("set_project", json!({"project": project}));
+    // The engine was not stopped under the rewind: it is answered, and the engine goes after.
+    assert_eq!(reply_to(&mut w, &rewind)["success"], true);
+    eventually("the engine to stop", || {
+        w.ok("list_bots", json!({}))["bots"][0]["running"] == false
+    });
+}
+
+#[test]
+fn a_refused_start_says_when_a_prompt_still_waits() {
+    let (home, bot, first, fork) = forked_bot("refused-with-queue");
+    // The first conversation's session cannot be opened (after a while), and the engine
+    // cannot start another.
+    set_session(&home, &first, "slowgone-first");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n8", "conversation": fork, "text": "hi"}),
+    );
+    turn_ended(&mut w);
+    // The engine cannot start a conversation now.
+    fs::write(home.join("bots").join(&bot).join("refuse-start"), "").unwrap();
+    let held = w.send(
+        "prompt",
+        json!({"bot": bot, "nonce": "n9", "conversation": first, "text": "hi"}),
+    );
+    let queued = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n10", "conversation": first, "text": "hi"}),
+    );
+    assert_eq!(queued, json!({"queued": true}));
+    let refused = reply_to(&mut w, &held);
+    assert_eq!(refused["code"], "engine_error", "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("still waits"),
+        "{refused}"
+    );
+}
+
+#[test]
 fn search_hits_say_when_and_where_and_can_stay_in_one_conversation() {
     let home = home("conversations-search");
     let _service = Service::start(&home);
