@@ -148,7 +148,7 @@ fn open_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// What the menus do that the page does: the page is told the item's id.
-const PAGE_ITEMS: [&str; 3] = ["new-bot", "find", "palette"];
+const PAGE_ITEMS: [&str; 4] = ["new-bot", "find", "palette", "settings"];
 
 fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let item = |id: &str, text: &str, keys: &str| {
@@ -158,6 +158,8 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
     let bate = SubmenuBuilder::new(app, "Bate")
         .about(None)
+        .separator()
+        .item(&item("settings", "Settings…", "CmdOrCtrl+,")?)
         .separator()
         .services()
         .separator()

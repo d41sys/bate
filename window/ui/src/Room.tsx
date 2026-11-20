@@ -180,7 +180,8 @@ export function Room({ project, bots }: { project: Project; bots: Bot[] }) {
             if (mention) {
               const n = mention.matches.length;
               if (e.key === "ArrowDown" || e.key === "ArrowUp") setActive((at + (e.key === "ArrowDown" ? 1 : n - 1)) % n);
-              else if (e.key === "Enter" || e.key === "Tab") pick(mention.matches[at], mention.start);
+              // ⌃Tab is the next-bot key, not a pick.
+              else if (e.key === "Enter" || (e.key === "Tab" && !e.ctrlKey)) pick(mention.matches[at], mention.start);
               else if (e.key === "Escape") setClosed(true);
               else return;
               e.preventDefault();
