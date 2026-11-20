@@ -3,7 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "wp-*"]
   pull_request:
 
 jobs:
@@ -58,3 +58,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BATE_UPDATE_KEY: ${{ secrets.BATE_UPDATE_KEY }}
+
+  # A `wp-<name>-v<version>` tag publishes the workplace `workplaces/<name>/` as a release asset
+  # that `catalog/workplaces.json` points at. The archive is packed by the script that made the
+  # entry's size and hash, and must equal them. The release is never the latest one: the updater
+  # reads `releases/latest/download/feed.json`, which only a `v*` release may own.
+  workplace:
+    if: startsWith(github.ref, 'refs/tags/wp-')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          rest=${GITHUB_REF_NAME#wp-}
+          name=${rest%-v*}
+          version=${rest##*-v}
+          file="$name-$version.tar.gz"
+          read -r size sha < <(python3 workplaces/pack.py "workplaces/$name" "$file")
+          want="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$file"
+          jq -e --arg n "$name" --arg v "$version" --arg s "$size" --arg h "$sha" --arg u "$want" \
+            '.workplaces[] | select(.name == $n and .version == $v and .url == $u and (.size | tostring) == $s and .sha256 == $h)' \
+            catalog/workplaces.json
+          test "$(jq -r .version "workplaces/$name/workplace.json")" = "$version"
+          gh release create "$GITHUB_REF_NAME" "$file" --latest=false --verify-tag \
+            --title "Workplace $name $version" --notes "The workplace $name $version, pinned by catalog/workplaces.json (size $size, sha256 $sha)."
+          test "$(gh release view "$GITHUB_REF_NAME" --json isLatest --jq .isLatest)" = false
+        env:
+          GH_TOKEN: ${{ github.token }}

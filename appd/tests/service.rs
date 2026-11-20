@@ -6955,7 +6955,7 @@ fn a_project_connector_that_will_not_start_is_reported_and_the_bots_still_answer
 
 /// The example workplace of the repository.
 fn example_workplace() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/workplaces/counter")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../workplaces/counter")
 }
 
 /// A copy of the example in a folder of its own, to break in some way.
@@ -8208,4 +8208,349 @@ fn a_project_room_sends_by_name_to_the_lead_by_default_waits_for_a_busy_bot_and_
             .any(|l| l["to"] == bo.as_str() && l["text"].as_str().unwrap().contains("LONG1")),
         "{kept}"
     );
+}
+
+/// The archive that `workplaces/pack.py` makes of `folder`.
+fn packed(folder: &Path, name: &str) -> Vec<u8> {
+    let out = std::env::temp_dir().join(format!("appd-{}-pack-{name}.tar.gz", std::process::id()));
+    let run = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../workplaces/pack.py"))
+        .arg(folder)
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let bytes = fs::read(&out).unwrap();
+    // It also says what a catalog entry pins.
+    let said = String::from_utf8(run.stdout).unwrap();
+    assert_eq!(
+        said.trim(),
+        format!("{} {}", bytes.len(), sha256_of(&bytes))
+    );
+    fs::remove_file(&out).unwrap();
+    bytes
+}
+
+/// A catalog entry that pins `archive`.
+fn catalog_entry(name: &str, version: &str, url: &str, archive: &[u8]) -> Value {
+    json!({"name": name, "description": "d", "version": version, "url": url,
+        "size": archive.len(), "sha256": sha256_of(archive)})
+}
+
+/// The files a stand-in host serves, which a test may change while the service runs.
+type Files = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+fn serve(files: &Files, path: &str, body: &[u8]) {
+    let mut all = files.lock().unwrap();
+    all.retain(|(p, _)| p != path);
+    all.push((path.to_owned(), body.to_vec()));
+}
+
+fn serve_catalog(files: &Files, entries: Vec<Value>) {
+    serve(
+        files,
+        "/catalog.json",
+        json!({"workplaces": entries}).to_string().as_bytes(),
+    );
+}
+
+fn changing_host() -> (FileHost, Files) {
+    let files = Files::default();
+    let served = files.clone();
+    let host = FileHost::start(move |path, _| {
+        (served.lock().unwrap().iter())
+            .find(|(p, _)| p == path)
+            .map_or_else(|| reply(404, &[]), |(_, body)| reply(200, body))
+    });
+    (host, files)
+}
+
+/// A service whose catalog is `/catalog.json` of `host`.
+fn catalog_service(home: &Home, host: &FileHost) -> Service {
+    Service::start_with(home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_CATALOG", host.url("/catalog.json"));
+    })
+}
+
+fn staging_is_empty(home: &Path) {
+    eventually("the staging folder to be empty", || {
+        fs::read_dir(home.join("staging")).map_or(true, |mut d| d.next().is_none())
+    });
+}
+
+#[test]
+fn a_workplace_is_installed_from_the_catalog_pinned_and_updated_only_when_asked() {
+    let home = home("wp-catalog");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpcatalog", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let (host, files) = changing_host();
+    let v1 = packed(&example_workplace(), "v1");
+    let url1 = host.url("/counter-1.0.0.tar.gz");
+    serve(&files, "/counter-1.0.0.tar.gz", &v1);
+    serve_catalog(&files, vec![catalog_entry("counter", "1.0.0", &url1, &v1)]);
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let code = |w: &mut Window, command: &str, fields: Value| {
+        let id = w.send(command, fields);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+
+    // Listed, with nothing installed yet.
+    let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["name"], "counter");
+    assert_eq!(listed[0]["sha256"], sha256_of(&v1));
+    assert_eq!(listed[0]["installedVersion"], Value::Null);
+    assert_eq!(listed[0]["update"], false);
+
+    // Shown before it is installed: all its needs are new, and nothing is kept.
+    let preview = w.ok("preview_catalog", json!({"name": "counter"}));
+    assert_eq!(preview["manifest"]["version"], "1.0.0");
+    assert_eq!(preview["newly"]["commands"], json!(["python3"]));
+    assert_eq!(preview["newly"]["downloads"], json!([]));
+    assert_eq!(preview["downloadBytes"], 0);
+    assert_eq!(
+        code(&mut w, "preview_catalog", json!({"name": "nope"})),
+        "no_such_catalog_entry"
+    );
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+
+    // Installed as a workplace from a folder is, and pinned to the archive.
+    let made = w.ok(
+        "install_catalog",
+        json!({"name": "counter", "sha256": sha256_of(&v1)}),
+    )["workplace"]
+        .clone();
+    assert_eq!(made["version"], "1.0.0");
+    assert_eq!(made["archive"], sha256_of(&v1));
+    let installed = home.join("workplaces").join("counter");
+    assert!(
+        installed.join("server.py").exists()
+            && installed.join("skills/count-things/SKILL.md").exists()
+    );
+    let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
+    assert_eq!(listed[0]["installedVersion"], "1.0.0");
+    assert_eq!(listed[0]["update"], false);
+    staging_is_empty(&home);
+
+    // Approving changed files keeps the pin.
+    fs::write(installed.join("server.py"), "# changed\n").unwrap();
+    w.ok("approve_workplace", json!({"name": "counter"}));
+    assert_eq!(
+        w.ok("list_workplaces", json!({}))["workplaces"][0]["archive"],
+        sha256_of(&v1)
+    );
+
+    // A newer entry: offered with what it newly needs, and not applied.
+    let model = vec![3u8; 2000];
+    serve(&files, "/model.bin", &model);
+    let folder = copied_workplace("wp-catalog-v2");
+    let file = folder.join("workplace.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    manifest["version"] = json!("2.0.0");
+    manifest["needs"] =
+        json!({"folders": ["~/data"], "hosts": ["example.com"], "commands": ["python3"]});
+    manifest["downloads"] = json!([download(
+        &host.url("/model.bin"),
+        &model,
+        "data/model.bin",
+        None
+    )]);
+    fs::write(&file, manifest.to_string()).unwrap();
+    let v2 = packed(&folder, "v2");
+    serve(&files, "/counter-2.0.0.tar.gz", &v2);
+    let url2 = host.url("/counter-2.0.0.tar.gz");
+    serve_catalog(&files, vec![catalog_entry("counter", "2.0.0", &url2, &v2)]);
+    let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
+    assert_eq!(listed[0]["version"], "2.0.0");
+    assert_eq!(listed[0]["installedVersion"], "1.0.0");
+    assert_eq!(listed[0]["update"], true);
+    let preview = w.ok("preview_catalog", json!({"name": "counter"}));
+    assert_eq!(preview["newly"]["folders"], json!(["~/data"]));
+    assert_eq!(preview["newly"]["hosts"], json!(["example.com"]));
+    assert_eq!(preview["newly"]["commands"], json!([]));
+    assert_eq!(preview["newly"]["downloads"][0]["dest"], "data/model.bin");
+    assert_eq!(preview["downloadBytes"], model.len());
+    assert_eq!(preview["hosts"], json!([host.addr()]));
+    let installed_now = w.ok("list_workplaces", json!({}))["workplaces"][0].clone();
+    assert_eq!(installed_now["version"], "1.0.0");
+    assert_eq!(installed_now["archive"], sha256_of(&v1));
+
+    // Only the command applies it, once the downloads are agreed to and the entry is the one shown.
+    let ask = json!({"name": "counter", "sha256": sha256_of(&v2)});
+    assert_eq!(
+        code(&mut w, "install_catalog", ask.clone()),
+        "download_not_agreed"
+    );
+    let stale = json!({"name": "counter", "sha256": sha256_of(&v1), "download": true});
+    assert_eq!(code(&mut w, "install_catalog", stale), "catalog_changed");
+    let a = w.create_bot();
+    let real = site.canonicalize().unwrap();
+    let project = json!({"name": "Site", "folder": real, "bots": [a], "workplace": "counter"});
+    let mut project = w.ok("set_project", json!({"project": project}))["project"].clone();
+    let agreed = json!({"name": "counter", "sha256": sha256_of(&v2), "download": true});
+    assert_eq!(
+        code(&mut w, "install_catalog", agreed.clone()),
+        "workplace_in_use"
+    );
+    project["workplace"] = Value::Null;
+    w.ok("set_project", json!({"project": project}));
+    let made = w.ok("install_catalog", agreed)["workplace"].clone();
+    assert_eq!(made["version"], "2.0.0");
+    assert_eq!(made["archive"], sha256_of(&v2));
+    assert_eq!(fs::read(installed.join("data/model.bin")).unwrap(), model);
+    assert!(
+        fs::read_to_string(installed.join("server.py"))
+            .unwrap()
+            .contains("def ")
+    );
+    let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
+    assert_eq!(listed[0]["installedVersion"], "2.0.0");
+    assert_eq!(listed[0]["update"], false);
+    staging_is_empty(&home);
+}
+
+#[test]
+fn a_catalog_archive_that_is_not_what_the_catalog_pins_is_refused_and_leaves_nothing() {
+    let home = home("wp-catalog-bad");
+    let (host, files) = changing_host();
+    let good = packed(&example_workplace(), "bad-good");
+    let url = host.url("/c.tar.gz");
+    serve(&files, "/c.tar.gz", &good);
+    let linked = tarball("catalog-link", &[], |dir| {
+        fs::copy(
+            example_workplace().join("workplace.json"),
+            dir.join("workplace.json"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("link")).unwrap();
+        vec!["workplace.json".into(), "link".into()]
+    });
+    serve(&files, "/link.tar.gz", &linked);
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+
+    let entry = |f: &dyn Fn(&mut Value)| {
+        let mut e = catalog_entry("counter", "1.0.0", &url, &good);
+        f(&mut e);
+        e
+    };
+    let cases: Vec<(&str, Value, &str)> = vec![
+        (
+            "wrong hash",
+            entry(&|e| e["sha256"] = json!("0".repeat(64))),
+            "sha256",
+        ),
+        (
+            "size too big",
+            entry(&|e| e["size"] = json!(good.len() + 1)),
+            "the catalog says",
+        ),
+        (
+            "size too small",
+            entry(&|e| e["size"] = json!(good.len() - 1)),
+            "larger than",
+        ),
+        (
+            "other workplace",
+            entry(&|e| e["name"] = json!("other")),
+            "holds counter",
+        ),
+        (
+            "other version",
+            entry(&|e| e["version"] = json!("9")),
+            "holds counter 1.0.0",
+        ),
+        (
+            "missing",
+            entry(&|e| e["url"] = json!(host.url("/none"))),
+            "404",
+        ),
+        (
+            "a link",
+            catalog_entry("counter", "1.0.0", &host.url("/link.tar.gz"), &linked),
+            "not a plain file",
+        ),
+    ];
+    for (what, e, reason) in cases {
+        serve_catalog(&files, vec![e.clone()]);
+        let name = e["name"].as_str().unwrap();
+        for command in ["preview_catalog", "install_catalog"] {
+            let id = w.send(command, json!({"name": name, "sha256": e["sha256"]}));
+            let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+            assert_eq!(reply["code"], "catalog_failed", "{what} {command}: {reply}");
+            let error = reply["error"].as_str().unwrap();
+            assert!(
+                error.contains(reason),
+                "{what}: {reason:?} not in {error:?}"
+            );
+        }
+        assert_eq!(
+            w.ok("list_workplaces", json!({}))["workplaces"],
+            json!([]),
+            "{what}"
+        );
+        assert!(!home.join("workplaces").join("counter").exists(), "{what}");
+        staging_is_empty(&home);
+    }
+
+    // A list that is not a list of https entries is refused as a whole.
+    let plain = catalog_entry("counter", "1.0.0", "http://example.com/c.tar.gz", &good);
+    for list in [
+        json!([plain]),
+        json!(vec![catalog_entry("counter", "1.0.0", &url, &good); 2]),
+    ] {
+        serve_catalog(&files, list.as_array().unwrap().clone());
+        let id = w.send("list_catalog", json!({}));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["code"], "catalog_failed", "{reply}");
+    }
+    staging_is_empty(&home);
+}
+
+#[test]
+fn the_catalog_of_the_repository_pins_what_the_pack_script_makes_of_its_workplaces() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    // The same folder gives the same bytes.
+    let counter = repo.join("workplaces/counter");
+    assert_eq!(packed(&counter, "repro-1"), packed(&counter, "repro-2"));
+
+    let text = fs::read_to_string(repo.join("catalog/workplaces.json")).unwrap();
+    let (host, files) = changing_host();
+    serve(&files, "/catalog.json", text.as_bytes());
+    let home = home("wp-catalog-repo");
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
+    let list = listed.as_array().unwrap();
+    assert!(list.iter().any(|e| e["name"] == "counter"));
+    for e in list {
+        let (name, version) = (e["name"].as_str().unwrap(), e["version"].as_str().unwrap());
+        // The release job builds `workplaces/<name>` on the tag `wp-<name>-v<version>`.
+        assert_eq!(
+            e["url"],
+            format!(
+                "https://github.com/d41sys/bate/releases/download/wp-{name}-v{version}/{name}-{version}.tar.gz"
+            )
+        );
+        let archive = packed(&repo.join("workplaces").join(name), name);
+        assert_eq!(
+            (e["size"].as_u64().unwrap(), e["sha256"].as_str().unwrap()),
+            (archive.len() as u64, sha256_of(&archive).as_str()),
+            "{name}: run workplaces/pack.py and put its size and hash in catalog/workplaces.json"
+        );
+        let manifest =
+            fs::read_to_string(repo.join("workplaces").join(name).join("workplace.json")).unwrap();
+        let manifest: Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(
+            (&manifest["name"], &manifest["version"]),
+            (&e["name"], &e["version"])
+        );
+    }
 }

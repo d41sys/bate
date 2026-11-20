@@ -1,4 +1,4 @@
-import type { Workplace, WorkplacePreview } from "./types.ts";
+import type { CatalogPreview, Workplace, WorkplacePreview } from "./types.ts";
 
 /** What a workplace needs, one line per kind, as the person is shown it before switching it on. */
 export function needsLines(w: Workplace): string[] {
@@ -39,4 +39,17 @@ export function downloadText(p: WorkplacePreview): string | undefined {
 /** How far the downloads are, for the progress line. */
 export function progressText(done: number, total: number): string {
   return `Downloading ${sizeText(done)} of ${sizeText(total)} (${Math.floor((done / Math.max(total, 1)) * 100)}%)`;
+}
+
+/** What an install or update from the catalog newly needs, one line per kind. */
+export function newlyLines(n: CatalogPreview["newly"]): string[] {
+  const lines = (
+    [
+      ["Folders", n.folders],
+      ["Network hosts", n.hosts],
+      ["Commands", n.commands],
+      ["Downloads", n.downloads.map((d) => `${d.dest} (${sizeText(d.size)})`)],
+    ] as const
+  ).flatMap(([what, items]) => (items.length ? [`${what}: ${items.join(", ")}`] : []));
+  return lines.length ? lines : ["Nothing it did not need already."];
 }

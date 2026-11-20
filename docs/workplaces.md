@@ -1,6 +1,6 @@
 # Workplaces
 
-A workplace is a package that equips a project for one kind of work: a program that Bate runs once for the project, with the skills and roles that go with it. The idea is in `docs/adr/0001-workplaces-are-separate-programs.md`; the requests are in `PROTOCOL.md` (Workplaces). A small working example is `examples/workplaces/counter/`.
+A workplace is a package that equips a project for one kind of work: a program that Bate runs once for the project, with the skills and roles that go with it. The idea is in `docs/adr/0001-workplaces-are-separate-programs.md`; the requests are in `PROTOCOL.md` (Workplaces). A small working example is `workplaces/counter/`; to install one from a list, see The catalog.
 
 ## The folder
 
@@ -81,7 +81,7 @@ A program may fill **surfaces**: a table, a tree or a code view that Bate's wind
 
 Everything is data: Bate shows every string as plain text, so markup and script in it do nothing. Large content is read in parts: a `resources/read` carries `params._meta["bate/part"] = {"offset": 0, "limit": 100}`. Send just those items, with `"offset"` and `"total"` in the content, or ignore it and send everything: Bate cuts the part itself (at most 500 items, 512 KiB) and never loads more.
 
-The person's actions are tool calls. Name them in the content: `"select"` (a tool called when a row, node or line is chosen), `"open"` (when it is opened: double click or Enter) and `"actions"`, a list of `{"tool", "label"}` shown as buttons. Bate calls the tool with `{"uri": <the surface>, "target": <the id of the row or node, or the line's number>}`; it calls only tools that the surface names. Change the content in the tool (or when a bot calls any tool) and send `notifications/resources/updated` for the uri on the `GET /mcp` stream of server-sent events: the open surface updates in every window. `examples/workplaces/counter/` has one surface of each kind. The wire details are in `PROTOCOL.md` (Surfaces). The web client on the local network has no surfaces.
+The person's actions are tool calls. Name them in the content: `"select"` (a tool called when a row, node or line is chosen), `"open"` (when it is opened: double click or Enter) and `"actions"`, a list of `{"tool", "label"}` shown as buttons. Bate calls the tool with `{"uri": <the surface>, "target": <the id of the row or node, or the line's number>}`; it calls only tools that the surface names. Change the content in the tool (or when a bot calls any tool) and send `notifications/resources/updated` for the uri on the `GET /mcp` stream of server-sent events: the open surface updates in every window. `workplaces/counter/` has one surface of each kind. The wire details are in `PROTOCOL.md` (Surfaces). The web client on the local network has no surfaces.
 
 ## Installing, switching on, removing
 
@@ -92,3 +92,46 @@ The person's actions are tool calls. Name them in the content: `"select"` (a too
 - **Remove:** refused while a project has the workplace on, unless you confirm; the project is then switched off. What the program kept in `project-data/<projectId>/` is never deleted by this.
 
 A workplace that cannot be used (its manifest no longer parses, its program does not start) is reported in the list and in the project; the project still opens and its bots still answer.
+
+## The catalog
+
+Bate's own list of workplaces is the file `catalog/workplaces.json` in this repository. In the window (Projects tab, Workplaces, Catalog) a person asks for it, reads the entries and installs one; nothing is contacted before that, and no server of the project is involved: the list is read from GitHub's raw files and the archives from wherever the entries say (GitHub releases, for Bate's own). A workplace that is not in the list is installed from a folder, as above.
+
+```json
+{
+  "workplaces": [
+    {
+      "name": "counter",
+      "description": "A counter that every bot of a project shares.",
+      "version": "1.0.0",
+      "url": "https://github.com/d41sys/bate/releases/download/wp-counter-v1.0.0/counter-1.0.0.tar.gz",
+      "size": 20503,
+      "sha256": "<64 hex digits>"
+    }
+  ]
+}
+```
+
+| Key | Value |
+|---|---|
+| `name` | The workplace's `name` (rules as in `workplace.json`), different for each entry. |
+| `description` | One line, at most 500 characters. |
+| `version` | One line, at most 40 characters: the `version` of the `workplace.json` inside. |
+| `url` | `https://…` (or `http://127.0.0.1…`, to this Mac) of a `.tar.gz` of the workplace's folder: `workplace.json` and the rest at the top of the archive. At most 5 redirects are followed. |
+| `size`, `sha256` | The archive's size in bytes (1 to 200 MiB) and SHA-256 (64 lowercase hex digits). |
+
+At most 200 entries, 1 MiB. A list with one bad entry is refused whole.
+
+**Installing.** Bate downloads the archive into its staging folder, stops at `size` bytes, and refuses it unless the size and the hash are the entry's and the `workplace.json` inside has the entry's `name` and `version`. It unpacks it with the checks a download's `tar.gz` gets (plain files and folders, nothing outside the folder), shows the manifest's needs, and then installs the folder as it installs one a person picked: the same limits, the same `downloads` with the same consent, the same fingerprint. Whatever fails leaves nothing behind. There is no signature: the pin of size and hash is what makes the archive the one the person was shown.
+
+**Pinned.** An installed workplace keeps the version and the archive's hash it was installed at. When the catalog lists another archive for its name, the window offers **Update**, and shows what the new version needs that the installed one did not: folders, hosts, commands and downloads. It is applied only when the person agrees, and never while a project has the workplace on (switch it off first). A workplace installed from a folder has no pin; the catalog's entry of that name is offered to it.
+
+### Releasing one of Bate's workplaces
+
+A workplace of Bate's lives in `workplaces/<name>/`. To release version `X` of `<name>` (its `workplace.json` says `X`):
+
+1. Pack it and read the size and hash: `python3 workplaces/pack.py workplaces/<name> <name>-X.tar.gz`. The script prints `<size> <sha256>`. The same folder gives the same bytes on every machine (members in order of their paths, no owner, time zero, modes 755 and 644, a gzip layer of stored blocks that no compressor version can change; `.DS_Store` and `__pycache__` are left out), so it can be done locally.
+2. Put the entry in `catalog/workplaces.json`, with `url` `https://github.com/d41sys/bate/releases/download/wp-<name>-vX/<name>-X.tar.gz`, and merge it. (`cargo test` fails when an entry does not match the pack of its folder.)
+3. Push the tag `wp-<name>-vX` on the merged commit. The job in `.github/workflows/ci.yml` packs the folder with the same script, checks that size, hash, version and `url` are the catalog entry's, and creates a release of that name with the archive, with `--latest=false`: the updater reads `releases/latest/download/feed.json`, so a workplace release must never become the latest one. It then checks that the release is not the latest.
+
+The tag is `wp-…`, never `v…`: `v*` tags publish the app.

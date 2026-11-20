@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { downloadText, needsLines, progressText, sizeText, unusable } from "./workplaces.ts";
+import { downloadText, needsLines, newlyLines, progressText, sizeText, unusable } from "./workplaces.ts";
 import type { Workplace } from "./types.ts";
 
 const base: Workplace = {
@@ -35,4 +35,10 @@ test("the person is told the size and the hosts before the downloads start", () 
   assert.equal(sizeText(5), "5 B");
   assert.equal(sizeText(300 * 1024 ** 2), "300.0 MiB");
   assert.equal(progressText(1024, 4096), "Downloading 1.0 KiB of 4.0 KiB (25%)");
+});
+
+test("an update is shown with what it newly needs", () => {
+  assert.deepEqual(newlyLines({ folders: [], hosts: [], commands: [], downloads: [] }), ["Nothing it did not need already."]);
+  const n = { folders: ["~/data"], hosts: [], commands: ["git"], downloads: [{ dest: "data/model.bin", size: 2048 }] };
+  assert.deepEqual(newlyLines(n), ["Folders: ~/data", "Commands: git", "Downloads: data/model.bin (2.0 KiB)"]);
 });
