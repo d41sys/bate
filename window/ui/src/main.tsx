@@ -38,7 +38,9 @@ type BotTab = keyof typeof BOT_TABS;
 type ProjectTab = keyof typeof PROJECT_TABS;
 /** What the page shows. The channels and the surfaces are for Bate's own window only. */
 type View =
-  | { page: "projects" | "workplaces" | "settings" | "new-bot" }
+  | { page: "workplaces" | "settings" | "new-bot" }
+  /** `asked`: when "New project" was asked for, so that its dialog opens at once, each time. */
+  | { page: "projects"; asked?: number }
   | { page: "project"; id: string; tab: ProjectTab }
   | { page: "bot"; id: string; tab: BotTab };
 const botTabs = (Object.keys(BOT_TABS) as BotTab[]).filter((t) => inShell || t !== "channels");
@@ -168,7 +170,7 @@ function App() {
       setFind(true);
     },
     "new-bot": () => setView({ page: "new-bot" }),
-    "new-project": () => setView({ page: "projects" }),
+    "new-project": () => setView({ page: "projects", asked: Date.now() }),
     "new-window": () => void newWindow().catch((e: Error) => setError(e.message)),
   };
   const act = useRef(actions);
@@ -283,7 +285,7 @@ function App() {
               {members.length > 0 && <ul>{members.map(botRow)}</ul>}
             </li>
           ))}
-          <li>{plain("New project", view?.page === "projects", () => setView({ page: "projects" }))}</li>
+          <li>{plain("New project", view?.page === "projects", actions["new-project"])}</li>
         </ul>
         <div className="heading">
           <h2>Bots</h2>
@@ -320,7 +322,7 @@ function App() {
         {view?.page === "projects" && (
           <>
             <header><div className="who"><h1>Projects</h1></div></header>
-            <Projects key={connection} bots={bots} projects={projects} open={openProject} />
+            <Projects key={`${connection}-${view.asked}`} adding={view.asked !== undefined} bots={bots} projects={projects} open={openProject} />
           </>
         )}
         {view?.page === "workplaces" && (

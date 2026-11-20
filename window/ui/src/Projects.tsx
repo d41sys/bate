@@ -10,8 +10,8 @@ import { needsLines, unusable } from "./workplaces.ts";
 const label = (b?: Bot) => (b ? `${b.avatar ? `${b.avatar} ` : ""}${b.name}` : "(deleted bot)");
 
 /** The projects: each opens to its own page. A project is made here, in a dialog, with no bot open. */
-export function Projects({ bots, projects, open }: { bots: Bot[]; projects: Project[]; open: (id: string) => void }) {
-  const [adding, setAdding] = useState(false);
+export function Projects({ bots, projects, open, adding: asked }: { bots: Bot[]; projects: Project[]; open: (id: string) => void; adding: boolean }) {
+  const [adding, setAdding] = useState(asked);
   const name = (id: string) => label(bots.find((o) => o.id === id));
   return (
     <section>
