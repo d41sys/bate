@@ -131,7 +131,7 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
 @media (hover: hover) {
   [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--ink); color: var(--on-ink); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
   /* The last control of a row is at the edge: its tip grows to the left. */
-  .composer > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+  .composer > [data-tip]:last-child::after, .heading > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
   [data-tip][aria-expanded=true]::after { display: none; }
 }
 /* A hint key on a button: the key that does the same. */
