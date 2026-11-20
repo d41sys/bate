@@ -20,7 +20,7 @@ _Avoid_: external agent, CLI
 
 **Group**:
 Bots that may message each other, one of them the lead.
-_Avoid_: team, room
+_Avoid_: team
 
 **Role**:
 A ready-made definition of a bot that a project can add as one of its bots.
@@ -30,7 +30,11 @@ _Avoid_: persona, template
 
 **Project**:
 One piece of work: a folder that a person and the project's bots share, with shared instructions and memory. A bot is in at most one project.
-_Avoid_: workspace, room
+_Avoid_: workspace
+
+**Room**:
+A project's one conversation: the person writes to its bots, by `@name` or to its lead, and their replies come back in one timeline.
+_Avoid_: channel, chat
 
 **Workplace**:
 An installed feature that equips a project for one kind of work, such as coding or reverse engineering.

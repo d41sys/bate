@@ -175,6 +175,11 @@ const TICK: Duration = Duration::from_secs(30);
 const QUEUE_MAX: usize = 20;
 /// Messages from other bots that may wait for one bot.
 const MAIL_MAX: usize = 20;
+/// What a bot is shown of its project's room: at most this many lines, and this many characters.
+const ROOM_LINES: usize = 10;
+const ROOM_CHARS: usize = 4000;
+/// The lines of the room a window gets.
+const ROOM_SHOWN: usize = 200;
 
 /// Shortens `text` to at most `max` bytes, at a character's edge.
 fn cut(text: &mut String, max: usize) {
@@ -183,6 +188,17 @@ fn cut(text: &mut String, max: usize) {
         end -= 1;
     }
     text.truncate(end);
+}
+
+/// What a person is told of a message that got no reply. The reasons are worded for another
+/// bot: `it` and `its` are the bot.
+fn no_reply(e: String) -> String {
+    let e = match (e.strip_prefix("its "), e.strip_prefix("it ")) {
+        (Some(rest), _) => format!("the bot's {rest}"),
+        (_, Some(rest)) => format!("the bot {rest}"),
+        _ => e,
+    };
+    format!("No reply: {e}.")
 }
 
 fn updates_off() -> Refusal {
@@ -356,9 +372,10 @@ enum Waiter {
         prompt: Outgoing,
     },
     /// A prompt from the bot's queue, sent now that the bot is free; it leaves the queue once
-    /// the engine admits it.
+    /// the engine admits it. `caller` when its turn's last words go somewhere (a room message).
     Queued {
         prompt: Outgoing,
+        caller: Option<Caller>,
     },
     /// The service's own `peers` or `reply`: a refusal changes nothing (the turn that waited
     /// for the reply may be over).
@@ -420,6 +437,8 @@ enum Caller {
     /// The message `seq`, which waited in the bot's inbox: its sender is not waiting, and gets
     /// the answer as a new prompt.
     Mail { seq: i64 },
+    /// A message the person wrote in the room of `project`: the reply goes into the room.
+    Room { project: String },
     /// A chat on one of the bot's own channels; `routine` when its message started one.
     Chat {
         kind: &'static str,
@@ -1352,6 +1371,38 @@ impl Core {
                 Ok(Some(
                     json!({"mail": self.store.mail_of(&bot).map_err(internal)?}),
                 ))
+            }
+            "list_room" => {
+                let project = self.project_by_id(f)?;
+                let id = project.id.as_deref().unwrap_or_default();
+                Ok(Some(
+                    json!({"room": self.store.room(id, ROOM_SHOWN).map_err(internal)?}),
+                ))
+            }
+            "send_room" => {
+                let project = self.project_by_id(f)?;
+                let id = project.id.clone().unwrap_or_default();
+                let (to, text) = self.room_target(&project, str_field(f, "text")?)?;
+                if self.store.queue(&to).map_err(internal)?.len() >= QUEUE_MAX {
+                    return Err((
+                        "queue_full",
+                        format!("{QUEUE_MAX} prompts are already waiting"),
+                    ));
+                }
+                let waits = !self.free(&to) || !self.store.queue(&to).map_err(internal)?.is_empty();
+                let seq = self
+                    .store
+                    .put_room(&id, "", &to, text, now_ms())
+                    .map_err(internal)?;
+                let nonce = format!("room-{seq}");
+                self.store
+                    .enqueue(&to, &nonce, text, false)
+                    .map_err(internal)?;
+                self.broadcast(&json!({"type": "room_changed", "projectId": id}));
+                self.broadcast(&json!({"type": "queue_changed", "bot": to}));
+                // Sent now if the bot is free, else it waits its turn like a typed prompt.
+                self.drain_queue(&to);
+                Ok(Some(json!({"seq": seq, "to": to, "queued": waits})))
             }
             "cancel_mail" => {
                 let seq = f
@@ -2986,6 +3037,10 @@ impl Core {
         }
         p.bots.sort();
         p.bots.dedup();
+        p.lead = p.lead.filter(|l| !l.is_empty());
+        if p.lead.as_ref().is_some_and(|l| !p.bots.contains(l)) {
+            return Err(invalid("`lead` must be one of the project's bots".into()));
+        }
         if p.bots.len() > MAX_MEMBERS {
             return Err(invalid(format!("a project has at most {MAX_MEMBERS} bots")));
         }
@@ -3295,8 +3350,9 @@ impl Core {
             };
             match self.store.ledger(bot, &nonce) {
                 Ok(None) => {
+                    let (text, caller) = self.room_prompt(bot, &nonce, text);
                     let sent = self.send_prompt(bot, Outgoing { nonce, text }, |prompt| {
-                        Waiter::Queued { prompt }
+                        Waiter::Queued { prompt, caller }
                     });
                     if let Err((_, e)) = sent {
                         log!("bot {bot}: queued prompt not sent: {e}");
@@ -3315,6 +3371,55 @@ impl Core {
         }
     }
 
+    /// A queued prompt that is a room message becomes that message under what the room said
+    /// since the bot's last turn there (at most `ROOM_LINES` lines and `ROOM_CHARS` characters),
+    /// and its reply goes back into the room. Other prompts stay as they are.
+    fn room_prompt(&self, bot: &str, nonce: &str, text: String) -> (String, Option<Caller>) {
+        let seq = nonce.strip_prefix("room-").and_then(|n| n.parse().ok());
+        let entry = seq.and_then(|seq| self.store.room_entry(seq).ok().flatten());
+        let Some((project, _)) = entry else {
+            return (text, None);
+        };
+        let unseen = self
+            .store
+            .room_unseen(&project, bot, ROOM_LINES)
+            .unwrap_or_default();
+        let (mut news, mut left) = (Vec::new(), ROOM_CHARS);
+        for e in unseen {
+            let who = if e.from.is_empty() {
+                "the person".into()
+            } else {
+                self.name_of(&e.from)
+            };
+            let line = match e.to.as_str() {
+                "" => format!("{who}: {}", e.text),
+                to => format!("{who} to {}: {}", self.name_of(to), e.text),
+            };
+            let n = line.chars().count();
+            // Whole lines only, except that the newest is cut rather than lost.
+            if n > left && !news.is_empty() {
+                break;
+            }
+            news.push(line.chars().take(left).collect::<String>());
+            // The line break that joins it counts too.
+            left = left.saturating_sub(n + 1);
+            if left == 0 {
+                break;
+            }
+        }
+        let caller = Some(Caller::Room { project });
+        if news.is_empty() {
+            return (text, caller);
+        }
+        news.reverse();
+        let head = "[The room of your project: what the others said there since your last turn in it. Not for you to answer.]";
+        let text = format!(
+            "{head}\n{}\n[Now the person writes to you in the room. What you say last goes into the room as your reply.]\n{text}",
+            news.join("\n")
+        );
+        (text, caller)
+    }
+
     /// The prompt that gives a bot the message `seq` from the bot named `sender`.
     fn mail_prompt(seq: i64, sender: &str, text: &str) -> Outgoing {
         Outgoing {
@@ -3323,6 +3428,52 @@ impl Core {
                 "[Message from the bot {sender:?}. It is another bot, not your user. What you say last goes back to it as your reply.]\n{text}"
             ),
         }
+    }
+
+    fn project_by_id(&self, f: &Value) -> Result<Project, Refusal> {
+        let id = str_field(f, "projectId")?;
+        let projects = self.store.projects().map_err(internal)?;
+        projects
+            .into_iter()
+            .find(|p| p.id.as_deref() == Some(id))
+            .ok_or(("no_such_project", "no such project".into()))
+    }
+
+    /// Who a room message is for, and what it says: `@name text` goes to that bot of the
+    /// project (the longest name that fits, any case), anything else to the project's lead.
+    fn room_target<'a>(
+        &self,
+        project: &Project,
+        text: &'a str,
+    ) -> Result<(String, &'a str), Refusal> {
+        let text = text.trim();
+        let mut target = None;
+        if let Some(rest) = text.strip_prefix('@') {
+            let named = project.bots.iter().filter_map(|id| {
+                let name = self.name_of(id);
+                let head = rest
+                    .get(..name.len())
+                    .filter(|h| h.eq_ignore_ascii_case(&name))?;
+                let after = &rest[head.len()..];
+                (after.is_empty() || after.starts_with(char::is_whitespace))
+                    .then(|| (name.len(), id.clone(), after.trim()))
+            });
+            let Some((_, id, after)) = named.max_by_key(|n| n.0) else {
+                return Err(("no_such_bot", "no bot of this project has that name".into()));
+            };
+            target = Some((id, after));
+        }
+        let (to, text) = match target {
+            Some(t) => t,
+            None => {
+                let lead = project.lead_bot();
+                (lead.ok_or(bad("the project has no bots"))?.to_owned(), text)
+            }
+        };
+        if text.is_empty() {
+            return Err(bad("`text` is empty"));
+        }
+        Ok((to, text))
     }
 
     fn name_of(&self, bot: &str) -> String {
@@ -3589,16 +3740,16 @@ impl Core {
             } => self.answer_mail(mail, reply, Some((generation, message))),
             Caller::Mail { seq } => self.answer_mail(seq, reply, None),
             Caller::Chat { kind, chat, .. } => {
-                // The reasons are worded for another bot: `it` and `its` are this bot.
-                let text = reply.unwrap_or_else(|e| {
-                    let e = match (e.strip_prefix("its "), e.strip_prefix("it ")) {
-                        (Some(rest), _) => format!("the bot's {rest}"),
-                        (_, Some(rest)) => format!("the bot {rest}"),
-                        _ => e,
-                    };
-                    format!("No reply: {e}.")
-                });
+                let text = reply.unwrap_or_else(no_reply);
                 self.say(bot, kind, &chat, &text);
+            }
+            Caller::Room { project } => {
+                let mut text = reply.unwrap_or_else(no_reply);
+                cut(&mut text, MAX_REPLY);
+                match self.store.put_room(&project, bot, "", &text, now_ms()) {
+                    Ok(_) => self.broadcast(&json!({"type": "room_changed", "projectId": project})),
+                    Err(e) => log!("bot {bot}: room reply not stored: {e}"),
+                }
             }
         }
     }
@@ -4416,7 +4567,7 @@ impl Core {
                     None => {
                         let routine = match &caller {
                             Caller::Chat { routine, .. } => routine.clone(),
-                            Caller::Bot { .. } | Caller::Mail { .. } => None,
+                            Caller::Bot { .. } | Caller::Mail { .. } | Caller::Room { .. } => None,
                         };
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.routine = routine;
@@ -4428,12 +4579,18 @@ impl Core {
                     }
                 }
             }
-            Waiter::Queued { prompt } => {
+            Waiter::Queued { prompt, caller } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
                 match error {
                     None => {
                         if let Err(e) = self.store.dequeue(bot, &prompt.nonce) {
                             log!("bot {bot}: queue not updated: {e}");
+                        }
+                        if let (Some(caller), Some(r)) = (caller, self.engines.get_mut(bot)) {
+                            r.call = Some(Call {
+                                caller,
+                                reply: String::new(),
+                            });
                         }
                         self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
                     }
@@ -4506,7 +4663,7 @@ impl Core {
             }
             | Waiter::Routine { prompt: p, .. }
             | Waiter::Peer { prompt: p, .. }
-            | Waiter::Queued { prompt: p } = &waiter
+            | Waiter::Queued { prompt: p, .. } = &waiter
                 && unwritten.contains(&req)
                 && let Err(e) = self.store.forget_ledger(bot, &p.nonce)
             {

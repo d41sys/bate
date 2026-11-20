@@ -126,6 +126,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `list_queue` | `bot` | `{queue:[{nonce, text}]}`, in the order they go |
 | `remove_queued` | `bot`, `nonce` | `{}`; `no_such_prompt` if that prompt is not waiting (it may have gone to the engine already) |
 | `list_mail` | `bot` | `{mail:[{seq, from, to, text, state, answer?, error?, atMs}]}`: the last 50 messages between this bot and other bots, oldest first; `state` is `waiting`, `working` or `answered` (`error` instead of `answer` when none came) |
+| `list_room` | `projectId` | `{room:[{seq, from, to, text, atMs}]}`: the last 200 lines of the project's room (see Room), oldest first; `from` is a bot's id, empty for the person; `to` the bot it was addressed to, empty for a bot's reply. `no_such_project` |
+| `send_room` | `projectId`, `text` | `{seq, to, queued}`: the person's message, to the bot its `@name` names, else to the project's lead (see Room); `queued` is `true` when that bot was busy or had prompts waiting. `no_such_project`, `no_such_bot` (the name is no bot of the project), `bad_request` (nothing after the name, or the project has no bots), `queue_full` |
 | `cancel_mail` | `seq` | `{}`; the sender is told the message got no answer. `no_such_message`; `not_waiting` once the bot took it |
 | `abort`, `compact` | `bot` | `{}` |
 | `set_model` | `bot`, `model` (empty: back to the engine's default, with no `effort`), `effort?` (`minimal`, `low`, `medium`, `high`) | `{}`; kept for the bot, so each new engine of it starts with them; `bots_changed` follows |
@@ -206,6 +208,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"routines_changed","bot"}` | Re-run `list_routines`. |
 | `{"type":"queue_changed","bot"}` | Re-run `list_queue`. |
 | `{"type":"mail_changed"}` | Re-run `list_mail`. |
+| `{"type":"room_changed","projectId"}` | Re-run `list_room`: a line came into that project's room. |
 | `{"type":"connectors_changed","bot"}` | Re-run `list_connectors`. |
 | `{"type":"update_changed"}` | Re-run `get_update`. |
 | `{"type":"workplace_progress","name","done","total"}` | An `install_workplace` has fetched `done` of `total` bytes of the workplace `name`'s downloads (at most four a second, and after each download). |
@@ -255,7 +258,16 @@ Whether a bot may message another is asked like a connector's tool: a `question`
 
 ### Projects
 
-Same shape as `proto::projects`. A project is `{id, name, folder, bots, instructions, connector, workplace, connectorError}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids, `instructions` at most 8000 characters, `connector` (optional) `{name, command, args}` (see A project's connector), `workplace` (optional) the name of an installed workplace (see Workplaces; not together with `connector`), `connectorError` output only; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads).
+Same shape as `proto::projects`. A project is `{id, name, folder, bots, lead, instructions, connector, workplace, connectorError}`: `name` is 1 to 80 characters, `folder` a folder's full path, `bots` at most 20 bots' ids, `lead` (optional) one of `bots` (`invalid_project` otherwise; the first bot when not set, and also when the bot it names has left), `instructions` at most 8000 characters, `connector` (optional) `{name, command, args}` (see A project's connector), `workplace` (optional) the name of an installed workplace (see Workplaces; not together with `connector`), `connectorError` output only; there are at most 50 projects, and a bot is in at most one. The bots of a project work in its folder, and may message each other as the bots of a group may (none of them leads in a group's sense; `lead` is for the room).
+
+### Room
+
+A project has a room: one conversation in which the person writes to its bots and the bots' replies come back, in one timeline (the window's Room tab). The project owns it: the service keeps the room's lines in its database (`room`), each with who wrote it (a bot's id, or the person), the bot it was addressed to (none for a bot's reply), the text and the time. Deleting the project deletes its room; deleting a bot deletes the lines it wrote or got.
+
+- **Addressing:** `send_room` text that starts with `@name` goes to the bot of the project with that name (any case; the longest name that fits, so names may hold spaces; the name must be followed by a space or the end), and the message is what follows. Anything else goes to the project's `lead`. The line is added to the room before anything else, and `room_changed` follows.
+- **Delivery:** the message is an ordinary prompt of that bot, nonce `room-<seq>`: it is in the bot's queue and goes as a typed prompt goes (at once to a free bot, else when its turn ends, behind the prompts waiting; `queue_full` at 20), so the bot's own conversation holds it and its reply as it holds any turn.
+- **Context:** the prompt starts with what the room said since the bot's last line in it: lines that are not the bot's own and not addressed to it, the last 10 at most and at most 4000 characters (whole lines, newest first; one line alone longer than that is cut), oldest first, each as `<who>: <text>` or `<who> to <bot>: <text>`. Without such lines the prompt is the message alone. The bot sees nothing else of the room, so what it costs in context stays bounded.
+- **The reply:** what the bot says after its last tool call, when its turn ends (as for a message from another bot), goes into the room as a line from the bot. A turn that gives none (stopped, failed, its engine gone) leaves a line that says so. The room is not pruned.
 
 - **The folder:** the user names it (`~/` stands for their home). It must be there, and it is kept by its real path. It is refused (`invalid_project`) when it is the user's home or a folder above it, when it holds the service's home, or when it is inside the service's home. With `folder` empty a new project gets `projects/<id>` in the service's home, made by the service, and a project that has a folder keeps it. `delete_project` never deletes a folder.
 - **Working there:** the engine of a bot in a project is told the folder in `BATE_WORK_DIR`. Its tools take a relative path from there and run commands there. The bot's own folder stays where its conversations, notes, skills and attachments are; the engine tells the model that folder, and names notes and skills by their full paths.
@@ -568,7 +580,7 @@ A bot can be written to from a chat app. The user makes a bot there (Telegram: B
 
 ### Storage
 
-One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, projects, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
+One SQLite database, `app.db`, in write-ahead mode with `synchronous=FULL`, written only by the service: bots, transcript, ledger, open questions, disk access, permission levels and grants, groups, projects, rooms, sign-ins of connectors, routines, their past runs, connectors, and channels with their paired chats. When the service starts, a ledger entry still `sending` becomes uncertain and open questions are dropped, because engines do not outlive the service.
 
 #### Secrets
 

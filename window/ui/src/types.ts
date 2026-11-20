@@ -75,6 +75,8 @@ export type Project = {
   folder: string;
   /** The ids of the bots in it, at most 20. A bot is in at most one project. */
   bots: string[];
+  /** The bot a room message with no `@name` goes to: one of `bots`; the first when not set. */
+  lead?: string;
   /** What every bot of the project follows after its own instructions, at most 8000 characters. */
   instructions?: string;
   /** A program the service runs once for the whole project; every bot gets its tools. */
