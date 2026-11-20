@@ -51,7 +51,6 @@ export function Surfaces({ projectId, current, open, workplaces }: {
     );
   return (
     <>
-      <p className="note">What the project's program shows. Choose one to open it in the side pane.</p>
       <div className="surfaces" role="group" aria-label="Surfaces of the project">
         {list.map((s) => (
           <button

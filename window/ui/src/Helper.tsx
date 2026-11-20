@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Problem, useSaves } from "./Form.tsx";
+import { Group, Problem, Setting, useSaves } from "./Form.tsx";
 import { listen, request } from "./service.ts";
 
 type Helper = { installed: boolean; path: string; connected: boolean; accessibility: boolean | null; screenRecording: boolean | null; fullDiskAccess: boolean | null };
@@ -22,8 +22,7 @@ export function Helper() {
     { pane: "full_disk_access" as const, name: "Full Disk Access", what: "Read your Messages history", granted: helper.fullDiskAccess },
   ];
   return (
-    <>
-      <h2 id="settings-helper" tabIndex={-1}>Bate Helper</h2>
+    <Group id="settings-helper" title="Bate Helper">
       {!helper && !error("load") && <p className="note">Loading…</p>}
       <Problem text={error("load")} />
       {helper && !helper.installed && (
@@ -31,24 +30,17 @@ export function Helper() {
           Bots cannot see or control other apps until Bate Helper is installed at <code>{helper.path}</code>. Build it with <code>helper/bundle.sh</code>.
         </p>
       )}
-      {helper?.installed && (
-        <ul className="rows">
-          {panes!.map(({ pane, name, what, granted }) => (
-            <li key={pane}>
-              <div className="what">
-                <strong>{name}</strong>
-                <div className="note">{what}</div>
-                <small>{state(granted)}</small>
-                {pane === "full_disk_access" && granted === false && <small>If Bate Helper is not listed there, add it with the + button.</small>}
-              </div>
-              <div className="actions">
-                <button className="small" aria-label={`Open System Settings: ${name}`} onClick={() => open(pane)}>Open System Settings</button>
-              </div>
-              {error(pane) && <small className="error" role="alert">{error(pane)}</small>}
-            </li>
-          ))}
-        </ul>
-      )}
-    </>
+      {helper?.installed &&
+        panes!.map(({ pane, name, what, granted }) => (
+          <Setting
+            key={pane}
+            title={name}
+            hint={`${what} · ${state(granted)}${pane === "full_disk_access" && granted === false ? ". If Bate Helper is not listed there, add it with the + button." : ""}`}
+            error={error(pane)}
+          >
+            <button className="small" aria-label={`Open System Settings: ${name}`} onClick={() => open(pane)}>Open System Settings</button>
+          </Setting>
+        ))}
+    </Group>
   );
 }

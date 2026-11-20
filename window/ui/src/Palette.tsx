@@ -3,15 +3,17 @@ import { Avatar } from "./Avatar.tsx";
 import { Dialog } from "./Dialog.tsx";
 import { request } from "./service.ts";
 import { when } from "./conversations.ts";
+import { keyOf, loadRecent, remember, saveRecent } from "./recent.ts";
 import type { Bot } from "./types.ts";
 
-/** One line of the palette. Lines of a group sit together; `keys` is the shortcut that does the same. */
-export type Choice = { group: string; label: string; hint?: string; keys?: string; bot?: Bot; run: () => void };
+/** One line of the palette. Lines of a group sit together; `keys` is the shortcut that does the same; `was` is the group a recent line came from. */
+export type Choice = { group: string; label: string; hint?: string; keys?: string; bot?: Bot; was?: string; run: () => void };
 type Hit = { bot: string; conversation: string; seq: number; atMs: number; kind: "user" | "reply"; snippet: string };
 
 /**
- * ⌘K: every command, every bot, and the words in every conversation of every bot, in groups. Arrows choose,
- * Enter runs, Escape closes (the dialog's own). `found` runs for a hit.
+ * ⌘K: the lines picked last until something is typed; then every command, every bot, and the words in every
+ * conversation of every bot that match, in groups. Arrows choose, Enter runs, Escape closes (the dialog's own).
+ * `found` runs for a hit.
  */
 export function Palette({ choices, bots, found, close }: {
   choices: Choice[];
@@ -24,6 +26,7 @@ export function Palette({ choices, bots, found, close }: {
   const [searching, setSearching] = useState(false);
   const [failed, setFailed] = useState("");
   const [at, setAt] = useState(0);
+  const [recent] = useState(loadRecent);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     setFailed("");
@@ -45,16 +48,25 @@ export function Palette({ choices, bots, found, close }: {
 
   const words = query.trim().toLowerCase();
   const find = (id: string) => bots.find((b) => b.id === id);
-  const shown: Choice[] = [
-    ...choices.filter((c) => c.label.toLowerCase().includes(words)),
-    ...hits.map((h) => ({
-      group: "In conversations",
-      label: h.snippet,
-      hint: `${find(h.bot)?.name ?? h.bot} · ${when(h.atMs)} · ${h.kind === "user" ? "you" : "reply"}`,
-      bot: find(h.bot),
-      run: () => found(h.bot, h.conversation, h.seq),
-    })),
-  ];
+  // Until something is typed: the lines picked before (or, with none, the commands). Then everything that matches.
+  const first = recent.flatMap((k) => {
+    const c = choices.find((x) => keyOf(x) === k);
+    return c ? [{ ...c, group: "Recent", was: c.group }] : [];
+  });
+  const shown: Choice[] = words
+    ? [
+        ...choices.filter((c) => c.label.toLowerCase().includes(words)),
+        ...hits.map((h) => ({
+          group: "In conversations",
+          label: h.snippet,
+          hint: `${find(h.bot)?.name ?? h.bot} · ${when(h.atMs)} · ${h.kind === "user" ? "you" : "reply"}`,
+          bot: find(h.bot),
+          run: () => found(h.bot, h.conversation, h.seq),
+        })),
+      ]
+    : first.length > 0
+      ? first
+      : choices.filter((c) => c.group === "Commands");
   const chosen = Math.min(at, shown.length - 1);
   // The key moved the choice: keep it in sight.
   useEffect(() => {
@@ -67,6 +79,7 @@ export function Palette({ choices, bots, found, close }: {
   }, []);
   const pick = (c?: Choice) => {
     if (!c) return;
+    if (c.group !== "In conversations") saveRecent(remember(recent, keyOf({ group: c.was ?? c.group, label: c.label })));
     close();
     c.run();
   };

@@ -1,6 +1,7 @@
 import { type ComponentProps, useEffect, useState } from "react";
 import { each, madeBy, matches } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
+import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { sent } from "./projects.ts";
 import { inShell, listen, request } from "./service.ts";
@@ -129,57 +130,63 @@ export function Workplaces({ projects }: { projects: Project[] }) {
 
   return (
     <section>
-      <p className="note">A workplace equips a project for one kind of work: a program that Bate runs for the project, with skills and roles. It is installed once and switched on per project.</p>
-      {!inShell && <p className="note">Installing, removing and switching on workplaces is done in Bate's own window on the Mac; here you can look.</p>}
-      <h2>Installed</h2>
-      {workplaces.length === 0 && <p className="note">No workplaces installed.{inShell ? " Find one under Browse." : ""}</p>}
+      {!inShell && <p className="note">Workplaces are changed in Bate's own window on the Mac; here you can look.</p>}
+      <div className="head">
+        <h2>Installed</h2>
+      </div>
+      {workplaces.length === 0 && <p className="note">No workplaces installed.{inShell ? " Find one in the catalog." : ""}</p>}
       <ul className="rows">
         {workplaces.map((w) => (
           <li key={w.name}>
             <div className="what">
-              <strong>{w.name}</strong> <span className="note">{w.version}{w.manifest?.description ? ` · ${w.manifest.description}` : ""}</span>
-              {w.manifest && <small>Program: <code>{[w.manifest.program.command, ...w.manifest.program.args].join(" ")}</code></small>}
-              <small>Needs: {needsLines(w).join("; ")}</small>
-              {w.skills.length > 0 && <small>Skills: {w.skills.map((s) => s.name).join(", ")}</small>}
-              {w.roles.length > 0 && <small>Roles: {w.roles.map((r) => r.split("/").pop()).join(", ")}</small>}
-              {w.archive && <small>From the catalog, pinned to <code>{w.archive.slice(0, 12)}</code></small>}
+              <strong>{w.name}</strong>
+              <small>{w.version}{w.manifest?.description ? ` · ${w.manifest.description}` : ""}</small>
               {w.error && <small className="error" role="alert">{w.error}</small>}
               {w.changed && !w.error && <small className="error" role="alert">Its files changed since they were approved, so it is off in every project until you approve it.</small>}
             </div>
             <div className="actions">
               {inShell && w.changed && <button className="small" onClick={() => void run(request("approve_workplace", { name: w.name }))}>Approve the files as they are</button>}
-              {inShell && <button className="small danger" aria-label={`Remove ${w.name}`} onClick={() => remove(w)}>Remove…</button>}
+              {inShell && <RowMenu label={w.name} items={[{ label: "Remove…", danger: true, run: () => remove(w) }]} />}
             </div>
-            {!inShell && w.usedBy.length > 0 && <small>On in: {using(w).join(", ")}</small>}
-            {inShell && projects.length > 0 && (
-              <ul className="rows" aria-label={`Projects that can have ${w.name} on`}>
-                {projects.map((p) => (
-                  <li key={p.id}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        checked={w.usedBy.includes(p.id!)}
-                        disabled={!w.usedBy.includes(p.id!) && (!!unusable(w) || !!p.connector)}
-                        onChange={(e) => (e.target.checked ? switchOn(w, p) : void run(switchTo(p)))}
-                      />
-                      {p.name}
-                    </label>
-                    {!w.usedBy.includes(p.id!) && p.connector && <small>Has a connector of its own</small>}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <details>
+              <summary>{inShell ? `On in ${w.usedBy.length} of ${projects.length} projects` : w.usedBy.length > 0 ? `On in: ${using(w).join(", ")}` : "On in no project"}</summary>
+              <div className="what">
+                {w.manifest && <small>Program: <code>{[w.manifest.program.command, ...w.manifest.program.args].join(" ")}</code></small>}
+                <small>Needs: {needsLines(w).join("; ")}</small>
+                {w.skills.length > 0 && <small>Skills: {w.skills.map((s) => s.name).join(", ")}</small>}
+                {w.roles.length > 0 && <small>Roles: {w.roles.map((r) => r.split("/").pop()).join(", ")}</small>}
+                {w.archive && <small>From the catalog, pinned to <code>{w.archive.slice(0, 12)}</code></small>}
+              </div>
+              {inShell && projects.length > 0 && (
+                <ul className="rows" aria-label={`Projects that can have ${w.name} on`}>
+                  {projects.map((p) => (
+                    <li key={p.id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          checked={w.usedBy.includes(p.id!)}
+                          disabled={!w.usedBy.includes(p.id!) && (!!unusable(w) || !!p.connector)}
+                          onChange={(e) => (e.target.checked ? switchOn(w, p) : void run(switchTo(p)))}
+                        />
+                        {p.name}
+                      </label>
+                      {!w.usedBy.includes(p.id!) && p.connector && <small>Has a connector of its own</small>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
           </li>
         ))}
       </ul>
       {inShell && (
         <>
-          <h2>Browse</h2>
-          <p className="note">
-            The catalog is a list kept in Bate's repository on GitHub. Each entry pins the exact archive by its size and hash; an installed workplace stays at the version it was installed at, and an update is only offered, with what it newly needs. Reading the list contacts GitHub, so it waits until you ask.
-          </p>
-          <button disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
+          <div className="head">
+            <h2>Catalog</h2>
+            <button className="small" disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
+          </div>
+          {!catalog && <p className="note">A list in Bate's repository on GitHub. Reading it contacts GitHub, so it waits until you ask.</p>}
           {catalog?.length === 0 && <p className="note">The catalog is empty.</p>}
           {catalog && catalog.length > 0 && (
             <div className="find">
@@ -190,9 +197,9 @@ export function Workplaces({ projects }: { projects: Project[] }) {
             {catalog?.filter((e) => matches(query, e.name, e.description)).map((e) => (
               <li key={e.name}>
                 <div className="what">
-                  <strong>{e.name}</strong> <span className="note">{e.version} · {sizeText(e.size)}</span>
+                  <strong>{e.name}</strong>
+                  <small>{e.version} · {sizeText(e.size)}{e.installedVersion ? ` · Installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>
                   <small>{e.description}</small>
-                  {e.installedVersion && <small>Installed: {e.installedVersion}{e.update ? "" : ", up to date"}</small>}
                 </div>
                 {(!e.installedVersion || e.update) && (
                   <div className="actions">
@@ -203,11 +210,11 @@ export function Workplaces({ projects }: { projects: Project[] }) {
             ))}
           </ul>
           {catalog && query && !catalog.some((e) => matches(query, e.name, e.description)) && <p className="note">Nothing in the catalog matches.</p>}
-          <h3>From a folder on this Mac</h3>
-          <p className="note">
-            A folder with a <code>workplace.json</code> in it (format: <code>docs/workplaces.md</code>), up to 2000 files and folders and 200 MiB, and no links. What it lists under <code>downloads</code> is fetched at install, after you have seen its size and hosts.
-          </p>
-          <Choose folder set={(path) => void fromFolder(path)} fail={setError} />
+          <div className="head">
+            <h2>From a folder</h2>
+            <Choose folder set={(path) => void fromFolder(path)} fail={setError} />
+          </div>
+          <p className="note">A folder with a <code>workplace.json</code> in it (<code>docs/workplaces.md</code>). You see its size and hosts before anything is fetched.</p>
         </>
       )}
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}

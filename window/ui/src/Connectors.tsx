@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { type ConnectorForm, connectorMay, connectorOf, connectorState, each, madeBy, placed } from "./addons.ts";
+import { type ConnectorForm, connectorMay, connectorOf, connectorState, connectorSummary, each, madeBy, placed } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
+import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { usePerBot } from "./usePerBot.ts";
 import { inShell, openInBrowser, request } from "./service.ts";
@@ -35,47 +36,59 @@ export function Connectors({ bots }: { bots: Bot[] }) {
 
   return (
     <section>
-      <p className="note">
-        A connector lets a bot use a tool that lives elsewhere: a server on the web, or a program on this Mac. Each bot has its own copy, with its own sign-in; here they are listed together.
-      </p>
-      <h2>Installed</h2>
-      {rows.length === 0 && <p className="note">No connectors yet. Add one under Browse.</p>}
+      <div className="head">
+        <h2>Installed</h2>
+        <button className="small" onClick={() => (setForm(blank), setAsk({ form: blank }))}>New connector…</button>
+      </div>
+      {rows.length === 0 && <p className="note">No connectors yet.</p>}
       <ul className="rows">
-        {rows.map((r) => (
-          <li key={`${r.name}${address(r.users[0].item)}`}>
-            <div className="what">
-              <strong>{r.name}</strong> <code>{address(r.users[0].item)}</code>
-            </div>
-            <div className="actions">
-              <button className="small" onClick={() => setAsk({ copy: r.users[0].item, from: botName(r.users[0].bot), has: r.users.map((u) => u.bot) })}>Add to bots…</button>
-              <button className="small danger" onClick={() => setAsk({ remove: r.name, users: r.users.map((u) => u.bot) })}>Remove…</button>
-            </div>
-            <ul className="rows">
-              {r.users.map(({ bot, item }) => {
-                const state = connectorState(item);
-                return (
-                  <li key={bot}>
-                    <label>
-                      <input type="checkbox" role="switch" checked={item.enabled} onChange={(e) => void run(request("set_connector", { bot, connector: { ...sent(item), enabled: e.target.checked } }))} />
-                      {botName(bot)}
-                    </label>
-                    <small className={state.problem ? "error" : undefined}>{state.text}</small>
-                    {item.oauth &&
-                      (item.signedIn ? (
-                        <button className="small" onClick={() => void run(request("sign_out_connector", { bot, name: item.name }))}>Sign out</button>
-                      ) : (
-                        <button className="small" onClick={() => void signIn(bot, item.name)}>Sign in</button>
-                      ))}
-                  </li>
-                );
-              })}
-            </ul>
-          </li>
-        ))}
+        {rows.map((r) => {
+          const sum = connectorSummary(r.users.map((u) => u.item), bots.length);
+          return (
+            <li key={`${r.name}${address(r.users[0].item)}`}>
+              <div className="what">
+                <strong>{r.name}</strong>
+                <small><code>{address(r.users[0].item)}</code></small>
+              </div>
+              <div className="actions">
+                <RowMenu
+                  label={r.name}
+                  items={[
+                    { label: "Add to bots…", run: () => setAsk({ copy: r.users[0].item, from: botName(r.users[0].bot), has: r.users.map((u) => u.bot) }) },
+                    { label: "Remove…", danger: true, run: () => setAsk({ remove: r.name, users: r.users.map((u) => u.bot) }) },
+                  ]}
+                />
+              </div>
+              <details>
+                <summary>
+                  {sum.text}
+                  {sum.problems > 0 && <span className="error"> · {sum.problems} to look at</span>}
+                </summary>
+                <ul className="rows">
+                  {r.users.map(({ bot, item }) => {
+                    const state = connectorState(item);
+                    return (
+                      <li key={bot}>
+                        <label>
+                          <input type="checkbox" role="switch" checked={item.enabled} onChange={(e) => void run(request("set_connector", { bot, connector: { ...sent(item), enabled: e.target.checked } }))} />
+                          {botName(bot)}
+                        </label>
+                        <small className={state.problem ? "error" : undefined}>{state.text}</small>
+                        {item.oauth &&
+                          (item.signedIn ? (
+                            <button className="small" onClick={() => void run(request("sign_out_connector", { bot, name: item.name }))}>Sign out</button>
+                          ) : (
+                            <button className="small" onClick={() => void signIn(bot, item.name)}>Sign in</button>
+                          ))}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </details>
+            </li>
+          );
+        })}
       </ul>
-      <h2>Browse</h2>
-      <p className="note">Bate has no online list of connectors yet, so a connector is one you describe: the address of a server, or a program to run. You see what it may do before it is added.</p>
-      <button onClick={() => (setForm(blank), setAsk({ form: blank }))}>New connector…</button>
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
       {ask && "form" in ask && (
         <Sheet

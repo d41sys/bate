@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { connectorOf, connectorState, each, matches, placed } from "./addons.ts";
+import { connectorOf, connectorState, connectorSummary, each, matches, placed } from "./addons.ts";
 import type { Connector } from "./types.ts";
 
 test("a skill three bots have is one row, with the bots that have it", () => {
@@ -29,6 +29,14 @@ test("a connector's line says off, failed with why, or waiting for the sign-in",
   assert.deepEqual(connectorState({ ...c, error: "no such program" }), { text: "Could not start: no such program", problem: true });
   assert.equal(connectorState({ ...c, oauth: true, signedIn: false }).problem, true);
   assert.equal(connectorState(c).problem, false);
+});
+
+test("a connector's row says on for how many bots, and how many need a look", () => {
+  const c: Connector = { name: "n", enabled: true, transport: { type: "http", url: "https://a.b/mcp" }, oauth: true, signedIn: true };
+  const copies = [c, c, c, c, { ...c, enabled: false }, { ...c, signedIn: false }];
+  assert.deepEqual(connectorSummary(copies, 6), { text: "On for 5 of 6 bots", problems: 1 });
+  assert.equal(connectorSummary(copies, 8).text, "On for 5 of 6 bots that have it");
+  assert.equal(connectorSummary([c], 1).text, "On for 1 of 1 bot");
 });
 
 test("a program's arguments are one to a line, so none is split at a space", () => {

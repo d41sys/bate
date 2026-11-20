@@ -59,27 +59,27 @@ export function FirstRun({ needed, hasBots, refresh, later, opened }: {
   if (!needed) return error ? <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p> : null;
   const run = (p: Promise<unknown>) => p.then(() => setError(""), (e: Error) => setError(e.message));
   return (
-    <section className="first-run fields stack" aria-label="First run">
+    <section className="first-run" aria-label="First run">
       <h1>Welcome to Bate</h1>
-      <p>A bot needs a model to answer. Sign in, and Bate makes your first bot to talk to.</p>
-      <p>
-        <button className="primary" onClick={() => run(request<{ url: string }>("sign_in_chatgpt").then((d) => openInBrowser(d.url)))}>Sign in with ChatGPT</button>
-      </p>
-      <p className="note">Bots then run on your ChatGPT plan. The sign-in happens in your browser.</p>
-      <h2>Or a model server</h2>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          chosen.current = model.trim();
-          run(request("set_provider", { url: url.trim(), key: key.trim() }).then(refresh));
-        }}
-      >
-        <label>URL <input required placeholder="http://127.0.0.1:1234/v1" value={url} onChange={(e) => setUrl(e.target.value)} /></label>
-        <label>Model <input required placeholder="the model's name" value={model} onChange={(e) => setModel(e.target.value)} /></label>
-        <label>API key <input type="password" placeholder="optional" value={key} onChange={(e) => setKey(e.target.value)} /></label>
-        <button>Use this server</button>
-      </form>
-      <p><button className="ghost" onClick={later}>Set up later</button></p>
+      <p>Sign in, and Bate makes your first bot to talk to. The sign-in happens in your browser.</p>
+      <button className="primary" onClick={() => run(request<{ url: string }>("sign_in_chatgpt").then((d) => openInBrowser(d.url)))}>Sign in with ChatGPT</button>
+      <details>
+        <summary>Use a model server instead</summary>
+        <form
+          className="fields stack"
+          onSubmit={(e) => {
+            e.preventDefault();
+            chosen.current = model.trim();
+            run(request("set_provider", { url: url.trim(), key: key.trim() }).then(refresh));
+          }}
+        >
+          <label>URL <input required placeholder="http://127.0.0.1:1234/v1" value={url} onChange={(e) => setUrl(e.target.value)} /></label>
+          <label>Model <input required placeholder="the model's name" value={model} onChange={(e) => setModel(e.target.value)} /></label>
+          <label>API key <input type="password" placeholder="optional" value={key} onChange={(e) => setKey(e.target.value)} /></label>
+          <button>Use this server</button>
+        </form>
+      </details>
+      <button className="ghost" onClick={later}>Set up later</button>
       {error && <p className="error" role="alert">{error}</p>}
     </section>
   );
