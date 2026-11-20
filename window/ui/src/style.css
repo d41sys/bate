@@ -92,6 +92,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .rows li > .what > small { display: block; }
 .rows li > .actions { margin-left: auto; }
 .rows li > .rows { flex: 1 0 100%; margin: 0; }
+/* A note open in place, or the error of its row, under the row's line. */
+.rows li > form, .rows li > .error { flex: 1 0 100%; margin: 0; }
 .rows li > .rows li { padding: var(--space-1) 0; border-bottom: 0; }
 /* A routine's past runs: a disclosure under its row, one line for each run. */
 .rows li > details { flex: 1 0 100%; }

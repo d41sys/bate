@@ -413,7 +413,7 @@ function App() {
                 open={(s) => setShown({ projectId: project.id!, uri: s.uri, name: s.name })}
               />
             )}
-            {view.tab === "memory" && <Memory key={`${project.id}-${connection}`} target={{ projectId: project.id! }} />}
+            {view.tab === "memory" && <Memory key={`${project.id}-${connection}`} target={{ projectId: project.id! }} title="Project notes" />}
             {view.tab === "settings" && (
               <>
                 <ProjectForm key={`${project.id}-${connection}`} project={project} bots={bots} />
@@ -470,8 +470,9 @@ function App() {
             {view.tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "memory" && (
               <>
-                {bot.agent && <p className="note">An installed agent keeps its own memory: these notes, and the project's notes and instructions, do not reach it.</p>}
-                <Memory key={`${bot.id}-${connection}`} target={{ bot: bot.id }} />
+                {bot.agent && <p className="banner" role="status">An installed agent keeps its own memory: these notes, and the project's notes and instructions, do not reach it.</p>}
+                <Memory key={`${bot.id}-${connection}`} target={{ bot: bot.id }} title={`${bot.name}'s notes`} />
+                {bot.project && <Memory key={`${bot.project.id}-${connection}`} target={{ projectId: bot.project.id }} title="Project notes" />}
               </>
             )}
             {view.tab === "channels" && inShell && <Channels key={`${bot.id}-${connection}`} bot={bot.id} />}
