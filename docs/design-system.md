@@ -79,6 +79,8 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Popover, select with search | `.menu` around a chip (`<button class="small chip" aria-expanded>`) and a `.popover` (`role="dialog"`) holding a search `<input>`, a `<ul role="listbox">` of `.row.plain` buttons and other controls. A click outside or Esc closes it; Esc is taken there and does not reach the page | closed, open, chosen row, no match | yes |
 | Conversation switcher | `<div class="conversations">` above the chat: a `.menu` with a chip (the conversation's name) whose `.popover.below` lists the bot's conversations as `.row.plain` buttons with a date under the name (or "Working…"), `.actions` of small ghost buttons beside each (Pin, Rename, Archive), a "Show archived" checkbox, and a `.row.plain` "Compact this conversation" (gone while the bot works or for an installed agent, disabled while a message goes out; the chat shows the result as a `.note`); a "New conversation" button after it. A rename is a one-field form in the row | closed, open, chosen row, working, pinned, archived, renaming | yes |
 | Folder picker | A text box for the whole path with a `Choose folder…` (or `Choose file…`) button beside it, in a `.field` (a label over a `.find`). The button asks the shell for the system's open panel and fills the box; it is only there in Bate's own window, so the typed path is the way on another device | | yes |
+| Side pane | `<aside class="pane">` (`Pane.tsx`) to the right of the main area: a `.pane-head` with an `<h2>` (the title, cut in the middle when long so its end stays; the full title on hover) and a `round ghost` Close (`×`, tooltip `Close (Esc)`), then the content. A grip on its left edge resizes it (arrows too). Focus moves into the pane when it opens and returns to what opened it; Esc closes it (before it stops a bot). Esc does not reach the page from inside a shown file's frame, so a Close button (`.leave`) follows the frame in the Tab order and shows only while it has the focus. Under 860 px it is a sheet over the conversation with a `.scrim` that closes it | beside, sheet, dragging | yes |
+| Surface chips, surface view | The Surfaces tab: a `.note`, then `.surfaces` of `.chip` buttons (`aria-pressed` for the one open in the pane; a name and its kind; the description in a tooltip). None, or a failure with the service's reason: `.empty` with one button (See workplaces, Try again). `.surface` in the pane: `.tools` (the program's actions; one that takes words is a `.find` form; `.pager` with Previous and Next only when there is more), a line for the result of an action (Done, Saved, or the error), then `.body` holding a `<table>` (sticky head), a `role="tree"` list (indent by `--depth`, a ghost small toggle) or a `.code` view with line numbers. A row, node or line that can be chosen has `aria-selected`: pointed at (`--bg-hover`), chosen (`--bg-current` and a stronger weight). Rows are `--control-h` high | loading, empty, error, chosen, focus | yes |
 | Toast | | | not built: #150 needed none; a failure is a line in the sheet or beside the list |
 | Loading | A `.note` saying what is loading; no spinner | | yes |
 
@@ -90,7 +92,7 @@ Three regions in one grid: sidebar, main area, side pane.
 |---|---|---|
 | Sidebar | `--side-w`: 280 px, 220 px under 900 px | Sections with a small heading; rows 44 px high; what is new goes at the bottom |
 | Main area | The rest | Every screen is one column of at most `--thread-w` (720 px), centred. The conversation's scroller is as wide as the area, so its bar is at the window's edge |
-| Side pane | 480 px, dragged wider or narrower | Under 860 px it lies over the conversation (`pane.ts`); as a sheet with a scrim: #158 |
+| Side pane | 480 px, dragged wider or narrower | Under 860 px it lies over the conversation (`pane.ts`) as a sheet with a scrim |
 
 Widths the page must work at: 1200 px and more, 900 px, and 390 px (a phone, since the page is also served to other devices). Under 640 px the sidebar becomes a strip of projects and bots across the top that scrolls sideways, and the header's tabs scroll sideways.
 
@@ -142,5 +144,5 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 | 7 | Settings, the bot's and the app's | #155 |
 | 8 | Routines | #156, done |
 | 9 | Memory | #157, done |
-| 10 | Side pane and surfaces | #158 |
+| 10 | Side pane and surfaces | #158, done |
 | 11 | Palette, pairing page, messages between bots | #159 |
