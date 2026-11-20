@@ -16,7 +16,7 @@ The owner chose a chat-app look: a bot is a contact, a conversation is messages.
 |---|---|
 | ![The target screen in light](design-system/target-light.webp) | ![The target screen in dark](design-system/target-dark.webp) |
 
-The pictures are `docs/design-system/shell.html`: a static page drawn with the app's own stylesheet. It shows where the window is going, not where it is: the badge on a bot that needs you comes with #144. Open it in a browser to resize it or to see it in dark.
+The pictures are `docs/design-system/shell.html`: a static page drawn with the app's own stylesheet. Open it in a browser to resize it or to see it in dark.
 
 Three other directions were drawn on the same screen and not chosen: one close to the Mac's own controls, one made for reading with a serif face, one dense with monospace labels.
 
@@ -59,6 +59,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Switch | | on, off, disabled | #155 |
 | Tabs | `role="tablist"` with `role="tab"` buttons | chosen, hover, focus | yes; arrow keys #151 |
 | List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one | hover, chosen, focus | yes |
+| Badge | `.badge` at the end of a `.row`: a dot and one word. Plain (warn) for what needs the person: "Needs you". `.badge.quiet` for what does not: "New reply". A working bot has no badge: its `.label` has a `<small>Working…</small>` line | | yes |
 | Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
 | Rows of settings or items | `<ul class="rows">` | | yes |
 | Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |

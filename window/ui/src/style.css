@@ -92,6 +92,10 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .row small { font-weight: 400; }
 /* A row with no avatar: a project, or a page of the app. */
 .row.plain { min-height: var(--control-h); }
+/* A state on a row: a dot and a word. `quiet` is for what does not need the person. */
+.badge { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-1); flex: none; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge.quiet { background: var(--bg-soft); color: var(--fg-muted); }
 
 main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */

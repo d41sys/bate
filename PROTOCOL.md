@@ -197,6 +197,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 
 `Bot` is `{id, name, createdAt, running, busy, wholeDisk, network, agent, browserTaken, instructions, stepLimit, avatar, color, model, effort, project}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true; `project`, `{id, name}`, only for a bot in a project): `stepLimit` is the tool rounds a turn may take, 100 unless set; `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes, and `projects_changed` each time `project` does. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the bot's last `session`. If the engine refuses `open`, the service forgets that session and sends `start`.
 
+A `Bot` also has `waiting`: `true` while one of its questions is open (see Questions), so a list shows which bots need the person without opening each one. `bots_changed` is sent when a question opens and when it closes.
+
 ### Events (service → every window that said hello)
 
 | Frame | Meaning |

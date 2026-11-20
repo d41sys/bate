@@ -1,6 +1,6 @@
 import { type CSSProperties, StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { inShell, listen, newWindow, openInBrowser, pair, request, serviceNote } from "./service.ts";
+import { inShell, listen, newWindow, notifyWaiting, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
 import { Pair } from "./Devices.tsx";
 import type { Bot, Project } from "./types.ts";
 import { Model } from "./Model.tsx";
@@ -18,7 +18,7 @@ import { Channels } from "./Channels.tsx";
 import { Room } from "./Room.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings } from "./AppSettings.tsx";
-import { neighbour, sidebar } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, sidebar, waitingCount } from "./nav.ts";
 import { FirstRun } from "./FirstRun.tsx";
 import { Palette, type Choice } from "./Palette.tsx";
 import "./highlight.css";
@@ -77,6 +77,12 @@ function App() {
   const newName = useRef<HTMLInputElement>(null);
   // What the shell says of starting the service with the app (macOS may want an approval).
   const [note, setNote] = useState<string | null>(null);
+  // Bots whose turn ended while their chat was not in front of the person (`endsUnseen`).
+  const [unread, setUnread] = useState<string[]>([]);
+  // The chat in front of the person, for the frames that come in later.
+  const looking = view?.page === "bot" && view.tab === "chat" ? view.id : undefined;
+  const now = useRef({ looking, bots });
+  now.current = { looking, bots };
 
   useEffect(() => {
     if (!inShell || !state) return setNote(null);
@@ -110,6 +116,15 @@ function App() {
         loadProjects();
       } else if (frame.type === "failed") {
         setState(`The connection failed: ${frame.error}`);
+      } else if (frame.type === "transcript") {
+        const front = document.hasFocus() ? now.current.looking : undefined;
+        if (endsUnseen(frame, front)) setUnread((u) => (u.includes(frame.bot!) ? u : [...u, frame.bot!]));
+        // The service sends a question's card live only; what history holds is not announced.
+        const entry = frame.entry as { type: string; question?: string; title?: string };
+        if (inShell && entry.type === "question" && frame.bot !== front) {
+          const name = now.current.bots.find((b) => b.id === frame.bot)?.name ?? "A bot";
+          notifyWaiting(frame.bot!, entry.question ?? "", `${name} needs you`, entry.title ?? "").catch(() => {});
+        }
       } else if (frame.type === "bots_changed") {
         load();
       } else if (frame.type === "projects_changed") {
@@ -180,6 +195,28 @@ function App() {
       removeEventListener("bate-menu", onMenu);
     };
   }, []);
+  // The Dock icon counts the bots that wait for the person.
+  const waiting = waitingCount(bots);
+  useEffect(() => {
+    if (inShell) setBadge(waiting).catch(() => {});
+  }, [waiting, connection]);
+  // A chat in front of the person, in a window that has focus, is read.
+  useEffect(() => {
+    const read = () => {
+      if (looking && document.hasFocus()) setUnread((u) => (u.includes(looking) ? u.filter((id) => id !== looking) : u));
+    };
+    read();
+    addEventListener("focus", read);
+    return () => removeEventListener("focus", read);
+  }, [looking]);
+  // A click on the shell's notification opens that bot.
+  const open = useRef(openBot);
+  open.current = openBot;
+  useEffect(() => {
+    const onOpen = (e: Event) => open.current((e as CustomEvent<string>).detail);
+    addEventListener("bate-open-bot", onOpen);
+    return () => removeEventListener("bate-open-bot", onOpen);
+  }, []);
   const choices: Choice[] = [
     ...projects.map((p) => ({ label: p.name, hint: "project", run: () => openProject(p.id!) })),
     ...bots.map((b) => ({ label: `${b.avatar ? `${b.avatar} ` : ""}${b.name}`, hint: "bot", run: () => openBot(b.id) })),
@@ -194,7 +231,9 @@ function App() {
   ];
 
   const lists = sidebar(bots, projects);
-  const botRow = (b: Bot) => (
+  const botRow = (b: Bot) => {
+    const state = rowState(b, unread.includes(b.id));
+    return (
     <li
       key={b.id}
       draggable
@@ -221,11 +260,14 @@ function App() {
         <Avatar bot={b} />
         <span className="label">
           <span>{b.name}</span>
-          {b.busy && <small>Working…</small>}
+          {state === "working" && <small>Working…</small>}
         </span>
+        {state === "waiting" && <span className="badge">Needs you</span>}
+        {state === "unread" && <span className="badge quiet">New reply</span>}
       </button>
     </li>
-  );
+    );
+  };
   /** A row with no avatar: a project, or a page of the app. */
   const plain = (text: string, current: boolean, go: () => void) => (
     <button className={current ? "row plain current" : "row plain"} aria-current={current ? "page" : undefined} onClick={go}>
