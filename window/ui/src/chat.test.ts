@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, build, planSteps, type Entry } from "./chat.ts";
+import { add, aim, build, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -118,4 +118,78 @@ test("a retry and a turn that hit its step limit each get a line", () => {
     { id: 3, kind: "reply", text: "ok" },
     { id: 4, kind: "ended", reason: "limit", error: "stopped after 100 tool rounds" },
   ]);
+});
+
+const call = (n: number, tool: string, args: unknown, output?: string, isError = false): Entry[] => [
+  { type: "tool_start", call: `c${n}`, tool, args },
+  ...(output === undefined ? [] : [{ type: "tool_end", call: `c${n}`, output, isError } as Entry]),
+];
+const chatOf = (entries: Entry[]) => build(entries.map((entry, i) => ({ seq: i + 1, entry })));
+
+test("calls that follow each other, and the thinking among them, fold into one run", () => {
+  const shown = fold(chatOf([
+    { type: "prompt", nonce: "n1", text: "go" },
+    { type: "thinking", delta: "look first" },
+    ...call(1, "run", { command: "ls" }, "a"),
+    ...call(2, "run", { command: "pwd" }, "/"),
+    ...call(3, "read", { path: "a.txt" }, "A"),
+    { type: "text", delta: "Done." },
+    ...call(4, "run", { command: "ls" }, "a"),
+  ]));
+  assert.deepEqual(shown.map((s) => s.kind), ["user", "run", "reply", "run"]);
+  const run = shown[1];
+  assert.ok(run.kind === "run");
+  // The run is named by its first part, so it keeps its id while it grows.
+  assert.equal(run.id, 2);
+  assert.deepEqual(run.parts.map((p) => p.kind), ["thinking", "tool", "tool", "tool"]);
+});
+
+test("a plan is a checklist of its own and ends the run before it", () => {
+  const plan = { steps: [{ step: "look", status: "in_progress" }] };
+  const shown = fold(chatOf([...call(1, "run", { command: "ls" }, "a"), ...call(2, "plan", plan, "Plan updated."), ...call(3, "run", { command: "ls" }, "a")]));
+  assert.deepEqual(shown.map((s) => s.kind), ["run", "plan", "run"]);
+  // A plan that is not one is a call like any other.
+  assert.deepEqual(fold(chatOf(call(1, "plan", { steps: [] }, "no", true))).map((s) => s.kind), ["run"]);
+});
+
+const parts = (entries: Entry[]) => fold(chatOf(entries)).flatMap((s) => (s.kind === "run" ? s.parts : [])) as Part[];
+
+test("a run says what happened in the person's words", () => {
+  const done = parts([
+    ...call(1, "run", { command: "ls" }, "a"),
+    ...call(2, "run", { command: "pwd" }, "/"),
+    ...call(3, "run", { command: "id" }, "me"),
+    ...call(4, "read", { path: "a.txt" }, "A"),
+  ]);
+  assert.deepEqual(describe(done, false), { text: "Ran 3 commands, read 1 file", running: false, failed: 0 });
+  assert.equal(describe(parts([...call(1, "search", { pattern: "x" }, "y"), ...call(2, "write", { path: "a" }, "ok"), ...call(3, "edit", { path: "a" }, "ok")]), false).text, "Made 1 search, wrote 1 file, edited 1 file");
+  // An installed agent's kinds, and a connector's tool, are said too.
+  assert.equal(describe(parts([...call(1, "execute", {}, "a"), ...call(2, "run", {}, "b"), ...call(3, "notes__find", {}, "c"), ...call(4, "mystery", {}, "d")]), false).text, "Ran 2 commands, used 1 notes tool, used 1 tool");
+});
+
+test("a run still going says so; one that is not going does not, however it ended", () => {
+  const going = parts([...call(1, "run", { command: "ls" }, "a"), ...call(2, "run", { command: "sleep 9" }), ...call(3, "read", { path: "a" }, "A")]);
+  assert.deepEqual(describe(going, true), { text: "Running 2 commands, read 1 file", running: true, failed: 0 });
+  // The same calls in a chat whose bot stopped: no spinner for a call that will never end.
+  assert.equal(describe(going, false).running, false);
+  assert.equal(describe(parts([{ type: "thinking", delta: "hm" }]), true).text, "Thinking…");
+  assert.equal(describe(parts([{ type: "thinking", delta: "hm" }]), false).text, "Thought");
+});
+
+test("a failed call shows as failed in the line, whether or not the run is open", () => {
+  const run = parts([...call(1, "run", { command: "ls" }, "a"), ...call(2, "run", { command: "nope" }, "not found", true), ...call(3, "run", { command: "bad" }, "no", true)]);
+  assert.deepEqual(describe(run, false), { text: "Ran 3 commands", running: false, failed: 2 });
+});
+
+test("a row is named by what the call acted on, not by the tool", () => {
+  const first = (entries: Entry[]) => aim(parts(entries)[0] as Extract<Part, { kind: "tool" }>);
+  assert.equal(first(call(1, "run", { command: "ls -la" }, "")), "ls -la");
+  assert.equal(first(call(1, "read", { path: "src/a.ts" }, "")), "src/a.ts");
+  assert.equal(first(call(1, "search", { pattern: "TODO", path: "src" }, "")), "TODO in src");
+  assert.equal(first(call(1, "search", { pattern: "TODO" }, "")), "TODO");
+  // An installed agent sends a title, the raw input and where it acted.
+  assert.equal(first(call(1, "execute", { title: "List files", rawInput: { command: "ls" } }, "")), "ls");
+  assert.equal(first(call(1, "read", { title: "Read a file", locations: [{ path: "/x/y.txt" }] }, "")), "/x/y.txt");
+  assert.equal(first(call(1, "browser", { action: "open", url: "https://example.com" }, "")), "https://example.com");
+  assert.equal(first(call(1, "mystery", null, "")), "mystery");
 });

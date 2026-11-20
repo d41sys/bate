@@ -1,17 +1,20 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { listen, request } from "./service.ts";
 import { label, listed, when } from "./conversations.ts";
 import type { Conversation } from "./types.ts";
 
 /**
- * A bot's conversations: the one shown, a list to switch, rename, pin and archive them, and a button
- * for a new one. It shows `children` for the conversation chosen, at first the bot's current one, and
+ * A bot's conversations: the one shown, a list to switch, rename, pin and archive them, a new one,
+ * export and compact. It shows `children` for the conversation chosen, at first the bot's current one, and
  * stays on it: a conversation made or used on another device does not move the chat under the reader.
- * `want` names one to show (a search hit); `show` switches to another (a fork).
+ * `want` names one to show (a search hit); `show` switches to another (a fork). The chip that opens the
+ * list is drawn into `slot`, a place in the page's header.
  */
-export function Conversations({ bot, want, children }: {
+export function Conversations({ bot, want, slot, children }: {
   bot: string;
   want?: string;
+  slot: HTMLElement | null;
   children: (conversation: string, show: (id: string) => void, offerCompact: (item: { run: () => void; disabled: boolean } | null) => void) => ReactNode;
 }) {
   const [all, setAll] = useState<Conversation[]>([]);
@@ -26,7 +29,11 @@ export function Conversations({ bot, want, children }: {
   const [open, setOpen] = useState(false);
   const [archived, setArchived] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; name: string }>();
+  // The conversation whose actions (Pin, Rename, Archive) are shown.
+  const [acting, setActing] = useState<string>();
   const [error, setError] = useState("");
+  // Where the last export went.
+  const [saved, setSaved] = useState("");
   // Compact, offered by the chat while it can run: it lives in this list because it acts on the shown conversation.
   const [compact, offerCompact] = useState<{ run: () => void; disabled: boolean } | null>(null);
   const wrap = useRef<HTMLDivElement>(null);
@@ -56,7 +63,7 @@ export function Conversations({ bot, want, children }: {
     };
   }, [bot]);
 
-  // While open: a click outside, or Esc, closes it. Esc is taken here so that it does not also stop the bot.
+  // While open: a click outside, or Esc, closes it (a row's actions first). Esc is taken here so that it does not also stop the bot.
   useEffect(() => {
     if (!open) return;
     const away = (e: PointerEvent) => {
@@ -65,6 +72,7 @@ export function Conversations({ bot, want, children }: {
     const key = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
+      if (acting) return setActing(undefined);
       setOpen(false);
       chip.current?.focus();
     };
@@ -74,9 +82,11 @@ export function Conversations({ bot, want, children }: {
       document.removeEventListener("pointerdown", away);
       document.removeEventListener("keydown", key);
     };
-  }, [open]);
+  }, [open, acting]);
 
   const shown = chosen ?? current;
+  // The last export is of the conversation that was shown then.
+  useEffect(() => setSaved(""), [shown]);
   if (!shown) return <p className="note">{error || "Loading the conversations…"}</p>;
   const now = all.find((c) => c.id === shown);
 
@@ -94,6 +104,21 @@ export function Conversations({ bot, want, children }: {
     setChosen(id);
     setOpen(false);
   };
+  /** A button of the list's foot: it closes the list, then does its work. */
+  const foot = (words: string, work: () => void, props: { disabled?: boolean; "data-tip"?: string } = {}) => (
+    <button
+      type="button"
+      className="row plain"
+      onClick={() => {
+        setOpen(false);
+        chip.current?.focus();
+        work();
+      }}
+      {...props}
+    >
+      {words}
+    </button>
+  );
 
   const row = (c: Conversation) =>
     renaming?.id === c.id ? (
@@ -110,66 +135,80 @@ export function Conversations({ bot, want, children }: {
         </form>
       </li>
     ) : (
-      <li key={c.id}>
+      <li key={c.id} className={acting === c.id ? "acting" : undefined}>
         <button type="button" aria-current={c.id === shown ? "true" : undefined} className={c.id === shown ? "row plain current" : "row plain"} onClick={() => show(c.id)}>
           <span className="label">
-            <span>{c.pinned && <span aria-label="Pinned">📌 </span>}{label(c)}</span>
+            <span>
+              {c.pinned && (
+                <svg className="pin" viewBox="0 0 24 24" role="img" aria-label="Pinned">
+                  <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6zM12 14v7" />
+                </svg>
+              )}
+              {label(c)}
+            </span>
             <small>{c.busy ? "Working…" : when(c.touchedAt)}</small>
           </span>
         </button>
-        <span className="actions">
-          <button type="button" className="ghost small" onClick={() => void change(c, { pinned: !c.pinned })}>{c.pinned ? "Unpin" : "Pin"}</button>
-          <button type="button" className="ghost small" onClick={() => setRenaming({ id: c.id, name: c.name })}>Rename</button>
-          <button type="button" className="ghost small" onClick={() => void change(c, { archived: !c.archived })}>{c.archived ? "Restore" : "Archive"}</button>
-        </span>
+        <button
+          type="button"
+          className="ghost small more"
+          aria-label={`Actions for ${label(c)}`}
+          aria-expanded={acting === c.id}
+          onClick={() => setActing(acting === c.id ? undefined : c.id)}
+        >
+          ⋯
+        </button>
+        {acting === c.id && (
+          <span className="actions">
+            <button type="button" className="ghost small" onClick={() => void change(c, { pinned: !c.pinned }).then(() => setActing(undefined))}>{c.pinned ? "Unpin" : "Pin"}</button>
+            <button type="button" className="ghost small" onClick={() => { setRenaming({ id: c.id, name: c.name }); setActing(undefined); }}>Rename</button>
+            <button type="button" className="ghost small" onClick={() => void change(c, { archived: !c.archived }).then(() => setActing(undefined))}>{c.archived ? "Restore" : "Archive"}</button>
+          </span>
+        )}
       </li>
     );
 
   return (
     <>
-      <div className="conversations">
-        <div className="menu" ref={wrap}>
-          <button
-            ref={chip}
-            type="button"
-            className="small chip"
-            aria-label={`Conversation: ${now ? label(now) : "…"}. Choose another`}
-            aria-haspopup="dialog"
-            aria-expanded={open}
-            onClick={() => setOpen(!open)}
-          >
-            <span>{now ? label(now) : "…"}</span> <span aria-hidden="true">▾</span>
-          </button>
-          {open && (
-            <div className="popover below" role="dialog" aria-label="Conversations of this bot">
-              <ul>{listed(all, shown, archived).map(row)}</ul>
-              {all.some((c) => c.archived) && (
-                <label>
-                  Show archived
-                  <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} />
-                </label>
-              )}
-              {compact && (
-                <button
-                  type="button"
-                  className="row plain"
-                  disabled={compact.disabled}
-                  data-tip="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole"
-                  onClick={() => {
-                    setOpen(false);
-                    chip.current?.focus();
-                    compact.run();
-                  }}
-                >
-                  Compact this conversation
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-        <button type="button" className="small" onClick={() => void make()}>New conversation</button>
-      </div>
+      {slot &&
+        createPortal(
+          <div className="menu" ref={wrap}>
+            <button
+              ref={chip}
+              type="button"
+              className="small chip"
+              aria-label={`Conversation: ${now ? label(now) : "…"}. Choose another`}
+              aria-haspopup="dialog"
+              aria-expanded={open}
+              onClick={() => setOpen(!open)}
+            >
+              <span>{now ? label(now) : "…"}</span> <span aria-hidden="true">▾</span>
+            </button>
+            {open && (
+              <div className="popover below end" role="dialog" aria-label="Conversations of this bot">
+                <ul>{listed(all, shown, archived).map(row)}</ul>
+                {all.some((c) => c.archived) && (
+                  <label>
+                    Show archived
+                    <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} />
+                  </label>
+                )}
+                <div className="foot">
+                  {foot("New conversation", () => void make())}
+                  {foot("Export chat", () => void run(request<{ path: string }>("export_chat", { bot, conversation: shown }).then((d) => setSaved(d.path))))}
+                  {compact &&
+                    foot("Compact this conversation", compact.run, {
+                      disabled: compact.disabled,
+                      "data-tip": "Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole",
+                    })}
+                </div>
+              </div>
+            )}
+          </div>,
+          slot,
+        )}
       {error && <p className="error" role="alert">{error}</p>}
+      {saved && <p className="note" role="status">Saved to <code>{saved}</code></p>}
       {children(shown, show, offerCompact)}
     </>
   );

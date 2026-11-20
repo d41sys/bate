@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation } from "./service.ts";
-import { add, build, planSteps, type Entry, type Item, type Question, type Row } from "./chat.ts";
+import { add, aim, build, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
@@ -12,6 +12,9 @@ type Opened = { history: Row[]; more: boolean; questions: Question[]; queue: Que
 /** Entries asked for at a time; a reply is many of them (one per delta). */
 const PAGE = 2000;
 
+/** How long (ms) a row that just came in counts as arriving: a little longer than its fade (`--slow`). */
+const ARRIVING = 400;
+
 /** The service's choices, in the person's words. */
 const CHOICES: Record<string, string> = { Approve: "Allow once", Always: "Always", Deny: "Deny" };
 
@@ -21,6 +24,12 @@ const COVERS: Record<string, string> = {
   write: "this exact file",
   run: "this exact command",
   connector: "this connector tool, whatever it is given",
+};
+
+/** The first line of a target, cut to what a button can hold; the card shows all of it above. */
+const short = (target: string) => {
+  const line = target.split("\n")[0];
+  return line.length > 32 ? `${line.slice(0, 31)}…` : line;
 };
 
 type Hit = { seq: number };
@@ -71,7 +80,6 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const [reading, setReading] = useState<number>();
   // The prompt being edited: sending goes back to just before it first.
   const [editing, setEditing] = useState<string>();
-  const [saved, setSaved] = useState("");
   // Every entry loaded so far, oldest first; an older page goes in front and the chat is built anew.
   const entries = useRef<Row[]>([]);
   const oldest = useRef<number>(undefined);
@@ -88,13 +96,18 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const [hit, setHit] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
+  // What came in just now fades in; a row scrolled back into view later does not.
+  const arrived = useRef(new Map<number, number>());
+  // The bot is at work: a mark closes the chat, unless a question is what it waits for.
+  const shown = useMemo(() => (bot.busy && questions.length === 0 ? [...fold(items), WORKING] : fold(items)), [items, bot.busy, questions.length]);
+  const lastIndex = shown.length - (shown[shown.length - 1] === WORKING ? 2 : 1);
   const rows = useVirtualizer({
-    count: items.length,
+    count: shown.length,
     getScrollElement: () => scroller.current,
     estimateSize: () => 48,
     overscan: 8,
     // By item, not place: rows measured stay measured when older ones come in front.
-    getItemKey: (index) => items[index].id,
+    getItemKey: (index) => shown[index].id,
   });
 
   useEffect(() => {
@@ -132,10 +145,10 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         oldest.current = d.history[0]?.seq ?? before;
         hasMore.current = d.more;
         setMore(d.more);
-        setItems((shown) => {
+        setItems((before) => {
           const all = build(entries.current);
           // Keep the rows the user was reading where they were.
-          requestAnimationFrame(() => rows.scrollToIndex(all.length - shown.length, { align: "start" }));
+          requestAnimationFrame(() => rows.scrollToIndex(fold(all).length - fold(before).length, { align: "start" }));
           return all;
         });
         return true;
@@ -154,6 +167,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         const row = { seq: frame.seq as number, entry };
         live?.push(row);
         entries.current.push(row);
+        arrived.current.set(row.seq, Date.now());
         setItems((items) => add(items, row));
         // History holds every question ever asked; only one asked now is still open.
         if (entry.type === "question") setQuestions((qs) => [...qs, entry]);
@@ -199,7 +213,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     while (oldest.current !== undefined && oldest.current > seq && hasMore.current) {
       if (!(await older.current())) break;
     }
-    const all = build(entries.current);
+    const all = fold(build(entries.current));
     // The item that begins at `seq`, or the one it is part of.
     let index = all.findIndex((item) => item.id >= seq);
     if (index < 0) index = all.length - 1;
@@ -245,8 +259,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
 
   // A reply that grows keeps its end in view, unless the user scrolled up to read.
   useLayoutEffect(() => {
-    if (atBottom.current && items.length) rows.scrollToIndex(items.length - 1, { align: "end" });
-  }, [items, rows]);
+    if (atBottom.current && shown.length) rows.scrollToIndex(shown.length - 1, { align: "end" });
+  }, [shown, rows]);
   // So does a shorter scroller: the message box grew, or a question came up under it.
   useEffect(() => {
     const el = scroller.current;
@@ -421,12 +435,6 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           <button type="button" onClick={() => setFinding(false)}>Done</button>
         </div>
       )}
-      <div className="tools">
-        <button type="button" className="ghost small" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id, conversation }).then((d) => setSaved(d.path)))}>
-          Export chat
-        </button>
-        {saved && <span className="note">Saved to <code>{saved}</code></span>}
-      </div>
       <div
         className="items"
         ref={scroller}
@@ -437,34 +445,39 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         }}
       >
         <div style={{ height: rows.getTotalSize(), position: "relative" }}>
-          {rows.getVirtualItems().map((row) => (
-            <div
-              key={row.key}
-              data-index={row.index}
-              ref={rows.measureElement}
-              className={`item ${items[row.index].kind}${items[row.index].id === marked ? " marked" : ""}`}
-              style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
-            >
-              <Row
-                item={items[row.index]}
-                busy={bot.busy || sending}
-                // An installed agent cannot go back in a conversation.
-                fixed={!!bot.agent?.length}
-                retry={retry}
-                proceed={proceed}
-                latest={row.index === items.length - 1}
-                fork={fork}
-                reading={reading === items[row.index].id}
-                read={canRead ? read : undefined}
-                stopReading={stopReading}
-                open={showFile}
-                edit={(item) => {
-                  setEditing(item.nonce);
-                  setText(item.text);
-                }}
-              />
-            </div>
-          ))}
+          {rows.getVirtualItems().map((row) => {
+            const item = shown[row.index];
+            return (
+              <div
+                key={row.key}
+                data-index={row.index}
+                ref={rows.measureElement}
+                className={`item ${item.kind}${item.id === marked ? " marked" : ""}${Date.now() - (arrived.current.get(item.id) ?? 0) < ARRIVING ? " arriving" : ""}`}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
+              >
+                <Row
+                  item={item}
+                  busy={bot.busy || sending}
+                  // The call run that the bot is at now, if it is the last thing said.
+                  working={bot.busy && row.index === lastIndex}
+                  // An installed agent cannot go back in a conversation.
+                  fixed={!!bot.agent?.length}
+                  retry={retry}
+                  proceed={proceed}
+                  latest={row.index === lastIndex}
+                  fork={fork}
+                  reading={reading === item.id}
+                  read={canRead ? read : undefined}
+                  stopReading={stopReading}
+                  open={showFile}
+                  edit={(item) => {
+                    setEditing(item.nonce);
+                    setText(item.text);
+                  }}
+                />
+              </div>
+            );
+          })}
         </div>
       </div>
       {questions.map((q, i) => (
@@ -477,18 +490,14 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
               <button
                 key={choice}
                 className={choice === "Approve" ? "primary" : choice === "Deny" ? "danger" : undefined}
+                // The keys are tips; what Always covers is the tip of its button.
+                data-tip={choice === "Approve" ? (i === 0 ? "Allow once (⌘Enter)" : undefined) : choice === "Deny" ? (i === 0 ? "Deny (Esc)" : undefined) : `Bate stops asking for ${COVERS[q.kind ?? ""] ?? "this exact action"}. The bot still asks again for anything else. Remove it in Settings.`}
                 onClick={() => run(answer(q, choice))}
               >
-                {CHOICES[choice] ?? choice}
-                {i === 0 && choice === "Approve" && <kbd>⌘Enter</kbd>}
-                {i === 0 && choice === "Deny" && <kbd>Esc</kbd>}
+                {choice === "Always" ? <>Always allow <code>{q.target ? short(q.target) : "this action"}</code></> : CHOICES[choice] ?? choice}
               </button>
             ))}
           </div>
-          {q.options.includes("Always") && (
-            <p className="note">Always: Bate stops asking for {COVERS[q.kind ?? ""] ?? "this exact action"}. The bot still asks again for anything else. Remove it in Settings.</p>
-          )}
-          {i === 0 && <p className="note">Writing a message instead denies this and sends the message to the bot.</p>}
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
@@ -557,7 +566,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           ref={box}
           rows={1}
           aria-label="Message"
-          placeholder={`Message ${bot.name}`}
+          placeholder={bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -569,31 +578,22 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              send();
+              // While the bot works, Enter queues the message and ⌥Enter puts it into the turn that runs.
+              send(e.altKey && bot.busy && !bot.agent?.length);
             }
           }}
         />
         {model}
         {bot.busy ? (
-          <>
-            <button disabled={!message || uploading || sending} data-tip="Send this when the bot is done with what it is doing">Queue</button>
-            {bot.agent?.length ? (
-              <span className="note">This agent takes no message while it works.</span>
-            ) : (
-              <button type="button" disabled={!message || uploading || sending} data-tip="Put this into the turn that is running" onClick={() => send(true)}>Steer</button>
-            )}
-            <button type="button" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>Stop {!asked && <kbd>Esc</kbd>}</button>
-          </>
+          <button type="button" className="round primary" aria-label="Stop" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
+            </svg>
+          </button>
         ) : (
           <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn}>↑</button>
         )}
       </form>
-      {bot.busy && (
-        <p className="hints note">
-          <span><b>Queue</b> sends it when the bot is done.</span>
-          {!bot.agent?.length && <span><b>Steer</b> puts it into the turn now.</span>}
-        </p>
-      )}
     </section>
   );
 }
@@ -617,7 +617,7 @@ type Actions = {
   stopReading: () => void;
 };
 
-function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, reading, read, stopReading }: { item: Item } & Actions) {
+function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -634,29 +634,24 @@ function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, read
       );
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
-    case "tool": {
-      const steps = item.tool === "plan" && !item.isError ? planSteps(item.args) : undefined;
-      if (steps) {
-        return (
-          <ul className="plan">
-            {steps.map((s, i) => (
-              <li key={i} aria-current={s.status === "in_progress" ? "step" : undefined}>
-                <label><input type="checkbox" checked={s.status === "done"} disabled readOnly /> {s.step}</label>
-              </li>
-            ))}
-          </ul>
-        );
-      }
+    case "run":
+      return <Run parts={item.parts} live={working} />;
+    case "plan":
       return (
-        <details>
-          <summary>
-            {item.tool} {item.output === undefined ? "…" : item.isError ? "failed" : "done"}
-          </summary>
-          <pre>{JSON.stringify(item.args, null, 2)}</pre>
-          {item.output !== undefined && <pre>{item.output}</pre>}
-        </details>
+        <ul className="plan">
+          {item.steps.map((s, i) => (
+            <li key={i} aria-current={s.status === "in_progress" ? "step" : undefined}>
+              <label><input type="checkbox" checked={s.status === "done"} disabled readOnly /> {s.step}</label>
+            </li>
+          ))}
+        </ul>
       );
-    }
+    case "working":
+      return (
+        <p role="status">
+          <span className="dots" aria-hidden="true"><i /><i /><i /></span> Working…
+        </p>
+      );
     case "retrying":
       return (
         <p>
@@ -681,9 +676,39 @@ function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, read
       return <p className="steered">You steered: {item.text}</p>;
     case "forked":
       return <p>Forked here. The bot goes on from before the greyed messages above; they are kept to read.</p>;
-    default:
-      return <p>{item.text}</p>;
   }
+}
+
+/** Calls and thinking that follow each other: one line saying what happened, which opens to a row for each call. */
+function Run({ parts, live }: { parts: Part[]; live: boolean }) {
+  const { text, running, failed } = describe(parts, live);
+  return (
+    <details className="run">
+      <summary>
+        <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true" />
+        {text}
+        {failed > 0 && <span className="error"> · {failed} failed</span>}
+      </summary>
+      <ul>
+        {parts.map((part) =>
+          part.kind === "thinking" ? (
+            <li key={part.id} className="thought"><p>{part.text}</p></li>
+          ) : (
+            <li key={part.id}>
+              <details>
+                <summary>
+                  <code>{aim(part)}</code>
+                  {part.isError && <span className="error"> failed</span>}
+                </summary>
+                <pre>{JSON.stringify(part.args, null, 2)}</pre>
+                {part.output !== undefined && <pre>{part.output}</pre>}
+              </details>
+            </li>
+          ),
+        )}
+      </ul>
+    </details>
+  );
 }
 
 function Reply({ item, busy, open, reading, read, stopReading }: {

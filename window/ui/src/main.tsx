@@ -88,6 +88,8 @@ function App() {
   // Bumped on each new connection, so every screen loads again.
   const [connection, setConnection] = useState(0);
   const [dragged, setDragged] = useState<string>();
+  // The place in a bot's header where its conversation chip is drawn.
+  const [conversationSlot, setConversationSlot] = useState<HTMLElement | null>(null);
   const [palette, setPalette] = useState(false);
   const [jump, setJump] = useState<{ seq: number; conversation: string }>();
   const [find, setFind] = useState(false);
@@ -177,8 +179,6 @@ function App() {
     else localStorage.removeItem(LATER);
     setLater(on);
   };
-  // Bots that wait for an answer while another bot's page is open: one click away from here.
-  const others = bot ? bots.filter((b) => b.waiting && b.id !== bot.id) : [];
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
   const openBot = (id: string, tab: BotTab = "chat") => setView({ page: "bot", id, tab });
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
@@ -311,6 +311,7 @@ function App() {
           <span>{b.name}</span>
           {state === "working" && <small>Working…</small>}
         </span>
+        {state === "working" && <span className="pulse" aria-hidden="true" />}
         {state === "waiting" && <span className="badge">Needs you</span>}
         {state === "unread" && <span className="badge quiet">New reply</span>}
       </button>
@@ -328,7 +329,10 @@ function App() {
   return (
     <div className="app">
       <nav className="sidebar" aria-label="Projects and bots">
-        <h2>Projects</h2>
+        <div className="heading">
+          <h2>Projects</h2>
+          <button className="round ghost" aria-label="New project" data-tip="New project" onClick={actions["new-project"]}>+</button>
+        </div>
         <ul>
           {lists.projects.map(({ project: p, bots: members }) => (
             <li key={p.id}>
@@ -336,7 +340,6 @@ function App() {
               {members.length > 0 && <ul>{members.map(botRow)}</ul>}
             </li>
           ))}
-          <li>{plain("New project", view?.page === "projects", actions["new-project"])}</li>
         </ul>
         <div className="heading">
           <h2>Bots</h2>
@@ -432,19 +435,13 @@ function App() {
                 <h1>{bot.name}</h1>
               </div>
               <Tabs ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)} />
+              {/* The conversation chip is drawn here by Conversations. */}
+              {view.tab === "chat" && <div className="conversation" ref={setConversationSlot} />}
             </header>
-            {others.length > 0 && (
-              <p className="banner actions" role="status">
-                {others.length === 1 ? `${others[0].name} waits for your answer.` : `${others.length} bots wait for your answer.`}
-                {others.map((b) => (
-                  <button key={b.id} className="small" onClick={() => openBot(b.id)}>Open {b.name}</button>
-                ))}
-              </p>
-            )}
             <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
-              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation}>
+              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation} slot={conversationSlot}>
                 {(conversation, show, offerCompact) => <Chat
                   key={`${bot.id}-${conversation}-${connection}`}
                   bot={bot}
