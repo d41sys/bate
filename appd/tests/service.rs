@@ -7767,3 +7767,171 @@ fn what_a_workplace_fetches_is_never_an_update() {
     );
     assert!(!u.staged() && u.untouched());
 }
+
+#[test]
+fn a_project_room_sends_by_name_to_the_lead_by_default_waits_for_a_busy_bot_and_bounds_what_a_bot_sees()
+ {
+    let home = home("room");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = |w: &mut Window, name: &str| {
+        w.ok("create_bot", json!({"name": name}))["bot"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (ann, bo) = (bot(&mut w, "Ann"), bot(&mut w, "Bo Peep"));
+    let made = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [ann, bo]}}),
+    )["project"]
+        .clone();
+    let pid = made["id"].as_str().unwrap().to_owned();
+    let first = made["bots"][0].as_str().unwrap().to_owned();
+    let other = if first == ann { &bo } else { &ann };
+    let room = |w: &mut Window| w.ok("list_room", json!({"projectId": pid}))["room"].clone();
+    let lines = |w: &mut Window| room(w).as_array().unwrap().len();
+    let prompt_of = |bot: &str, seq: &Value| {
+        let log = fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap();
+        log.lines()
+            .find(|l| l.contains(&format!("\"nonce\":\"room-{seq}\"")))
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    // No name: the first bot, while no lead is set. Its reply comes into the room, and the
+    // message is in the bot's own conversation as an ordinary prompt.
+    let sent = w.ok("send_room", json!({"projectId": pid, "text": "hi"}));
+    assert_eq!(
+        (sent["to"].as_str(), &sent["queued"]),
+        (Some(&*first), &json!(false))
+    );
+    eventually("the reply in the room", || lines(&mut w) == 2);
+    let r = room(&mut w);
+    assert_eq!(
+        (&r[0]["from"], &r[0]["to"], &r[0]["text"]),
+        (&json!(""), &json!(first), &json!("hi"))
+    );
+    assert_eq!(
+        (&r[1]["from"], &r[1]["to"], &r[1]["text"]),
+        (&json!(first), &json!(""), &json!("hello"))
+    );
+    let own = w.ok("open_bot", json!({"bot": first}))["history"].to_string();
+    assert!(
+        own.contains("\"text\":\"hi\"") && own.contains("\"delta\":\"lo\""),
+        "{own}"
+    );
+
+    // A lead that is not in the project is refused; the lead gets what has no name.
+    let refused = |w: &mut Window, command: &str, args: Value| {
+        let id = w.send(command, args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    let stranger = bot(&mut w, "Cy");
+    let mut changed = made.clone();
+    changed["lead"] = json!(stranger);
+    assert_eq!(
+        refused(&mut w, "set_project", json!({"project": changed})),
+        "invalid_project"
+    );
+    changed["lead"] = json!(other);
+    w.ok("set_project", json!({"project": changed}));
+    let sent = w.ok(
+        "send_room",
+        json!({"projectId": pid, "text": "to the lead"}),
+    );
+    assert_eq!(sent["to"], json!(other));
+
+    // `@name`, with a space in the name and in any case, goes to that bot, without the name.
+    eventually("both replies", || lines(&mut w) == 4);
+    let sent = w.ok(
+        "send_room",
+        json!({"projectId": pid, "text": "@bo peep  hello you"}),
+    );
+    assert_eq!(sent["to"], json!(bo));
+    eventually("the third reply", || lines(&mut w) == 6);
+    assert_eq!(room(&mut w)[4]["text"], "hello you");
+    assert_eq!(
+        refused(
+            &mut w,
+            "send_room",
+            json!({"projectId": pid, "text": "@Zed hi"})
+        ),
+        "no_such_bot"
+    );
+    assert_eq!(
+        refused(
+            &mut w,
+            "send_room",
+            json!({"projectId": pid, "text": "@Ann"})
+        ),
+        "bad_request"
+    );
+    assert_eq!(lines(&mut w), 6);
+
+    // A busy bot: the message waits in its queue, and the reply comes when its turn is over.
+    w.ok("prompt", json!({"bot": bo, "nonce": "w1", "text": "work"}));
+    eventually("Bo at work", || prompts_received(&home, &bo, "w1") == 1);
+    let sent = w.ok(
+        "send_room",
+        json!({"projectId": pid, "text": "@Bo Peep waiting"}),
+    );
+    assert_eq!(sent["queued"], true);
+    assert_eq!(
+        w.ok("list_queue", json!({"bot": bo}))["queue"][0]["text"],
+        "waiting"
+    );
+    assert_eq!(lines(&mut w), 7);
+    w.ok("abort", json!({"bot": bo}));
+    eventually("the reply of the waiting message", || lines(&mut w) == 8);
+    let r = room(&mut w);
+    assert_eq!(
+        (&r[7]["from"], &r[7]["text"]),
+        (&json!(bo), &json!("hello"))
+    );
+    assert_eq!(w.ok("list_queue", json!({"bot": bo}))["queue"], json!([]));
+
+    // What a bot sees of the room: at most the last 10 lines since its own last turn.
+    w.ok("prompt", json!({"bot": bo, "nonce": "w2", "text": "work"}));
+    eventually("Bo at work again", || {
+        prompts_received(&home, &bo, "w2") == 1
+    });
+    for i in 1..=12 {
+        w.ok(
+            "send_room",
+            json!({"projectId": pid, "text": format!("@Bo Peep mk{i:02}")}),
+        );
+    }
+    let sent = w.ok("send_room", json!({"projectId": pid, "text": "@Ann news?"}));
+    eventually("Ann to get it", || {
+        !prompt_of(&ann, &sent["seq"]).is_empty()
+    });
+    let seen = prompt_of(&ann, &sent["seq"]);
+    assert!(
+        seen.contains("mk03") && seen.contains("mk12") && !seen.contains("mk02"),
+        "{seen}"
+    );
+    assert_eq!(seen.matches("mk").count(), 10, "{seen}");
+    assert!(seen.contains("the person to Bo Peep: mk12"), "{seen}");
+    eventually("Ann's reply", || lines(&mut w) == 8 + 12 + 2);
+
+    // And at most 4000 characters: whole lines, the newest first.
+    let long = "x".repeat(3000);
+    for i in 1..=3 {
+        w.ok(
+            "send_room",
+            json!({"projectId": pid, "text": format!("@Bo Peep LONG{i} {long}")}),
+        );
+    }
+    let sent = w.ok("send_room", json!({"projectId": pid, "text": "@Ann again"}));
+    eventually("Ann to get it", || {
+        !prompt_of(&ann, &sent["seq"]).is_empty()
+    });
+    let seen = prompt_of(&ann, &sent["seq"]);
+    assert!(
+        seen.contains("LONG3") && !seen.contains("LONG2"),
+        "{}",
+        seen.len()
+    );
+    assert!(seen.len() < 4000 + 600, "{}", seen.len());
+}

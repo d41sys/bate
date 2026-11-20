@@ -54,7 +54,7 @@ export function Projects({ bots }: { bots: Bot[] }) {
   /** A workplace that this project does not have on yet: the person confirms what it needs first. */
   const switchingOn = !!chosen && saved?.workplace !== chosen.name;
   const toggle = (id: string, on: boolean) =>
-    setForm({ ...form, bots: on ? [...form.bots, id] : form.bots.filter((b) => b !== id) });
+    setForm({ ...form, bots: on ? [...form.bots, id] : form.bots.filter((b) => b !== id), lead: form.lead === id && !on ? undefined : form.lead });
 
   return (
     <section>
@@ -151,6 +151,13 @@ export function Projects({ bots }: { bots: Bot[] }) {
             );
           })}
         </fieldset>
+        <label>
+          Lead, who gets a room message with no @name{" "}
+          <select value={form.lead ?? ""} onChange={(e) => setForm({ ...form, lead: e.target.value || undefined })}>
+            <option value="">The first bot</option>
+            {form.bots.map((id) => <option key={id} value={id}>{name(id)}</option>)}
+          </select>
+        </label>
         <button disabled={form.bots.length > 20 || (switchingOn && !confirmed)}>{form.id ? "Save" : "Add"}</button>
         {form.id && <button type="button" onClick={() => edit(blank)}>Cancel</button>}
       </form>

@@ -45,6 +45,31 @@ pub struct Mail {
     pub at_ms: u64,
 }
 
+/// One line of a project's room: what the person or a bot wrote there.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomEntry {
+    pub seq: i64,
+    /// The bot's id; empty for the person.
+    pub from: String,
+    /// The bot it was addressed to; empty for a bot's reply, which is for the whole room.
+    pub to: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
+const ROOM: &str = "SELECT seq, author, to_bot, text, at FROM room";
+
+fn room_row(r: &rusqlite::Row) -> Result<RoomEntry> {
+    Ok(RoomEntry {
+        seq: r.get(0)?,
+        from: r.get(1)?,
+        to: r.get(2)?,
+        text: r.get(3)?,
+        at_ms: r.get(4)?,
+    })
+}
+
 const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at FROM mail";
 
 fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
@@ -132,6 +157,8 @@ CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_i
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
 CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS room(seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, author TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS room_project ON room(project, seq);
 CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 ";
 
@@ -625,6 +652,7 @@ impl Store {
             tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [bot])?;
         }
         tx.execute("DELETE FROM mail WHERE from_bot = ?1 OR to_bot = ?1", [bot])?;
+        tx.execute("DELETE FROM room WHERE author = ?1 OR to_bot = ?1", [bot])?;
         tx.commit()
     }
 
@@ -1208,8 +1236,68 @@ impl Store {
 
     pub fn delete_project(&self, id: &str) -> Result<()> {
         self.0
+            .execute("DELETE FROM room WHERE project = ?1", [id])?;
+        self.0
             .execute("DELETE FROM projects WHERE id = ?1", [id])
             .map(drop)
+    }
+
+    /// Adds a line to the project's room; its number.
+    pub fn put_room(
+        &self,
+        project: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        at: u64,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO room(project, author, to_bot, text, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project, from, to, text, at],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    pub fn room_entry(&self, seq: i64) -> Result<Option<(String, RoomEntry)>> {
+        self.0
+            .query_row(
+                "SELECT project, seq, author, to_bot, text, at FROM room WHERE seq = ?1",
+                [seq],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        RoomEntry {
+                            seq: r.get(1)?,
+                            from: r.get(2)?,
+                            to: r.get(3)?,
+                            text: r.get(4)?,
+                            at_ms: r.get(5)?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+    }
+
+    /// The last `limit` lines of the project's room, oldest first.
+    pub fn room(&self, project: &str, limit: usize) -> Result<Vec<RoomEntry>> {
+        let mut stmt = self.0.prepare_cached(&format!(
+            "SELECT * FROM ({ROOM} WHERE project = ?1 ORDER BY seq DESC LIMIT ?2) ORDER BY seq"
+        ))?;
+        stmt.query_map(params![project, limit as i64], room_row)?
+            .collect()
+    }
+
+    /// What `bot` has not seen of the project's room, newest first: lines since its own last
+    /// one, not its own and not addressed to it (those reach it as prompts).
+    pub fn room_unseen(&self, project: &str, bot: &str, limit: usize) -> Result<Vec<RoomEntry>> {
+        let mut stmt = self.0.prepare_cached(&format!(
+            "{ROOM} WHERE project = ?1 AND author != ?2 AND to_bot != ?2 AND seq > \
+             (SELECT COALESCE(MAX(seq), 0) FROM room WHERE project = ?1 AND author = ?2) \
+             ORDER BY seq DESC LIMIT ?3"
+        ))?;
+        stmt.query_map(params![project, bot, limit as i64], room_row)?
+            .collect()
     }
 
     /// The key under which the engine reaches this connector through the service; `fresh` is

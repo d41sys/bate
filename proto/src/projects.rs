@@ -17,6 +17,9 @@ pub struct Project {
     /// The bots in the project, at most 20. A bot is in at most one project.
     #[serde(default)]
     pub bots: Vec<String>,
+    /// The bot that gets a room message with no `@name`: one of `bots`; the first bot when not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     /// Instructions every bot of the project gets after its own, at most 8000 characters.
     #[serde(default)]
     pub instructions: String,
@@ -32,6 +35,15 @@ pub struct Project {
 }
 
 impl Project {
+    /// The bot a room message with no `@name` goes to.
+    pub fn lead_bot(&self) -> Option<&str> {
+        let lead = self
+            .lead
+            .as_deref()
+            .filter(|l| self.bots.iter().any(|b| b == l));
+        lead.or(self.bots.first().map(String::as_str))
+    }
+
     /// The name the project's connector goes by: its own, or its workplace's.
     pub fn connector_name(&self) -> Option<&str> {
         let own = self.connector.as_ref().map(|c| c.name.as_str());
