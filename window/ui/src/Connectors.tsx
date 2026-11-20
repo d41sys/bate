@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { type ConnectorForm, connectorMay, connectorOf, connectorState, each, madeBy, placed } from "./addons.ts";
-import { Pick, Sheet } from "./Sheet.tsx";
+import { Choose } from "./ProjectDialog.tsx";
+import { Sheet } from "./Sheet.tsx";
 import { usePerBot } from "./usePerBot.ts";
 import { inShell, openInBrowser, request } from "./service.ts";
 import type { Bot, Connector } from "./types.ts";
@@ -102,7 +103,7 @@ export function Connectors({ bots }: { bots: Bot[] }) {
           ) : (
             <>
               <label>Program <input required placeholder="npx" value={form.command} onChange={(e) => setForm({ ...form, command: e.target.value })} /></label>
-              {inShell && <Pick folder={false} pick={(command) => setForm((f) => ({ ...f, command }))} fail={setError} />}
+              {inShell && <Choose folder={false} set={(command) => setForm((f) => ({ ...f, command }))} fail={setError} />}
               <label>
                 Arguments, one on each line
                 <textarea rows={3} value={form.args} onChange={(e) => setForm({ ...form, args: e.target.value })} />

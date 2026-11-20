@@ -2618,6 +2618,9 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("10", "install_update"),
         ("11", "set_disk_access"),
         ("18", "set_network"),
+        // A path on this Mac is not for a device to look at or copy from.
+        ("19", "preview_skill"),
+        ("20", "install_skill"),
         ("12", "set_project"),
         ("13", "delete_project"),
         // Surfaces are for the window on this Mac.

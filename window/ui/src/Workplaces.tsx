@@ -1,8 +1,9 @@
 import { type ComponentProps, useEffect, useState } from "react";
 import { each, madeBy, matches } from "./addons.ts";
-import { Pick, Sheet } from "./Sheet.tsx";
+import { Choose } from "./ProjectDialog.tsx";
+import { Sheet } from "./Sheet.tsx";
 import { sent } from "./projects.ts";
-import { listen, request } from "./service.ts";
+import { inShell, listen, request } from "./service.ts";
 import type { CatalogEntry, CatalogPreview, Project, Workplace, WorkplacePreview } from "./types.ts";
 import { downloadText, needsLines, newlyLines, progressText, sizeText, unusable } from "./workplaces.ts";
 
@@ -129,8 +130,9 @@ export function Workplaces({ projects }: { projects: Project[] }) {
   return (
     <section>
       <p className="note">A workplace equips a project for one kind of work: a program that Bate runs for the project, with skills and roles. It is installed once and switched on per project.</p>
+      {!inShell && <p className="note">Installing, removing and switching on workplaces is done in Bate's own window on the Mac; here you can look.</p>}
       <h2>Installed</h2>
-      {workplaces.length === 0 && <p className="note">No workplaces installed. Find one under Browse.</p>}
+      {workplaces.length === 0 && <p className="note">No workplaces installed.{inShell ? " Find one under Browse." : ""}</p>}
       <ul className="rows">
         {workplaces.map((w) => (
           <li key={w.name}>
@@ -145,10 +147,11 @@ export function Workplaces({ projects }: { projects: Project[] }) {
               {w.changed && !w.error && <small className="error" role="alert">Its files changed since they were approved, so it is off in every project until you approve it.</small>}
             </div>
             <div className="actions">
-              {w.changed && <button className="small" onClick={() => void run(request("approve_workplace", { name: w.name }))}>Approve the files as they are</button>}
-              <button className="small danger" aria-label={`Remove ${w.name}`} onClick={() => remove(w)}>Remove…</button>
+              {inShell && w.changed && <button className="small" onClick={() => void run(request("approve_workplace", { name: w.name }))}>Approve the files as they are</button>}
+              {inShell && <button className="small danger" aria-label={`Remove ${w.name}`} onClick={() => remove(w)}>Remove…</button>}
             </div>
-            {projects.length > 0 && (
+            {!inShell && w.usedBy.length > 0 && <small>On in: {using(w).join(", ")}</small>}
+            {inShell && projects.length > 0 && (
               <ul className="rows" aria-label={`Projects that can have ${w.name} on`}>
                 {projects.map((p) => (
                   <li key={p.id}>
@@ -170,39 +173,43 @@ export function Workplaces({ projects }: { projects: Project[] }) {
           </li>
         ))}
       </ul>
-      <h2>Browse</h2>
-      <p className="note">
-        The catalog is a list kept in Bate's repository on GitHub. Each entry pins the exact archive by its size and hash; an installed workplace stays at the version it was installed at, and an update is only offered, with what it newly needs. Reading the list contacts GitHub, so it waits until you ask.
-      </p>
-      <button disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
-      {catalog?.length === 0 && <p className="note">The catalog is empty.</p>}
-      {catalog && catalog.length > 0 && (
-        <div className="find">
-          <input type="search" aria-label="Search the catalog" placeholder="Search the catalog" value={query} onChange={(e) => setQuery(e.target.value)} />
-        </div>
-      )}
-      <ul className="rows">
-        {catalog?.filter((e) => matches(query, e.name, e.description)).map((e) => (
-          <li key={e.name}>
-            <div className="what">
-              <strong>{e.name}</strong> <span className="note">{e.version} · {sizeText(e.size)}</span>
-              <small>{e.description}</small>
-              {e.installedVersion && <small>Installed: {e.installedVersion}{e.update ? "" : ", up to date"}</small>}
+      {inShell && (
+        <>
+          <h2>Browse</h2>
+          <p className="note">
+            The catalog is a list kept in Bate's repository on GitHub. Each entry pins the exact archive by its size and hash; an installed workplace stays at the version it was installed at, and an update is only offered, with what it newly needs. Reading the list contacts GitHub, so it waits until you ask.
+          </p>
+          <button disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
+          {catalog?.length === 0 && <p className="note">The catalog is empty.</p>}
+          {catalog && catalog.length > 0 && (
+            <div className="find">
+              <input type="search" aria-label="Search the catalog" placeholder="Search the catalog" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
-            {(!e.installedVersion || e.update) && (
-              <div className="actions">
-                <button className="small" onClick={() => void fromCatalog(e)}>{e.installedVersion ? `Update to ${e.version}…` : "Install…"}</button>
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
-      {catalog && query && !catalog.some((e) => matches(query, e.name, e.description)) && <p className="note">Nothing in the catalog matches.</p>}
-      <h3>From a folder on this Mac</h3>
-      <p className="note">
-        A folder with a <code>workplace.json</code> in it (format: <code>docs/workplaces.md</code>), up to 2000 files and folders and 200 MiB, and no links. What it lists under <code>downloads</code> is fetched at install, after you have seen its size and hosts.
-      </p>
-      <Pick folder pick={(path) => void fromFolder(path)} fail={setError} />
+          )}
+          <ul className="rows">
+            {catalog?.filter((e) => matches(query, e.name, e.description)).map((e) => (
+              <li key={e.name}>
+                <div className="what">
+                  <strong>{e.name}</strong> <span className="note">{e.version} · {sizeText(e.size)}</span>
+                  <small>{e.description}</small>
+                  {e.installedVersion && <small>Installed: {e.installedVersion}{e.update ? "" : ", up to date"}</small>}
+                </div>
+                {(!e.installedVersion || e.update) && (
+                  <div className="actions">
+                    <button className="small" onClick={() => void fromCatalog(e)}>{e.installedVersion ? `Update to ${e.version}…` : "Install…"}</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          {catalog && query && !catalog.some((e) => matches(query, e.name, e.description)) && <p className="note">Nothing in the catalog matches.</p>}
+          <h3>From a folder on this Mac</h3>
+          <p className="note">
+            A folder with a <code>workplace.json</code> in it (format: <code>docs/workplaces.md</code>), up to 2000 files and folders and 200 MiB, and no links. What it lists under <code>downloads</code> is fetched at install, after you have seen its size and hosts.
+          </p>
+          <Choose folder set={(path) => void fromFolder(path)} fail={setError} />
+        </>
+      )}
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
       {sheet && <Sheet {...sheet} status={progress && progressText(...progress)} close={() => setSheet(undefined)} />}
     </section>

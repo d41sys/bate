@@ -1,7 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Avatar } from "./Avatar.tsx";
-import { Choose } from "./ProjectDialog.tsx";
-import { inShell } from "./service.ts";
 import type { Bot } from "./types.ts";
 
 /** Who or what an add-on goes to, or is taken from: a bot, or a project. */
@@ -124,25 +122,5 @@ export function Sheet(p: {
         </div>
       </form>
     </dialog>
-  );
-}
-
-/** A folder or a file, from the system's panel in Bate's own window; another device has no panel, so it types the whole path. */
-export function Pick({ folder, pick, fail }: { folder: boolean; pick: (path: string) => void; fail: (message: string) => void }) {
-  const [typed, setTyped] = useState("");
-  if (inShell) return <Choose folder={folder} set={pick} fail={fail} />;
-  return (
-    <form
-      className="find"
-      onSubmit={(e) => {
-        e.preventDefault();
-        // The service does not expand `~`.
-        if (typed.startsWith("/")) pick(typed);
-        else fail("Give the whole path on the Mac, starting with /.");
-      }}
-    >
-      <input required aria-label={`Whole path of the ${folder ? "folder" : "file"} on the Mac`} placeholder="/Users/you/Downloads/my-skill" value={typed} onChange={(e) => setTyped(e.target.value)} />
-      <button>Look</button>
-    </form>
   );
 }
