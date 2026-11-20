@@ -56,6 +56,8 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 [role=tab] { border: 0; background: none; color: var(--fg-muted); min-height: 28px; }
 [role=tab]:hover:not(:disabled) { background: var(--bg-hover); }
 [role=tab][aria-selected=true] { background: var(--bg-current); color: var(--fg); font-weight: var(--weight-strong); }
+/* The panel adds no box: its contents lay out as the main area's own. */
+[role=tabpanel] { display: contents; }
 
 /* ---- Lines that tell: a note, an error, nothing here yet ---- */
 .note { color: var(--fg-muted); }
@@ -133,7 +135,7 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 
 main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
-main > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
+main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
 /* No bar on top: who this is floats above the page as a chip, the tabs beside it. */
 main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-2) var(--space-4); padding: var(--space-2) 0; background: var(--glass); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
 .who { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); box-shadow: var(--shadow-1); }

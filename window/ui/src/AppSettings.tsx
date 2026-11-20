@@ -38,7 +38,7 @@ export function AppSettings() {
     <section className="fields">
       {inShell && (
         <>
-          <h2>ChatGPT</h2>
+          <h2 id="settings-chatgpt" tabIndex={-1}>ChatGPT</h2>
           {chatgpt ? (
             <p>
               Signed in: every bot runs on your ChatGPT plan, not on the model server below.{" "}

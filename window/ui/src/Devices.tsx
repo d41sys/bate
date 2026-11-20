@@ -31,7 +31,7 @@ export function Devices() {
 
   return (
     <>
-      <h2>Other devices</h2>
+      <h2 id="settings-devices" tabIndex={-1}>Other devices</h2>
       <label>
         <input
           type="checkbox"

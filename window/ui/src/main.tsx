@@ -1,4 +1,5 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { type ReactNode, StrictMode, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { inShell, listen, newWindow, notifyWaiting, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
 import { Pair } from "./Devices.tsx";
@@ -20,7 +21,7 @@ import { Room } from "./Room.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings } from "./AppSettings.tsx";
-import { endsUnseen, neighbour, rowState, sidebar, waitingCount } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab, waitingCount } from "./nav.ts";
 import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { LATER } from "./firstRun.ts";
@@ -48,13 +49,28 @@ const projectTabs = (Object.keys(PROJECT_TABS) as ProjectTab[]).filter((t) => in
 
 function Tabs<T extends string>({ ids, names, tab, set }: { ids: T[]; names: Record<T, string>; tab: T; set: (t: T) => void }) {
   return (
-    <div role="tablist">
+    <div
+      role="tablist"
+      onKeyDown={(e) => {
+        const to = e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.nativeEvent.isComposing ? undefined : stepTab(ids, tab, e.key);
+        if (!to) return;
+        e.preventDefault();
+        set(to);
+        e.currentTarget.querySelector<HTMLElement>(`[id="tab-${to}"]`)?.focus();
+      }}
+    >
       {ids.map((t) => (
-        <button key={t} role="tab" aria-selected={t === tab} onClick={() => set(t)}>{names[t]}</button>
+        // Only the chosen tab is in the Tab order; the arrows move among the rest.
+        <button key={t} role="tab" id={`tab-${t}`} aria-controls="tabpanel" aria-selected={t === tab} tabIndex={t === tab ? 0 : -1} onClick={() => set(t)}>{names[t]}</button>
       ))}
     </div>
   );
 }
+
+/** What the chosen tab shows (a bot's or a project's). */
+const Panel = ({ tab, children }: { tab: string; children: ReactNode }) => (
+  <div role="tabpanel" id="tabpanel" aria-labelledby={`tab-${tab}`}>{children}</div>
+);
 
 function App() {
   const [state, setState] = useState("Connecting to the service…");
@@ -81,8 +97,8 @@ function App() {
   const [unread, setUnread] = useState<string[]>([]);
   // The chat in front of the person, for the frames that come in later.
   const looking = view?.page === "bot" && view.tab === "chat" ? view.id : undefined;
-  const now = useRef({ looking, bots });
-  now.current = { looking, bots };
+  const now = useRef({ looking, bots, palette, shown });
+  now.current = { looking, bots, palette, shown };
 
   useEffect(() => {
     if (!inShell || !state) return setNote(null);
@@ -161,6 +177,14 @@ function App() {
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
   const openBot = (id: string, tab: BotTab = "chat") => setView({ page: "bot", id, tab });
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
+  const order = shownBots(bots, projects);
+  // Like a click on its row: the tab in front stays.
+  const goBot = (b?: Bot) => b && openBot(b.id, view?.page === "bot" ? view.tab : "chat");
+  // The app's settings, at one of its sections.
+  const settingsAt = (id: string) => {
+    flushSync(() => setView({ page: "settings" }));
+    document.getElementById(id)?.focus();
+  };
   // What the menus, the keys and the palette can do, by the menu item's id.
   const actions: Record<string, () => void> = {
     palette: () => setPalette(true),
@@ -172,20 +196,34 @@ function App() {
     "new-bot": () => setView({ page: "new-bot" }),
     "new-project": () => setView({ page: "projects", asked: Date.now() }),
     "new-window": () => void newWindow().catch((e: Error) => setError(e.message)),
+    settings: () => setView({ page: "settings" }),
+    "previous-bot": () => goBot(stepBot(order, bot?.id, -1)),
+    "next-bot": () => goBot(stepBot(order, bot?.id, 1)),
+    ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`bot-${i + 1}`, () => goBot(order[i])])),
   };
   const act = useRef(actions);
   act.current = actions;
   useEffect(() => {
-    // By the key, not the letter it typed (Caps Lock).
-    const keys: Record<string, string> = { KeyK: "palette", KeyF: "find", KeyN: "new-bot", "Shift+KeyN": "new-window" };
+    // Behind the palette nothing else runs.
+    const run = (id: string) => now.current.palette || act.current[id]?.();
+    // This is the first of the window's keydown listeners (the chat's come later), so Esc is spent
+    // here before the chat's own sees it: the palette closes first, then the pane, and only then
+    // does Esc deny a question or stop the bot.
     const onKey = (e: KeyboardEvent) => {
-      const id = e.metaKey && !e.altKey && !e.ctrlKey ? keys[e.shiftKey ? `Shift+${e.code}` : e.code] : undefined;
+      if (e.key === "Escape") {
+        if (e.defaultPrevented || e.isComposing || !(now.current.palette || now.current.shown)) return;
+        e.preventDefault();
+        if (now.current.palette) setPalette(false);
+        else setShown(undefined);
+        return;
+      }
+      const id = shortcut(e);
       if (!id) return;
       e.preventDefault();
-      act.current[id]();
+      run(id);
     };
     // The shell's menus send their items' ids.
-    const onMenu = (e: Event) => act.current[(e as CustomEvent<string>).detail]?.();
+    const onMenu = (e: Event) => run((e as CustomEvent<string>).detail);
     addEventListener("keydown", onKey);
     addEventListener("bate-menu", onMenu);
     return () => {
@@ -224,7 +262,14 @@ function App() {
     { label: "New bot", hint: "⌘N", run: actions["new-bot"] },
     { label: "New project", run: actions["new-project"] },
     { label: "Workplaces", run: () => setView({ page: "workplaces" }) },
-    { label: "Settings", hint: "the app's", run: () => setView({ page: "settings" }) },
+    { label: "App settings", hint: "⌘,", run: actions.settings },
+    ...(inShell
+      ? [
+          { label: "ChatGPT sign-in", hint: "app settings", run: () => settingsAt("settings-chatgpt") },
+          { label: "Devices", hint: "app settings", run: () => settingsAt("settings-devices") },
+        ]
+      : []),
+    { label: "Updates", hint: "app settings", run: () => settingsAt("settings-updates") },
     { label: "New window", hint: "⇧⌘N", run: actions["new-window"] },
   ];
 
@@ -343,6 +388,7 @@ function App() {
               <div className="who"><h1>{project.name}</h1></div>
               <Tabs ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)} />
             </header>
+            <Panel tab={view.tab}>
             {view.tab === "room" && <Room key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {view.tab === "bots" && <ProjectBots key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {/* Surfaces open in the window's pane only, not on other devices. */}
@@ -360,6 +406,7 @@ function App() {
                 <DeleteProject key={`delete-${project.id}`} project={project} bots={bots} gone={() => setView({ page: "projects" })} />
               </>
             )}
+            </Panel>
           </>
         )}
         {view?.page === "bot" && bot && (
@@ -379,6 +426,7 @@ function App() {
                 ))}
               </p>
             )}
+            <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
               <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation}>
@@ -415,6 +463,7 @@ function App() {
             {view.tab === "skills" && <Skills key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "channels" && inShell && <Channels key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setView(undefined)} />}
+            </Panel>
           </>
         )}
         {!state && !(view?.page === "bot" ? bot : view?.page === "project" ? project : view) && !(inShell && needed && !later) && (

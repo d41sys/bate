@@ -16,7 +16,7 @@ export function Updates() {
   const ready = update?.available && (update.state === "ready" || update.state === "waiting");
   return (
     <>
-      <h2>Updates</h2>
+      <h2 id="settings-updates" tabIndex={-1}>Updates</h2>
       {update && (
         <p>
           Bate {update.current}.{" "}
