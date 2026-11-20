@@ -74,6 +74,9 @@ export const setBadge = (count: number) => invoke("set_badge", { count }) as Pro
 /** A system notification that `bot` waits; clicking it opens that bot in this window. `id` is the question's, so a second window's copy replaces it (the shell's). */
 export const notifyWaiting = (bot: string, id: string, title: string, body: string) => invoke("notify_waiting", { bot, id, title, body }) as Promise<void>;
 
+/** The system's panel for a folder or a file: the path chosen, or null when the person cancels (the shell's; not on another device). */
+export const pickPath = (folder: boolean) => invoke("pick_path", { folder }) as Promise<string | null>;
+
 export type Frame = { type: string; bot?: string; [field: string]: unknown };
 
 let next = 0;

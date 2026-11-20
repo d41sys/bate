@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The page talks to the service through the shell's two calls and may open another window, start dictation, ask what the service's start left to say, set the Dock icon's badge and show a notification that a bot waits; nothing else.",
+  "description": "The page talks to the service through the shell's two calls and may open another window, start dictation, ask what the service's start left to say, set the Dock icon's badge and show a notification that a bot waits, and ask for a folder or a file with the system's panel; nothing else.",
   "windows": ["bate-*"],
-  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation", "allow-service-note", "allow-set-badge", "allow-notify-waiting"]
+  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation", "allow-service-note", "allow-set-badge", "allow-notify-waiting", "allow-pick-path"]
 }
