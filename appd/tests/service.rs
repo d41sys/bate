@@ -667,6 +667,26 @@ fn a_question_is_closed_when_its_turn_ends_unanswered() {
     );
 }
 
+#[test]
+fn a_bot_with_an_open_question_is_listed_as_waiting_and_windows_are_told_when_that_changes() {
+    let home = home("waiting");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["waiting"], false);
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "ask"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    w.wait_for(|f| f["type"] == "bots_changed");
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["waiting"], true);
+    w.send(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Approve"}),
+    );
+    w.wait_for(|f| f["type"] == "question_closed");
+    w.wait_for(|f| f["type"] == "bots_changed");
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["waiting"], false);
+}
+
 /// Builds the real engine next to `appd`, where the service looks for it when `APPD_ENGINE`
 /// is unset.
 fn build_engine() {

@@ -1,10 +1,11 @@
 //! The window: a small shell around the macOS system web view. The page is the interface;
 //! the shell gives each window two calls (send a line to the service, receive the next line)
-//! and two more (open another window, start dictation), keeps it on its own local files, and
-//! adds the menus and the menu-bar icon.
+//! and a few more (open another window, start dictation, the Dock badge, a notification),
+//! keeps it on its own local files, and adds the menus and the menu-bar icon.
 
 mod bridge;
 mod files;
+mod notify;
 mod service;
 
 use bridge::Bridge;
@@ -70,6 +71,28 @@ fn service_note(note: State<'_, Note>) -> Option<String> {
 #[tauri::command]
 fn new_window(app: AppHandle) -> Result<(), String> {
     open_window(&app).map_err(|e| e.to_string())
+}
+
+/// The Dock icon's badge: how many bots wait for the person; 0 takes it off. Every window
+/// says the same count, as every window sees the same service.
+#[tauri::command]
+fn set_badge(window: WebviewWindow, count: u32) -> Result<(), String> {
+    window
+        .set_badge_count((count > 0).then_some(i64::from(count)))
+        .map_err(|e| e.to_string())
+}
+
+/// A notification that `bot` waits for the person's answer to `id`; a click on it opens that
+/// bot in a window. See `notify`.
+#[tauri::command]
+fn notify_waiting(
+    window: WebviewWindow,
+    bot: String,
+    id: String,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    notify::waiting(window.label(), &bot, &id, &title, &body)
 }
 
 /// Starts the system's Dictation in the box that has focus, as the Edit menu's Start
@@ -222,7 +245,9 @@ fn main() {
             recv,
             new_window,
             start_dictation,
-            service_note
+            service_note,
+            set_badge,
+            notify_waiting
         ])
         .register_uri_scheme_protocol("botfile", |_, request| {
             files::serve(&proto::paths::home(), &request.uri().to_string())
@@ -248,6 +273,7 @@ fn main() {
             }
             icon.build(app)?;
             app.state::<Note>().start();
+            notify::listen(handle);
             open_window(handle)?;
             Ok(())
         })

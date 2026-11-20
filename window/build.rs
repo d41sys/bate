@@ -6,6 +6,8 @@ fn main() {
         "new_window",
         "start_dictation",
         "service_note",
+        "set_badge",
+        "notify_waiting",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("the shell's build configuration");

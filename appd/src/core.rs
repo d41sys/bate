@@ -2305,6 +2305,8 @@ impl Core {
         let running = self.engines.get(bot);
         row["running"] = json!(running.is_some());
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
+        // An open question: the bot waits for the person's answer, which is not thinking.
+        row["waiting"] = json!(self.store.questions(bot).is_ok_and(|q| !q.is_empty()));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
         row["network"] = json!(self.store.network(bot).unwrap_or(None));
@@ -4603,6 +4605,9 @@ impl Core {
             _ => {}
         }
         self.record(bot, serde_json::to_value(&ev).expect("serializable"));
+        if matches!(ev, Event::Question { .. }) {
+            self.broadcast(&json!({"type": "bots_changed"}));
+        }
         if matches!(ev, Event::TurnEnd { .. }) && self.project_restarts.contains(bot) {
             self.on_engine_gone(bot);
         }
@@ -4673,9 +4678,12 @@ impl Core {
                     // A question is closed only once the engine took the answer.
                     (Settles::Question(q, grant), None) => {
                         match self.store.take_question(bot, q) {
-                            Ok(_) => self.broadcast(
-                                &json!({"type": "question_closed", "bot": bot, "question": q}),
-                            ),
+                            Ok(_) => {
+                                self.broadcast(
+                                    &json!({"type": "question_closed", "bot": bot, "question": q}),
+                                );
+                                self.broadcast(&json!({"type": "bots_changed"}));
+                            }
                             Err(e) => log!("bot {bot}: question not closed: {e}"),
                         }
                         if let Some((kind, target)) = grant {

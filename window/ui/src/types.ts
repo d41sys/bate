@@ -6,6 +6,8 @@ export type Bot = {
   createdAt: number;
   running: boolean;
   busy: boolean;
+  /** One of its questions is open: it waits for the person's answer. */
+  waiting: boolean;
   wholeDisk: boolean;
   /** The hosts the bot's commands may reach (its project's are added); `null`: any. */
   network: string[] | null;
