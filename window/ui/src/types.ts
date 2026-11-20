@@ -53,6 +53,8 @@ export type Connector = {
   oauth?: boolean;
   clientId?: string;
   signedIn?: boolean;
+  /** What the bot's engine said when it could not load the connector (output only). */
+  error?: string;
 };
 
 export const KINDS = ["read", "write", "run", "connector", "desktop", "apple_read", "apple_change"] as const;
@@ -123,6 +125,9 @@ export type Role = {
 };
 
 export type Skill = { name: string; description: string };
+
+/** What `preview_skill` says of a skill folder: the skill and how much an install would copy. */
+export type SkillPreview = { skill: Skill; entries: number; bytes: number };
 
 /** A prompt the service holds until the bot is free. */
 export type QueuedPrompt = { nonce: string; text: string };

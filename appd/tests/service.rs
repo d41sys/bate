@@ -130,7 +130,10 @@ while IFS= read -r line; do
       esac ;;
     *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
-    *'"type":"connectors"'*) printf '%s\n' "$line" >> connectors.log; echo "$ok" ;;
+    *'"type":"connectors"'*)
+      printf '%s\n' "$line" >> connectors.log
+      case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
+      echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
@@ -1174,6 +1177,32 @@ fn connectors_reach_the_engine_when_it_starts_and_when_they_change() {
         "{:?}",
         sent()
     );
+}
+
+#[test]
+fn a_connector_the_engine_could_not_load_shows_why_until_it_changes() {
+    let home = home("connector-error");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let broken = |enabled: bool| {
+        json!({"name": "broken", "enabled": enabled,
+            "transport": {"type": "stdio", "command": "nowhere", "args": [], "env": {}}})
+    };
+    let shown =
+        |w: &mut Window| w.ok("list_connectors", json!({"bot": bot}))["connectors"][0].clone();
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": broken(true)}),
+    );
+    w.ok("set_model", json!({"bot": bot, "model": "m1"})); // starts the engine, which reports it
+    eventually("the reason", || shown(&mut w)["error"] == "no such program");
+    // Switched off: nothing to report; the old reason is not kept.
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": broken(false)}),
+    );
+    assert!(shown(&mut w).get("error").is_none());
 }
 
 #[test]
@@ -2589,6 +2618,9 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("10", "install_update"),
         ("11", "set_disk_access"),
         ("18", "set_network"),
+        // A path on this Mac is not for a device to look at or copy from.
+        ("19", "preview_skill"),
+        ("20", "install_skill"),
         ("12", "set_project"),
         ("13", "delete_project"),
         // Surfaces are for the window on this Mac.
@@ -4021,8 +4053,33 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
 
     // Installed under the skill's own name, whatever the picked folder is called.
     let expected = json!({"name": "pdf-forms", "description": "Fill in PDF forms."});
+    // Looked at first: what it is and how big, checked as an install checks, and nothing is installed.
+    let preview = w.ok("preview_skill", json!({"path": &source}));
+    assert_eq!(preview["skill"], expected);
+    assert_eq!(
+        (
+            preview["entries"].as_u64(),
+            preview["bytes"].as_u64().unwrap() > 0
+        ),
+        (Some(3), true)
+    );
+    assert_eq!(
+        refused(
+            &mut w,
+            "preview_skill",
+            json!({"path": home.join("picked")})
+        ),
+        "invalid_skill"
+    );
+    assert_eq!(listed(&mut w, &bot), json!([]));
     assert_eq!(install(&mut w, &source), expected);
     assert_eq!(listed(&mut w, &bot), json!([expected]));
+    // A skill one bot has goes to another by name, with no path.
+    let from = json!({"bot": other, "fromBot": bot, "name": "pdf-forms"});
+    assert_eq!(w.ok("preview_skill", from.clone())["skill"], expected);
+    assert_eq!(w.ok("install_skill", from)["skill"], expected);
+    assert_eq!(listed(&mut w, &other), json!([expected]));
+    w.ok("delete_skill", json!({"bot": other, "name": "pdf-forms"}));
     assert_eq!(listed(&mut w, &other), json!([]));
     let script = skills.join("pdf-forms/scripts/fill.sh");
     assert_eq!(fs::read_to_string(&script).unwrap(), "#!/bin/sh\n");
