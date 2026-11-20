@@ -1,0 +1,94 @@
+/* The design tokens: every colour, size, radius and duration the window uses is named here.
+   Components (style.css) use these names only. See docs/design-system.md. */
+:root {
+  color-scheme: light dark;
+
+  /* Colour: neutral surfaces, one ink for what stands out, blue only for links, focus and unread. */
+  --bg: #ffffff;
+  --bg-side: #f6f6f6;
+  --bg-raised: #ffffff;
+  --bg-soft: #f0f0f0;
+  --bg-hover: rgba(0, 0, 0, .05);
+  --bg-current: rgba(0, 0, 0, .09);
+  --fg: #1a1a1a;
+  --fg-muted: #606060;
+  --border: #e6e6e6;
+  --border-strong: #cfcfcf;
+  /* A field is known by its edge, so the edge has 3:1 against what is around it. */
+  --border-field: #8a8a8a;
+  --ink: #1a1a1a;
+  --on-ink: #ffffff;
+  --accent: #0a66d1;
+  --danger: #c8232c;
+  --warn: #8a5300;
+  --warn-soft: #fff1d1;
+  --mark: #f5a623;
+  --scrim: rgba(0, 0, 0, .35);
+  --glass: rgba(255, 255, 255, .8);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .06), 0 2px 8px rgba(0, 0, 0, .05);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, .08), 0 16px 48px rgba(0, 0, 0, .16);
+
+  /* Type: the system's font; 14/20 for text. */
+  --font-ui: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --size-small: 12px;
+  --size-ui: 14px;
+  --size-title: 17px;
+  --size-head: 22px;
+  --leading: 20px;
+  --weight-strong: 600;
+
+  /* Space: a 4 px grid. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  /* Shape. */
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --radius-bubble: 18px;
+  --radius-pill: 999px;
+  --control-h: 32px;
+  --control-h-small: 24px;
+  --row-h: 44px;
+  --avatar: 28px;
+  --side-w: 280px;
+  --thread-w: 720px;
+
+  /* Motion: short, and none when the system asks for less. */
+  --fast: 100ms;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616;
+    --bg-side: #101010;
+    --bg-raised: #212121;
+    --bg-soft: #262626;
+    --bg-hover: rgba(255, 255, 255, .07);
+    --bg-current: rgba(255, 255, 255, .12);
+    --fg: #f3f3f3;
+    --fg-muted: #a6a6a6;
+    --border: #2c2c2c;
+    --border-strong: #444444;
+    --border-field: #707070;
+    --ink: #f3f3f3;
+    --on-ink: #161616;
+    --accent: #62a8ff;
+    --danger: #ff6f6f;
+    --warn: #ffcf70;
+    --warn-soft: rgba(255, 190, 60, .16);
+    --scrim: rgba(0, 0, 0, .6);
+    --glass: rgba(22, 22, 22, .8);
+    --shadow-1: 0 0 0 1px rgba(255, 255, 255, .06);
+    --shadow-2: 0 0 0 1px rgba(255, 255, 255, .08), 0 16px 48px rgba(0, 0, 0, .6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --fast: 0ms; }
+}

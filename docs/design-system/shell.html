@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bate: the screen the window is moving towards</title>
+<!-- The app's own stylesheet: this page has no look of its own. -->
+<link rel="stylesheet" href="../../window/ui/src/style.css">
+<style>
+  /* Not in the app yet: projects with their bots in the sidebar (#142), the model in the composer (#146). */
+  .sidebar ul ul { padding-left: var(--space-4); }
+  .sidebar .foot { margin-top: auto; }
+  .row.plain { min-height: var(--control-h); }
+  .badge { margin-left: auto; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar" aria-label="Projects and bots">
+    <h2>Projects</h2>
+    <ul>
+      <li>
+        <button class="row plain"><span class="label"><span>Firmware teardown</span></span></button>
+        <ul>
+          <li><button class="row plain"><span class="label"><span>Room</span></span></button></li>
+          <li><button class="row current" aria-current="page"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6">A</span><span class="label"><span>Analyst</span></span><span class="badge">Needs you</span></button></li>
+          <li><button class="row"><span class="avatar" aria-hidden="true" style="--tint: #b3541e">L</span><span class="label"><span>Lead</span><small>Working…</small></span></button></li>
+        </ul>
+      </li>
+      <li><button class="row plain"><span class="label"><span>Website redesign</span></span></button></li>
+    </ul>
+    <h2>Bots</h2>
+    <ul>
+      <li><button class="row"><span class="avatar" aria-hidden="true" style="--tint: #d6a01e">🌼</span><span class="label"><span>Daisy</span></span></button></li>
+      <li><button class="row"><span class="avatar" aria-hidden="true" style="--tint: #2e8a5c">S</span><span class="label"><span>Scout</span><small>Daily at 08:00</small></span></button></li>
+    </ul>
+    <ul class="foot">
+      <li><button class="row plain"><span class="label"><span>Workplaces</span></span></button></li>
+      <li><button class="row plain"><span class="label"><span>Settings</span></span></button></li>
+    </ul>
+  </nav>
+
+  <main>
+    <header>
+      <div class="who"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6">A</span><h1>Analyst</h1></div>
+      <div role="tablist">
+        <button role="tab" aria-selected="true">Chat</button>
+        <button role="tab" aria-selected="false">Routines</button>
+        <button role="tab" aria-selected="false">Connectors</button>
+        <button role="tab" aria-selected="false">Memory</button>
+        <button role="tab" aria-selected="false">Skills</button>
+        <button role="tab" aria-selected="false">Settings</button>
+      </div>
+    </header>
+
+    <section class="chat">
+      <div class="items"><div>
+        <div class="item user"><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p></div>
+        <div class="item tool"><details><summary>Read 3 functions in Ghidra</summary></details></div>
+        <div class="item reply"><div class="bubble">
+          <p>The update check is in <code>fw_check_update</code> at <code>0x0801a3c0</code>. It asks <code>updates.example.net</code> over HTTPS every 6 hours, and once more right after start.</p>
+          <ul>
+            <li>The address is built from two strings, so a plain search for it finds nothing.</li>
+            <li>The interval is the constant <code>21600</code>, passed to the timer in <code>sched_init</code>.</li>
+          </ul>
+        </div></div>
+        <div class="item user"><p class="bubble">Unpack it.</p></div>
+        <div class="item reply"><div class="bubble"><p>I need to run one command for that.</p></div></div>
+      </div></div>
+
+      <div class="question" role="group" aria-label="Analyst wants to run a command">
+        <p>Analyst wants to run a command</p>
+        <pre>binwalk -e firmware.bin</pre>
+        <div class="actions">
+          <button class="primary">Allow once</button>
+          <button>Always allow binwalk here</button>
+          <button class="danger">Deny</button>
+        </div>
+      </div>
+
+      <form class="composer">
+        <button type="button" class="round" aria-label="Attach files">+</button>
+        <textarea rows="1" aria-label="Message" placeholder="Message Analyst"></textarea>
+        <button type="button" class="small">gpt-6.2-sol ▾</button>
+        <button class="round" aria-label="Send">↑</button>
+      </form>
+    </section>
+  </main>
+</div>
+</body>
+</html>
