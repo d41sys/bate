@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Sheet } from "./Sheet.tsx";
 import { listen, request } from "./service.ts";
 import type { Frequency, Routine, RoutineRun } from "./types.ts";
 
@@ -11,7 +12,16 @@ const EVERY: Record<Frequency, string> = {
   yearly: "years",
 };
 
-const blank = { name: "", prompt: "", frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
+const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped" };
+
+/** The fields of the dialog; a routine with no schedule starts only from its web address or a chat. */
+const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
+const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat });
+
+const at = (ms: number) => new Date(ms).toLocaleString();
+const when = (r: Routine) => (r.schedule ? `Every ${r.schedule.interval === 1 ? EVERY[r.schedule.frequency].replace(/s$/, "") : `${r.schedule.interval} ${EVERY[r.schedule.frequency]}`} from ${r.schedule.time}` : "Not on a schedule");
+/** How a run ended: a quiet badge when it went well, a plain one when the person should look. */
+const Outcome = ({ run }: { run: RoutineRun }) => <span className={run.outcome === "sent" ? "badge quiet" : "badge"}>{OUTCOME[run.outcome]}</span>;
 
 function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
   const [open, setOpen] = useState(false);
@@ -32,13 +42,16 @@ function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
     <details onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>Past runs</summary>
       {error && <p className="error" role="alert">{error}</p>}
+      {!runs && !error && <p className="note">Loading runs…</p>}
       {runs && (runs.length === 0 ? (
         <p className="note">No runs yet.</p>
       ) : (
-        <ul>
-          {runs.map((x) => (
-            <li key={x.atMs}>
-              {new Date(x.atMs).toLocaleString()} · {x.outcome}{x.error && `: ${x.error}`}
+        <ul className="rows">
+          {runs.map((x, i) => (
+            <li key={`${x.atMs}-${i}`}>
+              <span>{at(x.atMs)}</span>
+              {x.error && <small className="error">{x.error}</small>}
+              <Outcome run={x} />
             </li>
           ))}
         </ul>
@@ -47,14 +60,18 @@ function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
   );
 }
 
+/** A bot's routines: one row each (when it runs, how the last run ended, on or off), and New and Edit in a dialog. */
 export function Routines({ bot }: { bot: string }) {
-  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [routines, setRoutines] = useState<Routine[]>();
+  /** The routine being edited, or `{}` for a new one. */
+  const [ask, setAsk] = useState<{ edit?: Routine }>();
   const [form, setForm] = useState(blank);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const load = () =>
-      request<{ routines: Routine[] }>("list_routines", { bot }).then((d) => setRoutines(d.routines), (e) => setError(e.message));
+      request<{ routines: Routine[] }>("list_routines", { bot }).then((d) => (setRoutines(d.routines), setError("")), (e: Error) => setError(e.message));
     load();
     return listen((frame) => {
       if (frame.type === "routines_changed" && frame.bot === bot) load();
@@ -62,51 +79,92 @@ export function Routines({ bot }: { bot: string }) {
   }, [bot]);
 
   /** Whether it worked; if not, the error shows. */
-  const run = (p: Promise<unknown>) =>
-    p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
-  const save = (routine: Routine) => run(request("set_routine", { bot, routine }));
-  const create = async () => {
-    const { frequency, interval, time } = form;
-    if (await save({ name: form.name, prompt: form.prompt, enabled: true, webhook: form.webhook, chat: form.chat, schedule: { frequency, interval, time } })) setForm(blank);
+  const run = (p: Promise<unknown>, done = false) =>
+    p.then(() => (setError(""), setSaved(done), true), (e: Error) => (setError(e.message), setSaved(false), false));
+  const open = (edit?: Routine) => (setForm(edit ? formOf(edit) : blank), setAsk({ edit }));
+  const save = async () => {
+    const { edit } = ask!;
+    const { name, prompt, scheduled, frequency, interval, time, webhook, chat } = form;
+    if (!scheduled && !webhook && !chat) throw new Error("Choose what starts it: a schedule, a web address or a chat.");
+    await request("set_routine", {
+      bot,
+      routine: { ...edit, name, prompt, enabled: edit?.enabled ?? true, webhook, chat, schedule: scheduled ? { ...edit?.schedule, frequency, interval, time } : undefined },
+    });
+    setError("");
+    setSaved(true);
   };
 
   return (
     <section>
-      <ul className="rows">
-        {routines.map((r) => (
-          <li key={r.id}>
-            <label>
-              <input type="checkbox" checked={r.enabled} onChange={(e) => save({ ...r, enabled: e.target.checked })} /> {r.name}
-            </label>
-            <span className="note">
-              {r.schedule && `every ${r.schedule.interval} ${EVERY[r.schedule.frequency]} from ${r.schedule.time}`}
-              {r.nextRunMs !== undefined && ` · next ${new Date(r.nextRunMs).toLocaleString()}`}
-              {r.lastRun && ` · last ${r.lastRun.outcome}${r.lastRun.error ? `: ${r.lastRun.error}` : ""}`}
-              {r.chat && ` · from a paired chat: /run ${r.name}`}
-            </span>
-            {r.hookUrl && <code>{r.hookUrl}</code>}
-            {r.id && <PastRuns bot={bot} routineId={r.id} />}
-            <button onClick={() => run(request("delete_routine", { bot, routineId: r.id }))}>Delete</button>
-          </li>
-        ))}
-      </ul>
-      <form className="fields" onSubmit={(e) => { e.preventDefault(); create(); }}>
-        <h2>New routine</h2>
-        <label>Name <input required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-        <label>Prompt <textarea required maxLength={8000} value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} /></label>
-        <label>
-          Every{" "}
-          <input type="number" min={1} max={1440} value={form.interval} onChange={(e) => setForm({ ...form, interval: Number(e.target.value) })} />{" "}
-          <select value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as Frequency })}>
-            {(Object.keys(EVERY) as Frequency[]).map((f) => <option key={f} value={f}>{EVERY[f]}</option>)}
-          </select>
-        </label>
-        <label>From <input type="time" required value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} /></label>
-        <label><input type="checkbox" checked={form.webhook} onChange={(e) => setForm({ ...form, webhook: e.target.checked })} /> Also run from a web address</label>
-        <label><input type="checkbox" checked={form.chat} onChange={(e) => setForm({ ...form, chat: e.target.checked })} /> Also run from a paired chat (Telegram, Discord), by writing /run and its name</label>
-        <button>Add</button>
-      </form>
+      {!routines && !error && <p className="note">Loading routines…</p>}
+      {routines?.length === 0 && (
+        <div className="empty">
+          <p>A routine is a prompt the bot gets by itself: on a schedule, from a web address or from a chat.</p>
+          <button onClick={() => open()}>New routine</button>
+        </div>
+      )}
+      {!!routines?.length && (
+        <>
+          <ul className="rows">
+            {routines.map((r) => (
+              <li key={r.id}>
+                <div className="what">
+                  <strong>{r.name}</strong> {r.lastRun && <Outcome run={r.lastRun} />}
+                  <small>
+                    {when(r)}
+                    {r.enabled && r.nextRunMs !== undefined && ` · next ${at(r.nextRunMs)}`}
+                    {r.lastRun && ` · last ${at(r.lastRun.atMs)}`}
+                  </small>
+                  {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}
+                  {r.chat && <small>From a paired chat: write /run {r.name}</small>}
+                  {r.hookUrl && <small>Web address: <code>{r.hookUrl}</code></small>}
+                </div>
+                <label>
+                  <input type="checkbox" role="switch" aria-label={r.name} checked={r.enabled} onChange={(e) => void run(request("set_routine", { bot, routine: { ...r, enabled: e.target.checked } }), true)} />
+                  {r.enabled ? "On" : "Off"}
+                </label>
+                <div className="actions">
+                  <button className="small" aria-label={`Edit ${r.name}`} onClick={() => open(r)}>Edit…</button>
+                  <button className="small danger" aria-label={`Delete ${r.name}`} onClick={() => void run(request("delete_routine", { bot, routineId: r.id }))}>Delete</button>
+                </div>
+                {r.id && <PastRuns bot={bot} routineId={r.id} />}
+              </li>
+            ))}
+          </ul>
+          <div className="actions">
+            <button onClick={() => open()}>New routine…</button>
+            {saved && <span className="note" role="status">Saved</span>}
+          </div>
+        </>
+      )}
       {error && <p className="error" role="alert">{error}</p>}
+      {ask && (
+        <Sheet title={ask.edit ? "Edit routine" : "New routine"} action={ask.edit ? "Save" : "Add"} go={save} close={() => setAsk(undefined)}>
+          <label>Name <input required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+          <label>Prompt <textarea required rows={4} maxLength={8000} value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} /></label>
+          <fieldset>
+            <legend>What starts it</legend>
+            <label><input type="checkbox" checked={form.scheduled} onChange={(e) => setForm({ ...form, scheduled: e.target.checked })} /> A schedule</label>
+            {form.scheduled && (
+              <>
+                <div className="field">
+                  <label htmlFor="routine-every">Every</label>
+                  <div className="find">
+                    <input id="routine-every" type="number" min={1} max={1440} value={form.interval} onChange={(e) => setForm({ ...form, interval: Number(e.target.value) })} />
+                    <select aria-label="Unit" value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as Frequency })}>
+                      {(Object.keys(EVERY) as Frequency[]).map((f) => <option key={f} value={f}>{EVERY[f]}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <label>From <input type="time" required value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} /></label>
+              </>
+            )}
+            <label><input type="checkbox" checked={form.webhook} onChange={(e) => setForm({ ...form, webhook: e.target.checked })} /> A web address</label>
+            {form.webhook && <p className="note">The address is shown under the routine. Anyone on this Mac who knows it can start the routine. For a new address, turn this off and save, then turn it on and save.</p>}
+            <label><input type="checkbox" checked={form.chat} onChange={(e) => setForm({ ...form, chat: e.target.checked })} /> A paired chat (Telegram, Discord), by writing /run and its name</label>
+          </fieldset>
+        </Sheet>
+      )}
     </section>
   );
 }

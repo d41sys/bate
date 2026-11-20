@@ -93,6 +93,9 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .rows li > .actions { margin-left: auto; }
 .rows li > .rows { flex: 1 0 100%; margin: 0; }
 .rows li > .rows li { padding: var(--space-1) 0; border-bottom: 0; }
+/* A routine's past runs: a disclosure under its row, one line for each run. */
+.rows li > details { flex: 1 0 100%; }
+.rows li > details .rows li { padding: var(--space-1) 0; border-bottom: 0; }
 .actions, .tools, .find, .surfaces { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .tools, .find, .surfaces { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
