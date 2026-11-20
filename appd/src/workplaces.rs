@@ -13,6 +13,7 @@ use crate::{paths, sys};
 use proto::skills::Skill;
 use ring::digest;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
@@ -34,6 +35,10 @@ const LIMITS: Limits = Limits {
 const MOST: usize = 50;
 const LONGEST: usize = 200;
 const MOST_DOWNLOADS: usize = 20;
+/// What the downloads may add to the folder on top of `LIMITS`: a program's tools can be tens of
+/// thousands of files (a reverse-engineering suite), nested deeper than a program's own.
+const DOWNLOADED_FILES: usize = 100_000;
+const DOWNLOADED_DEPTH: usize = 32;
 /// The most one download may be, and the stated size cannot be more.
 const LARGEST_DOWNLOAD: u64 = 16 << 30;
 
@@ -69,7 +74,7 @@ impl Manifest {
 
 /// A file the workplace needs that is too big to ship in its folder. Bate fetches it at
 /// install, checks `size` and `sha256`, and puts it at `dest` in the workplace's folder, or,
-/// with `unpack: "tar.gz"`, unpacks the archive into the folder `dest`.
+/// with `unpack` (`tar.gz` or `zip`), unpacks the archive into the folder `dest`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Download {
     pub url: String,
@@ -210,8 +215,11 @@ fn check_downloads(list: &[Download]) -> Result<(), String> {
                     .into(),
             );
         }
-        if d.unpack.as_deref().is_some_and(|u| u != "tar.gz") {
-            return Err("`downloads.unpack` is `tar.gz` or left out".into());
+        if d.unpack
+            .as_deref()
+            .is_some_and(|u| !matches!(u, "tar.gz" | "zip"))
+        {
+            return Err("`downloads.unpack` is `tar.gz`, `zip` or left out".into());
         }
         if list[..i].iter().any(|o| o.dest == d.dest) {
             return Err(format!("`downloads.dest` {:?} is used twice", d.dest));
@@ -303,7 +311,7 @@ pub fn fingerprint(root: &Path) -> io::Result<String> {
         seen: &mut usize,
         hash: &mut digest::Context,
     ) -> io::Result<()> {
-        if depth > LIMITS.depth {
+        if depth > LIMITS.depth + DOWNLOADED_DEPTH {
             return Err(io::Error::other("folders too deep"));
         }
         let mut names = fs::read_dir(at)?
@@ -312,7 +320,7 @@ pub fn fingerprint(root: &Path) -> io::Result<String> {
         names.sort();
         for name in names {
             *seen += 1;
-            if *seen > LIMITS.files {
+            if *seen > LIMITS.files + DOWNLOADED_FILES {
                 return Err(io::Error::other("too many files"));
             }
             let path = at.join(&name);
@@ -611,8 +619,8 @@ fn fetch_all(
                 d.url, got.sha256, d.sha256
             ));
         }
-        if d.unpack.is_some() {
-            unpack(&archive, &dest)?;
+        if let Some(kind) = &d.unpack {
+            unpack(kind, &archive, &dest)?;
             fs::remove_file(&archive).map_err(|e| format!("cannot remove the archive: {e}"))?;
         }
         before += d.size;
@@ -621,20 +629,33 @@ fn fetch_all(
     Ok(())
 }
 
-/// Unpacks the `.tar.gz` at `archive` into the folder `dest` with `/usr/bin/tar`, once the
-/// listing shows that every entry is a plain file or folder and stays inside `dest`: no
-/// absolute path, no `..`, no link, device or other special file.
+/// Unpacks the archive at `archive` (`kind`: a `.tar.gz` with `/usr/bin/tar`, a `.zip` with
+/// `/usr/bin/unzip`) into the folder `dest`, once the listing shows that every entry is a plain
+/// file or folder and stays inside `dest`: no absolute path, no `..`, no link, device or other
+/// special file.
 // shortcut: the unpacked size is not capped (the hash pins the archive, and its maker is the
 // workplace's, who also supplies the program); cap it if archives from others are ever taken.
-pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
-    let tar = |flags: &str, into: Option<&Path>| {
-        let mut tar = Command::new("/usr/bin/tar");
-        tar.arg(flags).arg(archive);
-        if let Some(into) = into {
-            tar.arg("-C").arg(into);
-        }
-        let out =
-            (tar.stdin(Stdio::null()).output()).map_err(|e| format!("cannot run tar: {e}"))?;
+pub fn unpack(kind: &str, archive: &Path, dest: &Path) -> Result<(), String> {
+    let (a, d) = (archive.as_os_str(), dest.as_os_str());
+    let o = |s: &'static str| OsStr::new(s);
+    let (tool, names, long, extract) = if kind == "zip" {
+        (
+            "/usr/bin/unzip",
+            [o("-Z1"), a],
+            [o("-Zs"), a],
+            vec![o("-q"), a, o("-d"), d],
+        )
+    } else {
+        (
+            "/usr/bin/tar",
+            [o("-tzf"), a],
+            [o("-tvzf"), a],
+            vec![o("-xzf"), a, o("-C"), d],
+        )
+    };
+    let run = |args: &[&OsStr]| {
+        let out = (Command::new(tool).args(args).stdin(Stdio::null()).output())
+            .map_err(|e| format!("cannot run {tool}: {e}"))?;
         if !out.status.success() {
             return Err(format!(
                 "cannot unpack the archive: {}",
@@ -644,30 +665,39 @@ pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
         String::from_utf8(out.stdout)
             .map_err(|_| "the archive has names that are not text".to_owned())
     };
-    let (names, kinds) = (tar("-tzf", None)?, tar("-tvzf", None)?);
-    if names.lines().count() != kinds.lines().count() || names.lines().count() > LIMITS.files {
+    let (names, kinds) = (run(&names)?, run(&long)?);
+    // `-` a file, `d` a folder; a link shows as `l` or `h`, a device or pipe as another. Of
+    // `unzip -Zs` the entries are the lines that start with a kind (not its header or totals).
+    let kinds: Vec<&str> = (kinds.lines())
+        .filter(|l| kind != "zip" || l.starts_with(['-', 'd', 'l', 'b', 'c', 'p', 's', '?']))
+        .collect();
+    if names.lines().count() != kinds.len()
+        || names.lines().count() > LIMITS.files + DOWNLOADED_FILES
+    {
         return Err(format!(
             "the archive has more than {} files and folders, or a listing that cannot be read",
-            LIMITS.files
+            LIMITS.files + DOWNLOADED_FILES
         ));
     }
-    for (name, kind) in names.lines().zip(kinds.lines()) {
-        let inside = Path::new(name)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    for (name, kind) in names.lines().zip(kinds) {
+        let path = Path::new(name);
+        let inside =
+            (path.components()).all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
         if name.is_empty() || !inside {
             return Err(format!(
                 "the archive has {name:?}, which is outside its folder"
             ));
         }
-        // `-` a file, `d` a folder; a link shows as `l` or `h`, a device or pipe as another.
+        if path.components().count() > DOWNLOADED_DEPTH {
+            return Err(format!("the archive has {name:?}, which is too deep"));
+        }
         if !kind.starts_with(['-', 'd']) {
             return Err(format!(
                 "the archive has {name:?}, which is not a plain file or folder"
             ));
         }
     }
-    tar("-xzf", Some(dest)).map(drop)
+    run(&extract).map(drop)
 }
 
 /// A program that is a file of the workplace must be there and run.
@@ -714,6 +744,7 @@ pub fn remove(name: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn a_manifest_is_checked() {
@@ -750,6 +781,69 @@ mod tests {
         assert_ne!(second, third);
         std::os::unix::fs::symlink("y", root.join("a/z")).unwrap();
         assert_ne!(third, fingerprint(&root).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_zip_is_unpacked_only_when_it_holds_plain_files_and_folders_inside_its_folder() {
+        let root = std::env::temp_dir().join(format!("appd-{}-zip", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let inside = root.join("in");
+        fs::create_dir_all(inside.join("bin")).unwrap();
+        fs::write(inside.join("bin/run"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(inside.join("bin/run"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(inside.join("x.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("x.txt", inside.join("link")).unwrap();
+        let run = |program: &str, args: &[&str], dir: &Path| {
+            let done = Command::new(program).args(args).current_dir(dir).status();
+            assert!(done.unwrap().success());
+        };
+        let (good, linked, bad) = (
+            root.join("good.zip"),
+            root.join("link.zip"),
+            root.join("bad.zip"),
+        );
+        run(
+            "/usr/bin/zip",
+            &["-qr", good.to_str().unwrap(), "bin", "x.txt"],
+            &inside,
+        );
+        // `-y` stores the link as a link.
+        run(
+            "/usr/bin/zip",
+            &["-qry", linked.to_str().unwrap(), "bin", "link"],
+            &inside,
+        );
+        let evil = |name: &str| {
+            let code =
+                "import sys, zipfile; zipfile.ZipFile(sys.argv[1], 'w').writestr(sys.argv[2], 'x')";
+            run("python3", &["-c", code, bad.to_str().unwrap(), name], &root);
+            let dest = root.join(format!("out-{}", name.len()));
+            fs::create_dir(&dest).unwrap();
+            unpack("zip", &bad, &dest).unwrap_err()
+        };
+
+        let dest = root.join("out");
+        fs::create_dir(&dest).unwrap();
+        unpack("zip", &good, &dest).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("x.txt")).unwrap(), "x");
+        assert_eq!(
+            fs::metadata(dest.join("bin/run")).unwrap().mode() & 0o111,
+            0o111
+        );
+
+        let dest = root.join("out-link");
+        fs::create_dir(&dest).unwrap();
+        let err = unpack("zip", &linked, &dest).unwrap_err();
+        assert!(err.contains("not a plain file"), "{err}");
+        assert!(fs::read_dir(&dest).unwrap().next().is_none());
+        for name in ["../escape", "/abs/escape", "a/../../escape"] {
+            let err = evil(name);
+            assert!(err.contains("outside its folder"), "{name}: {err}");
+        }
+        assert!(!root.join("escape").exists());
+        let err = unpack("zip", &root.join("in/x.txt"), &root).unwrap_err();
+        assert!(err.contains("cannot unpack"), "{err}");
         fs::remove_dir_all(&root).unwrap();
     }
 }

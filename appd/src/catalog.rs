@@ -117,7 +117,7 @@ pub fn unpacked<T>(
             )));
         }
         fs::create_dir(&folder).map_err(failed)?;
-        workplaces::unpack(&archive, &folder).map_err(failed)?;
+        workplaces::unpack("tar.gz", &archive, &folder).map_err(failed)?;
         let manifest = workplaces::preview(&folder)?;
         if manifest.name != entry.name || manifest.version != entry.version {
             return Err(failed(format!(
