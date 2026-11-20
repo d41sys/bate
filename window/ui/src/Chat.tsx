@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation } from "./service.ts";
 import { add, build, planSteps, type Entry, type Item, type Question, type Row } from "./chat.ts";
@@ -18,13 +18,15 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
+export function Chat({ bot, jump, find = false, used = () => {}, showFile, model }: {
   bot: Bot;
   jump?: { seq: number };
   find?: boolean;
   used?: () => void;
   // Opens a file of the bot's in the pane; absent where there is no pane (other devices).
   showFile?: (path: string) => void;
+  // The model and thinking chip, which sits in the message box.
+  model?: ReactNode;
 }) {
   // Prompts the service holds until the bot is free, in the order they go.
   const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
@@ -240,6 +242,16 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
   }, [text]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
+  const stop = () => run(request("abort", { bot: bot.id }));
+  // Esc stops a working bot, unless it was spent on something else: a popover, the find bar, the palette.
+  useEffect(() => {
+    if (!bot.busy) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) stop();
+    };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, [bot.busy, bot.id]);
   // One file at a time: the service takes only a few at once from a window.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const attach = (list: Iterable<File>) => {
@@ -448,11 +460,11 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
             e.target.value = "";
           }}
         />
-        <button type="button" className="round" aria-label="Attach files" title="Attach files" onClick={() => picker.current?.click()}>+</button>
+        <button type="button" className="round" aria-label="Attach files" data-tip="Attach files" onClick={() => picker.current?.click()}>+</button>
         {inShell && (
           <button
             type="button"
-            title="Dictate with the system's Dictation (on this Mac)"
+            data-tip="Dictate with the system's Dictation (on this Mac)"
             onClick={() => {
               box.current?.focus();
               run(startDictation());
@@ -481,23 +493,30 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
             }
           }}
         />
+        {model}
         {!bot.busy && !bot.agent?.length && (
-          <button type="button" disabled={sending} title="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole" onClick={compact}>Compact</button>
+          <button type="button" disabled={sending} data-tip="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole" onClick={compact}>Compact</button>
         )}
         {bot.busy ? (
           <>
-            <button disabled={!message || uploading || sending} title="Send this when the bot is done with what it is doing">Queue</button>
+            <button disabled={!message || uploading || sending} data-tip="Send this when the bot is done with what it is doing">Queue</button>
             {bot.agent?.length ? (
               <span className="note">This agent takes no message while it works.</span>
             ) : (
-              <button type="button" disabled={!message || uploading || sending} title="Put this into the turn that is running" onClick={() => send(true)}>Steer</button>
+              <button type="button" disabled={!message || uploading || sending} data-tip="Put this into the turn that is running" onClick={() => send(true)}>Steer</button>
             )}
-            <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
+            <button type="button" data-tip="Stop the bot (Esc)" onClick={stop}>Stop <kbd>Esc</kbd></button>
           </>
         ) : (
-          <button className="round" aria-label="Send" title="Send" disabled={!message || uploading || sending}>↑</button>
+          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending}>↑</button>
         )}
       </form>
+      {bot.busy && (
+        <p className="hints note">
+          <span><b>Queue</b> sends it when the bot is done.</span>
+          {!bot.agent?.length && <span><b>Steer</b> puts it into the turn now.</span>}
+        </p>
+      )}
     </section>
   );
 }

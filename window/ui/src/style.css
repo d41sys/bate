@@ -111,11 +111,20 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
 .pane .grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
 .pane .grip:hover, .pane .grip:focus-visible { background: var(--bg-current); }
 
+/* ---- Tooltip: `data-tip` on a control. Shown for a pointer or the keyboard, not on a touch screen ---- */
+[data-tip] { position: relative; }
+@media (hover: hover) {
+  [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--ink); color: var(--on-ink); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
+  /* The last control of a row is at the edge: its tip grows to the left. */
+  .composer > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+  [data-tip][aria-expanded=true]::after { display: none; }
+}
+/* A hint key on a button: the key that does the same. */
+button kbd { padding: 0 var(--space-1); border: 1px solid var(--border-strong); border-radius: var(--radius-s); font-size: var(--size-small); font-weight: 400; color: var(--fg-muted); }
+
 /* ---- The conversation ---- */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
 .chat > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; }
-.model button, .model select, .model input { min-height: var(--control-h-small); padding-block: 0; font-size: var(--size-small); }
-.model { display: flex; gap: var(--space-2) var(--space-3); align-items: center; flex-wrap: wrap; padding: var(--space-1) 0; font-size: var(--size-small); color: var(--fg-muted); }
 /* The scroller is as wide as the window, so its bar is at the edge; the messages keep the column. */
 .items { flex: 1; overflow: auto; min-height: 0; max-width: none; }
 .items > div { max-width: var(--thread-w); margin-inline: auto; }
@@ -156,6 +165,19 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
 .composer button[type=button]:not(.primary) { border-color: transparent; background: none; color: var(--fg-muted); }
 .composer button[type=button]:not(.primary):hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 .composer .note { align-self: center; font-size: var(--size-small); }
+/* The model chip: its name, cut short when long; the popover opens above it. */
+.menu { position: relative; display: flex; min-width: 0; }
+.chip { max-width: var(--chip-w); }
+.chip > :first-child { overflow: hidden; text-overflow: ellipsis; }
+.popover { position: absolute; bottom: calc(100% + var(--space-2)); right: 0; z-index: 2; width: var(--popover-w); max-width: calc(100vw - 2 * var(--space-2)); display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); box-shadow: var(--shadow-2); font-size: var(--size-ui); font-weight: 400; white-space: normal; }
+.popover ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }
+.popover p { margin: 0; }
+.popover label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.popover .row { justify-content: space-between; }
+.composer .popover button[type=button]:not(.primary) { color: var(--fg); }
+/* What is under the box while the bot works: what Queue and Steer do, in a line each. */
+.hints { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); margin-block: var(--space-1) 0; padding-inline: var(--space-3); font-size: var(--size-small); }
+.hints b { color: var(--fg); font-weight: var(--weight-strong); }
 
 /* ---- A surface of a project's program ---- */
 .surface { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -195,4 +217,11 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
   main { padding: 0 var(--space-2) var(--space-2); }
   main > header { justify-content: flex-start; }
   .item.user .bubble { max-width: 92%; }
+  /* A phone has no Esc to press. */
+  button kbd { display: none; }
+  /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */
+  .composer { position: relative; flex-wrap: wrap; }
+  .composer textarea { order: -1; flex: 1 0 100%; }
+  .menu { position: static; }
+  .popover { left: 0; right: 0; width: auto; }
 }

@@ -315,8 +315,6 @@ function App() {
               </div>
               <Tabs ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)} />
             </header>
-            {/* An installed agent chooses its own model. */}
-            {view.tab === "chat" && !bot.agent && <Model key={bot.id} bot={bot} bots={bots} />}
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && <Chat
                 key={`${bot.id}-${connection}`}
@@ -325,6 +323,8 @@ function App() {
                 find={find}
                 // Bots' files open in the window's pane only, not on other devices.
                 showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
+                // An installed agent chooses its own model.
+                model={bot.agent ? undefined : <Model key={bot.id} bot={bot} bots={bots} report={setError} />}
                 used={() => {
                   setJump(undefined);
                   setFind(false);

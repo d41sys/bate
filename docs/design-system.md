@@ -16,7 +16,7 @@ The owner chose a chat-app look: a bot is a contact, a conversation is messages.
 |---|---|
 | ![The target screen in light](design-system/target-light.webp) | ![The target screen in dark](design-system/target-dark.webp) |
 
-The pictures are `docs/design-system/shell.html`: a static page drawn with the app's own stylesheet. It shows where the window is going, not where it is: the model in the composer comes with #146, the badge on a bot that needs you with #144. Open it in a browser to resize it or to see it in dark.
+The pictures are `docs/design-system/shell.html`: a static page drawn with the app's own stylesheet. It shows where the window is going, not where it is: the badge on a bot that needs you comes with #144. Open it in a browser to resize it or to see it in dark.
 
 Three other directions were drawn on the same screen and not chosen: one close to the Mac's own controls, one made for reading with a serif face, one dense with monospace labels.
 
@@ -44,7 +44,7 @@ All in `window/ui/src/tokens.css`.
 | Type | `--font-ui`, `--font-mono`, `--size-small` 12, `--size-ui` 14, `--size-title` 17, `--size-head` 22, `--leading` 20, `--weight-strong` 600 | |
 | Space | `--space-1` to `--space-5`: 4, 8, 12, 16, 24 | A 4 px grid |
 | Shape | `--radius-s` 6, `--radius-m` 10, `--radius-l` 14, `--radius-bubble` 18, `--radius-pill` | Code and small things; fields and rows; cards and dialogs; messages; buttons |
-| Size | `--control-h` 32, `--control-h-small` 24, `--row-h` 44, `--avatar` 28, `--side-w` 280, `--thread-w` 720 | |
+| Size | `--control-h` 32, `--control-h-small` 24, `--row-h` 44, `--avatar` 28, `--side-w` 280, `--thread-w` 720, `--popover-w` 300, `--chip-w` 180, `--tip-w` 240 | |
 | Motion | `--fast` 100 ms, `--ease` | Hover, press, showing a message's actions |
 
 ## Components
@@ -65,12 +65,15 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it | past (greyed), marked (a search hit) | yes |
 | Step of a turn | `.item.tool` with `<details>` | running, done, failed | yes |
 | Card | `.card`; `.question` for what a bot asks, with `.actions` | | yes; what the card says #145 |
-| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows | empty, typing, bot working, focus | yes; model and Esc #146 |
+| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops | empty, typing, bot working, focus | yes |
 | Note, error line | `.note`, `.error` (with `role="alert"`) | | yes |
 | Banner | `.banner`, `.banner.error` | | yes |
 | Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
 | Dialog | scrim, panel, focus kept inside, Esc closes | | palette only; #159 |
-| Toast, tooltip, select with search, folder picker | | | #146, #150 |
+| Tooltip | `data-tip="…"` on a control; the text is shown above it for a pointer or the keyboard, and not on a touch screen, so it never holds the only copy of something a button must say | hover, focus | yes |
+| Button with a hint key | `<button>Stop <kbd>Esc</kbd></button>`: the key that does the same, hidden under 640 px | | yes |
+| Popover, select with search | `.menu` around a chip (`<button class="small chip" aria-expanded>`) and a `.popover` (`role="dialog"`) holding a search `<input>`, a `<ul role="listbox">` of `.row.plain` buttons and other controls. A click outside or Esc closes it; Esc is taken there and does not reach the page | closed, open, chosen row, no match | yes |
+| Toast, folder picker | | | #150 |
 | Loading | A `.note` saying what is loading; no spinner | | yes |
 
 ## Layout
@@ -104,7 +107,7 @@ Widths the page must work at: 1200 px and more, 900 px, and 390 px (a phone, sin
 
 - **Focus.** One ring, 2 px of `--accent` with a 2 px gap, on every control, shown for the keyboard only (`:focus-visible`). The composer shows it around the whole pill.
 - **Keyboard.** Every action is a `<button>` or a link, so Tab reaches it and Enter or Space runs it. A message's actions are hidden until the message is pointed at, and shown when the keyboard is inside it or when the device has no pointer. Shortcuts are #151.
-- **Colour is never the only sign.** A working bot says "Working…" under its name; an error is words; a round button has an `aria-label` and a `title`.
+- **Colour is never the only sign.** A working bot says "Working…" under its name; an error is words; a round button has an `aria-label` and a tooltip.
 - **Motion.** Nothing longer than 100 ms, and none when the system asks for reduced motion.
 - **Text size.** Sizes are in px today, so the page does not follow a larger text setting. Not done; it comes with the settings (#155).
 
@@ -115,7 +118,7 @@ Not checked: a screen reader, and the page in the system web view of macOS 13.
 Built: hand-written CSS on tokens, with React components only where there is behaviour.
 
 - The window is 20 screen files of forms, lists and one conversation. Plain elements with one stylesheet cover them in about 190 lines.
-- A component library (Radix, Base UI, shadcn/ui; all MIT) would add a dependency and its own way of styling for what is today two needs: a dialog that keeps the focus, and a select with search. `<dialog>` gives the first. The second is one component (#146).
+- A component library (Radix, Base UI, shadcn/ui; all MIT) would add a dependency and its own way of styling for what is today two needs: a dialog that keeps the focus, and a select with search. `<dialog>` gives the first. The second is the model popover (#146), written by hand: a search box over a list of `<button role="option">`.
 - Adopt one later if a third such need comes up. It must be MIT or Apache-2.0.
 
 ## Order of the screens

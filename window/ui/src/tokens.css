@@ -57,6 +57,9 @@
   --avatar: 28px;
   --side-w: 280px;
   --thread-w: 720px;
+  --popover-w: 300px;
+  --chip-w: 180px;
+  --tip-w: 240px;
 
   /* Motion: short, and none when the system asks for less. */
   --fast: 100ms;
