@@ -29,8 +29,12 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, jump, find = false, used = () => {}, showFile, model, signIn, start = "" }: {
+export function Chat({ bot, conversation, onFork, jump, find = false, used = () => {}, showFile, model, signIn, start = "", started = () => {} }: {
   bot: Bot;
+  /** The conversation shown; the service holds the rest. */
+  conversation: string;
+  /** "Fork" made a new conversation: show it. */
+  onFork: (conversation: string) => void;
   jump?: { seq: number };
   find?: boolean;
   used?: () => void;
@@ -40,14 +44,19 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
   model?: ReactNode;
   // Set while the bot has no way to reach a model: opens the sign-in, and nothing is sent until then.
   signIn?: () => void;
-  // What the message box starts with: a first message to send as it is.
+  // What the message box starts with: a first message to send as it is; `started` says it took it.
   start?: string;
+  started?: () => void;
 }) {
   // Prompts the service holds until the bot is free, in the order they go.
   const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState(start);
+  // The first message is the box's start once: not again when another conversation is shown.
+  useEffect(() => {
+    if (start) started();
+  }, []);
   const [error, setError] = useState("");
   const [compacted, setCompacted] = useState(false);
   const [sending, setSending] = useState(false);
@@ -93,7 +102,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     let live: Row[] | undefined;
     const open = () => {
       live = [];
-      return request<Opened>("open_bot", { bot: bot.id, limit: PAGE }).then((d) => {
+      return request<Opened>("open_bot", { bot: bot.id, conversation, limit: PAGE }).then((d) => {
         if (gone) return;
         const last = d.history[d.history.length - 1]?.seq ?? 0;
         entries.current = [...d.history, ...(live ?? []).filter((row) => row.seq > last)];
@@ -114,7 +123,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       if (loading || oldest.current === undefined) return Promise.resolve(false);
       loading = true;
       const before = oldest.current;
-      return request<Opened>("open_bot", { bot: bot.id, limit: PAGE, before }).then((d) => {
+      return request<Opened>("open_bot", { bot: bot.id, conversation, limit: PAGE, before }).then((d) => {
         loading = false;
         if (gone || before !== oldest.current) return false;
         entries.current = [...d.history, ...entries.current];
@@ -136,7 +145,8 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     };
     opened.current = open();
     const stop = listen((frame) => {
-      if (frame.bot !== bot.id) return;
+      // A frame of another conversation of this bot is not this chat's.
+      if (frame.bot !== bot.id || (frame.conversation !== undefined && frame.conversation !== conversation)) return;
       if (frame.type === "transcript") {
         const entry = frame.entry as Entry;
         const row = { seq: frame.seq as number, entry };
@@ -150,7 +160,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       } else if (frame.type === "engine_stopped") {
         setQuestions([]);
       } else if (frame.type === "queue_changed") {
-        request<{ queue: QueuedPrompt[] }>("list_queue", { bot: bot.id }).then(
+        request<{ queue: QueuedPrompt[] }>("list_queue", { bot: bot.id, conversation }).then(
           (d) => gone || setWaiting(d.queue),
           (e: Error) => gone || setError(e.message),
         );
@@ -162,7 +172,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       gone = true;
       stop();
     };
-  }, [bot.id]);
+  }, [bot.id, conversation]);
 
   // Another bot's chat, or no chat: what is being read stops.
   useEffect(() => () => {
@@ -212,7 +222,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     if (!finding || !needle.trim()) return setHits(undefined);
     let stale = false;
     const wait = setTimeout(() => {
-      request<{ hits: Hit[] }>("search", { bot: bot.id, text: needle, limit: 200 }).then((d) => {
+      request<{ hits: Hit[] }>("search", { bot: bot.id, conversation, text: needle, limit: 200 }).then((d) => {
         if (stale) return;
         setHits(d.hits);
         setHit(0);
@@ -223,7 +233,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       stale = true;
       clearTimeout(wait);
     };
-  }, [needle, finding, bot.id]);
+  }, [needle, finding, bot.id, conversation]);
   const step = (by: number) => {
     if (!hits?.length) return;
     const next = (hit + by + hits.length) % hits.length;
@@ -263,7 +273,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
   const answer = (q: Question, choice: string) => {
     if (answering.current.has(q.question)) return Promise.resolve();
     answering.current.add(q.question);
-    return request("answer", { bot: bot.id, question: q.question, choice }).catch((e) => {
+    return request("answer", { bot: bot.id, conversation, question: q.question, choice }).catch((e) => {
       answering.current.delete(q.question);
       throw e;
     });
@@ -289,7 +299,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       removeEventListener("keydown", onKey);
       removeEventListener("keydown", onChord, true);
     };
-  }, [bot.busy, bot.id, asked?.question]);
+  }, [bot.busy, bot.id, conversation, asked?.question]);
   // One file at a time: the service takes only a few at once from a window.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const attach = (list: Iterable<File>) => {
@@ -320,10 +330,10 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       setSending(false);
     }
   };
-  const prompt = (words: string) => request("prompt", { bot: bot.id, nonce: crypto.randomUUID(), text: words });
+  const prompt = (words: string) => request("prompt", { bot: bot.id, conversation, nonce: crypto.randomUUID(), text: words });
   const retry = (item: { nonce: string; text: string }) =>
     once(async () => {
-      await request("rewind", { bot: bot.id, entry: item.nonce, fork: false });
+      await request("rewind", { bot: bot.id, conversation, entry: item.nonce, fork: false });
       // The message is gone from the chat now: if it cannot be sent again, it is not lost.
       await prompt(item.text).catch((e) => {
         setText(item.text);
@@ -332,14 +342,15 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     });
   const fork = (item: { nonce: string; text: string }) =>
     once(async () => {
-      await request("rewind", { bot: bot.id, entry: item.nonce, fork: true });
+      const made = await request<{ conversation?: string }>("rewind", { bot: bot.id, conversation, entry: item.nonce, fork: true });
       setEditing(undefined);
       setText(item.text);
+      if (made.conversation) onFork(made.conversation);
     });
   const proceed = () => once(() => prompt("Continue."));
   const compact = () =>
     once(async () => {
-      await request("compact", { bot: bot.id });
+      await request("compact", { bot: bot.id, conversation });
       setCompacted(true);
     });
   /** `steer`: into the turn that runs; otherwise a prompt, which the service queues while the bot is busy. */
@@ -353,11 +364,11 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
       const instead = questions.length > 0 && !bot.agent?.length;
       for (const q of questions) if (q.options.includes("Deny")) await answer(q, "Deny");
       if (editing) {
-        await request("rewind", { bot: bot.id, entry: editing, fork: false });
+        await request("rewind", { bot: bot.id, conversation, entry: editing, fork: false });
         // Gone from the chat: a second try only sends.
         setEditing(undefined);
       }
-      await (steer || instead ? request("steer", { bot: bot.id, text: message }) : prompt(message));
+      await (steer || instead ? request("steer", { bot: bot.id, conversation, text: message }) : prompt(message));
       setText("");
       setCompacted(false);
       setFiles([]);
@@ -384,8 +395,8 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
         <div className="find" role="search">
           <input
             autoFocus
-            aria-label="Find in this chat"
-            placeholder="Find in this chat"
+            aria-label="Find in this conversation"
+            placeholder="Find in this conversation"
             value={needle}
             onChange={(e) => setNeedle(e.target.value)}
             onKeyDown={(e) => {
@@ -404,7 +415,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
         </div>
       )}
       <div className="tools">
-        <button type="button" className="ghost small" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id }).then((d) => setSaved(d.path)))}>
+        <button type="button" className="ghost small" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id, conversation }).then((d) => setSaved(d.path)))}>
           Export chat
         </button>
         {saved && <span className="note">Saved to <code>{saved}</code></span>}
@@ -501,7 +512,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
           {waiting.map((p) => (
             <li key={p.nonce}>
               {p.text}{" "}
-              <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, nonce: p.nonce }))}>×</button>
+              <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, conversation, nonce: p.nonce }))}>×</button>
             </li>
           ))}
         </ol>
@@ -607,7 +618,7 @@ function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, read
             <div className="actions">
               <button disabled={busy} onClick={() => retry(item)}>Retry</button>
               <button disabled={busy} onClick={() => edit(item)}>Edit</button>
-              <button disabled={busy} onClick={() => fork(item)} title="Go on from before this message in a copy; what came after stays here to read">Fork</button>
+              <button disabled={busy} onClick={() => fork(item)} title="Start a new conversation from before this message; this one stays as it is">Fork</button>
             </div>
           )}
         </>

@@ -127,6 +127,23 @@ export type Skill = { name: string; description: string };
 /** A prompt the service holds until the bot is free. */
 export type QueuedPrompt = { nonce: string; text: string };
 
+/** One of a bot's conversations (`list_conversations`). */
+export type Conversation = {
+  id: string;
+  bot: string;
+  createdAt: number;
+  /** When a prompt last went into it, in Unix milliseconds. */
+  touchedAt: number;
+  /** Made after the first reply; empty before. */
+  title: string;
+  /** The person's own; empty: the title shows. */
+  name: string;
+  pinned: boolean;
+  archived: boolean;
+  /** The bot works in it now. */
+  busy: boolean;
+};
+
 /** A surface a project's program offers (`list_surfaces`). */
 export type Surface = { uri: string; name: string; description?: string; kind: "table" | "tree" | "code" };
 

@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { request } from "./service.ts";
+import { when } from "./conversations.ts";
 import type { Bot } from "./types.ts";
 
 export type Choice = { label: string; hint?: string; run: () => void };
-type Hit = { bot: string; seq: number; kind: "user" | "reply"; snippet: string };
+type Hit = { bot: string; conversation: string; seq: number; atMs: number; kind: "user" | "reply"; snippet: string };
 
 /**
- * ⌘K: every command, every bot, and what the bots' chats say. Arrows choose, Enter runs,
- * Escape closes. `found` runs for a chat hit.
+ * ⌘K: every command, every bot, and the words in every conversation of every bot. Arrows choose,
+ * Enter runs, Escape closes. `found` runs for a hit.
  */
 export function Palette({ choices, bots, found, close }: {
   choices: Choice[];
   bots: Bot[];
-  found: (bot: string, seq: number) => void;
+  found: (bot: string, conversation: string, seq: number) => void;
   close: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -44,8 +45,8 @@ export function Palette({ choices, bots, found, close }: {
     ...choices.filter((c) => c.label.toLowerCase().includes(words)),
     ...hits.map((h) => ({
       label: h.snippet,
-      hint: `${name(h.bot)} · ${h.kind === "user" ? "you" : "reply"}`,
-      run: () => found(h.bot, h.seq),
+      hint: `${name(h.bot)} · ${when(h.atMs)} · ${h.kind === "user" ? "you" : "reply"}`,
+      run: () => found(h.bot, h.conversation, h.seq),
     })),
   ];
   const chosen = Math.min(at, shown.length - 1);
@@ -64,7 +65,7 @@ export function Palette({ choices, bots, found, close }: {
           aria-expanded="true"
           aria-controls="palette-list"
           aria-activedescendant={chosen >= 0 ? `palette-${chosen}` : undefined}
-          placeholder="A command, a bot, or words from a chat"
+          placeholder="A command, a bot, or words from any conversation"
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);

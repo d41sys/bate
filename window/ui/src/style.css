@@ -205,6 +205,18 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .hints { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); margin-block: var(--space-1) 0; padding-inline: var(--space-3); font-size: var(--size-small); }
 .hints b { color: var(--fg); font-weight: var(--weight-strong); }
 
+/* ---- The bot's conversations: the one shown, a list to switch, a button for a new one ---- */
+.conversations { position: relative; display: flex; align-items: center; gap: var(--space-2); padding-bottom: var(--space-2); }
+/* The list is placed by the strip, so it is as wide as the column. */
+.conversations .menu { position: static; }
+.conversations .chip { max-width: 100%; }
+.conversations .popover { width: 100%; max-width: var(--thread-w); }
+.popover.below { top: calc(100% + var(--space-1)); bottom: auto; left: 0; right: auto; }
+.popover li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1); }
+.popover li > .row { flex: 1; min-width: 0; }
+.popover li > form { display: flex; flex: 1; gap: var(--space-1); }
+.popover li > form input { flex: 1; min-width: 0; }
+
 /* ---- A surface of a project's program ---- */
 .surface { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .surface .body { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-s); }
