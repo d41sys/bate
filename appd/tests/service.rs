@@ -7962,7 +7962,7 @@ fn a_manifest_with_a_bad_download_is_refused() {
         with("dest", json!("/etc/x")),
         with("dest", json!("../x")),
         with("dest", json!("a/../x")),
-        with("unpack", json!("zip")),
+        with("unpack", json!("rar")),
     ];
     for (i, bad) in cases.into_iter().enumerate() {
         let folder = workplace_that_fetches(&format!("wp-bad-manifest-{i}"), json!([bad]));
@@ -8553,4 +8553,408 @@ fn the_catalog_of_the_repository_pins_what_the_pack_script_makes_of_its_workplac
             (&e["name"], &e["version"])
         );
     }
+}
+
+/// The Ghidra workplace of the repository, with a stand-in for Ghidra and for the Java it needs
+/// (`tests/fake_analyze_headless.py`, which speaks the protocol of the workplace's Java script).
+fn ghidra_workplace(name: &str) -> Home {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = Home(std::env::temp_dir().join(format!("appd-{}-{name}", std::process::id())));
+    let _ = fs::remove_dir_all(&copy.0);
+    let done = Command::new("cp")
+        .arg("-R")
+        .arg(manifest_dir.join("../workplaces/ghidra"))
+        .arg(&copy.0)
+        .status()
+        .unwrap();
+    assert!(done.success());
+    let file = copy.join("workplace.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    // The real downloads are Ghidra and its Java: the test cannot fetch them.
+    assert_eq!(manifest["downloads"].as_array().unwrap().len(), 2);
+    manifest.as_object_mut().unwrap().remove("downloads");
+    fs::write(&file, manifest.to_string()).unwrap();
+    let fake = copy.join("ghidra/fake");
+    fs::create_dir_all(fake.join("support")).unwrap();
+    fs::copy(
+        manifest_dir.join("tests/fake_analyze_headless.py"),
+        fake.join("support/analyzeHeadless"),
+    )
+    .unwrap();
+    // On a Mac the release's decompiler is built at first use; here it is there already.
+    for os in ["mac_arm_64", "mac_x86_64"] {
+        let dir = fake.join("Ghidra/Features/Decompiler/os").join(os);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("decompile"), "").unwrap();
+    }
+    fs::create_dir_all(copy.join("jdk/fake/Contents/Home/bin")).unwrap();
+    fs::write(copy.join("jdk/fake/Contents/Home/bin/java"), "").unwrap();
+    copy
+}
+
+/// A tool of the program behind a bot's connector `url`: whether it failed, and what it said.
+fn said_tool(url: &str, name: &str, arguments: Value) -> (bool, String) {
+    let result = call_tool(url, name, arguments);
+    (
+        result["isError"] == true,
+        result["content"][0]["text"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn the_ghidra_workplace_analyses_binaries_for_bots_and_surfaces_and_keeps_the_analysis() {
+    let home = home("wp-ghidra");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-ghsite", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let real = site.canonicalize().unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let a = w.create_bot();
+    let source = ghidra_workplace("wp-ghidra-src");
+    let installed = w.ok("install_workplace", json!({"path": &source.0}))["workplace"].clone();
+    assert_eq!(installed["name"], "ghidra");
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"][0].clone();
+    let roles: Vec<_> = (listed["roles"].as_array().unwrap().iter())
+        .map(|r| {
+            let r = w.ok("read_roles", json!({"paths": [r]}));
+            r["roles"][0]["name"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(roles, ["Analyst", "Report writer", "Triage"]);
+    assert_eq!(listed["skills"][0]["name"], "reverse-engineering");
+
+    let on = json!({"name": "Re", "folder": real, "bots": [a], "workplace": "ghidra"});
+    let made = w.ok("set_project", json!({"project": on}))["project"].clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    let data = home.canonicalize().unwrap().join("project-data").join(&id);
+    let (binaries, functions, code, strings, imports) = (
+        "ghidra://binaries",
+        "ghidra://functions",
+        "ghidra://code",
+        "ghidra://strings",
+        "ghidra://imports",
+    );
+    let surfaces = w.ok("list_surfaces", json!({"projectId": id}))["surfaces"].clone();
+    let kinds: Vec<_> = (surfaces.as_array().unwrap().iter())
+        .map(|s| (s["uri"].as_str().unwrap(), s["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (binaries, "table"),
+            (functions, "tree"),
+            (code, "code"),
+            (strings, "table"),
+            (imports, "table")
+        ]
+    );
+    let read =
+        |w: &mut Window, uri: &str| w.ok("read_surface", json!({"projectId": id, "uri": uri}));
+    // Nothing is analysed yet: no Ghidra runs, and each surface says how to begin.
+    assert!(
+        read(&mut w, code)["lines"][0]
+            .as_str()
+            .unwrap()
+            .contains("No binary")
+    );
+    assert_eq!(read(&mut w, binaries)["total"], 0);
+    assert_eq!(read(&mut w, strings)["total"], 0);
+    assert!(!data.join("ghidra").exists());
+
+    // A binary copied into the project's folder is analysed, and the open surface is told.
+    w.ok("watch_surfaces", json!({"projectId": id, "uri": binaries}));
+    fs::create_dir(real.join("binaries")).unwrap();
+    fs::write(real.join("binaries/tool"), "MACH main").unwrap();
+    w.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == binaries);
+    let state = |w: &mut Window, name: &str| {
+        let table = read(w, binaries);
+        let row = (table["rows"].as_array().unwrap().iter())
+            .find(|r| r["id"] == name)
+            .map(|r| r["cells"][1].as_str().unwrap().to_owned());
+        row.unwrap_or_default()
+    };
+    eventually("the binary to be analysed", || {
+        state(&mut w, "tool") == "ready"
+    });
+    assert_eq!(
+        read(&mut w, binaries)["rows"][0],
+        json!({"id": "tool", "cells": ["tool", "ready", "*"]})
+    );
+
+    // The bot's tools.
+    ask_prompt(&mut w, &a, "n1");
+    let url_of = |home: &Path| {
+        let last = last_logged(home, &a, "connectors.log");
+        assert!(last.contains("\"name\":\"ghidra\""), "{last}");
+        let url = last.split("\"url\":\"http://").nth(1).unwrap();
+        url.split('"').next().unwrap().to_owned()
+    };
+    let url = url_of(&home);
+    let tool = |name: &str, args: Value| said_tool(&url, name, args);
+    let (failed, text) = tool("list_binaries", json!({}));
+    assert!(!failed && text == "tool  ready  (shown)", "{text}");
+    let (_, text) = tool("list_functions", json!({}));
+    assert_eq!(text.lines().count(), 6, "{text}");
+    assert!(text.starts_with("100000978  entry  40"), "{text}");
+    let (_, text) = tool("list_functions", json!({"filter": "FUN_1000011"}));
+    assert_eq!(text, "100001100  FUN_100001100  64");
+    assert_eq!(
+        tool("list_functions", json!({"filter": "zzz"})),
+        (false, "no functions".into())
+    );
+    let (_, text) = tool("decompile", json!({"function": "FUN_100001100"}));
+    assert!(text.contains("void FUN_100001100(void)"), "{text}");
+    let (_, text) = tool("find_references", json!({"target": "entry"}));
+    assert!(
+        text.contains("100001010  in entry  UNCONDITIONAL_CALL"),
+        "{text}"
+    );
+    let (_, text) = tool("list_strings", json!({"filter": "usage"}));
+    assert_eq!(text, "100000630  \"usage: tool [-v]\"");
+    assert!(tool("list_imports", json!({})).1.contains("_printf"));
+    let (failed, text) = tool("decompile", json!({"function": "nothing"}));
+    assert!(
+        failed && text.contains("there is no function nothing"),
+        "{text}"
+    );
+    let (failed, text) = tool("list_functions", json!({"binary": "other"}));
+    assert!(
+        failed && text.contains("there is no binary other"),
+        "{text}"
+    );
+
+    // The person chooses a function in the tree; the code view shows it.
+    let tree = read(&mut w, functions);
+    assert_eq!(
+        tree["nodes"][0],
+        json!({"id": "group-Named", "label": "Named (1)", "depth": 0})
+    );
+    assert_eq!(tree["nodes"][2]["label"], "Unnamed (5)");
+    assert_eq!(tree["nodes"][3]["id"], "100001100");
+    assert_eq!(tree["select"], "show_function");
+    assert!(
+        read(&mut w, code)["lines"][0]
+            .as_str()
+            .unwrap()
+            .contains("Choose a function")
+    );
+    let act = |w: &mut Window, uri: &str, tool: &str, target: &str| {
+        w.ok(
+            "act_surface",
+            json!({"projectId": id, "uri": uri, "tool": tool, "target": target}),
+        )
+    };
+    // A second window hears of changes: the first skips frames while it waits for a reply.
+    let mut other = Window::connect(&home);
+    other.ok("watch_surfaces", json!({"projectId": id, "uri": code}));
+    assert_eq!(
+        act(&mut w, functions, "show_function", "100001100")["ok"],
+        true
+    );
+    other.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == code);
+    let lines = |w: &mut Window| read(w, code)["lines"].to_string();
+    assert!(lines(&mut w).contains("void FUN_100001100(void)"));
+    let refused = act(&mut w, functions, "show_function", "424242");
+    assert_eq!(refused["ok"], false);
+    assert!(refused["text"].as_str().unwrap().contains("no function"));
+
+    // A bot's rename shows in the open code view and moves the function to the named ones.
+    let (failed, text) = tool(
+        "rename_function",
+        json!({"function": "FUN_100001100", "name": "parse_args"}),
+    );
+    assert!(
+        !failed && text == "FUN_100001100 at 100001100 is now parse_args",
+        "{text}"
+    );
+    other.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == code);
+    assert!(lines(&mut w).contains("void parse_args(void)"));
+    let tree = read(&mut w, functions);
+    assert_eq!(tree["nodes"][0]["label"], "Named (2)");
+    assert_eq!(tree["nodes"][2]["label"], "parse_args  100001100");
+
+    // A comment, from a bot, is in the view and in the next read of any bot.
+    let (_, text) = tool(
+        "comment",
+        json!({"function": "parse_args", "text": "reads -v"}),
+    );
+    assert_eq!(text, "commented on parse_args at 100001100");
+    assert!(lines(&mut w).contains("/* reads -v */"));
+    let (_, text) = tool("decompile", json!({"function": "100001100"}));
+    assert!(
+        text.contains("// plate comment at 100001100: reads -v"),
+        "{text}"
+    );
+
+    // The person's comment, written in the code view, is there when a bot next reads the function.
+    assert_eq!(
+        read(&mut w, code)["actions"],
+        json!([{"tool": "comment_shown", "label": "Comment", "input": true}])
+    );
+    let done = w.ok(
+        "act_surface",
+        json!({"projectId": id, "uri": code, "tool": "comment_shown", "text": "the person: checks argv"}),
+    );
+    assert_eq!(done["ok"], true, "{done}");
+    other.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == code);
+    assert!(lines(&mut w).contains("/* the person: checks argv */"));
+    let (_, text) = tool("decompile", json!({"function": "parse_args"}));
+    assert!(
+        text.contains("// plate comment at 100001100: the person: checks argv"),
+        "{text}"
+    );
+
+    // While a binary is analysed Ghidra is busy; one it cannot read fails, in words.
+    fs::write(real.join("slow"), "SLOW file").unwrap();
+    fs::write(real.join("bad"), "BAD! file").unwrap();
+    let path = |name: &str| real.join(name).to_str().unwrap().to_owned();
+    let (failed, text) = tool("add_binary", json!({"path": path("slow")}));
+    assert!(
+        !failed && text.starts_with("slow is being analysed"),
+        "{text}"
+    );
+    let (failed, text) = tool("list_functions", json!({}));
+    assert!(failed && text.contains("busy analysing"), "{text}");
+    let (failed, text) = tool("list_functions", json!({"binary": "slow"}));
+    assert!(failed && text.contains("still being analysed"), "{text}");
+    // What was read before still shows.
+    assert!(lines(&mut w).contains("void parse_args(void)"));
+    eventually("the slow binary to be analysed", || {
+        state(&mut w, "slow") == "ready"
+    });
+    assert!(
+        tool("add_binary", json!({"path": path("slow")}))
+            .1
+            .contains("in the project already")
+    );
+    assert!(!tool("add_binary", json!({"path": path("bad")})).0);
+    eventually("the bad binary to fail", || {
+        state(&mut w, "bad").starts_with("failed: ")
+    });
+    assert!(state(&mut w, "bad").contains("Ghidra cannot read"));
+    let (failed, text) = tool(
+        "add_binary",
+        json!({"path": real.join("missing").to_str().unwrap()}),
+    );
+    assert!(failed && text.contains("is not a file"), "{text}");
+    // The person shows the other binary.
+    assert_eq!(act(&mut w, binaries, "show_binary", "slow")["ok"], true);
+    assert_eq!(read(&mut w, binaries)["rows"][1]["cells"][2], "*");
+    assert!(lines(&mut w).contains("Choose a function"));
+    assert_eq!(act(&mut w, binaries, "show_binary", "tool")["ok"], true);
+
+    // Switched off, the analysis stays in the project's data folder. A comment that the person
+    // makes in Ghidra's own window (the fake keeps the project in a file) is there when the
+    // workplace is back on, and a bot next reads the function.
+    let mut off = made.clone();
+    off["workplace"] = Value::Null;
+    off["bots"] = json!([a]);
+    w.ok("set_project", json!({"project": off}));
+    let project_file = data.join("ghidra/fake.json");
+    let mut stored: Value =
+        serde_json::from_str(&fs::read_to_string(&project_file).unwrap()).unwrap();
+    stored["tool"]["comments"]["100001200"] = json!({"plate": "the person: checks the length"});
+    fs::write(&project_file, stored.to_string()).unwrap();
+    let mut back = made.clone();
+    back["bots"] = json!([a]);
+    w.ok("set_project", json!({"project": back}));
+    ask_prompt(&mut w, &a, "n2");
+    let url = url_of(&home);
+    let (failed, text) = said_tool(
+        &url,
+        "decompile",
+        json!({"function": "FUN_100001200", "binary": "tool"}),
+    );
+    assert!(
+        !failed && text.contains("/* the person: checks the length */"),
+        "{text}"
+    );
+    assert!(
+        text.contains("// plate comment at 100001200: the person: checks the length"),
+        "{text}"
+    );
+    // Binaries, names and comments are from the project, not the program's memory.
+    let (_, text) = said_tool(&url, "list_binaries", json!({}));
+    // The binary that failed was never kept.
+    assert_eq!(text, "slow  ready  (shown)\ntool  ready");
+    assert!(
+        said_tool(
+            &url,
+            "decompile",
+            json!({"function": "parse_args", "binary": "tool"})
+        )
+        .1
+        .contains("the person: checks argv")
+    );
+}
+
+#[test]
+fn a_zip_download_is_unpacked_and_may_hold_more_files_than_the_workplace_itself() {
+    let home = home("wp-zip");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let root = Home(std::env::temp_dir().join(format!("appd-{}-zipdl", std::process::id())));
+    let _ = fs::remove_dir_all(&root.0);
+    let inside = root.join("in");
+    // More than the 2000 files that a workplace's own folder may hold.
+    for i in 0..2100 {
+        let dir = inside.join(format!("d{}", i % 10));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("f{i}")), "x").unwrap();
+    }
+    fs::write(inside.join("run"), "#!/bin/sh\n").unwrap();
+    fs::set_permissions(inside.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+    let zip = |name: &str, members: &[&str], flags: &str| {
+        let out = root.join(name);
+        let mut zip = Command::new("/usr/bin/zip");
+        zip.arg(flags).arg(&out).args(members).current_dir(&inside);
+        assert!(zip.status().unwrap().success());
+        fs::read(&out).unwrap()
+    };
+    let many = zip("many.zip", &["."], "-qr");
+    std::os::unix::fs::symlink("run", inside.join("link")).unwrap();
+    let linked = zip("linked.zip", &["run", "link"], "-qry");
+    let host = FileHost::of(vec![
+        ("/many.zip", many.clone()),
+        ("/linked.zip", linked.clone()),
+    ]);
+
+    let folder = workplace_that_fetches(
+        "wp-zip-src",
+        json!([download(
+            &host.url("/linked.zip"),
+            &linked,
+            "tools",
+            Some("zip")
+        )]),
+    );
+    fetch_fails(&mut w, &home, &folder, "not a plain file");
+
+    let folder = workplace_that_fetches(
+        "wp-zip-src",
+        json!([download(
+            &host.url("/many.zip"),
+            &many,
+            "tools",
+            Some("zip")
+        )]),
+    );
+    w.ok(
+        "install_workplace",
+        json!({"path": &folder.0, "download": true}),
+    );
+    use std::os::unix::fs::MetadataExt;
+    let installed = home.join("workplaces").join("counter");
+    assert_eq!(
+        fs::read_to_string(installed.join("tools/d3/f13")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        fs::metadata(installed.join("tools/run")).unwrap().mode() & 0o111,
+        0o111
+    );
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
+    assert_eq!(listed[0]["changed"], false, "{listed}");
+    assert_eq!(listed[0]["error"], Value::Null, "{listed}");
 }

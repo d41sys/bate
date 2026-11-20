@@ -1,0 +1,23 @@
+{
+  "name": "ghidra",
+  "version": "1.0.0",
+  "description": "Reverse engineering with Ghidra: add a binary to the project and the person and the bots work on one analysis, with a tree of functions, the decompiled code, strings and imports.",
+  "program": { "command": "python3", "args": ["server.py"] },
+  "needs": { "folders": [], "hosts": [], "commands": ["python3", "make", "g++"] },
+  "downloads": [
+    {
+      "url": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip",
+      "size": 569649598,
+      "sha256": "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db",
+      "dest": "ghidra",
+      "unpack": "zip"
+    },
+    {
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13.1%2B2/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.13.1_2.tar.gz",
+      "size": 199772678,
+      "sha256": "48067f2b7c958ed104a9d8a5749be7d25220b0a356b4d2d1bcfaab3e16ad0b14",
+      "dest": "jdk",
+      "unpack": "tar.gz"
+    }
+  ]
+}

@@ -72,9 +72,9 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
     };
   }, [projectId, uri, offset, again]);
 
-  /** A tool of the program, with what was chosen; the surface is read again for the result. */
-  const act = (tool: string, target?: string) =>
-    request<{ ok: boolean; text: string }>("act_surface", { projectId, uri, tool, target }).then(
+  /** A tool of the program, with what was chosen (and written); the surface is read again for the result. */
+  const act = (tool: string, target?: string, text?: string) =>
+    request<{ ok: boolean; text: string }>("act_surface", { projectId, uri, tool, target, text }).then(
       (r) => {
         setResult(r);
         setAgain((n) => n + 1);
@@ -106,9 +106,24 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
   return (
     <div className="surface">
       <div className="tools">
-        {part.actions.map((a) => (
-          <button key={a.tool} type="button" onClick={() => void act(a.tool, selected)}>{a.label}</button>
-        ))}
+        {part.actions.map((a) =>
+          a.input ? (
+            <form
+              key={a.tool}
+              onSubmit={(e) => {
+                e.preventDefault();
+                const field = e.currentTarget.elements.namedItem("text") as HTMLInputElement;
+                void act(a.tool, selected, field.value);
+                field.value = "";
+              }}
+            >
+              <input name="text" aria-label={a.label} placeholder={a.label} maxLength={2000} />
+              <button type="submit">{a.label}</button>
+            </form>
+          ) : (
+            <button key={a.tool} type="button" onClick={() => void act(a.tool, selected)}>{a.label}</button>
+          ),
+        )}
         <span className="note">{range(part)}</span>
         <button type="button" disabled={prevOffset(part) === undefined} onClick={() => move(prevOffset(part))}>Previous</button>
         <button type="button" disabled={nextOffset(part) === undefined} onClick={() => move(nextOffset(part))}>Next</button>

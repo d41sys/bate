@@ -35,6 +35,8 @@ const MAX_CELL: usize = 1000;
 const MAX_LINE: usize = 2000;
 const MAX_COLUMNS: usize = 20;
 const MAX_ACTIONS: usize = 20;
+/// Most bytes of what the person writes for an action that takes words.
+const MAX_WORDS: usize = 2000;
 /// Deepest level of a tree's node.
 const MAX_DEPTH: u64 = 64;
 /// How long the program may take over one call.
@@ -260,8 +262,9 @@ impl Link {
     }
 
     /// The person's action: the tool `tool` of the program, if the surface offers it, with the
-    /// surface and what was chosen (`target`: a row's or node's id, or a line's number).
-    pub fn act(&self, uri: &str, tool: &str, target: Option<&str>) -> Answered {
+    /// surface, what was chosen (`target`: a row's or node's id, or a line's number) and what
+    /// the person wrote for an action that takes words (`text`).
+    pub fn act(&self, uri: &str, tool: &str, target: Option<&str>, text: Option<&str>) -> Answered {
         let now = self.read(uri, Some(0), Some(1))?;
         let offered = ["select", "open"]
             .iter()
@@ -280,6 +283,9 @@ impl Link {
         let mut arguments = json!({"uri": uri});
         if let Some(target) = target {
             arguments["target"] = json!(cut(target, 200));
+        }
+        if let Some(text) = text {
+            arguments["text"] = json!(cut(text, MAX_WORDS));
         }
         let done = self.call("tools/call", json!({"name": tool, "arguments": arguments}))?;
         let said: Vec<&str> = done["content"]
@@ -482,7 +488,12 @@ fn cut_part(kind: &str, doc: &Value, offset: usize, limit: usize) -> Answered {
         .filter_map(|a| {
             let tool = a["tool"].as_str().filter(|t| !t.is_empty())?;
             let label = a["label"].as_str().unwrap_or(tool);
-            Some(json!({"tool": cut(tool, 128), "label": cut(label, 80)}))
+            let mut action = json!({"tool": cut(tool, 128), "label": cut(label, 80)});
+            // The window asks the person for words before it calls such an action.
+            if a["input"] == json!(true) {
+                action["input"] = json!(true);
+            }
+            Some(action)
         })
         .take(MAX_ACTIONS)
         .collect();
