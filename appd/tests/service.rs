@@ -691,6 +691,61 @@ fn a_bot_with_an_open_question_is_listed_as_waiting_and_windows_are_told_when_th
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["waiting"], false);
 }
 
+#[test]
+fn a_question_about_a_file_or_a_command_names_the_folder_it_would_act_in() {
+    let home = home("question-folder");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+
+    // Its own folder.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "do run ls -l"}),
+    );
+    let asked = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    assert_eq!(asked["entry"]["target"], "ls -l");
+    assert_eq!(
+        asked["entry"]["folder"],
+        home.join("bots").join(&bot).to_str().unwrap()
+    );
+    let open = w.ok("open_bot", json!({"bot": bot}))["questions"][0].clone();
+    assert_eq!(open["folder"], asked["entry"]["folder"]);
+    w.send(
+        "answer",
+        json!({"bot": bot, "question": open["question"], "choice": "Deny"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+
+    // A connector's tool is no place: no folder.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "do connector files__list"}),
+    );
+    let asked = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    assert_eq!(asked["entry"]["kind"], "connector");
+    assert!(asked["entry"].get("folder").is_none(), "{asked}");
+    w.send(
+        "answer",
+        json!({"bot": bot, "question": asked["entry"]["question"], "choice": "Deny"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+
+    // A bot in a project works in the project's folder.
+    let project = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [bot]}}),
+    )["project"]
+        .clone();
+    wait_for_stop(&mut w);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n3", "text": "do write notes.txt"}),
+    );
+    let asked = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    assert_eq!(asked["entry"]["folder"], project["folder"]);
+}
+
 /// Builds the real engine next to `appd`, where the service looks for it when `APPD_ENGINE`
 /// is unset.
 fn build_engine() {

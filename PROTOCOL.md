@@ -380,6 +380,8 @@ The service decides every engine `question` that has a `kind`, on the `target` t
 
 An engine `question` is stored until the engine takes an `answer` to it (an answer the engine refuses leaves it open), its turn ends, or the engine stops. `open_bot` lists the open ones, so a window that reconnects still sees them.
 
+The service adds `folder` to the `question` entry of a `read`, `write` or `run` action: the folder the bot's tools work in (its project's, else its own), so a card shows where a relative path or a command would act. What `Always` covers is the grant described under Permissions: this `kind` and exactly this `target`.
+
 ### Routines
 
 Same shapes as `proto::routines`: a routine is a prompt sent on a daily, weekly, monthly or yearly schedule at a wall time in an IANA zone, every `interval` periods counted from `anchor`. Two more frequencies count real time, starting at `time` on the anchor date: `hourly` (every 1 to 99 hours) and `minutes` (every 5 to 1440 minutes); a clock change neither skips nor repeats their runs. The service sets `id`, `anchor`, `nextRunMs` and `lastRun`. `name` is 1 to 80 characters, `prompt` 1 to 8000, and a bot has at most 50 routines.

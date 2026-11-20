@@ -65,10 +65,10 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |
 | Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it | past (greyed), marked (a search hit) | yes |
 | Step of a turn | `.item.tool` with `<details>` | running, done, failed | yes |
-| Card | `.card`; `.question` for what a bot asks, with `.actions` | | yes; what the card says #145 |
-| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops | empty, typing, bot working, focus | yes |
+| Card | `.card`. `.question` is the approval card of a risky action: the title, the exact command or file in a `<pre>` (it scrolls when long), `In <code>folder</code>`, then `.actions` with **Allow once** (`primary`), **Always** and **Deny** (`danger`, set apart at the end), a `.note` saying what Always covers and that the bot asks again for anything else, and a `.note` that a message typed instead denies it. Nothing in it has focus when it appears. Esc denies; allowing by key is the chord ⌘Enter, never Enter alone | the first card shows the keys (`<kbd>`); Always is absent for an action that always asks | yes |
+| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops it (Esc denies instead while an approval card waits) | empty, typing, bot working, focus | yes |
 | Note, error line | `.note`, `.error` (with `role="alert"`) | | yes |
-| Banner | `.banner`, `.banner.error` | | yes |
+| Banner | `.banner`, `.banner.error`; `.banner.actions` when it offers a button (`<button class="small">`), as the line "Daisy waits for your answer" does | | yes |
 | Starter card | `<ul class="starters">` of `<li><button type="button" aria-pressed>`, each with an `.avatar` and a `.label` (a name and a `<small>` line). A card fills a form; it is not a link | hover, chosen (`aria-pressed`), focus | yes |
 | Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
 | Dialog | scrim, panel, focus kept inside, Esc closes | | palette only; #159 |

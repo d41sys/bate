@@ -2621,6 +2621,14 @@ impl Core {
         self.store.project_of(bot)
     }
 
+    /// Where the bot's tools work: its project's folder, else its own.
+    fn work_folder(&self, bot: &str) -> String {
+        match self.project_of(bot) {
+            Ok(Some(project)) => project.folder,
+            _ => paths::bot_dir(bot).to_string_lossy().into_owned(),
+        }
+    }
+
     /// What holds a limited process of `owner` (`bot:<id>`, `project:<id>`) to its hosts: the
     /// proxy's port and a new key for it, which takes the place of the owner's last. `hosts`:
     /// what a program may reach; for a bot, none: they are read each time they are asked. Without
@@ -4500,6 +4508,22 @@ impl Core {
             // Not for the transcript: the tool call that sent it is there already.
             return self.on_message(bot, message.clone(), to, text);
         }
+        // A question about a file or a command also says where it would happen.
+        let folder = matches!(
+            &ev,
+            Event::Question {
+                kind: Some(Kind::Read | Kind::Write | Kind::Run),
+                ..
+            }
+        )
+        .then(|| self.work_folder(bot));
+        let with_folder = |ev: &Event| {
+            let mut entry = serde_json::to_value(ev).expect("serializable");
+            if let Some(folder) = &folder {
+                entry["folder"] = json!(folder);
+            }
+            entry
+        };
         let r = self.engines.get_mut(bot).expect("checked by generation");
         match (&ev, &mut r.call) {
             (Event::Text { delta }, Some(call)) => call.reply.push_str(delta),
@@ -4587,7 +4611,7 @@ impl Core {
             Event::Question {
                 question, title, ..
             } => {
-                let entry = serde_json::to_value(&ev).expect("serializable");
+                let entry = with_folder(&ev);
                 if let Err(e) = self.store.put_question(bot, question, &entry) {
                     log!("bot {bot}: question not stored: {e}");
                 }
@@ -4604,7 +4628,7 @@ impl Core {
             }
             _ => {}
         }
-        self.record(bot, serde_json::to_value(&ev).expect("serializable"));
+        self.record(bot, with_folder(&ev));
         if matches!(ev, Event::Question { .. }) {
             self.broadcast(&json!({"type": "bots_changed"}));
         }
