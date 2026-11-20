@@ -36,6 +36,8 @@ export type Question = {
   options: string[];
   kind?: string;
   target?: string;
+  /** Where a file or a command would act: the bot's folder, or its project's. */
+  folder?: string;
 };
 
 /** Puts one more entry into `items`, in place. Text and thinking deltas join the item they continue. */

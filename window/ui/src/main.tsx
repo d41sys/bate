@@ -159,6 +159,8 @@ function App() {
     else localStorage.removeItem(LATER);
     setLater(on);
   };
+  // Bots that wait for an answer while another bot's page is open: one click away from here.
+  const others = bot ? bots.filter((b) => b.waiting && b.id !== bot.id) : [];
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
   const openBot = (id: string, tab: BotTab = "chat") => setView({ page: "bot", id, tab });
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
@@ -372,6 +374,14 @@ function App() {
               </div>
               <Tabs ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)} />
             </header>
+            {others.length > 0 && (
+              <p className="banner actions" role="status">
+                {others.length === 1 ? `${others[0].name} waits for your answer.` : `${others.length} bots wait for your answer.`}
+                {others.map((b) => (
+                  <button key={b.id} className="small" onClick={() => openBot(b.id)}>Open {b.name}</button>
+                ))}
+              </p>
+            )}
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && <Chat
                 key={`${bot.id}-${connection}`}

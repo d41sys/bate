@@ -12,6 +12,17 @@ type Opened = { history: Row[]; more: boolean; questions: Question[]; queue: Que
 /** Entries asked for at a time; a reply is many of them (one per delta). */
 const PAGE = 2000;
 
+/** The service's choices, in the person's words. */
+const CHOICES: Record<string, string> = { Approve: "Allow once", Always: "Always", Deny: "Deny" };
+
+/** What "Always" remembers: a grant is for this kind of action and exactly this target (PROTOCOL.md, Permissions). */
+const COVERS: Record<string, string> = {
+  read: "this exact path",
+  write: "this exact file",
+  run: "this exact command",
+  connector: "this connector tool, whatever it is given",
+};
+
 type Hit = { seq: number };
 
 /**
@@ -247,15 +258,37 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
   const stop = () => run(request("abort", { bot: bot.id }));
-  // Esc stops a working bot, unless it was spent on something else: a popover, the find bar, the palette.
+  // One answer per question: a second click or Esc before the service closes it would be refused.
+  const answering = useRef(new Set<string>());
+  const answer = (q: Question, choice: string) => {
+    if (answering.current.has(q.question)) return Promise.resolve();
+    answering.current.add(q.question);
+    return request("answer", { bot: bot.id, question: q.question, choice }).catch((e) => {
+      answering.current.delete(q.question);
+      throw e;
+    });
+  };
+  const asked = questions[0];
+  // Esc denies the question that waits, else stops a working bot; not when it was spent on something else: a popover, the find bar, the palette.
+  // Allowing needs a chord (⌘Enter, taken before the message box can send on it), so a stray Enter cannot approve.
   useEffect(() => {
-    if (!bot.busy) return;
+    if (!bot.busy && !asked) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) stop();
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) run(asked ? answer(asked, "Deny") : stop());
+    };
+    const onChord = (e: KeyboardEvent) => {
+      if (!asked || e.key !== "Enter" || !(e.metaKey || e.ctrlKey) || e.isComposing || !asked.options.includes("Approve")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      run(answer(asked, "Approve"));
     };
     addEventListener("keydown", onKey);
-    return () => removeEventListener("keydown", onKey);
-  }, [bot.busy, bot.id]);
+    addEventListener("keydown", onChord, true);
+    return () => {
+      removeEventListener("keydown", onKey);
+      removeEventListener("keydown", onChord, true);
+    };
+  }, [bot.busy, bot.id, asked?.question]);
   // One file at a time: the service takes only a few at once from a window.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const attach = (list: Iterable<File>) => {
@@ -315,12 +348,15 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     inFlight.current = true;
     setSending(true);
     try {
+      // A message while a card is open denies it: "not this, do that". The bot reads it as a steer.
+      const instead = questions.length > 0 && !bot.agent?.length;
+      for (const q of questions) await answer(q, "Deny");
       if (editing) {
         await request("rewind", { bot: bot.id, entry: editing, fork: false });
         // Gone from the chat: a second try only sends.
         setEditing(undefined);
       }
-      await (steer ? request("steer", { bot: bot.id, text: message }) : prompt(message));
+      await (steer || instead ? request("steer", { bot: bot.id, text: message }) : prompt(message));
       setText("");
       setCompacted(false);
       setFiles([]);
@@ -412,17 +448,28 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
           ))}
         </div>
       </div>
-      {questions.map((q) => (
+      {questions.map((q, i) => (
         <div key={q.question} className="question" role="group" aria-label={q.title}>
           <p>{q.title}</p>
           {q.target && <pre>{q.target}</pre>}
+          {q.folder && <p className="note">In <code>{q.folder}</code></p>}
           <div className="actions">
             {q.options.map((choice) => (
-              <button key={choice} onClick={() => run(request("answer", { bot: bot.id, question: q.question, choice }))}>
-                {choice}
+              <button
+                key={choice}
+                className={choice === "Approve" ? "primary" : choice === "Deny" ? "danger" : undefined}
+                onClick={() => run(answer(q, choice))}
+              >
+                {CHOICES[choice] ?? choice}
+                {i === 0 && choice === "Approve" && <kbd>⌘Enter</kbd>}
+                {i === 0 && choice === "Deny" && <kbd>Esc</kbd>}
               </button>
             ))}
           </div>
+          {q.options.includes("Always") && (
+            <p className="note">Always: Bate stops asking for {COVERS[q.kind ?? ""] ?? "this exact action"}. The bot still asks again for anything else. Remove it in Settings.</p>
+          )}
+          {i === 0 && <p className="note">Writing a message instead denies this and sends the message to the bot.</p>}
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
@@ -514,7 +561,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
             ) : (
               <button type="button" disabled={!message || uploading || sending} data-tip="Put this into the turn that is running" onClick={() => send(true)}>Steer</button>
             )}
-            <button type="button" data-tip="Stop the bot (Esc)" onClick={stop}>Stop <kbd>Esc</kbd></button>
+            <button type="button" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>Stop {!asked && <kbd>Esc</kbd>}</button>
           </>
         ) : (
           <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn}>↑</button>
