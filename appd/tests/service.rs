@@ -7962,7 +7962,7 @@ fn a_manifest_with_a_bad_download_is_refused() {
         with("dest", json!("/etc/x")),
         with("dest", json!("../x")),
         with("dest", json!("a/../x")),
-        with("unpack", json!("zip")),
+        with("unpack", json!("rar")),
     ];
     for (i, bad) in cases.into_iter().enumerate() {
         let folder = workplace_that_fetches(&format!("wp-bad-manifest-{i}"), json!([bad]));
@@ -8810,7 +8810,7 @@ fn the_ghidra_workplace_analyses_binaries_for_bots_and_surfaces_and_keeps_the_an
             .1
             .contains("in the project already")
     );
-    assert!(tool("add_binary", json!({"path": path("bad")})).0 == false);
+    assert!(!tool("add_binary", json!({"path": path("bad")})).0);
     eventually("the bad binary to fail", || {
         state(&mut w, "bad").starts_with("failed: ")
     });

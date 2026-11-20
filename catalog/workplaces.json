@@ -7,6 +7,14 @@
       "url": "https://github.com/d41sys/bate/releases/download/wp-counter-v1.0.0/counter-1.0.0.tar.gz",
       "size": 20503,
       "sha256": "4a5417e39b2550bd05a96680f0636924591bdcca1e9162490e27156c428dd683"
+    },
+    {
+      "name": "ghidra",
+      "description": "Reverse engineering with Ghidra: add a binary to the project and the person and the bots work on one analysis, with a tree of functions, the decompiled code, strings and imports.",
+      "version": "1.0.0",
+      "url": "https://github.com/d41sys/bate/releases/download/wp-ghidra-v1.0.0/ghidra-1.0.0.tar.gz",
+      "size": 51223,
+      "sha256": "b7c4be0d4dd548eb2e44af5a08647e944246d8fa3ad24bfc796a84242a1f865b"
     }
   ]
 }
