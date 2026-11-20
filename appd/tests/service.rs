@@ -54,9 +54,9 @@ while IFS= read -r line; do
             prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
             env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
             work) [ "$BATE_WORK_DIR" = "$path" ] && r=ok || r=refused ;;
-            fetch) curl -sf -m 5 -o /dev/null "$path" && r=ok || r=refused ;;
-            tunnel) curl -sf -m 5 -p -o /dev/null "$path" && r=ok || r=refused ;;
-            direct) curl -sf -m 5 --noproxy '*' -o /dev/null "$path" && r=ok || r=refused ;;
+            fetch) d=$(curl -sSf -m 5 -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe fetch: $r $d" >&2 ;;
+            tunnel) d=$(curl -sSf -m 5 -p -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe tunnel: $r $d" >&2 ;;
+            direct) d=$(curl -sSf -m 5 --noproxy '*' -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe direct: $r $d" >&2 ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -290,8 +290,12 @@ fn prompts_received(home: &Path, bot: &str, nonce: &str) -> usize {
         .count()
 }
 
-fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + TIMEOUT;
+fn eventually(what: &str, check: impl FnMut() -> bool) {
+    within(TIMEOUT, what, check);
+}
+
+fn within(limit: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(20));
@@ -2331,6 +2335,14 @@ fn probe(w: &mut Window, bot: &str, nonce: &str, what: &str) -> String {
     said["entry"]["delta"].as_str().unwrap().to_owned()
 }
 
+/// The service log of this test's home: the engine's network probes say there why one was
+/// refused, and the service says when an engine stopped (#162).
+fn probes(home: &Path) -> String {
+    // The log is written by another thread.
+    std::thread::sleep(Duration::from_millis(500));
+    fs::read_to_string(home.join("logs/appd.log")).unwrap_or_default()
+}
+
 #[test]
 fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() {
     let home = home("folder-limit");
@@ -2452,8 +2464,15 @@ fn web() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let counted = hits.clone();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut head = [0u8; 4096];
-            let _ = stream.read(&mut head);
+            // The whole head, however many pieces it comes in: an answer sent after the first
+            // piece closes the connection under a client that is still writing (#162).
+            let (mut head, mut piece) = (Vec::new(), [0u8; 4096]);
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut piece) {
+                    Ok(n) if n > 0 => head.extend_from_slice(&piece[..n]),
+                    _ => break,
+                }
+            }
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello",
@@ -2525,8 +2544,18 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     let listed = w.ok("list_bots", json!({}))["bots"][0]["network"].clone();
     assert_eq!(listed, json!([format!("127.0.0.1:{a}")]));
     // An allowed host passes, as a plain request and as a tunnel.
-    assert_eq!(probe(&mut w, &bot, "n4", &format!("fetch {url_a}")), "ok");
-    assert_eq!(probe(&mut w, &bot, "n5", &format!("tunnel {url_a}")), "ok");
+    assert_eq!(
+        probe(&mut w, &bot, "n4", &format!("fetch {url_a}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
+    assert_eq!(
+        probe(&mut w, &bot, "n5", &format!("tunnel {url_a}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
     // Another is refused by the proxy, and never reached.
     assert_eq!(
         probe(&mut w, &bot, "n6", &format!("fetch {url_b}")),
@@ -2571,7 +2600,12 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     wider["hosts"] = json!([format!(" 127.0.0.1:{b} ")]);
     let stored = w.ok("set_project", json!({"project": wider}))["project"].clone();
     assert_eq!(stored["hosts"], json!([format!("127.0.0.1:{b}")]));
-    assert_eq!(probe(&mut w, &bot, "n11", &format!("fetch {url_b}")), "ok");
+    assert_eq!(
+        probe(&mut w, &bot, "n11", &format!("fetch {url_b}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
     assert_eq!(hits(), 3);
     let id = w.send(
         "set_project",
@@ -4223,7 +4257,11 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
             "prompt",
             json!({"bot": bot, "nonce": nonce, "text": format!("browse {what}")}),
         );
-        eventually("the browser's result", || results().len() > before);
+        // A real Chrome: on a machine busy with the other tests it alone can take longer than
+        // `TIMEOUT` (#162). Still failing after this is a hang, not slowness.
+        within(6 * TIMEOUT, "the browser's result", || {
+            results().len() > before
+        });
         let result = results().pop().unwrap();
         assert_eq!(result["request"], format!("b-{nonce}"));
         result
