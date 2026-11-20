@@ -63,10 +63,10 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots; the Bots heading sits in a `.heading` with its `+` beside it, a `round ghost` button), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
 | Rows of settings or items | `<ul class="rows">` | | yes |
 | Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |
-| Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it | past (greyed), marked (a search hit) | yes |
+| Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it; in the Room a `<small class="from">` above it says who wrote it (avatar, name, "to" whom, time) | past (greyed), marked (a search hit) | yes |
 | Step of a turn | `.item.tool` with `<details>` | running, done, failed | yes |
 | Card | `.card`. `.question` is the approval card of a risky action: the title, the exact command or file in a `<pre>` (it scrolls when long), `In <code>folder</code>`, then `.actions` with **Allow once** (`primary`), **Always** and **Deny** (`danger`, set apart at the end), a `.note` saying what Always covers and that the bot asks again for anything else, and a `.note` that a message typed instead denies it. Nothing in it has focus when it appears. Esc denies; allowing by key is the chord ⌘Enter, never Enter alone | the first card shows the keys (`<kbd>`); Always is absent for an action that always asks | yes |
-| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops it (Esc denies instead while an approval card waits) | empty, typing, bot working, focus | yes |
+| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. The Room's has no chip for a model: typing `@` opens a `.popover.start` listing the project's bots as `.row.plain` options, and the pick becomes a `.mention` (an avatar, `@name` and a remove button, like an attached file) in front of the words; Enter picks while the list is open, Esc closes it, Backspace on an empty box removes the pick. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops it (Esc denies instead while an approval card waits) | empty, typing, bot working, focus | yes |
 | Note, error line | `.note`, `.error` (with `role="alert"`) | | yes |
 | Banner | `.banner`, `.banner.error`; `.banner.actions` when it offers a button (`<button class="small">`), as the line "Daisy waits for your answer" does | | yes |
 | Starter card | `<ul class="starters">` of `<li><button type="button" aria-pressed>`, each with an `.avatar` and a `.label` (a name and a `<small>` line). A card fills a form; it is not a link | hover, chosen (`aria-pressed`), focus | yes |
@@ -133,7 +133,7 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 | 1 | Sidebar: projects and bots, what needs you | #142, #144 |
 | 2 | Composer and question card | #146, #145 |
 | 3 | First run: the sign-in screen, "Set up later", the first bot, the new-bot form with starter cards | #143, done |
-| 4 | Room | #148 |
+| 4 | Room: the composer, Markdown replies, who works, who answers with no `@` | #148, done |
 | 5 | Projects | #147 |
 | 6 | Add-ons: skills, connectors, workplaces | #150 |
 | 7 | Settings, the bot's and the app's | #155 |
