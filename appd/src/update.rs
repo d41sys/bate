@@ -2,19 +2,20 @@
 //! Ed25519 signature. The service takes nothing that fails the hash, the signature or the
 //! version rule, and never swaps a program while a bot is replying (the core decides when).
 
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use ring::digest::{Context, SHA256};
+use ring::digest::SHA256;
 use ring::rand::SystemRandom;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 
+use crate::download::{self, hex};
 use crate::{attach, oauth, paths};
 
 const DEFAULT_FEED: &str = "https://github.com/d41sys/bate/releases/latest/download/feed.json";
@@ -95,10 +96,6 @@ fn message(version: &str, sha256: &str) -> String {
     format!("bate-update\n{version}\n{sha256}")
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Standard padded base64.
 fn base64(bytes: &[u8]) -> String {
     let mut out = oauth::base64url(bytes).replace('-', "+").replace('_', "/");
@@ -138,15 +135,6 @@ fn judge(feed: &Feed, key: &[u8], running: &str) -> Result<bool, String> {
     Ok(offered > have)
 }
 
-fn agent() -> ureq::Agent {
-    // Redirects are followed: GitHub serves release files from another host. Nothing secret is sent.
-    let config = ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_global(Some(Duration::from_secs(600)))
-        .build();
-    ureq::Agent::new_with_config(config)
-}
-
 /// Reads the feed; when it offers a newer release than the running one (and than `staged`),
 /// downloads, checks and unpacks it under `updates/`. `None`: nothing new.
 pub fn fetch(key: &[u8], staged: Option<&str>) -> Result<Option<Staged>, String> {
@@ -154,7 +142,8 @@ pub fn fetch(key: &[u8], staged: Option<&str>) -> Result<Option<Staged>, String>
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_FEED.to_owned());
-    let agent = agent();
+    // Redirects are followed: GitHub serves release files from another host. Nothing secret is sent.
+    let agent = download::agent(5, Duration::from_secs(600));
     let mut body = agent
         .get(&url)
         .call()
@@ -192,38 +181,15 @@ pub fn fetch(key: &[u8], staged: Option<&str>) -> Result<Option<Staged>, String>
 
 /// Downloads the archive to `dir`, checks its hash, and unpacks the programs there.
 fn stage(agent: &ureq::Agent, feed: &Feed, dir: &Path) -> Result<(), String> {
-    let err = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
     let archive = dir.join("release.tar.gz");
-    let mut body = agent
-        .get(&feed.url)
-        .call()
-        .map_err(|e| err(&format!("cannot download {}", feed.url), &e))?
-        .into_body();
-    let mut file = File::create(&archive).map_err(|e| err("cannot write the download", &e))?;
-    let (mut hash, mut buf, mut size) = (Context::new(&SHA256), [0u8; 64 << 10], 0u64);
-    let mut reader = body.as_reader();
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| err("the download broke off", &e))?;
-        if n == 0 {
-            break;
-        }
-        size += n as u64;
-        if size > MAX_ARCHIVE {
-            return Err("the download is larger than any release can be".into());
-        }
-        hash.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| err("cannot write the download", &e))?;
-    }
-    let got = hex(hash.finish().as_ref());
+    let got = download::to_file(agent, &feed.url, MAX_ARCHIVE, &archive, |_| {})?.sha256;
     if got != feed.sha256 {
         return Err(format!(
             "the download's sha256 is {got}, not the feed's {}",
             feed.sha256
         ));
     }
+    let err = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
     // Only the app is named, so nothing else in the archive is written.
     let out = Command::new("/usr/bin/tar")
         .arg("-xzf")
