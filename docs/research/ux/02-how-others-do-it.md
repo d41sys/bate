@@ -117,7 +117,7 @@ Public guidance used in more than one section:
 
 **Differ.** Three apps (Hermes, `CopilotKit/OpenBot`, `nightly-labs/openbot`) have a group chat with one timeline; OpenClaw keeps one session per agent; nanobot, pi and omp have one main bot with sub-agents. The rule for an un-named message differs: everyone, the lead, or an automatic pick.
 
-**Recommendation for Bate (R7).** Make the Room a chat as good as the bot's: Enter sends, "@" opens a list of members and the result becomes a chip, replies are Markdown, a working mark and Stop per bot (#148). Show the lead's rule as a visible line (`nightly-labs/openbot`) and make it a setting of the project (Hermes). Whether Groups stay as a second way to group bots is left to the owner (R14); ADR 0002 keeps them for now.
+**Recommendation for Bate (R7).** Make the Room a chat as good as the bot's: Enter sends, "@" opens a list of members and the result becomes a chip, replies are Markdown, a working mark and Stop per bot (#148). Show the lead's rule as a visible line (`nightly-labs/openbot`) and make it a setting of the project (Hermes). Groups, the second way to group bots, are removed (R14, #152; ADR 0002).
 
 ---
 
@@ -211,7 +211,7 @@ Public guidance used in more than one section:
 
 **Differ.** Search depth: titles and loaded messages (nanobot), all text (OpenClaw, Hermes, pi, omp, `CopilotKit/OpenBot`). Whether the unit is a session list (most) or a thread inside a bot (`nightly-labs/openbot`).
 
-**Recommendation for Bate (R8).** Give a bot many conversations: a "New chat" button, a list under the bot (or tabs, as `nightly-labs/openbot`), auto-titles that a rename does not freeze (`CopilotKit/OpenBot` `app/src/components/channels/rename-conversation-dialog.tsx:64`; OpenClaw derives titles in `ui/src/lib/session-display.ts:253`), pin and archive. Show a date and the bot on every search hit and state the scope in the box, as `CopilotKit/OpenBot` does. "Fork" opens a new chat "from here" (nanobot's `fork_chat`: `docs/websocket.md:233`). ADR 0002 says a bot has exactly one conversation, so the owner decides first (#149).
+**Recommendation for Bate (R8).** Give a bot many conversations: a "New chat" button, a list under the bot (or tabs, as `nightly-labs/openbot`), auto-titles that a rename does not freeze (`CopilotKit/OpenBot` `app/src/components/channels/rename-conversation-dialog.tsx:64`; OpenClaw derives titles in `ui/src/lib/session-display.ts:253`), pin and archive. Show a date and the bot on every search hit and state the scope in the box, as `CopilotKit/OpenBot` does. "Fork" opens a new chat "from here" (nanobot's `fork_chat`: `docs/websocket.md:233`). The owner chose many conversations (#149; ADR 0002).
 
 ---
 

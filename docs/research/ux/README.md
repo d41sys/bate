@@ -18,7 +18,7 @@ Sources:
 3. Closed desktop bot apps, as patterns only (no name, code or screenshot).
 4. Apple Human Interface Guidelines and Nielsen's ten heuristics, read as text.
 
-Nothing was run. Each change was filed as an issue, or named in #138 or #142 (tables below). R14 (Groups) was not filed: the owner decides it.
+Nothing was run. Each change was filed as an issue, or named in #138 or #142 (tables below).
 
 ## Findings
 
@@ -50,13 +50,13 @@ Ranked by how much friction each removes for the three common tasks: talk to a b
 | R5 | Composer: model, effort, Stop | Separate model form; "Thinking" disabled; Queue and Steer unexplained (B22–B24) | Model chip with a scope tooltip, applied on pick, effort beside it; Stop on Esc; one-line Queue and Steer labels | Talking to a bot is the main task ([02 §5](02-how-others-do-it.md), [§6](02-how-others-do-it.md)) | M | #146 (blocked by #138) |
 | R6 | Project page | A project has no page and no "Open"; typed path; eight field groups (B50–B58) | Create from a folder picker; add bots in the dialog or "New bot in this project"; a page with Room, bots, notes and workplace | Starting a project is a common task ([02 §3](02-how-others-do-it.md)) | L | The page: #142. Folder picker, bots in the dialog, "New bot in this project": #147 (blocked by #142) |
 | R7 | Room as a real chat | Plain box, hand-typed `@name`, no Enter to send (B47, B48) | Enter sends; "@" opens a list and becomes a chip; Markdown; working mark and Stop per bot; the lead rule shown | The Room is where several bots meet ([02 §4](02-how-others-do-it.md)) | M | #148 |
-| R8 | Many conversations per bot | One chat per bot; hits without date; Fork stays in the same chat (B26, B27) | New chat; list; auto-titles; pin and archive; dated hits with the bot named; Fork opens a new chat | Finding an old thing ([02 §8](02-how-others-do-it.md)) | L | #149 (needs the owner first: ADR 0002 says a bot has one conversation) |
+| R8 | Many conversations per bot | One chat per bot; hits without date; Fork stays in the same chat (B26, B27) | New chat; list; auto-titles; pin and archive; dated hits with the bot named; Fork opens a new chat | Finding an old thing ([02 §8](02-how-others-do-it.md)) | L | #149 (the owner chose many; ADR 0002) |
 | R9 | App Settings window | 11 sections in one scroll inside a bot; no "Saved"; no ⌘, (B63–B73) | ⌘, opens Sign-in and models, Devices, Chat apps, Helper permissions, Updates, Bug report. Bot and project settings open from the bot and the project. Rows with counts. | One place per scope ([02 §9](02-how-others-do-it.md)) | M | Scope split: #142. Layout: #138. The key: #151 |
 | R10 | One Add-ons screen | Connectors, Skills and Workplaces in three places; typed paths; preview for workplaces only (B36–B46, B58) | Three tabs, each with Installed (switch, scope) and Browse; one install-preview dialog; folder pickers | Risk shown before install ([02 §10](02-how-others-do-it.md)) | L | #150 (blocked by #138) |
 | R11 | Feedback and errors | Inconsistent confirms and error places (B05, B64, B70) | One banner and toast; "Saved" state; inline errors; retry on connection loss; confirm only for irreversible actions, undo for the rest | NN/g heuristics 1 and 9; HIG Alerts | M | #138 (comment) |
 | R12 | Empty states and plain wording | Dead ends such as "Choose a bot." (B02) | An empty-state component with one action; plain-word copy pass | A blank screen gives no next step | S | #138 (comment) |
 | R13 | Keyboard and palette | ⌘K and ⌘F exist; no ⌘,, no Esc to stop, no arrow keys in tabs | ⌘, ; Esc to stop; bot switching; palette entries for projects, settings and add-ons; arrow keys in tabs | Cheap, and every app with a palette has these | S | #151 |
-| R14 | Groups | Groups cannot be written to; Projects now have a Room (B59–B62) | Fold into Projects, or drop. ADR 0002 keeps Groups for now: a bot may be in several groups but in one project. | Two ways to group bots confuse | S | Not filed; the owner decides |
+| R14 | Groups | Groups cannot be written to; Projects now have a Room (B59–B62) | Remove them: bots that work together are in one project | Two ways to group bots confuse | S | #152 (the owner chose to remove them; ADR 0002) |
 | R15 | Narrow screens, focus ring, contrast, reduced motion | No `@media`; pane floats below 776 px; header not sticky | One layout rule set down to a phone; visible focus; contrast; reduced motion | Accessibility and the remote view | M | #138 (comment) |
 
 ## Routing
@@ -65,8 +65,7 @@ Ranked by how much friction each removes for the three common tasks: talk to a b
 |---|---|
 | #142 (window: Projects and Bots at the top level) | R1, the project page of R6, the scope split of R9 (comment) |
 | #138 (design system) | R11, R12, R15, the layout of R9, the components R5 and R10 use (comment) |
-| Own issues | #143 R2, #144 R3, #145 R4, #146 R5, #147 R6 build-out, #148 R7, #150 R10, #151 R13 and the key of R9 |
-| Owner decides first | #149 R8 (many conversations; ADR 0002 says one), R14 (Groups; not filed) |
+| Own issues | #143 R2, #144 R3, #145 R4, #146 R5, #147 R6 build-out, #148 R7, #149 R8, #150 R10, #151 R13 and the key of R9, #152 R14 |
 
 Suggested order: #143 to #145 and #148 can start now. #146 and #150 wait for #138; #147 waits for #142. #151 can start, but its ⌘, and project entries need #142.
 

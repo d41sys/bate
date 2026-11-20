@@ -7,11 +7,11 @@ A personal bot app for the Mac: a host where a person and bots work on projects 
 ### People and bots
 
 **Bot**:
-A named assistant with its own instructions, memory, permissions and conversation. It is in no project or in one.
+A named assistant with its own instructions, memory, permissions and conversations. It is in no project or in one.
 _Avoid_: agent, assistant
 
 **Conversation**:
-A bot's one exchange with the person: the prompts, the replies and what the bot did, in order.
+One exchange between the person and a bot: the prompts, the replies and what the bot did, in order. A bot has many.
 _Avoid_: chat, thread, session
 
 **Engine**:
@@ -22,10 +22,6 @@ _Avoid_: harness, driver, runtime
 Another maker's agent program used as a bot's engine.
 _Avoid_: external agent, CLI
 
-**Group**:
-Bots that may message each other, one of them the lead, whatever projects they are in. Not a place: it has no folder and no room.
-_Avoid_: team
-
 **Role**:
 A ready-made definition of a bot that a project can add as one of its bots.
 _Avoid_: persona, template
@@ -34,7 +30,7 @@ _Avoid_: persona, template
 
 **Project**:
 One piece of work: a folder that a person and the project's bots share, with shared instructions and memory. It is not part of a bot; a bot is in at most one project.
-_Avoid_: workspace
+_Avoid_: workspace, group, team
 
 **Room**:
 A project's one conversation: the person writes to its bots, by `@name` or to its lead, and their replies come back in one timeline.
