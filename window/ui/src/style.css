@@ -75,6 +75,11 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .error { color: var(--danger); }
 .banner { background: var(--bg-soft); border-radius: var(--radius-m); padding: var(--space-2) var(--space-3); }
 .banner.error { background: var(--warn-soft); color: var(--warn); cursor: pointer; }
+/* Messages with other bots: closed, with the count of the open ones; the rows are the list-row component. */
+.mail { margin-bottom: var(--space-2); }
+.mail > summary { font-weight: var(--weight-strong); }
+.mail .rows { margin-bottom: 0; }
+.mail .rows li:last-child { border-bottom: 0; }
 .empty { margin: auto; text-align: center; color: var(--fg-muted); }
 
 /* ---- Rows of a list, actions side by side, a card ---- */
@@ -222,7 +227,7 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
   [data-tip][aria-expanded=true]::after { display: none; }
 }
 /* A hint key on a button: the key that does the same. */
-button kbd { padding: 0 var(--space-1); border: 1px solid var(--border-strong); border-radius: var(--radius-s); font-size: var(--size-small); font-weight: 400; color: var(--fg-muted); }
+button kbd, .palette kbd { padding: 0 var(--space-1); border: 1px solid var(--border-strong); border-radius: var(--radius-s); font-size: var(--size-small); font-weight: 400; color: var(--fg-muted); }
 button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 
 /* ---- The conversation ---- */
@@ -328,14 +333,27 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .surface .code .line { display: flex; min-height: var(--leading); padding-right: var(--space-3); }
 .surface .code .no { flex: none; min-width: 4ch; margin-right: var(--space-2); padding-right: var(--space-2); text-align: right; color: var(--fg-muted); border-right: 1px solid var(--border); user-select: none; }
 
-/* ---- Dialog: the palette ---- */
-.palette { position: fixed; inset: 0; z-index: 2; background: var(--scrim); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
-.palette > div { background: var(--bg-raised); width: min(640px, 90vw); border-radius: var(--radius-l); box-shadow: var(--shadow-2); overflow: hidden; }
-.palette input { width: 100%; padding: var(--space-3) var(--space-4); font-size: var(--size-title); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; outline: none; }
-.palette ul { list-style: none; margin: 0; padding: var(--space-1); max-height: 50vh; overflow: auto; }
-.palette li { padding: var(--space-2) var(--space-3); border-radius: var(--radius-s); cursor: pointer; }
-.palette li[aria-selected="true"] { background: var(--bg-current); }
-.palette small { margin-left: var(--space-2); }
+/* ---- Palette (⌘K): a Dialog whose panel is a search box over groups of options ---- */
+.sheet.palette { align-items: flex-start; }
+.sheet.palette > form { display: flex; flex-direction: column; margin: 12vh auto 0; max-height: calc(100% - 12vh); padding: 0; overflow: hidden; }
+.sheet.palette input { width: 100%; padding: var(--space-3) var(--space-4); font-size: var(--size-title); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: none; }
+/* The ring sits inside the edge, where the panel's rounded corners do not cut it. */
+.sheet.palette input:focus-visible { outline-offset: -2px; }
+.sheet.palette ul { list-style: none; margin: 0; padding: 0; }
+.sheet.palette ul[role=listbox] { overflow: auto; padding: var(--space-1) var(--space-2) var(--space-2); }
+/* A group's name, then its options: rows of the list-row component, chosen with the arrows. */
+.palette [role=group] > small { display: block; padding: var(--space-2) var(--space-2) var(--space-1); font-weight: var(--weight-strong); }
+.palette .row { display: flex; align-items: center; width: 100%; max-width: none; padding-block: var(--space-1); cursor: pointer; }
+.palette .row[aria-selected=true] { background: var(--bg-current); }
+.palette .row .label { flex: 0 1 auto; }
+.palette kbd { margin-left: auto; }
+.palette .note, .palette .error { margin: 0; padding: var(--space-2) var(--space-4); }
+.palette .empty { padding: var(--space-5) var(--space-4); }
+
+/* ---- Pairing page: one card, centred; what a device sees before it is paired ---- */
+.pair { min-height: 100%; justify-content: center; padding-block: var(--space-4); }
+.pair > .card { max-width: calc(var(--thread-w) / 2); }
+.pair .field { margin-block: var(--space-3); }
 
 /* ---- Narrow windows, and a phone: the page is also served to other devices ---- */
 @media (max-width: 900px) {
@@ -356,7 +374,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
   main > header { justify-content: flex-start; }
   .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
-  button kbd { display: none; }
+  button kbd, .palette kbd { display: none; }
   /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */
   .composer { flex-wrap: wrap; }
   .composer textarea { order: -1; flex: 1 0 100%; }

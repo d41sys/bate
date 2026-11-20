@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Avatar } from "./Avatar.tsx";
+import { Dialog } from "./Dialog.tsx";
 import { inShell, pickPath, request } from "./service.ts";
 import { MAX_BOTS, findBots, folderName, sent, takenBy } from "./projects.ts";
 import type { Bot, Project, Role } from "./types.ts";
@@ -19,7 +20,6 @@ export function Choose({ folder, set, fail }: { folder: boolean; set: (path: str
  * from a searchable list or made now. With a `project`: only the bots. Nothing is sent until Make/Save.
  */
 export function ProjectDialog({ project, bots, done, close }: { project?: Project; bots: Bot[]; done: (p: Project) => void; close: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   /** The project, once it exists: a second try after a failure goes on with this one, never makes another. */
   const [made, setMade] = useState(project);
   const [folder, setFolder] = useState("");
@@ -35,15 +35,6 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
   const name = typed || folderName(folder);
   const full = ticked.length + fresh.length >= MAX_BOTS;
   const raised = fresh.flatMap((f) => (f.role?.raises ?? []).map((k) => `${f.name}: ${k}`));
-
-  useEffect(() => {
-    // Focus goes to the first field, and comes back where it was when the dialog closes.
-    const before = document.activeElement as HTMLElement | null;
-    const d = dialog.current!;
-    if (!d.open) d.showModal();
-    d.querySelector("input")?.focus();
-    return () => before?.focus();
-  }, []);
 
   const addName = () => {
     if (!botName.trim() || full) return;
@@ -89,7 +80,7 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
   };
 
   return (
-    <dialog ref={dialog} className="sheet" aria-labelledby="dialog-title" onClose={close} onClick={(e) => e.target === e.currentTarget && close()}>
+    <Dialog labelledby="dialog-title" close={close}>
       <form className="fields stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <h2 id="dialog-title">{project ? `Bots in ${project.name}` : made ? `Bots for ${made.name}` : "New project"}</h2>
         {!made && (
@@ -170,6 +161,6 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
           <button type="button" onClick={close}>Cancel</button>
         </div>
       </form>
-    </dialog>
+    </Dialog>
   );
 }

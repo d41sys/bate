@@ -1,5 +1,6 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Avatar } from "./Avatar.tsx";
+import { Dialog } from "./Dialog.tsx";
 import type { Bot } from "./types.ts";
 
 /** Who or what an add-on goes to, or is taken from: a bot, or a project. */
@@ -35,20 +36,10 @@ export function Sheet(p: {
   go: (ids: string[]) => Promise<{ id: string; error: string }[] | void>;
   close: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const [ticked, setTicked] = useState(p.who?.ticked ?? []);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const ids = p.who?.items.filter((i) => !i.off).map((i) => i.id) ?? [];
-
-  useEffect(() => {
-    // The focus goes in and comes back to the button that opened the sheet.
-    const before = document.activeElement as HTMLElement | null;
-    const d = dialog.current!;
-    if (!d.open) d.showModal();
-    d.querySelector<HTMLElement>("input, textarea, select")?.focus();
-    return () => before?.focus();
-  }, []);
 
   const submit = async () => {
     setBusy(true);
@@ -68,7 +59,7 @@ export function Sheet(p: {
     ) : null;
 
   return (
-    <dialog ref={dialog} className="sheet" aria-labelledby="sheet-title" onClose={p.close} onClick={(e) => e.target === e.currentTarget && p.close()}>
+    <Dialog labelledby="sheet-title" close={p.close}>
       <form className="fields stack" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
         <h2 id="sheet-title">{p.title}</h2>
         {p.about && <p>{p.about}</p>}
@@ -121,6 +112,6 @@ export function Sheet(p: {
           <button type="button" onClick={p.close}>Cancel</button>
         </div>
       </form>
-    </dialog>
+    </Dialog>
   );
 }

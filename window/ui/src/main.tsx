@@ -102,8 +102,8 @@ function App() {
   const [unread, setUnread] = useState<string[]>([]);
   // The chat in front of the person, for the frames that come in later.
   const looking = view?.page === "bot" && view.tab === "chat" ? view.id : undefined;
-  const now = useRef({ looking, bots, palette, shown });
-  now.current = { looking, bots, palette, shown };
+  const now = useRef({ looking, bots, shown });
+  now.current = { looking, bots, shown };
 
   useEffect(() => {
     if (!inShell || !state) return setNote(null);
@@ -209,20 +209,18 @@ function App() {
   const act = useRef(actions);
   act.current = actions;
   useEffect(() => {
-    // Behind the palette or an open <dialog> nothing else runs.
-    const covered = () => now.current.palette || !!document.querySelector("dialog[open]");
+    // Behind an open <dialog> (the palette is one) nothing else runs.
+    const covered = () => !!document.querySelector("dialog[open]");
     const run = (id: string) => covered() || act.current[id]?.();
     // This is the first of the window's keydown listeners (the chat's come later), so Esc is spent
     // here before the chat's own sees it: a <dialog> keeps it (the browser closes the dialog, and
-    // nothing behind reacts), then the palette closes, then the pane, and only then does Esc deny a
-    // question or stop the bot.
+    // nothing behind reacts), then the pane, and only then does Esc deny a question or stop the bot.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (document.querySelector("dialog[open]")) return e.stopImmediatePropagation();
-        if (e.defaultPrevented || e.isComposing || !(now.current.palette || now.current.shown)) return;
+        if (e.defaultPrevented || e.isComposing || !now.current.shown) return;
         e.preventDefault();
-        if (now.current.palette) setPalette(false);
-        else setShown(undefined);
+        setShown(undefined);
         return;
       }
       const id = shortcut(e);
@@ -262,23 +260,23 @@ function App() {
     return () => removeEventListener("bate-open-bot", onOpen);
   }, []);
   const choices: Choice[] = [
-    ...projects.map((p) => ({ label: p.name, hint: "project", run: () => openProject(p.id!) })),
-    ...bots.map((b) => ({ label: `${b.avatar ? `${b.avatar} ` : ""}${b.name}`, hint: "bot", run: () => openBot(b.id) })),
-    ...(bot && view?.page === "bot" ? botTabs.map((t) => ({ label: BOT_TABS[t], hint: bot.name, run: () => openBot(bot.id, t) })) : []),
-    ...(project ? projectTabs.map((t) => ({ label: PROJECT_TABS[t], hint: project.name, run: () => openProject(project.id!, t) })) : []),
-    ...(bot ? [{ label: "Find in chat", hint: "⌘F", run: actions.find }] : []),
-    { label: "New bot", hint: "⌘N", run: actions["new-bot"] },
-    { label: "New project", run: actions["new-project"] },
-    ...(Object.keys(ADDON_TABS) as AddonTab[]).map((t) => ({ label: `Add-ons: ${ADDON_TABS[t]}`, run: () => setView({ page: "addons", tab: t }) })),
-    { label: "App settings", hint: "⌘,", run: actions.settings },
+    ...projects.map((p) => ({ group: "Projects", label: p.name, run: () => openProject(p.id!) })),
+    ...bots.map((b) => ({ group: "Bots", label: b.name, bot: b, run: () => openBot(b.id) })),
+    ...(bot && view?.page === "bot" ? botTabs.map((t) => ({ group: `In ${bot.name}`, label: BOT_TABS[t], run: () => openBot(bot.id, t) })) : []),
+    ...(project ? projectTabs.map((t) => ({ group: `In ${project.name}`, label: PROJECT_TABS[t], run: () => openProject(project.id!, t) })) : []),
+    ...(bot ? [{ group: "Commands", label: "Find in chat", keys: "⌘F", run: actions.find }] : []),
+    { group: "Commands", label: "New bot", keys: "⌘N", run: actions["new-bot"] },
+    { group: "Commands", label: "New project", run: actions["new-project"] },
+    { group: "Commands", label: "New window", keys: "⇧⌘N", run: actions["new-window"] },
+    ...(Object.keys(ADDON_TABS) as AddonTab[]).map((t) => ({ group: "Pages", label: `Add-ons: ${ADDON_TABS[t]}`, run: () => setView({ page: "addons", tab: t }) })),
+    { group: "Pages", label: "App settings", keys: "⌘,", run: actions.settings },
     ...(inShell
       ? [
-          { label: "ChatGPT sign-in", hint: "app settings", run: () => settingsAt("chatgpt") },
-          { label: "Devices", hint: "app settings", run: () => settingsAt("devices") },
+          { group: "Pages", label: "ChatGPT sign-in", run: () => settingsAt("chatgpt") },
+          { group: "Pages", label: "Devices", run: () => settingsAt("devices") },
         ]
       : []),
-    { label: "Updates", hint: "app settings", run: () => settingsAt("updates") },
-    { label: "New window", hint: "⇧⌘N", run: actions["new-window"] },
+    { group: "Pages", label: "Updates", run: () => settingsAt("updates") },
   ];
 
   const lists = sidebar(bots, projects);
