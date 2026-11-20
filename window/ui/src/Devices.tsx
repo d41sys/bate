@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CodeBlock, Problem, Toggle, useSaves } from "./Form.tsx";
 import { request } from "./service.ts";
 
 type Lan = {
@@ -15,8 +16,8 @@ export function Devices() {
   const [lan, setLan] = useState<Lan>();
   const [code, setCode] = useState<{ code: string; expiresAt: number }>();
   const [now, setNow] = useState(Date.now());
-  const [error, setError] = useState("");
-  const load = () => request<Lan>("lan_status").then(setLan, (e: Error) => setError(e.message));
+  const { run, fail, saved, error } = useSaves();
+  const load = () => request<Lan>("lan_status").then(setLan, (e: Error) => fail("load", e.message));
   useEffect(() => {
     void load();
     // Devices pair from their side: look again now and then, and count the code down.
@@ -26,58 +27,68 @@ export function Devices() {
     }, 2000);
     return () => clearInterval(timer);
   }, []);
-  const run = (p: Promise<unknown>) => p.then(() => (setError(""), load()), (e: Error) => setError(e.message));
+  const act = (key: string, p: Promise<unknown>) => run(key, p).then(load);
   const left = code ? Math.max(0, Math.round((code.expiresAt - now) / 1000)) : 0;
+  const urls = (list: string[]) => list.map((u) => <code key={u}>{u} </code>);
 
   return (
     <>
       <h2 id="settings-devices" tabIndex={-1}>Other devices</h2>
-      <label>
-        <input
-          type="checkbox"
-          checked={lan?.on ?? false}
-          disabled={!lan}
-          onChange={(e) => {
+      {!lan && !error("load") && <p className="note">Loading…</p>}
+      <Problem text={error("load")} />
+      {lan && (
+        <Toggle
+          label="Let devices on this network open Bate"
+          checked={lan.on}
+          saved={saved("lan")}
+          error={error("lan")}
+          onChange={(on) => {
             setCode(undefined);
-            run(request("set_lan", { on: e.target.checked }));
+            act("lan", request("set_lan", { on }));
           }}
-        />{" "}
-        Let devices on this network open Bate
-      </label>
+        />
+      )}
+      {lan && !lan.on && <p className="note">Other devices cannot open Bate. Turn the switch on to pair one.</p>}
       {lan?.on && (
         <>
-          <p>Open on the other device: {lan.urls?.length ? lan.urls.map((u) => <code key={u}>{u} </code>) : "this Mac is on no network"}</p>
-          {!!lan.tailscaleUrls?.length && (
-            <p>
-              Or from anywhere on your Tailscale network: {lan.tailscaleUrls.map((u) => <code key={u}>{u} </code>)}
-            </p>
-          )}
-          <p>
-            The browser will warn about the certificate. Go on only if it shows this fingerprint (SHA-256):{" "}
-            <code>{lan.fingerprint}</code>
-          </p>
+          <p>Open on the other device: {lan.urls?.length ? urls(lan.urls) : "this Mac is on no network"}</p>
+          {!!lan.tailscaleUrls?.length && <p>Or from anywhere on your Tailscale network: {urls(lan.tailscaleUrls)}</p>}
+          <p>The browser will warn about the certificate. Go on only if it shows this fingerprint (SHA-256):</p>
+          {lan.fingerprint && <CodeBlock key={lan.fingerprint} text={lan.fingerprint} label="the fingerprint" />}
+          <h3>Pairing</h3>
           {code && left > 0 ? (
-            <p>
-              Pairing code <strong className="code">{code.code}</strong> ({Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} left)
-            </p>
+            <>
+              <p>Enter this code on the other device ({Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} left):</p>
+              <CodeBlock key={code.code} text={code.code} label="the pairing code" />
+            </>
           ) : (
-            <button onClick={() => request<{ code: string; expiresAt: number }>("pair_device").then(setCode, (e: Error) => setError(e.message))}>
-              Pair a device
-            </button>
+            <div className="actions">
+              <button onClick={() => run("pair", request<{ code: string; expiresAt: number }>("pair_device").then(setCode))}>Pair a device</button>
+            </div>
           )}
+          <Problem text={error("pair")} />
         </>
       )}
+      {lan?.on && !lan.devices.length && <p className="note">No device is paired yet.</p>}
       {!!lan?.devices.length && (
-        <ul className="rows">
-          {lan.devices.map((d) => (
-            <li key={d.id}>
-              {d.name} <small>last seen {new Date(d.lastSeen).toLocaleString()}</small>{" "}
-              <button onClick={() => run(request("remove_device", { device: d.id }))}>Remove</button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <h3>Paired devices</h3>
+          <ul className="rows">
+            {lan.devices.map((d) => (
+              <li key={d.id}>
+                <div className="what">
+                  <strong>{d.name}</strong>
+                  <small>Last seen {new Date(d.lastSeen).toLocaleString()}</small>
+                </div>
+                <div className="actions">
+                  <button className="small" aria-label={`Remove ${d.name}`} onClick={() => act("remove", request("remove_device", { device: d.id }))}>Remove</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <Problem text={error("remove")} />
+        </>
       )}
-      {error && <p className="error" role="alert">{error}</p>}
     </>
   );
 }

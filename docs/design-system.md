@@ -44,7 +44,7 @@ All in `window/ui/src/tokens.css`.
 | Type | `--font-ui`, `--font-mono`, `--size-small` 12, `--size-ui` 14, `--size-title` 17, `--size-head` 22, `--leading` 20, `--weight-strong` 600 | |
 | Space | `--space-1` to `--space-5`: 4, 8, 12, 16, 24 | A 4 px grid |
 | Shape | `--radius-s` 6, `--radius-m` 10, `--radius-l` 14, `--radius-bubble` 18, `--radius-pill` | Code and small things; fields and rows; cards and dialogs; messages; buttons |
-| Size | `--control-h` 32, `--control-h-small` 24, `--row-h` 44, `--avatar` 28, `--side-w` 280, `--thread-w` 720, `--popover-w` 300, `--chip-w` 180, `--tip-w` 240 | |
+| Size | `--control-h` 32, `--control-h-small` 24, `--row-h` 44, `--avatar` 28, `--side-w` 280, `--thread-w` 720, `--popover-w` 300, `--nav-w` 180, `--chip-w` 180, `--tip-w` 240 | |
 | Motion | `--fast` 100 ms, `--ease` | Hover, press, showing a message's actions |
 
 ## Components
@@ -55,7 +55,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 |---|---|---|---|
 | Button | `<button>`; `primary`, `danger`, `ghost`, `small`, `round` (one sign, needs `aria-label`). A form's submit button is primary by itself | hover, pressed, disabled, focus | yes |
 | Text field, select | `<input>`, `<textarea>`, `<select>`; in a form, `.fields` with one `<label>` per control; `.fields.stack` puts each label over its control, as wide as the column | placeholder, disabled, focus | yes |
-| Form row with hint, error and "Saved" | | | #155 |
+| Form row with hint, error and "Saved" | `Field` (`Form.tsx`): a `.field` with a `<label>` over one control, a `<small>` hint and a `<small class="error" role="alert">` under it; the control takes the label's id and describes itself by both. `Toggle` is the same row for a switch. After a save `<Saved>` puts "Saved" beside the control (a `role="status"` region that is always there) until the next edit; an error stays by the control that caused it (`useSaves` keeps both by key). Each form ends with `.actions`: Save, then "Saved" | placeholder, hint, error, saved, disabled with the reason in the hint, focus | yes |
 | Switch | `<label><input type="checkbox" role="switch"> Analyst</label>`: a checkbox that takes effect at once, with its words in the label. A checkbox that is only part of a form stays a checkbox | on, off, disabled, focus | yes |
 | Tabs | `role="tablist"` with `role="tab"` buttons (`id="tab-…"`, `aria-controls="tabpanel"`); only the chosen tab is in the Tab order. Left and right arrows choose the neighbour and wrap, Home and End the first and last. What the tab shows is inside `<div role="tabpanel" id="tabpanel" aria-labelledby="tab-…">`, which adds no box (`display: contents`) | chosen, hover, focus | yes |
 | List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one. A row to tick is `<label class="row">` with a checkbox before the avatar; one that cannot be ticked is dimmed and its `<small>` says why | hover, chosen, disabled, focus | yes |
@@ -73,6 +73,9 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Starter card | `<ul class="starters">` of `<li><button type="button" aria-pressed>`, each with an `.avatar` and a `.label` (a name and a `<small>` line). A card fills a form; it is not a link | hover, chosen (`aria-pressed`), focus | yes |
 | Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
 | Install sheet | `Sheet.tsx`, the one sheet for installing, adding to more bots and removing an add-on: `<h2>`, what it is, **Made by**, **What it is**, **What it may do**, a line saying what is downloaded ("Nothing is downloaded until you agree"), then a `<fieldset>` of tickable rows (`Install for`, `Switch it on in`, `Remove from`) with Select all, and `.actions`: the confirm button (`danger` for a removal) first, Cancel after. A failure for one bot stays in the sheet, with that bot still ticked | | yes |
+| Confirm dialog | `Confirm.tsx`, a Dialog with a title, one sentence saying what happens, and `.actions` with the `danger` confirm button first and Cancel after. Cancel holds the focus, so that Enter does not do it; a failure stays in the dialog | busy, error | yes (a bot's Delete) |
+| Code block | `CodeBlock` (`Form.tsx`): `.codeblock` with the text in a `<pre>` and a small **Copy** button. Where the clipboard is not offered (a page served over plain http) the text is selected for ⌘C and the line says so | copied | yes (pairing codes, the certificate's fingerprint) |
+| Settings of the app | `.settings`: a `<nav aria-label="Settings sections">` of `.row.plain` buttons (`aria-current` on the chosen one) and the chosen section beside it, whose `<h2 id="settings-…" tabindex="-1">` is where ⌘K puts the focus. Under 640 px the list is a strip across the top | chosen, loading | yes |
 | Dialog | `<dialog class="sheet">` opened with `showModal()` and holding one `<form class="fields stack">`: the dialog is the scrim, the form the panel, `.actions` stay at the foot while it scrolls. Focus goes to the first field, stays inside, and returns to the button that opened it; Esc or a click on the scrim closes it. A form of fields only (a routine's) is `Sheet.tsx` with its fields as children | scrolling | yes (Projects, Add-ons, Routines); the palette is its own overlay, #159 |
 | Tooltip | `data-tip="…"` on a control; the text is shown above it for a pointer or the keyboard, and not on a touch screen, so it never holds the only copy of something a button must say | hover, focus | yes |
 | Button with a hint key | `<button>Stop <kbd>Esc</kbd></button>`: the key that does the same, hidden under 640 px | | yes |
@@ -117,7 +120,7 @@ Widths the page must work at: 1200 px and more, 900 px, and 390 px (a phone, sin
 - **Keyboard.** Every action is a `<button>` or a link, so Tab reaches it and Enter or Space runs it. A message's actions are hidden until the message is pointed at, and shown when the keyboard is inside it or when the device has no pointer. Shortcuts go by the physical key (`shortcut` in `nav.ts`), never fire while an input method composes text, and do nothing behind the palette or an open `<dialog>`: ⌘K palette, ⌘F find in the chat, ⌘N new bot, ⇧⌘N new window, ⌘, the app's settings (also a menu item), ⌘[ and ⌘] (or ⌃⇧Tab and ⌃Tab) the previous and next bot in the sidebar's order, ⌘1 to ⌘9 the first nine bots in that order. They work with focus in the chat's or the Room's message box too (the Room's `@` list leaves ⌃Tab alone). Esc goes to the nearest thing that is open: an open `<dialog>` (the browser closes it; nothing behind reacts), a popover, the find bar, the Room's `@` list or the palette, then the side pane, and only then does it deny a question that offers Deny, or stop the bot. ⌘Enter allows a question once.
 - **Colour is never the only sign.** A working bot says "Working…" under its name; an error is words; a round button has an `aria-label` and a tooltip.
 - **Motion.** Nothing longer than 100 ms, and none when the system asks for reduced motion.
-- **Text size.** Sizes are in px today, so the page does not follow a larger text setting. Not done; it comes with the settings (#155).
+- **Text size.** Sizes are in px today, so the page does not follow a larger text setting. Not done.
 
 Not checked: a screen reader, and the page in the system web view of macOS 13.
 
@@ -141,7 +144,7 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 | 4 | Room: the composer, Markdown replies, who works, who answers with no `@` | #148, done |
 | 5 | Projects | #147, done |
 | 6 | Add-ons: skills, connectors, workplaces | #150, done |
-| 7 | Settings, the bot's and the app's | #155 |
+| 7 | Settings, the bot's and the app's | #155, done |
 | 8 | Routines | #156, done |
 | 9 | Memory | #157, done |
 | 10 | Side pane and surfaces | #158, done |
