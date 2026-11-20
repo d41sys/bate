@@ -62,6 +62,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Badge | `.badge` at the end of a `.row`: a dot and one word. Plain (warn) for what needs the person: "Needs you". `.badge.quiet` for what does not: "New reply". A working bot has no badge: its `.label` has a `<small>Working…</small>` line. In a routine's row it is how its last run ended: "Sent" quiet; "Failed", "Missed", "Stopped" (the step limit) plain, with the reason in a `<small class="error">` | | yes |
 | Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots; the Bots heading sits in a `.heading` with its `+` beside it, a `round ghost` button), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
 | Rows of settings or items | `<ul class="rows">`. An add-on's row is a `.what` (a `<strong>` name, a `.note`, then a `<small>` per fact) and `.actions` of `small` buttons at the end; a nested `<ul class="rows">` under it has one line for each bot or project that has it, with a switch. A routine's row adds a switch and its `.badge` after the name, and a `<details>` ("Past runs") whose lines are a nested `<ul class="rows">` | | yes |
+| Note, opened in place | A row of `.rows` (the note's first line as `<strong>`, its file name and size in the `<small>`) with **Open** and **Delete**. **Open** shows a `<form class="fields stack">` in the same `li`, with Save and, once the text differs, Discard changes and a line saying it is unsaved; "Saved" shows after a save and an error under the form. Unsaved text is kept when the tab or the bot changes and comes back with a line saying so; while it is unsaved no other note opens | closed, open, unsaved, saved, error | yes |
 | Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |
 | Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it; in the Room a `<small class="from">` above it says who wrote it (avatar, name, "to" whom, time) | past (greyed), marked (a search hit) | yes |
 | Step of a turn | `.item.tool` with `<details>` | running, done, failed | yes |
@@ -140,6 +141,6 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 | 6 | Add-ons: skills, connectors, workplaces | #150, done |
 | 7 | Settings, the bot's and the app's | #155 |
 | 8 | Routines | #156, done |
-| 9 | Memory | #157 |
+| 9 | Memory | #157, done |
 | 10 | Side pane and surfaces | #158 |
 | 11 | Palette, pairing page, messages between bots | #159 |
