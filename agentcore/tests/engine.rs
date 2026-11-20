@@ -1,8 +1,8 @@
 //! `agentcore` over stdin/stdout against a mock OpenAI-compatible model server.
 
 use proto::connectors::{Connector, Transport};
-use proto::groups::Peer;
 use proto::permissions::Kind;
+use proto::projects::Peer;
 use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, TurnEnd};
 use serde_json::{Value, json};
 use std::fs;
@@ -1814,10 +1814,10 @@ fn a_bot_messages_another_bot_after_asking_and_gets_its_reply_or_why_there_is_no
     let requests = model.requests();
     let system = requests[0]["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system.contains("- Scout\n- Boss (leads your group)"),
+        system.contains("- Scout\n- Boss (leads your project)"),
         "{system}"
     );
-    assert!(!system.contains("You lead a group"));
+    assert!(!system.contains("You lead this project"));
     assert!(offered(&requests[0]).contains(&"message_bot"));
     let result =
         |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
@@ -1849,7 +1849,7 @@ fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
     assert!(!requests[0].to_string().contains("other bots"));
     let system = requests[1]["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system.contains("You lead a group") && system.contains("cannot stop or redirect"),
+        system.contains("You lead this project") && system.contains("cannot stop or redirect"),
         "{system}"
     );
 }

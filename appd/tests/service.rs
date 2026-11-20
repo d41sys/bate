@@ -1413,12 +1413,8 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
         "bad_request"
     );
 
-    // Deleting: the bot is gone from Bate, its group with it, its folder in the Trash.
+    // Deleting: the bot is gone from Bate, its folder in the Trash.
     fs::write(home.join("bots").join(&a).join("kept.txt"), "mine").unwrap();
-    w.ok(
-        "set_group",
-        json!({"group": {"name": "Pair", "lead": b, "members": [a]}}),
-    );
     // A Trash that takes nothing: the bot stays as it was.
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o500)).unwrap();
     assert_eq!(
@@ -1431,20 +1427,12 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
         fs::read_to_string(home.join("bots").join(&a).join("kept.txt")).unwrap(),
         "mine"
     );
-    assert_eq!(
-        w.ok("list_groups", json!({}))["groups"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
     w.ok("delete_bot", json!({"bot": a}));
     assert_eq!(ids(&mut w), std::slice::from_ref(&b));
     assert_eq!(
         refused(&mut w, "open_bot", json!({"bot": a})),
         "no_such_bot"
     );
-    assert_eq!(w.ok("list_groups", json!({}))["groups"], json!([]));
     assert!(!home.join("bots").join(&a).exists());
     let trashed = bin.join(format!("Bea {a}"));
     assert_eq!(
@@ -2775,12 +2763,9 @@ fn bots_of_a_project_work_in_its_folder_and_message_each_other() {
         "invalid_project"
     );
 
-    // The bots of a project message each other with no group. With no folder named, the
-    // project keeps the one it has.
-    assert_eq!(
-        tell(&mut w, "n6"),
-        "error: that bot is not in a group or a project with you"
-    );
+    // The bots of a project message each other. With no folder named, the project keeps the
+    // one it has.
+    assert_eq!(tell(&mut w, "n6"), "error: that bot is not in your project");
     let mut both = made.clone();
     both["bots"] = json!([a, b]);
     both["folder"] = json!("");
@@ -3397,8 +3382,8 @@ fn a_local_webhook_starts_a_routine_and_passes_the_requests_data_on() {
 }
 
 #[test]
-fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
-    let home = home("groups");
+fn bots_in_a_project_message_each_other_and_the_reply_comes_back() {
+    let home = home("peers");
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
     let (a, b, c) = (w.create_bot(), w.create_bot(), w.create_bot());
@@ -3420,35 +3405,25 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
     let prompts_of = |bot: &str| {
         fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
     };
-    let refused = |w: &mut Window, command: &str, args: Value| {
-        let id = w.send(command, args);
-        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    let peers_of = |bot: &str| {
+        let log = fs::read_to_string(home.join("bots").join(bot).join("peers.log"));
+        log.unwrap_or_default()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_owned()
     };
 
-    // No group: no bot to message.
+    // In no project: no bot to message, and the engine is told it has no peers.
     let said = tell(&mut w, "n1", &b, "anyone there");
-    assert_eq!(
-        said,
-        "error: that bot is not in a group or a project with you"
-    );
+    assert_eq!(said, "error: that bot is not in your project");
     assert!(prompts_of(&b).is_empty());
-
-    let group = json!({"name": " Team ", "lead": a, "members": [b, b]});
-    let id = w.send("set_group", json!({"group": group}));
-    w.wait_for(|f| f["type"] == "groups_changed");
-    let made =
-        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["data"]["group"].clone();
-    assert_eq!(made["name"], "Team");
-    assert_eq!(made["members"], json!([b]));
-    assert_eq!(w.ok("list_groups", json!({}))["groups"], json!([made]));
-    // The running engine hears who it may message now, and that it leads.
-    let peers_log = home.join("bots").join(&a).join("peers.log");
-    eventually("the lead's peers", || {
-        let log = fs::read_to_string(&peers_log).unwrap_or_default();
-        let last = log.lines().last().unwrap_or_default();
-        last.contains(&format!("\"id\":\"{b}\"")) && last.contains("\"leads\":true")
+    eventually("the lone bot's peers", || {
+        peers_of(&a).contains("\"peers\":[]") && peers_of(&a).contains("\"leads\":false")
     });
 
+    let project = json!({"name": "Team", "bots": [a, b], "lead": a});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
     // The message arrives as a prompt that says who it is from; what the bot says is the reply.
     let said = tell(&mut w, "n2", &b, "count the tests");
     assert_eq!(said, "text: hello");
@@ -3459,6 +3434,17 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
     );
     assert!(got.contains("\\ncount the tests\""), "{got}");
     assert!(got.contains("\"nonce\":\"mail-"), "{got}");
+
+    // Each engine, started under the project, hears who it may message; the lead hears that it leads.
+    eventually("the lead's peers", || {
+        let last = peers_of(&a);
+        last.contains(&format!("\"id\":\"{b}\",")) && last.contains("\"leads\":true")
+    });
+    eventually("the other bot's peers", || {
+        let last = peers_of(&b);
+        last.contains(&format!("\"id\":\"{a}\",\"name\":\"Ada\",\"lead\":true"))
+            && last.contains("\"leads\":false")
+    });
 
     // A bot does one thing at a time: the lead's message waits, and the lead goes on.
     w.ok(
@@ -3482,41 +3468,58 @@ fn bots_in_a_group_message_each_other_and_the_reply_comes_back() {
         "error: its engine stopped"
     );
 
-    // Outside the group nobody is reached.
+    // Outside the project nobody is reached.
     assert_eq!(
         tell(&mut w, "n4", &c, "hi"),
-        "error: that bot is not in a group or a project with you"
+        "error: that bot is not in your project"
     );
 
-    // What a group cannot be.
-    for bad in [
-        json!({"name": "x", "lead": a, "members": [a]}),
-        json!({"name": "x", "lead": a, "members": []}),
-        json!({"name": "x", "lead": a, "members": ["nobody"]}),
-        json!({"name": " ", "lead": a, "members": [b]}),
-    ] {
-        assert_eq!(
-            refused(&mut w, "set_group", json!({"group": bad})),
-            "invalid_group",
-            "{bad}"
-        );
-    }
-    let gone = json!({"id": "00000000", "name": "x", "lead": a, "members": [b]});
-    assert_eq!(
-        refused(&mut w, "set_group", json!({"group": gone})),
-        "no_such_group"
-    );
-
-    // Without the group the two are strangers again.
-    w.ok("delete_group", json!({"groupId": made["id"]}));
-    assert_eq!(
-        refused(&mut w, "delete_group", json!({"groupId": made["id"]})),
-        "no_such_group"
-    );
+    // Without the project the two are strangers again.
+    w.ok("delete_project", json!({"projectId": made["id"]}));
     assert_eq!(
         tell(&mut w, "n5", &b, "still there"),
-        "error: that bot is not in a group or a project with you"
+        "error: that bot is not in your project"
     );
+}
+
+#[test]
+fn a_database_with_groups_loses_the_table_and_keeps_its_bots() {
+    let home = home("groups-dropped");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    drop(w);
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TABLE groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
+         INSERT INTO groups VALUES ('g1', '{{\"name\":\"Pair\",\"lead\":\"{a}\",\"members\":[\"{b}\"]}}');"
+    ))
+    .unwrap();
+    drop(db);
+
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let listed = w.ok("list_bots", json!({}))["bots"].clone();
+    let mut ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|bot| bot["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    let mut both = [a.as_str(), b.as_str()];
+    both.sort();
+    assert_eq!(ids, both);
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    let left: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'groups'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
 }
 
 /// One HTTP request, sent as written; gives the whole reply.
@@ -6523,8 +6526,8 @@ fn a_message_to_a_busy_bot_waits_in_its_inbox_and_the_answer_comes_as_a_new_mess
     let mut w = Window::connect(&home);
     let (a, b) = (w.create_bot(), w.create_bot());
     w.ok(
-        "set_group",
-        json!({"group": {"name": "Team", "lead": a, "members": [b]}}),
+        "set_project",
+        json!({"project": {"name": "Team", "bots": [a, b], "lead": a}}),
     );
     let prompts_of = |bot: &str| {
         fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
