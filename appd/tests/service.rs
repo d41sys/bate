@@ -5479,6 +5479,41 @@ fn bots_run_on_a_chatgpt_sign_in_that_is_renewed_and_can_be_ended() {
     assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": false}));
 }
 
+#[test]
+fn the_plans_model_list_is_read_with_a_renewed_sign_in_or_says_why_not() {
+    let openai = ChatGpt::start();
+    let home = home("chatgpt-models");
+    let _service = Service::start_with(&home, |c| {
+        c.env("BATE_CHATGPT_AUTH", &openai.base)
+            .env("BATE_CHATGPT_API", format!("{}/v1", openai.base));
+    });
+    let mut w = Window::connect(&home);
+    // The stand-in's first token is at its end at once, and no bot has made a model call.
+    sign_in_chatgpt(&mut w, &openai);
+    assert_eq!(
+        w.ok("list_models", json!({})),
+        json!({"models": ["gpt-test", "gpt-small"]})
+    );
+    let lists = openai.seen("GET /v1/models");
+    assert!(lists[0].contains("| Bearer plan-at-2 |"), "{lists:?}");
+
+    // A sign-in that cannot be renewed: an error, not an empty list.
+    sign_in_chatgpt(&mut w, &openai);
+    openai
+        .ended
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let id = w.send("list_models", json!({}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["code"], "models_failed", "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("sign in again in Settings"),
+        "{reply}"
+    );
+}
+
 /// A fresh install: the user makes a bot and writes to it, having chosen no model.
 #[test]
 fn a_new_bot_says_what_to_set_up_and_answers_on_chatgpt_with_no_model_chosen() {

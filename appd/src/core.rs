@@ -63,7 +63,8 @@ pub enum Msg {
     Models {
         client: u64,
         id: Value,
-        models: Vec<String>,
+        /// `Err`: the ChatGPT plan's list could not be read.
+        models: Result<Vec<String>, String>,
         /// The ChatGPT plan's list, when that is what was read.
         plan: Option<Vec<(String, Option<usize>)>>,
     },
@@ -495,6 +496,12 @@ pub enum ChatGptNews {
     Renewed(String, Result<chatgpt::Saved, chatgpt::Failed>),
 }
 
+/// What is asked of the ChatGPT sign-in: a bot's `token` request, or a window's `list_models`.
+enum PlanAsk {
+    Token { bot: String, request: String },
+    Models { client: u64, id: Value },
+}
+
 /// How long before its end an access token is renewed: a long request does not start on a
 /// token about to end.
 const RENEW_BEFORE_MS: u64 = 180_000;
@@ -520,9 +527,9 @@ pub struct Core {
     update: Updates,
     /// A workplace is being copied and fetched, on a thread of its own: one at a time.
     installing: bool,
-    /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
-    /// renewed; `Some` while a renewal runs, so that there is one at a time.
-    chatgpt_waiting: Option<Vec<(String, String)>>,
+    /// What waits for the ChatGPT sign-in to be renewed; `Some` while a renewal runs, so that
+    /// there is one at a time.
+    chatgpt_waiting: Option<Vec<PlanAsk>>,
     /// The ChatGPT plan's models and their context sizes, as last listed; `None` until the
     /// list was asked for.
     plan_models: Option<Vec<(String, Option<usize>)>>,
@@ -838,10 +845,13 @@ impl Core {
                 models,
                 plan,
             } => {
-                if let Some(plan) = plan.filter(|p| !p.is_empty()) {
+                if let Some(plan) = plan {
                     self.keep_plan_models(plan);
                 }
-                self.reply(client, &id, "list_models", Ok(json!({"models": models})));
+                let models = models
+                    .map(|models| json!({"models": models}))
+                    .map_err(|e| ("models_failed", e));
+                self.reply(client, &id, "list_models", models);
             }
             Msg::PlanModel {
                 bot,
@@ -2135,28 +2145,27 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_models" => {
-                let chatgpt = self.store.chatgpt().map_err(internal)?;
                 let (url, key, _) = self.provider().map_err(internal)?;
-                let (tx, id) = (self.tx.clone(), id.clone());
-                std::thread::spawn(move || {
-                    let (models, plan) = match (chatgpt.filter(chatgpt::Saved::signed_in), url) {
-                        // shortcut: with a token past its end the list is empty until the
-                        // next model call has renewed it.
-                        (Some(saved), _) => {
-                            let plan = chatgpt::models(&chatgpt::api(), &saved.access_token)
-                                .unwrap_or_default();
-                            (plan.iter().map(|(m, _)| m.clone()).collect(), Some(plan))
-                        }
-                        (None, Some(u)) => (fetch_models(&u, key.as_deref()), None),
-                        (None, None) => (Vec::new(), None),
-                    };
-                    let _ = tx.send(Msg::Models {
-                        client,
-                        id,
-                        models,
-                        plan,
-                    });
-                });
+                let chatgpt = self.store.chatgpt().map_err(internal)?;
+                match chatgpt.filter(chatgpt::Saved::signed_in) {
+                    Some(saved) => {
+                        let id = id.clone();
+                        self.ask_chatgpt(PlanAsk::Models { client, id }, saved);
+                    }
+                    None => {
+                        let (tx, id) = (self.tx.clone(), id.clone());
+                        std::thread::spawn(move || {
+                            // A model server need not list its models: none is no error.
+                            let models = url.map(|u| fetch_models(&u, key.as_deref()));
+                            let _ = tx.send(Msg::Models {
+                                client,
+                                id,
+                                models: Ok(models.unwrap_or_default()),
+                                plan: None,
+                            });
+                        });
+                    }
+                }
                 Ok(None)
             }
             "export_report" => {
@@ -4313,23 +4322,48 @@ impl Core {
         self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
     }
 
-    /// Answers a bot's `token` request from the ChatGPT sign-in, renewing it first when
-    /// its access token is at its end.
-    fn chatgpt_token(&mut self, bot: &str, request: String, saved: chatgpt::Saved) {
+    /// Answers `ask` from the ChatGPT sign-in, renewing it first when its access token is at
+    /// its end.
+    fn ask_chatgpt(&mut self, ask: PlanAsk, saved: chatgpt::Saved) {
         if now_ms() + RENEW_BEFORE_MS < saved.expires_ms {
-            return self.send_chatgpt_token(bot, request, Ok(&saved));
+            return self.answer_chatgpt(ask, Ok(&saved));
         }
-        let asked = (bot.to_owned(), request);
         if let Some(waiting) = &mut self.chatgpt_waiting {
-            return waiting.push(asked);
+            return waiting.push(ask);
         }
-        self.chatgpt_waiting = Some(vec![asked]);
+        self.chatgpt_waiting = Some(vec![ask]);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let result = chatgpt::renew(&chatgpt::auth(), &chatgpt::api(), &saved);
             let news = ChatGptNews::Renewed(saved.refresh_token, result);
             let _ = tx.send(Msg::ChatGpt(news));
         });
+    }
+
+    fn answer_chatgpt(&mut self, ask: PlanAsk, saved: Result<&chatgpt::Saved, &str>) {
+        match (ask, saved) {
+            (PlanAsk::Token { bot, request }, saved) => {
+                self.send_chatgpt_token(&bot, request, saved)
+            }
+            (PlanAsk::Models { client, id }, Ok(saved)) => {
+                let (tx, key) = (self.tx.clone(), saved.access_token.clone());
+                std::thread::spawn(move || {
+                    let plan = chatgpt::models(&chatgpt::api(), &key);
+                    let names = |plan: &Vec<(String, Option<usize>)>| {
+                        plan.iter().map(|(model, _)| model.clone()).collect()
+                    };
+                    let _ = tx.send(Msg::Models {
+                        client,
+                        id,
+                        models: plan.as_ref().map(names).map_err(String::clone),
+                        plan: plan.ok(),
+                    });
+                });
+            }
+            (PlanAsk::Models { client, id }, Err(e)) => {
+                self.reply(client, &id, "list_models", Err(("models_failed", e.into())));
+            }
+        }
     }
 
     /// The model `bot`'s engine calls: the one chosen for it, else the environment's.
@@ -4465,8 +4499,8 @@ impl Core {
                         }
                     }
                 };
-                for (bot, request) in waiting {
-                    self.send_chatgpt_token(&bot, request, answer.as_ref().map_err(String::as_str));
+                for ask in waiting {
+                    self.answer_chatgpt(ask, answer.as_ref().map_err(String::as_str));
                 }
             }
         }
@@ -4477,7 +4511,11 @@ impl Core {
             // A ChatGPT sign-in comes before a model server.
             match self.store.chatgpt() {
                 Ok(Some(saved)) if saved.signed_in() => {
-                    return self.chatgpt_token(bot, request.clone(), saved);
+                    let ask = PlanAsk::Token {
+                        bot: bot.to_owned(),
+                        request: request.clone(),
+                    };
+                    return self.ask_chatgpt(ask, saved);
                 }
                 Ok(_) => {}
                 Err(e) => log!("the ChatGPT sign-in cannot be read: {e}"),

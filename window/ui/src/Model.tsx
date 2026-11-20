@@ -10,17 +10,23 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
   const [effort, setEffort] = useState(bot.effort ?? "");
   const [serverModels, setServerModels] = useState<string[]>([]);
   const [error, setError] = useState("");
+  /** Why the model list could not be read. */
+  const [listError, setListError] = useState("");
   const list = useId();
   useEffect(() => {
     setModel(bot.model ?? "");
     setEffort(bot.effort ?? "");
   }, [bot.model, bot.effort]);
+  const loadModels = () =>
+    void request<{ models: string[] }>("list_models").then(
+      (d) => { setServerModels(d.models); setListError(""); },
+      (e: Error) => setListError(e.message),
+    );
   // Again when the sign-in changes: the list is the plan's then, or the model server's.
   useEffect(() => {
-    const load = () => void request<{ models: string[] }>("list_models").then((d) => setServerModels(d.models), () => {});
-    load();
+    loadModels();
     return listen((frame) => {
-      if (frame.type === "chatgpt_changed") load();
+      if (frame.type === "chatgpt_changed") loadModels();
     });
   }, []);
   const [onPlan, setOnPlan] = useState(false);
@@ -65,6 +71,12 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
       </label>
       <button disabled={model.trim() === (bot.model ?? "") && effort === (bot.effort ?? "")}>Use</button>
       {error && <span className="error" role="alert">{error}</span>}
+      {listError && (
+        <span className="error" role="alert">
+          The model list could not be read: {listError}{" "}
+          <button type="button" onClick={loadModels}>Try again</button>
+        </span>
+      )}
       {onPlan && (
         <span>
           Using ChatGPT plan · <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
