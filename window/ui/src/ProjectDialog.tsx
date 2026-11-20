@@ -1,4 +1,5 @@
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Avatar } from "./Avatar.tsx";
 import { inShell, pickPath, request } from "./service.ts";
 import { MAX_BOTS, findBots, folderName, sent, takenBy } from "./projects.ts";
 import type { Bot, Project, Role } from "./types.ts";
@@ -119,7 +120,7 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
                       disabled={!!other || (!ticked.includes(b.id) && full)}
                       onChange={(e) => setTicked(e.target.checked ? [...ticked, b.id] : ticked.filter((id) => id !== b.id))}
                     />
-                    <span className="avatar" aria-hidden="true" style={{ "--tint": b.color || undefined } as CSSProperties}>{b.avatar || [...b.name][0]?.toUpperCase()}</span>
+                    <Avatar bot={b} />
                     <span className="label"><span>{b.name}</span>{other && <small>In {other}: a bot is in one project</small>}</span>
                   </label>
                 </li>
