@@ -2331,13 +2331,12 @@ fn probe(w: &mut Window, bot: &str, nonce: &str, what: &str) -> String {
     said["entry"]["delta"].as_str().unwrap().to_owned()
 }
 
-/// What the engine's network probes wrote to the service log: why one was refused (#162).
+/// The service log of this test's home: the engine's network probes say there why one was
+/// refused, and the service says when an engine stopped (#162).
 fn probes(home: &Path) -> String {
     // The log is written by another thread.
     std::thread::sleep(Duration::from_millis(500));
-    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap_or_default();
-    let said: Vec<&str> = log.lines().filter(|l| l.contains("probe ")).collect();
-    said.join("\n")
+    fs::read_to_string(home.join("logs/appd.log")).unwrap_or_default()
 }
 
 #[test]
