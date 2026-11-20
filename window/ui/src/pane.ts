@@ -11,3 +11,9 @@ export function placePane(want: number, viewport: number): { width: number; over
   if (room < MIN_PANE) return { width: Math.min(Math.max(want, MIN_PANE), viewport * 0.9), overlay: true };
   return { width: Math.min(Math.max(want, MIN_PANE), room), overlay: false };
 }
+
+/** A title split so that its end stays in view when it is cut: `[the start, the last `keep` characters]`. */
+export function cutMiddle(title: string, keep = 14): [string, string] {
+  const chars = [...title];
+  return [chars.slice(0, -keep).join(""), chars.slice(-keep).join("")];
+}

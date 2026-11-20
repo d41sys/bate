@@ -1,15 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { PART, clampOffset, nextOffset, prevOffset, range, visibleNodes } from "./surface.ts";
 import type { Surface, SurfacePart } from "./types.ts";
 
-/** The surfaces a project's program offers, to open one in the pane. */
-export function Surfaces({ projectId, open }: { projectId: string; open: (s: Surface) => void }) {
-  const [list, setList] = useState<Surface[]>([]);
+/** The surfaces a project's program offers, as chips, to open one in the pane (`current`: the one open). */
+export function Surfaces({ projectId, current, open, workplaces }: {
+  projectId: string;
+  current?: string;
+  open: (s: Surface) => void;
+  workplaces: () => void;
+}) {
+  const [list, setList] = useState<Surface[]>();
+  const [error, setError] = useState("");
+  // Bumped to ask again after a failure.
+  const [again, setAgain] = useState(0);
   useEffect(() => {
     let live = true;
-    // Not an error to show: the project says why its program is not running.
-    const load = () => request<{ surfaces: Surface[] }>("list_surfaces", { projectId }).then((d) => live && setList(d.surfaces), () => live && setList([]));
+    const load = () =>
+      request<{ surfaces: Surface[] }>("list_surfaces", { projectId }).then(
+        (d) => {
+          if (!live) return;
+          setError("");
+          setList(d.surfaces);
+        },
+        (e: Error) => live && setError(e.message),
+      );
     load();
     const off = listen((f) => {
       if ((f.type === "surfaces_changed" && f.projectId === projectId) || f.type === "projects_changed") load();
@@ -18,15 +33,42 @@ export function Surfaces({ projectId, open }: { projectId: string; open: (s: Sur
       live = false;
       off();
     };
-  }, [projectId]);
-  if (!list.length) return <p className="note">The project's program offers no surfaces.</p>;
+  }, [projectId, again]);
+  if (error)
+    return (
+      <div className="empty">
+        <p className="error" role="alert">{error}</p>
+        <button type="button" onClick={() => setAgain((n) => n + 1)}>Try again</button>
+      </div>
+    );
+  if (!list) return <p className="note">Loading…</p>;
+  if (!list.length)
+    return (
+      <div className="empty">
+        <p>No surfaces yet. A workplace's program fills them.</p>
+        <button type="button" onClick={workplaces}>See workplaces</button>
+      </div>
+    );
   return (
-    <div className="surfaces" role="group" aria-label="Surfaces of the project">
-      <span className="note">Surfaces:</span>
-      {list.map((s) => (
-        <button key={s.uri} type="button" title={s.description} onClick={() => open(s)}>{s.name} ({s.kind})</button>
-      ))}
-    </div>
+    <>
+      <p className="note">What the project's program shows. Choose one to open it in the side pane.</p>
+      <div className="surfaces" role="group" aria-label="Surfaces of the project">
+        {list.map((s) => (
+          <button
+            key={s.uri}
+            type="button"
+            className="chip"
+            aria-pressed={s.uri === current}
+            aria-label={s.description ? `${s.name}, ${s.kind}. ${s.description}` : `${s.name}, ${s.kind}`}
+            data-tip={s.description}
+            onClick={() => open(s)}
+          >
+            <span>{s.name}</span>
+            <small>{s.kind}</small>
+          </button>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -76,7 +118,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
   const act = (tool: string, target?: string, text?: string) =>
     request<{ ok: boolean; text: string }>("act_surface", { projectId, uri, tool, target, text }).then(
       (r) => {
-        setResult(r);
+        setResult({ ok: r.ok, text: r.text || (!r.ok ? "That did not work." : text === undefined ? "Done." : "Saved.") });
         setAgain((n) => n + 1);
       },
       (e: Error) => setResult({ ok: false, text: e.message }),
@@ -101,7 +143,15 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
       : {};
   const pickable = part?.select || part?.open;
 
-  if (!part) return <p className={error ? "error" : "note"} role={error ? "alert" : undefined}>{error || "Loading…"}</p>;
+  if (!part)
+    return error ? (
+      <div className="empty">
+        <p className="error" role="alert">{error}</p>
+        <button type="button" onClick={() => setAgain((n) => n + 1)}>Try again</button>
+      </div>
+    ) : (
+      <p className="note">Loading…</p>
+    );
   const move = (to: number | undefined) => to !== undefined && setOffset(to);
   return (
     <div className="surface">
@@ -109,6 +159,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
         {part.actions.map((a) =>
           a.input ? (
             <form
+              className="find"
               key={a.tool}
               onSubmit={(e) => {
                 e.preventDefault();
@@ -124,14 +175,24 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
             <button key={a.tool} type="button" onClick={() => void act(a.tool, selected)}>{a.label}</button>
           ),
         )}
-        <span className="note">{range(part)}</span>
-        <button type="button" disabled={prevOffset(part) === undefined} onClick={() => move(prevOffset(part))}>Previous</button>
-        <button type="button" disabled={nextOffset(part) === undefined} onClick={() => move(nextOffset(part))}>Next</button>
+        {(prevOffset(part) !== undefined || nextOffset(part) !== undefined) && (
+          <div className="pager">
+            <small>{range(part)}</small>
+            <button type="button" className="small" disabled={prevOffset(part) === undefined} onClick={() => move(prevOffset(part))}>Previous</button>
+            <button type="button" className="small" disabled={nextOffset(part) === undefined} onClick={() => move(nextOffset(part))}>Next</button>
+          </div>
+        )}
       </div>
       {error && <p className="error" role="alert">{error}</p>}
-      {result && <p className={result.ok ? "note" : "error"} role="status">{result.text || (result.ok ? "Done." : "That did not work.")}</p>}
+      {result && <p className={result.ok ? "note" : "error"} role="status">{result.text}</p>}
       <div className="body">
-        {part.kind === "table" && (
+        {part.total === 0 && (
+          <div className="empty">
+            <p>Nothing here yet.</p>
+            <button type="button" className="small" onClick={() => setAgain((n) => n + 1)}>Read again</button>
+          </div>
+        )}
+        {part.total > 0 && part.kind === "table" && (
           <table>
             <thead>
               <tr>{part.columns.map((c, i) => <th key={i}>{c}</th>)}</tr>
@@ -151,7 +212,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
             </tbody>
           </table>
         )}
-        {part.kind === "tree" && (
+        {part.total > 0 && part.kind === "tree" && (
           <ul role="tree" className="tree">
             {visibleNodes(part.nodes, collapsed).map(({ index, hasChildren }) => {
               const n = part.nodes[index];
@@ -163,14 +224,14 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
                   aria-expanded={hasChildren ? !collapsed.has(n.id) : undefined}
                   aria-selected={pickable ? n.id === selected : undefined}
                   tabIndex={pickable ? 0 : undefined}
-                  style={{ paddingLeft: `${n.depth * 1.25}rem` }}
+                  style={{ "--depth": n.depth } as CSSProperties}
                   onClick={pickable ? () => choose(n.id) : undefined}
                   {...opener(n.id)}
                 >
                   {hasChildren ? (
                     <button
                       type="button"
-                      className="file"
+                      className="ghost small"
                       aria-label={`${collapsed.has(n.id) ? "Expand" : "Collapse"} ${n.label}`}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -184,7 +245,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
                       {collapsed.has(n.id) ? "▸" : "▾"}
                     </button>
                   ) : (
-                    <span className="gap" />
+                    <span className="gap" aria-hidden="true" />
                   )}
                   {n.label}
                 </li>
@@ -192,7 +253,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
             })}
           </ul>
         )}
-        {part.kind === "code" && (
+        {part.total > 0 && part.kind === "code" && (
           <pre className="code" aria-label={part.language ? `Code, ${part.language}` : "Code"}>
             {part.lines.map((line, i) => {
               // A line is chosen by its number, as a person reads it.

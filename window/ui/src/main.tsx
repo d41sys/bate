@@ -410,7 +410,9 @@ function App() {
               <Surfaces
                 key={`surfaces-${project.id}-${connection}`}
                 projectId={project.id!}
+                current={watched?.projectId === project.id ? watched?.uri : undefined}
                 open={(s) => setShown({ projectId: project.id!, uri: s.uri, name: s.name })}
+                workplaces={() => setView({ page: "addons", tab: "workplaces" })}
               />
             )}
             {view.tab === "memory" && <Memory key={`${project.id}-${connection}`} target={{ projectId: project.id! }} title="Project notes" />}
