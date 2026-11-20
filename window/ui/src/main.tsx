@@ -1,4 +1,4 @@
-import { type CSSProperties, StrictMode, useEffect, useRef, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { inShell, listen, newWindow, notifyWaiting, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
 import { Pair } from "./Devices.tsx";
@@ -17,6 +17,7 @@ import { DeleteProject, ProjectBots, ProjectForm, Projects } from "./Projects.ts
 import { Workplaces } from "./Workplaces.tsx";
 import { Channels } from "./Channels.tsx";
 import { Room } from "./Room.tsx";
+import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings } from "./AppSettings.tsx";
 import { endsUnseen, neighbour, rowState, sidebar, waitingCount } from "./nav.ts";
@@ -52,13 +53,6 @@ function Tabs<T extends string>({ ids, names, tab, set }: { ids: T[]; names: Rec
     </div>
   );
 }
-
-/** The bot's sign, or its first letter, on its colour. The name is always beside it. */
-const Avatar = ({ bot }: { bot: Bot }) => (
-  <span className="avatar" aria-hidden="true" style={{ "--tint": bot.color || undefined } as CSSProperties}>
-    {bot.avatar || [...bot.name][0]?.toUpperCase()}
-  </span>
-);
 
 function App() {
   const [state, setState] = useState("Connecting to the service…");
@@ -347,7 +341,7 @@ function App() {
               <div className="who"><h1>{project.name}</h1></div>
               <Tabs ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)} />
             </header>
-            {view.tab === "room" && <Room key={`${project.id}-${connection}`} project={{ id: project.id!, name: project.name }} bots={bots} />}
+            {view.tab === "room" && <Room key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {view.tab === "bots" && <ProjectBots key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {/* Surfaces open in the window's pane only, not on other devices. */}
             {view.tab === "surfaces" && inShell && (

@@ -9178,6 +9178,62 @@ fn a_project_room_sends_by_name_to_the_lead_by_default_waits_for_a_busy_bot_and_
     );
 }
 
+#[test]
+fn a_room_message_for_a_chosen_bot_is_not_read_for_a_name() {
+    let home = home("room-to");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = |w: &mut Window, name: &str| {
+        w.ok("create_bot", json!({"name": name}))["bot"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (ann, lee, cy) = (
+        bot(&mut w, "Ann"),
+        bot(&mut w, "Ann Lee"),
+        bot(&mut w, "Cy"),
+    );
+    let pid = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [ann, lee]}}),
+    )["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let room = |w: &mut Window| w.ok("list_room", json!({"projectId": pid}))["room"].clone();
+
+    // The person picked Ann and wrote "Lee look": it is Ann's, and says what was written.
+    let sent = w.ok(
+        "send_room",
+        json!({"projectId": pid, "to": ann, "text": "Lee look"}),
+    );
+    assert_eq!(sent["to"], json!(ann));
+    // The same words as a typed name are Ann Lee's: that is why a pick is sent as `to`.
+    let sent = w.ok(
+        "send_room",
+        json!({"projectId": pid, "text": "@Ann Lee look"}),
+    );
+    assert_eq!(sent["to"], json!(lee));
+    eventually("both replies", || {
+        room(&mut w).as_array().unwrap().len() == 4
+    });
+    let r = room(&mut w);
+    assert_eq!(
+        (&r[0]["to"], &r[0]["text"]),
+        (&json!(ann), &json!("Lee look"))
+    );
+
+    // A bot that is not in the project is refused, and nothing is added to the room.
+    let id = w.send(
+        "send_room",
+        json!({"projectId": pid, "to": cy, "text": "hi"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "no_such_bot");
+    assert_eq!(room(&mut w).as_array().unwrap().len(), 4);
+}
+
 /// The archive that `workplaces/pack.py` makes of `folder`.
 fn packed(folder: &Path, name: &str) -> Vec<u8> {
     let out = std::env::temp_dir().join(format!("appd-{}-pack-{name}.tar.gz", std::process::id()));

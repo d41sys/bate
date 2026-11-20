@@ -1592,7 +1592,11 @@ impl Core {
             "send_room" => {
                 let project = self.project_by_id(f)?;
                 let id = project.id.clone().unwrap_or_default();
-                let (to, text) = self.room_target(&project, str_field(f, "text")?)?;
+                let named = match f.get("to") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(str_field(f, "to")?),
+                };
+                let (to, text) = self.room_target(&project, named, str_field(f, "text")?)?;
                 let queued = self.store.queue(&to).map_err(internal)?;
                 if queued.len() >= QUEUE_MAX {
                     return Err((
@@ -3839,16 +3843,22 @@ impl Core {
             .ok_or(("no_such_project", "no such project".into()))
     }
 
-    /// Who a room message is for, and what it says: `@name text` goes to that bot of the
-    /// project (the longest name that fits, any case), anything else to the project's lead.
+    /// Who a room message is for, and what it says: the bot `to` names, else `@name text` goes to
+    /// that bot of the project (the longest name that fits, any case), anything else to the lead.
     fn room_target<'a>(
         &self,
         project: &Project,
+        to: Option<&str>,
         text: &'a str,
     ) -> Result<(String, &'a str), Refusal> {
         let text = text.trim();
         let mut target = None;
-        if let Some(rest) = text.strip_prefix('@') {
+        if let Some(id) = to {
+            if !project.bots.iter().any(|b| b == id) {
+                return Err(("no_such_bot", "that bot is not in this project".into()));
+            }
+            target = Some((id.to_owned(), text));
+        } else if let Some(rest) = text.strip_prefix('@') {
             let named = project.bots.iter().filter_map(|id| {
                 let name = self.name_of(id);
                 let head = rest
