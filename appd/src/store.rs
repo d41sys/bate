@@ -1437,6 +1437,15 @@ impl Store {
             .collect()
     }
 
+    /// Whether a question is open in any conversation of the bot.
+    pub fn has_questions(&self, bot: &str) -> Result<bool> {
+        self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM questions q JOIN conversations c ON c.id = q.conversation WHERE c.bot = ?1)",
+            [bot],
+            |r| r.get(0),
+        )
+    }
+
     /// The bot's engine stopped: none of its conversations has an open question.
     pub fn clear_questions(&self, bot: &str) -> Result<()> {
         self.0

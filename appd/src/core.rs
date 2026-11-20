@@ -2403,7 +2403,7 @@ impl Core {
         row["running"] = json!(running.is_some());
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         // An open question: the bot waits for the person's answer, which is not thinking.
-        row["waiting"] = json!(self.store.questions(bot).is_ok_and(|q| !q.is_empty()));
+        row["waiting"] = json!(self.store.has_questions(bot).unwrap_or(false));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
         row["network"] = json!(self.store.network(bot).unwrap_or(None));
