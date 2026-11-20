@@ -53,10 +53,14 @@ const PAUSE: Duration = Duration::from_secs(3);
 /// registered for this very build is left alone.
 ///
 /// macOS cannot start the login item of an app that changed (an update replaces the whole app)
-/// until it is registered again, and goes on calling it `enabled`; a registration made too soon
-/// after the change is lost too (measured: the first one fails, a second one, a few seconds
-/// later, takes). So the build is remembered in `run/login-item`, a registration is followed by
-/// a look at whether launchd really started the service, and it is made again if not.
+/// until it is registered again, and goes on calling it `enabled`. The first registration
+/// after the change fails too (measured on ad-hoc signed builds, #167): macOS still holds the
+/// record of the build it registered before, refuses the new program its start under it
+/// ("Launch Constraint Violation", with a crash report), and has made a new record by the time
+/// the registration is made again, which then takes. Taking the old job out of launchd first,
+/// and waiting until it is gone, changes nothing. So the build is remembered in
+/// `run/login-item`, a registration is followed by a look at whether launchd really started
+/// the service, and it is made again if not.
 pub fn start(app: &Path) -> io::Result<String> {
     if !paths::in_applications(app) {
         return Err(io::Error::other(format!(
