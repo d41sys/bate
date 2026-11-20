@@ -7,8 +7,12 @@ A personal bot app for the Mac: a host where a person and bots work on projects 
 ### People and bots
 
 **Bot**:
-A named assistant with its own instructions, memory, permissions and conversation.
+A named assistant with its own instructions, memory, permissions and conversation. It is in no project or in one.
 _Avoid_: agent, assistant
+
+**Conversation**:
+A bot's one exchange with the person: the prompts, the replies and what the bot did, in order.
+_Avoid_: chat, thread, session
 
 **Engine**:
 The program that runs a bot's turns: Bate's own, or an installed agent.
@@ -19,7 +23,7 @@ Another maker's agent program used as a bot's engine.
 _Avoid_: external agent, CLI
 
 **Group**:
-Bots that may message each other, one of them the lead.
+Bots that may message each other, one of them the lead, whatever projects they are in. Not a place: it has no folder and no room.
 _Avoid_: team
 
 **Role**:
@@ -29,7 +33,7 @@ _Avoid_: persona, template
 ### Work
 
 **Project**:
-One piece of work: a folder that a person and the project's bots share, with shared instructions and memory. A bot is in at most one project.
+One piece of work: a folder that a person and the project's bots share, with shared instructions and memory. It is not part of a bot; a bot is in at most one project.
 _Avoid_: workspace
 
 **Room**:
@@ -54,3 +58,11 @@ A folder of instructions that a bot reads when a task calls for it.
 **Routine**:
 A prompt that a bot runs on a schedule or when something triggers it.
 _Avoid_: job, automation, cron
+
+### The app
+
+**Channel**:
+A messaging service outside Bate, such as Telegram or Discord, through which people write to one bot.
+
+**Device**:
+Another computer or phone, paired with this Mac, that uses Bate through its page.
