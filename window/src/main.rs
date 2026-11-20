@@ -1,6 +1,6 @@
 //! The window: a small shell around the macOS system web view. The page is the interface;
 //! the shell gives each window two calls (send a line to the service, receive the next line)
-//! and a few more (open another window, start dictation, the Dock badge, a notification),
+//! and a few more (open another window, start dictation, a folder or file panel, the Dock badge, a notification),
 //! keeps it on its own local files, and adds the menus and the menu-bar icon.
 
 mod bridge;
@@ -10,7 +10,7 @@ mod service;
 
 use bridge::Bridge;
 use objc2::{MainThreadMarker, sel};
-use objc2_app_kit::NSApplication;
+use objc2_app_kit::{NSApplication, NSModalResponseOK, NSOpenPanel};
 use service::Note;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,6 +107,25 @@ fn start_dictation() -> Result<(), String> {
     } else {
         Err("Dictation is not available here: turn it on in System Settings, Keyboard".into())
     }
+}
+
+/// The system's own open panel for a folder (`folder`) or a file: the path chosen, or `None`
+/// when the person cancels. The page asks; nothing is read from the path here.
+#[tauri::command]
+fn pick_path(folder: bool) -> Result<Option<String>, String> {
+    // Commands that are not `async` run on the main thread, where AppKit may be used.
+    let main = MainThreadMarker::new().ok_or("not on the main thread")?;
+    let panel = NSOpenPanel::openPanel(main);
+    panel.setCanChooseDirectories(folder);
+    panel.setCanChooseFiles(!folder);
+    panel.setAllowsMultipleSelection(false);
+    if panel.runModal() != NSModalResponseOK {
+        return Ok(None);
+    }
+    Ok(panel
+        .URL()
+        .and_then(|url| url.path())
+        .map(|p| p.to_string()))
 }
 
 /// Opens one more window on the page.
@@ -241,7 +260,8 @@ fn main() {
             start_dictation,
             service_note,
             set_badge,
-            notify_waiting
+            notify_waiting,
+            pick_path
         ])
         .register_uri_scheme_protocol("botfile", |_, request| {
             files::serve(&proto::paths::home(), &request.uri().to_string())

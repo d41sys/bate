@@ -58,7 +58,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Form row with hint, error and "Saved" | | | #155 |
 | Switch | | on, off, disabled | #155 |
 | Tabs | `role="tablist"` with `role="tab"` buttons | chosen, hover, focus | yes; arrow keys #151 |
-| List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one | hover, chosen, focus | yes |
+| List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one. A row to tick is `<label class="row">` with a checkbox before the avatar; one that cannot be ticked is dimmed and its `<small>` says why | hover, chosen, disabled, focus | yes |
 | Badge | `.badge` at the end of a `.row`: a dot and one word. Plain (warn) for what needs the person: "Needs you". `.badge.quiet` for what does not: "New reply". A working bot has no badge: its `.label` has a `<small>Working…</small>` line | | yes |
 | Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots; the Bots heading sits in a `.heading` with its `+` beside it, a `round ghost` button), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
 | Rows of settings or items | `<ul class="rows">` | | yes |
@@ -71,12 +71,13 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Banner | `.banner`, `.banner.error`; `.banner.actions` when it offers a button (`<button class="small">`), as the line "Daisy waits for your answer" does | | yes |
 | Starter card | `<ul class="starters">` of `<li><button type="button" aria-pressed>`, each with an `.avatar` and a `.label` (a name and a `<small>` line). A card fills a form; it is not a link | hover, chosen (`aria-pressed`), focus | yes |
 | Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
-| Dialog | scrim, panel, focus kept inside, Esc closes | | palette only; #159 |
+| Dialog | `<dialog class="sheet">` opened with `showModal()` and holding one `<form class="fields stack">`: the dialog is the scrim, the form the panel, `.actions` stay at the foot while it scrolls. Focus goes to the first field, stays inside, and returns to the button that opened it; Esc or a click on the scrim closes it | scrolling | yes (Projects); the palette is its own overlay, #159 |
 | Tooltip | `data-tip="…"` on a control; the text is shown above it for a pointer or the keyboard, and not on a touch screen, so it never holds the only copy of something a button must say | hover, focus | yes |
 | Button with a hint key | `<button>Stop <kbd>Esc</kbd></button>`: the key that does the same, hidden under 640 px | | yes |
 | Popover, select with search | `.menu` around a chip (`<button class="small chip" aria-expanded>`) and a `.popover` (`role="dialog"`) holding a search `<input>`, a `<ul role="listbox">` of `.row.plain` buttons and other controls. A click outside or Esc closes it; Esc is taken there and does not reach the page | closed, open, chosen row, no match | yes |
 | Conversation switcher | `<div class="conversations">` above the chat: a `.menu` with a chip (the conversation's name) whose `.popover.below` lists the bot's conversations as `.row.plain` buttons with a date under the name (or "Working…"), `.actions` of small ghost buttons beside each (Pin, Rename, Archive), and a "Show archived" checkbox; a "New conversation" button after it. A rename is a one-field form in the row | closed, open, chosen row, working, pinned, archived, renaming | yes |
-| Toast, folder picker | | | #150 |
+| Folder picker | A text box for the whole path with a `Choose folder…` (or `Choose file…`) button beside it, in a `.field` (a label over a `.find`). The button asks the shell for the system's open panel and fills the box; it is only there in Bate's own window, so the typed path is the way on another device | | yes |
+| Toast | | | #150 |
 | Loading | A `.note` saying what is loading; no spinner | | yes |
 
 ## Layout
@@ -134,7 +135,7 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 | 2 | Composer and question card | #146, #145 |
 | 3 | First run: the sign-in screen, "Set up later", the first bot, the new-bot form with starter cards | #143, done |
 | 4 | Room: the composer, Markdown replies, who works, who answers with no `@` | #148, done |
-| 5 | Projects | #147 |
+| 5 | Projects | #147, done |
 | 6 | Add-ons: skills, connectors, workplaces | #150 |
 | 7 | Settings, the bot's and the app's | #155 |
 | 8 | Routines | #156 |

@@ -67,6 +67,13 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 /* ---- Rows of a list, actions side by side, a card ---- */
 .rows { list-style: none; padding: 0; margin: var(--space-2) 0; }
 .rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+/* A label over a box and the buttons beside it (a path and its Choose button). */
+.field > label { margin-bottom: var(--space-1); }
+.field > small { display: block; margin-top: var(--space-1); }
+/* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
+.fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
+.row:has(input:disabled) { opacity: .6; cursor: default; }
+.rows li:has(> label.row) { padding: 0; }
 .actions, .tools, .find, .surfaces { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .tools, .find, .surfaces { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
@@ -88,6 +95,14 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 /* Deny sits apart from the two that allow. */
 .question .actions { margin-top: var(--space-2); }
 .question .actions .danger { margin-left: auto; }
+
+/* ---- Dialog: a modal sheet. The dialog is the scrim itself: ::backdrop cannot read the tokens in older WebKit ---- */
+.sheet { max-width: none; max-height: none; width: 100%; height: 100%; margin: 0; padding: var(--space-4); border: 0; background: var(--scrim); color: var(--fg); }
+.sheet[open] { display: flex; }
+.sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-4); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
+.sheet .rows li button { margin-left: auto; }
+/* The buttons stay in sight while a long dialog scrolls. */
+.sheet .actions { position: sticky; bottom: 0; padding: var(--space-2) 0 var(--space-4); background: var(--bg-raised); }
 
 /* ---- Avatar: the bot's colour as a tint and a ring, so the sign on it always reads ---- */
 .avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: 50%; flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: var(--fg); background: color-mix(in srgb, var(--tint, var(--fg-muted)) 22%, var(--bg-raised)); box-shadow: inset 0 0 0 1.5px var(--tint, var(--border-strong)); }
