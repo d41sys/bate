@@ -98,24 +98,34 @@ export function Pair({ onPair }: { onPair: (code: string, name: string) => Promi
   const [code, setCode] = useState("");
   const [name, setName] = useState(navigator.platform || "This device");
   const [error, setError] = useState("");
+  const [state, setState] = useState<"" | "busy" | "paired">("");
   return (
-    <form
-      className="fields pair"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onPair(code.trim(), name.trim()).catch((err: Error) => setError(err.message));
-      }}
-    >
-      <h1>Pair with Bate</h1>
-      <p>In Bate on your Mac, open Settings and choose “Pair a device”.</p>
-      <label>
-        Code <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" autoFocus required />
-      </label>
-      <label>
-        This device's name <input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
-      </label>
-      <button type="submit">Pair</button>
-      {error && <p className="error" role="alert">{error}</p>}
-    </form>
+    <main className="pair">
+      <form
+        className="card fields stack"
+        aria-labelledby="pair-title"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setState("busy");
+          setError("");
+          onPair(code.trim(), name.trim()).then(() => setState("paired"), (err: Error) => (setError(err.message), setState("")));
+        }}
+      >
+        <h1 id="pair-title">Pair with Bate</h1>
+        <p>On your Mac, open Bate's settings and choose “Pair a device”. It shows a 6-digit code: type it here.</p>
+        <div className="field">
+          <label htmlFor="pair-code">Code</label>
+          <input id="pair-code" value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" autoFocus required />
+          {error && <p className="error" role="alert">{error}</p>}
+        </div>
+        <div className="field">
+          <label htmlFor="pair-name">This device's name</label>
+          <input id="pair-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={60} />
+          <small>Bate lists it in its settings, so you can remove the device later.</small>
+        </div>
+        {state === "paired" && <p className="note" role="status">Paired. Opening Bate…</p>}
+        <button disabled={state !== ""}>{state === "busy" ? "Pairing…" : "Pair"}</button>
+      </form>
+    </main>
   );
 }

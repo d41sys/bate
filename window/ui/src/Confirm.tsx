@@ -1,24 +1,20 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Dialog } from "./Dialog.tsx";
 
 /**
  * A question before something that cannot be undone, in a dialog. Cancel holds the focus, so that a stray
  * Enter does not do it. `go` runs on the confirm button; a failure stays in the dialog, a success closes it.
  */
 export function Confirm({ title, children, action, go, close }: { title: string; children: ReactNode; action: string; go: () => Promise<unknown>; close: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // The dialog opens first (its effect runs before this one), and Cancel takes the focus it gave.
   useEffect(() => {
-    // The focus goes in and comes back to the button that opened the dialog.
-    const before = document.activeElement as HTMLElement | null;
-    const d = dialog.current!;
-    if (!d.open) d.showModal();
     cancel.current?.focus();
-    return () => before?.focus();
   }, []);
   return (
-    <dialog ref={dialog} className="sheet" aria-labelledby="confirm-title" onClose={close} onClick={(e) => e.target === e.currentTarget && close()}>
+    <Dialog labelledby="confirm-title" close={close}>
       <form
         className="fields stack"
         onSubmit={(e) => {
@@ -35,6 +31,6 @@ export function Confirm({ title, children, action, go, close }: { title: string;
           <button type="button" ref={cancel} onClick={close}>Cancel</button>
         </div>
       </form>
-    </dialog>
+    </Dialog>
   );
 }

@@ -1,41 +1,57 @@
 import { useEffect, useState } from "react";
+import { when } from "./conversations.ts";
 import { listen, request } from "./service.ts";
 import type { Bot } from "./types.ts";
 
 type Mail = { seq: number; from: string; to: string; text: string; state: "waiting" | "working" | "answered"; answer?: string; error?: string; atMs: number };
+const STATE = { waiting: "Waiting", working: "In progress", answered: "Answered" };
+/** Answered with a reason instead of an answer: the other bot failed, or the message was cancelled. */
+const failed = (m: Mail) => m.state === "answered" && !!m.error;
 
-const STATE = { waiting: "waiting", working: "in progress", answered: "answered" };
-
-/** Messages between this bot and other bots: what waits, what is in progress, what was answered. */
+/** Messages between this bot and other bots: what waits, what is in progress, what was answered or got no answer. */
 export function Mail({ bot, bots }: { bot: string; bots: Bot[] }) {
   const [mail, setMail] = useState<Mail[]>([]);
-  const [error, setError] = useState("");
+  // `seq` is the message whose Cancel failed; none, for the list itself.
+  const [error, setError] = useState<{ seq?: number; text: string }>();
 
   useEffect(() => {
-    const load = () => request<{ mail: Mail[] }>("list_mail", { bot }).then((d) => setMail(d.mail), (e) => setError(e.message));
+    const load = () => request<{ mail: Mail[] }>("list_mail", { bot }).then((d) => setMail(d.mail), (e: Error) => setError({ text: e.message }));
     load();
     return listen((frame) => {
       if (frame.type === "mail_changed") load();
     });
   }, [bot]);
 
+  // No messages, no line: most bots never write to another.
   if (!mail.length && !error) return null;
   const name = (id: string) => bots.find((b) => b.id === id)?.name ?? "(deleted bot)";
-  const cancel = (seq: number) => request("cancel_mail", { seq }).then(() => setError(""), (e: Error) => setError(e.message));
+  const cancel = (seq: number) => request("cancel_mail", { seq }).then(() => setError(undefined), (e: Error) => setError({ seq, text: e.message }));
+  const open = mail.filter((m) => m.state !== "answered").length;
 
   return (
-    <details className="mail">
-      <summary>Messages with other bots ({mail.filter((m) => m.state !== "answered").length} open)</summary>
-      <ol>
-        {mail.map((m) => (
-          <li key={m.seq}>
-            {m.from === bot ? `To ${name(m.to)}` : `From ${name(m.from)}`} · {STATE[m.state]}: {m.text.slice(0, 200)}
-            {m.state === "answered" && <span className="note"> → {m.error ? `no answer: ${m.error}` : (m.answer ?? "").slice(0, 200)}</span>}
-            {m.state === "waiting" && <button type="button" onClick={() => cancel(m.seq)}>Cancel</button>}
-          </li>
-        ))}
-      </ol>
-      {error && <p className="error" role="alert">{error}</p>}
+    <details className="banner mail">
+      <summary>Messages with other bots · {open ? `${open} open` : "none open"}</summary>
+      <ul className="rows">
+        {mail.map((m) => {
+          const title = m.from === bot ? `To ${name(m.to)}` : `From ${name(m.from)}`;
+          return (
+            <li key={m.seq}>
+              <div className="what">
+                <strong>{title}</strong>
+                <span className="note"> · {when(m.atMs)}</span>
+                <div>{m.text.slice(0, 200)}</div>
+                {m.state === "answered" && (failed(m) ? <small className="error">No answer: {m.error}</small> : <small>Answer: {(m.answer ?? "").slice(0, 200)}</small>)}
+                {error?.seq === m.seq && <small className="error" role="alert">{error.text}</small>}
+              </div>
+              <div className="actions">
+                <span className={failed(m) ? "badge" : "badge quiet"}>{failed(m) ? "No answer" : STATE[m.state]}</span>
+                {m.state === "waiting" && <button type="button" className="small" aria-label={`Cancel: ${title}`} onClick={() => cancel(m.seq)}>Cancel</button>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {error && error.seq === undefined && <p className="error" role="alert">{error.text}</p>}
     </details>
   );
 }
