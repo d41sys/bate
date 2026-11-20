@@ -528,42 +528,59 @@ fn save(devices: &[Device]) -> Result<(), String> {
         .map_err(|e| format!("devices not saved: {e}"))
 }
 
+/// Whether the TLS library takes this private key. `/usr/bin/openssl` (LibreSSL) writes the
+/// private number without its leading zero byte, about one key in 256, and such a key is refused.
+fn usable(pem: &str) -> bool {
+    PrivateKeyDer::from_pem_slice(pem.as_bytes())
+        .is_ok_and(|key| rustls::crypto::ring::sign::any_supported_type(&key).is_ok())
+}
+
 /// The certificate (made on first use, kept in `lan/`) and its SHA-256 fingerprint. It is made
-/// again when `names` (what it must cover) are not what it was made for. The private key is made
-/// beside it, then moved into the Keychain (`lan.key`) and its file removed; a key file an older
-/// version left is moved the same way.
+/// again when `names` (what it must cover) are not what it was made for, or its key is not
+/// [`usable`]. The private key is made beside it, then moved into the Keychain (`lan.key`) and its
+/// file removed; a key file an older version left is moved the same way.
 fn tls(names: &str) -> io::Result<(ServerConfig, String)> {
     const ACCOUNT: &str = "lan.key";
     let kc = io::Error::other;
     let (cert, key) = (dir().join("cert.pem"), dir().join("key.pem"));
     let made_for = dir().join("cert.names");
+    let kept = match fs::read_to_string(&key) {
+        Ok(pem) => Some(pem),
+        Err(_) => keychain::get(ACCOUNT).map_err(kc)?,
+    };
     if !cert.exists()
-        || !(key.exists() || keychain::get(ACCOUNT).map_err(kc)?.is_some())
+        || !kept.is_some_and(|pem| usable(&pem))
         || fs::read_to_string(&made_for).ok().as_deref() != Some(names)
     {
-        let made = std::process::Command::new("/usr/bin/openssl")
-            .args([
-                "req",
-                "-x509",
-                "-newkey",
-                "ec",
-                "-pkeyopt",
-                "ec_paramgen_curve:prime256v1",
-            ])
-            // A named curve: LibreSSL writes the curve out in full otherwise, which TLS libraries refuse.
-            .args(["-pkeyopt", "ec_param_enc:named_curve"])
-            .args(["-nodes", "-days", "3650", "-subj", "/CN=Bate"])
-            .arg("-addext")
-            .arg(format!("subjectAltName={names}"))
-            .arg("-keyout")
-            .arg(&key)
-            .arg("-out")
-            .arg(&cert)
-            .output()?;
-        if !made.status.success() {
-            return Err(io::Error::other(
-                String::from_utf8_lossy(&made.stderr).trim().to_owned(),
-            ));
+        // A few tries: an unusable key eight times running is not chance, and is reported below.
+        for _ in 0..8 {
+            let made = std::process::Command::new("/usr/bin/openssl")
+                .args([
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "ec",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:prime256v1",
+                ])
+                // A named curve: LibreSSL writes the curve out in full otherwise, which TLS libraries refuse.
+                .args(["-pkeyopt", "ec_param_enc:named_curve"])
+                .args(["-nodes", "-days", "3650", "-subj", "/CN=Bate"])
+                .arg("-addext")
+                .arg(format!("subjectAltName={names}"))
+                .arg("-keyout")
+                .arg(&key)
+                .arg("-out")
+                .arg(&cert)
+                .output()?;
+            if !made.status.success() {
+                return Err(io::Error::other(
+                    String::from_utf8_lossy(&made.stderr).trim().to_owned(),
+                ));
+            }
+            if usable(&fs::read_to_string(&key)?) {
+                break;
+            }
         }
         fs::write(&made_for, names)?;
     }

@@ -1778,6 +1778,28 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
 }
 
 #[test]
+fn a_key_the_tls_library_refuses_is_made_again() {
+    let home = home("lan-key");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0");
+    });
+    let mut w = Window::connect(&home);
+    let first = w.ok("set_lan", json!({"on": true}));
+    w.ok("set_lan", json!({"on": false}));
+    // Not a key: it stands in for one the TLS library refuses, left where an older version
+    // left its key.
+    fs::write(
+        home.join("lan/key.pem"),
+        "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let second = w.ok("set_lan", json!({"on": true}));
+    assert_ne!(second["fingerprint"], first["fingerprint"]);
+    let (code, _, _) = Device::new(second["port"].as_u64().unwrap()).call("GET", "/", "", false);
+    assert!(code == 200 || code == 503, "{code}");
+}
+
+#[test]
 fn search_finds_words_in_prompts_and_whole_replies_of_one_bot_or_all() {
     let home = home("search");
     let _service = Service::start(&home);
