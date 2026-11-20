@@ -31,7 +31,9 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, desktop, egress, oauth, project_server, surfaces, workplaces};
+use crate::{
+    apple, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
+};
 use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
@@ -84,11 +86,20 @@ pub enum Msg {
         done: u64,
         total: u64,
     },
-    /// A workplace is copied and fetched, or why not; `id` is the `install_workplace` request.
+    /// A workplace is copied and fetched, or why not; `id` is the request, an
+    /// `install_workplace` or an `install_catalog`.
     WorkplacePrepared {
         client: u64,
         id: Value,
+        command: &'static str,
         result: Result<workplaces::Prepared, Refusal>,
+    },
+    /// The answer to a request that waited for the network: the catalog read, or why not.
+    Replied {
+        client: u64,
+        id: Value,
+        command: &'static str,
+        result: Result<Value, Refusal>,
     },
     /// News from the reader of a bot's channel; `reader` says which reader.
     Channel {
@@ -869,7 +880,18 @@ impl Core {
             Msg::WorkplaceProgress { name, done, total } => self.broadcast(
                 &json!({"type": "workplace_progress", "name": name, "done": done, "total": total}),
             ),
-            Msg::WorkplacePrepared { client, id, result } => {
+            Msg::Replied {
+                client,
+                id,
+                command,
+                result,
+            } => self.reply(client, &id, command, result),
+            Msg::WorkplacePrepared {
+                client,
+                id,
+                command,
+                result,
+            } => {
                 self.installing = false;
                 let result = result.and_then(|prepared| {
                     let used = self.workplaces_in_use().map_err(internal)?;
@@ -878,7 +900,7 @@ impl Core {
                     self.broadcast(&json!({"type": "workplaces_changed"}));
                     Ok(json!({"workplace": workplaces::inspect(&row, Vec::new())}))
                 });
-                self.reply(client, &id, "install_workplace", result);
+                self.reply(client, &id, command, result);
             }
             Msg::Channel {
                 bot,
@@ -953,6 +975,59 @@ impl Core {
                 }
             }
         }
+    }
+
+    /// Answers a request with what `work` gives, which waits for the network: on a thread of its
+    /// own, so that the service goes on meanwhile.
+    fn reply_later(
+        &self,
+        client: u64,
+        id: &Value,
+        command: &'static str,
+        work: impl FnOnce() -> Result<Value, Refusal> + Send + 'static,
+    ) {
+        let (tx, id) = (self.tx.clone(), id.clone());
+        thread::spawn(move || {
+            let result = work();
+            let _ = tx.send(Msg::Replied {
+                client,
+                id,
+                command,
+                result,
+            });
+        });
+    }
+
+    /// Runs `prepare`, the slow part of installing a workplace, on a thread of its own: one at a
+    /// time. Answered by `WorkplacePrepared`; `workplace_progress` frames come meanwhile.
+    fn install(
+        &mut self,
+        client: u64,
+        id: &Value,
+        command: &'static str,
+        prepare: impl FnOnce(&mut dyn FnMut(&str, u64, u64)) -> Result<workplaces::Prepared, Refusal>
+        + Send
+        + 'static,
+    ) -> Result<(), Refusal> {
+        if self.installing {
+            return Err(("busy", "a workplace is being installed: wait for it".into()));
+        }
+        self.installing = true;
+        let (tx, id) = (self.tx.clone(), id.clone());
+        thread::spawn(move || {
+            let progress = tx.clone();
+            let result = prepare(&mut |name, done, total| {
+                let name = name.to_owned();
+                let _ = progress.send(Msg::WorkplaceProgress { name, done, total });
+            });
+            let _ = tx.send(Msg::WorkplacePrepared {
+                client,
+                id,
+                command,
+                result,
+            });
+        });
+        Ok(())
     }
 
     fn reply(&mut self, client: u64, id: &Value, command: &str, result: Result<Value, Refusal>) {
@@ -1333,37 +1408,75 @@ impl Core {
                 })))
             }
             "install_workplace" => {
-                if self.installing {
-                    return Err(("busy", "a workplace is being installed: wait for it".into()));
-                }
                 let source = std::path::PathBuf::from(str_field(f, "path")?);
                 let fetch = f.get("download").and_then(Value::as_bool).unwrap_or(false);
                 let used = self.workplaces_in_use().map_err(internal)?;
-                self.installing = true;
-                // Answered by `WorkplacePrepared`. Slow: the folder is copied, files fetched.
-                let tx = self.tx.clone();
-                let (client, id) = (client, id.clone());
-                thread::spawn(move || {
-                    let progress = tx.clone();
-                    let result = workplaces::prepare(
-                        &source,
-                        fetch,
-                        |name| used.iter().any(|u| u == name),
-                        &mut |name, done, total| {
-                            let name = name.to_owned();
-                            let _ = progress.send(Msg::WorkplaceProgress { name, done, total });
-                        },
-                    );
-                    let _ = tx.send(Msg::WorkplacePrepared { client, id, result });
+                self.install(client, id, "install_workplace", move |report| {
+                    workplaces::prepare(&source, fetch, |n| used.iter().any(|u| u == n), report)
+                })?;
+                Ok(None)
+            }
+            "list_catalog" => {
+                let installed = self.store.workplaces().map_err(internal)?;
+                self.reply_later(client, id, "list_catalog", move || {
+                    let entries = catalog::list()?;
+                    Ok(json!({"catalog": catalog::listed(&entries, &installed)}))
                 });
+                Ok(None)
+            }
+            "preview_catalog" => {
+                let name = str_field(f, "name")?.to_owned();
+                let old = match self.store.workplace(&name).map_err(internal)? {
+                    Some(row) => workplaces::inspect(&row, Vec::new()).manifest,
+                    None => None,
+                };
+                self.reply_later(client, id, "preview_catalog", move || {
+                    let entry = catalog::entry(&name)?;
+                    catalog::unpacked(&entry, |_, manifest| {
+                        Ok(json!({
+                            "entry": entry,
+                            "manifest": manifest,
+                            "downloadBytes": manifest.download_bytes(),
+                            "hosts": manifest.hosts(),
+                            "newly": catalog::newly(&manifest, old.as_ref()),
+                        }))
+                    })
+                });
+                Ok(None)
+            }
+            "install_catalog" => {
+                let name = str_field(f, "name")?.to_owned();
+                // The hash of the entry the person was shown: what is installed is that archive.
+                let shown = str_field(f, "sha256")?.to_owned();
+                let fetch = f.get("download").and_then(Value::as_bool).unwrap_or(false);
+                let used = self.workplaces_in_use().map_err(internal)?;
+                if used.contains(&name) {
+                    return Err(workplaces::in_use_refusal(&name));
+                }
+                self.install(client, id, "install_catalog", move |report| {
+                    let entry = catalog::entry(&name)?;
+                    if entry.sha256 != shown {
+                        return Err((
+                            "catalog_changed",
+                            format!("the catalog now lists another {name} than the one shown: look at it again"),
+                        ));
+                    }
+                    let mut prepared = catalog::unpacked(&entry, |folder, _| {
+                        workplaces::prepare(folder, fetch, |n| used.iter().any(|u| u == n), report)
+                    })?;
+                    prepared.archive = Some(entry.sha256);
+                    Ok(prepared)
+                })?;
                 Ok(None)
             }
             "approve_workplace" => {
                 let name = str_field(f, "name")?;
-                if self.store.workplace(name).map_err(internal)?.is_none() {
+                let Some(old) = self.store.workplace(name).map_err(internal)? else {
                     return Err(("no_such_workplace", format!("no workplace `{name}`")));
-                }
-                let row = workplaces::approve(name).map_err(|e| ("invalid_workplace", e))?;
+                };
+                let mut row = workplaces::approve(name).map_err(|e| ("invalid_workplace", e))?;
+                // The files are approved as they are; the archive it was installed from stays pinned.
+                row.archive = old.archive;
                 self.store.put_workplace(&row).map_err(internal)?;
                 self.workplace_approved(name);
                 self.broadcast(&json!({"type": "workplaces_changed"}));

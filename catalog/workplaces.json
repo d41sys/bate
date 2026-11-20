@@ -1,0 +1,12 @@
+{
+  "workplaces": [
+    {
+      "name": "counter",
+      "description": "A counter that every bot of a project shares: the tool `tick` adds one and says the total; it offers a table, a tree and a code view of its ticks.",
+      "version": "1.0.0",
+      "url": "https://github.com/d41sys/bate/releases/download/wp-counter-v1.0.0/counter-1.0.0.tar.gz",
+      "size": 20503,
+      "sha256": "4a5417e39b2550bd05a96680f0636924591bdcca1e9162490e27156c428dd683"
+    }
+  ]
+}

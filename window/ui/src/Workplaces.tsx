@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
-import type { Project, Workplace, WorkplacePreview } from "./types.ts";
-import { downloadText, needsLines, progressText } from "./workplaces.ts";
+import type { CatalogEntry, CatalogPreview, Project, Workplace, WorkplacePreview } from "./types.ts";
+import { downloadText, needsLines, newlyLines, progressText, sizeText } from "./workplaces.ts";
 
-/** Installed workplaces: install from a folder, look at what each needs, approve a changed one, remove. */
+/** Installed workplaces: install from the catalog or a folder, look at what each needs, approve a changed one, remove. */
 export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; projects: Project[] }) {
   const [path, setPath] = useState("");
   const [removing, setRemoving] = useState<string>();
@@ -34,6 +34,32 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
     if (await run(request("install_workplace", { path, download }))) setPath("");
     setProgress(undefined);
   };
+  /** The catalog once read (only when asked: reading it contacts GitHub), and the entry being looked at. */
+  const [catalog, setCatalog] = useState<CatalogEntry[]>();
+  const [offer, setOffer] = useState<{ entry: CatalogEntry; preview: CatalogPreview }>();
+  const [reading, setReading] = useState(false);
+  const loadCatalog = () => {
+    setReading(true);
+    return run(request<{ catalog: CatalogEntry[] }>("list_catalog").then((d) => setCatalog(d.catalog))).finally(() => setReading(false));
+  };
+  // What is installed changed (here or elsewhere): the entries say which are installed or have an update.
+  const installed = workplaces.map((w) => `${w.name} ${w.version} ${w.archive}`).join();
+  useEffect(() => {
+    if (catalog) void loadCatalog();
+  }, [installed]);
+  const look = async (entry: CatalogEntry) => {
+    const preview = await request<CatalogPreview>("preview_catalog", { name: entry.name }).catch((e: Error) => (setError(e.message), undefined));
+    if (preview) setOffer({ entry, preview }), setError("");
+  };
+  const take = async () => {
+    if (!offer) return;
+    const { entry, preview } = offer;
+    setOffer(undefined);
+    setProgress(undefined);
+    // The hash is the one shown: if the catalog changed meanwhile, the service refuses.
+    await run(request("install_catalog", { name: entry.name, sha256: preview.entry.sha256, download: (preview.manifest.downloads?.length ?? 0) > 0 }));
+    setProgress(undefined);
+  };
   const using = (w: Workplace) => w.usedBy.map((id) => projects.find((p) => p.id === id)?.name ?? id);
 
   return (
@@ -52,6 +78,7 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
             {w.roles.length > 0 && (
               <span className="note"> · Roles (paths for “Add bots from role files”): {w.roles.map((r) => <code key={r}>{r} </code>)}</span>
             )}
+            {w.archive && <span className="note"> · From the catalog, pinned to <code>{w.archive.slice(0, 12)}</code></span>}
             {w.usedBy.length > 0 && <span className="note"> · On in: {using(w).join(", ")}</span>}
             {w.error && <span className="error" role="alert"> · {w.error}</span>}
             {w.changed && !w.error && (
@@ -72,6 +99,35 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
           </li>
         ))}
       </ul>
+      <h3>Catalog</h3>
+      <p className="note">
+        A list kept in Bate's repository on GitHub. Each entry pins the exact archive by its size and hash; an installed workplace stays at the version it was installed at, and an update is only offered, with what it newly needs. Reading the list contacts GitHub, so it waits until you ask.
+      </p>
+      <button disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
+      {catalog?.length === 0 && <p className="note">The catalog is empty.</p>}
+      <ul className="rows">
+        {catalog?.map((e) => (
+          <li key={e.name}>
+            <strong>{e.name}</strong>
+            <span className="note"> {e.version} · {e.description} · {sizeText(e.size)}</span>
+            {e.installedVersion && <span className="note"> · Installed: {e.installedVersion}{e.update ? "" : ", up to date"}</span>}
+            {(!e.installedVersion || e.update) && (
+              <button disabled={!!progress} onClick={() => void look(e)}>{e.installedVersion ? `Update to ${e.version}…` : "Install…"}</button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {offer && (
+        <div role="alert">
+          <p>
+            {offer.entry.installedVersion ? `Update ${offer.entry.name} from ${offer.entry.installedVersion} to ${offer.preview.entry.version}` : `Install ${offer.entry.name} ${offer.preview.entry.version}`}.{" "}
+            {offer.entry.installedVersion ? "It newly needs" : "It needs"}: {newlyLines(offer.preview.newly).join("; ")}
+          </p>
+          {downloadText(offer.preview) && <p>{downloadText(offer.preview)} Nothing is downloaded until you agree.</p>}
+          <button onClick={() => void take()}>{offer.entry.installedVersion ? "Update" : "Install"}</button>{" "}
+          <button onClick={() => setOffer(undefined)}>Cancel</button>
+        </div>
+      )}
       <form className="fields" onSubmit={(e) => { e.preventDefault(); install(false); }}>
         <h3>Install a workplace</h3>
         <p className="note">

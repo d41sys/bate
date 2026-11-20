@@ -118,6 +118,9 @@ pub struct Listed {
     pub error: Option<String>,
     /// The ids of the projects it is switched on in.
     pub used_by: Vec<String>,
+    /// SHA-256 of the catalog's archive it was installed from, if it came from the catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive: Option<String>,
 }
 
 impl Listed {
@@ -144,7 +147,7 @@ pub fn folder(name: &str) -> PathBuf {
     dir().join(name)
 }
 
-fn line(what: &str, text: &str, longest: usize) -> Result<(), String> {
+pub fn line(what: &str, text: &str, longest: usize) -> Result<(), String> {
     if text.trim().is_empty() || text.chars().count() > longest || text.contains(char::is_control) {
         return Err(format!(
             "`{what}` must be one line of 1 to {longest} characters"
@@ -161,7 +164,7 @@ fn list_of(what: &str, items: &[String]) -> Result<(), String> {
 }
 
 /// `host[:port]` of an address that may be downloaded from: https, or http to this Mac.
-fn host_of(url: &str) -> Result<String, String> {
+pub fn host_of(url: &str) -> Result<String, String> {
     let bad = || format!("`downloads.url` {url:?} must be an https address");
     let uri: ureq::http::Uri = url.parse().map_err(|_| bad())?;
     let authority = uri.authority().ok_or_else(bad)?;
@@ -178,6 +181,12 @@ fn host_of(url: &str) -> Result<String, String> {
     Ok(authority.as_str().to_ascii_lowercase())
 }
 
+pub fn is_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn check_downloads(list: &[Download]) -> Result<(), String> {
     if list.len() > MOST_DOWNLOADS {
         return Err(format!("`downloads` has at most {MOST_DOWNLOADS} entries"));
@@ -188,11 +197,7 @@ fn check_downloads(list: &[Download]) -> Result<(), String> {
         if d.size == 0 || d.size > LARGEST_DOWNLOAD {
             return Err(format!("`downloads.size` is 1 to {LARGEST_DOWNLOAD} bytes"));
         }
-        let hex = d
-            .sha256
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        if d.sha256.len() != 64 || !hex {
+        if !is_sha256(&d.sha256) {
             return Err("`downloads.sha256` is 64 lowercase hex digits".into());
         }
         line("downloads.dest", &d.dest, LONGEST)?;
@@ -414,10 +419,11 @@ pub fn inspect(row: &Workplace, used_by: Vec<String>) -> Listed {
         changed: now.ok().as_deref() != Some(row.fingerprint.as_str()),
         error,
         used_by,
+        archive: row.archive.clone(),
     }
 }
 
-type Refusal = (&'static str, String);
+pub type Refusal = (&'static str, String);
 
 /// The manifest of the folder `source`, for the person to see before installing.
 pub fn preview(source: &Path) -> Result<Manifest, Refusal> {
@@ -432,6 +438,8 @@ pub struct Prepared {
     pub manifest: Manifest,
     staged: PathBuf,
     fingerprint: String,
+    /// The hash of the catalog's archive it came from, set by the caller that took it from there.
+    pub archive: Option<String>,
 }
 
 /// Copies the folder `source` and fetches what its manifest lists into a staging folder: the
@@ -487,6 +495,7 @@ pub fn prepare(
             manifest,
             staged,
             fingerprint,
+            archive: None,
         }),
         Err(e) => {
             skills::discard(Some(staged));
@@ -495,7 +504,7 @@ pub fn prepare(
     }
 }
 
-fn in_use_refusal(name: &str) -> Refusal {
+pub fn in_use_refusal(name: &str) -> Refusal {
     (
         "workplace_in_use",
         format!("the workplace {name} is switched on in a project: switch it off first"),
@@ -509,6 +518,7 @@ pub fn commit(prepared: Prepared, in_use: impl FnOnce(&str) -> bool) -> Result<W
         manifest,
         staged,
         fingerprint,
+        archive,
     } = prepared;
     let failed = |e: io::Error| {
         (
@@ -542,6 +552,7 @@ pub fn commit(prepared: Prepared, in_use: impl FnOnce(&str) -> bool) -> Result<W
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
                 fingerprint,
+                archive,
             })
         })()
     };
@@ -615,7 +626,7 @@ fn fetch_all(
 /// absolute path, no `..`, no link, device or other special file.
 // shortcut: the unpacked size is not capped (the hash pins the archive, and its maker is the
 // workplace's, who also supplies the program); cap it if archives from others are ever taken.
-fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
+pub fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
     let tar = |flags: &str, into: Option<&Path>| {
         let mut tar = Command::new("/usr/bin/tar");
         tar.arg(flags).arg(archive);
@@ -683,6 +694,7 @@ pub fn approve(name: &str) -> Result<Workplace, String> {
         name: name.to_owned(),
         version: manifest.version,
         fingerprint: fingerprint(&root).map_err(|e| format!("cannot read its files: {e}"))?,
+        archive: None,
     })
 }
 

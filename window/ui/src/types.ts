@@ -112,6 +112,8 @@ export type Workplace = {
   error?: string;
   /** Ids of the projects that have it on. */
   usedBy: string[];
+  /** SHA-256 of the catalog's archive it was installed from, if it came from the catalog. */
+  archive?: string;
 };
 
 /** What a role file would create (`read_roles`). */
@@ -155,4 +157,23 @@ export type WorkplacePreview = {
   manifest: NonNullable<Workplace["manifest"]>;
   downloadBytes: number;
   hosts: string[];
+};
+
+/** An entry of the catalog and what is installed of it (`list_catalog`). */
+export type CatalogEntry = {
+  name: string;
+  description: string;
+  version: string;
+  size: number;
+  /** The archive the entry pins: sent back to install exactly what was shown. */
+  sha256: string;
+  installedVersion: string | null;
+  /** What is installed is not the archive the entry pins. */
+  update: boolean;
+};
+
+/** What `preview_catalog` says of an entry's archive: what it needs that the installed one did not. */
+export type CatalogPreview = WorkplacePreview & {
+  entry: { version: string; sha256: string };
+  newly: { folders: string[]; hosts: string[]; commands: string[]; downloads: { dest: string; size: number }[] };
 };

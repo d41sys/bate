@@ -92,6 +92,8 @@ pub struct Workplace {
     pub version: String,
     /// SHA-256 of its files, as hex (see `workplaces::fingerprint`).
     pub fingerprint: String,
+    /// SHA-256 of the catalog's archive it was installed from: the version it is pinned to.
+    pub archive: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -149,6 +151,7 @@ CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT
 CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
@@ -1224,14 +1227,16 @@ impl Store {
     }
 
     pub fn workplaces(&self) -> Result<Vec<Workplace>> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT name, version, fingerprint FROM workplaces ORDER BY name")?;
+        let mut stmt = self.0.prepare_cached(
+            "SELECT w.name, w.version, w.fingerprint, a.sha256 FROM workplaces w \
+             LEFT JOIN workplace_archives a ON a.name = w.name ORDER BY w.name",
+        )?;
         stmt.query_map([], |r| {
             Ok(Workplace {
                 name: r.get(0)?,
                 version: r.get(1)?,
                 fingerprint: r.get(2)?,
+                archive: r.get(3)?,
             })
         })?
         .collect()
@@ -1242,18 +1247,26 @@ impl Store {
     }
 
     pub fn put_workplace(&self, w: &Workplace) -> Result<()> {
-        self.0
-            .execute(
-                "INSERT OR REPLACE INTO workplaces(name, version, fingerprint) VALUES (?1, ?2, ?3)",
-                params![w.name, w.version, w.fingerprint],
-            )
-            .map(drop)
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO workplaces(name, version, fingerprint) VALUES (?1, ?2, ?3)",
+            params![w.name, w.version, w.fingerprint],
+        )?;
+        match &w.archive {
+            Some(sha256) => tx.execute(
+                "INSERT OR REPLACE INTO workplace_archives(name, sha256) VALUES (?1, ?2)",
+                params![w.name, sha256],
+            )?,
+            None => tx.execute("DELETE FROM workplace_archives WHERE name = ?1", [&w.name])?,
+        };
+        tx.commit()
     }
 
     pub fn delete_workplace(&self, name: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM workplaces WHERE name = ?1", [name])
-            .map(drop)
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute("DELETE FROM workplaces WHERE name = ?1", [name])?;
+        tx.execute("DELETE FROM workplace_archives WHERE name = ?1", [name])?;
+        tx.commit()
     }
 
     pub fn delete_project(&self, id: &str) -> Result<()> {

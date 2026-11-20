@@ -5,6 +5,7 @@
 mod apple;
 mod attach;
 mod browser;
+mod catalog;
 mod channels;
 mod chatgpt;
 mod clients;
