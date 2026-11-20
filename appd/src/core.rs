@@ -13,9 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use proto::connectors::{Connector, Transport};
-use proto::groups::{Group, Peer};
 use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
-use proto::projects::{Project, ProjectConnector};
+use proto::projects::{Peer, Project, ProjectConnector};
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{
     Engine, EngineInput, Event, MAX_STEP_LIMIT, Op, PROTOCOL, STEP_LIMIT, WINDOW_PROTOCOL,
@@ -173,7 +172,6 @@ pub enum Msg {
 /// Longest piece of engine stderr logged as one line.
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
-const MAX_GROUPS: usize = 50;
 const MAX_PROJECTS: usize = 50;
 /// How long the browser may take to come back from a sign-in.
 const SIGN_IN_MS: u64 = 10 * 60 * 1000;
@@ -1363,25 +1361,6 @@ impl Core {
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
-            "list_groups" => Ok(Some(
-                json!({"groups": self.store.groups().map_err(internal)?}),
-            )),
-            "set_group" => {
-                let group = self.set_group(f.get("group").cloned().unwrap_or(Value::Null))?;
-                self.peers_changed("groups_changed");
-                Ok(Some(json!({"group": group})))
-            }
-            "delete_group" => {
-                if !self
-                    .store
-                    .delete_group(str_field(f, "groupId")?)
-                    .map_err(internal)?
-                {
-                    return Err(("no_such_group", "no such group".into()));
-                }
-                self.peers_changed("groups_changed");
-                Ok(Some(json!({})))
-            }
             "list_projects" => Ok(Some(
                 json!({"projects": self.projects().map_err(internal)?}),
             )),
@@ -1961,21 +1940,6 @@ impl Core {
                         profile.display()
                     );
                 }
-                let mut groups_changed = false;
-                for mut g in self.store.groups().map_err(internal)? {
-                    if g.lead != bot && !g.members.contains(&bot) {
-                        continue;
-                    }
-                    groups_changed = true;
-                    g.members.retain(|m| *m != bot);
-                    let id = g.id.clone().unwrap_or_default();
-                    // A group without its lead, or with no one to lead, is no group.
-                    if g.lead == bot || g.members.is_empty() {
-                        self.store.delete_group(&id).map_err(internal)?;
-                    } else {
-                        self.store.put_group(&g).map_err(internal)?;
-                    }
-                }
                 let project = self.project_of(&bot).map_err(internal)?;
                 if let Some(mut project) = project.clone() {
                     project.bots.retain(|b| *b != bot);
@@ -1984,9 +1948,6 @@ impl Core {
                 self.store.delete_bot(&bot).map_err(internal)?;
                 for kind in channels::KINDS {
                     self.stop_channel(&(bot.clone(), kind));
-                }
-                if groups_changed {
-                    self.peers_changed("groups_changed");
                 }
                 if project.is_some() {
                     self.projects_changed(std::slice::from_ref(&bot));
@@ -2625,51 +2586,28 @@ impl Core {
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
 
-    /// The bots `bot` shares a group or a project with, and whether it leads a group.
+    /// The other bots of `bot`'s project, and whether `bot` is its lead with company.
     fn peers_of(&self, bot: &str) -> rusqlite::Result<(Vec<Peer>, bool)> {
-        let mut peers: Vec<Peer> = Vec::new();
-        let mut leads = false;
-        for group in self.store.groups()? {
-            let all = || group.members.iter().chain([&group.lead]);
-            if !all().any(|id| id == bot) {
-                continue;
-            }
-            leads |= group.lead == bot;
-            for id in all().filter(|id| *id != bot) {
-                let lead = *id == group.lead;
-                match peers.iter_mut().find(|p| p.id == *id) {
-                    Some(peer) => peer.lead |= lead,
-                    None => {
-                        if let Some(row) = self.store.bot(id)? {
-                            peers.push(Peer {
-                                id: row.id,
-                                name: row.name,
-                                lead,
-                            });
-                        }
-                    }
-                }
+        let Some(project) = self.project_of(bot)? else {
+            return Ok((Vec::new(), false));
+        };
+        let lead = project.lead_bot();
+        let mut peers = Vec::new();
+        for id in project.bots.iter().filter(|id| *id != bot) {
+            if let Some(row) = self.store.bot(id)? {
+                peers.push(Peer {
+                    lead: lead == Some(row.id.as_str()),
+                    id: row.id,
+                    name: row.name,
+                });
             }
         }
-        if let Some(project) = self.project_of(bot)? {
-            for id in project.bots.iter().filter(|id| *id != bot) {
-                if !peers.iter().any(|p| p.id == *id)
-                    && let Some(row) = self.store.bot(id)?
-                {
-                    peers.push(Peer {
-                        id: row.id,
-                        name: row.name,
-                        lead: false,
-                    });
-                }
-            }
-        }
+        let leads = lead == Some(bot) && !peers.is_empty();
         Ok((peers, leads))
     }
 
-    /// After a change to the groups or the projects: every running engine is told its bot's
-    /// peers again, and the windows are sent `event`.
-    fn peers_changed(&mut self, event: &str) {
+    /// After a change to the projects: every running engine is told its bot's peers again.
+    fn peers_changed(&mut self) {
         let running: Vec<String> = self.engines.keys().cloned().collect();
         for bot in running {
             let sent = self
@@ -2682,7 +2620,6 @@ impl Core {
                 log!("bot {bot}: peers not sent: {e}");
             }
         }
-        self.broadcast(&json!({"type": event}));
     }
 
     /// The project `bot` is in.
@@ -3160,7 +3097,8 @@ impl Core {
                 link_work_bot(&self.store, bot);
             }
         }
-        self.peers_changed("projects_changed");
+        self.peers_changed();
+        self.broadcast(&json!({"type": "projects_changed"}));
     }
 
     /// The role files at `paths`, all valid, or the reason one is not.
@@ -3425,44 +3363,6 @@ impl Core {
         }
         p.connector_error = self.server_error(&p);
         Ok(p)
-    }
-
-    /// Validates and stores a group from `set_group`.
-    fn set_group(&mut self, raw: Value) -> Result<Group, Refusal> {
-        let invalid = |e: String| ("invalid_group", e);
-        let mut g: Group = serde_json::from_value(raw).map_err(|e| invalid(e.to_string()))?;
-        g.name = g.name.trim().to_owned();
-        if g.name.is_empty() || g.name.chars().count() > 80 {
-            return Err(invalid("`name` must be 1 to 80 characters".into()));
-        }
-        g.members.sort();
-        g.members.dedup();
-        if g.members.is_empty() || g.members.len() > MAX_MEMBERS {
-            return Err(invalid(format!(
-                "a group has 1 to {MAX_MEMBERS} members beside its lead"
-            )));
-        }
-        if g.members.contains(&g.lead) {
-            return Err(invalid("the lead is not listed among the members".into()));
-        }
-        for bot in g.members.iter().chain([&g.lead]) {
-            if self.store.bot(bot).map_err(internal)?.is_none() {
-                return Err(invalid(format!("no bot `{bot}`")));
-            }
-        }
-        let existing = self.store.groups().map_err(internal)?;
-        match &g.id {
-            Some(id) if !existing.iter().any(|o| o.id.as_ref() == Some(id)) => {
-                return Err(("no_such_group", format!("no group `{id}`")));
-            }
-            None if existing.len() >= MAX_GROUPS => {
-                return Err(invalid(format!("there are at most {MAX_GROUPS} groups")));
-            }
-            _ => {}
-        }
-        g.id.get_or_insert_with(|| sys::random_hex(4));
-        self.store.put_group(&g).map_err(internal)?;
-        Ok(g)
     }
 
     /// `get_update`'s answer.
@@ -3783,7 +3683,7 @@ impl Core {
         }
         let (peers, _) = self.peers_of(from).map_err(|e| e.to_string())?;
         let Some(peer) = peers.iter().find(|p| p.id == to) else {
-            return Err("that bot is not in a group or a project with you".into());
+            return Err("that bot is not in your project".into());
         };
         let name = peer.name.clone();
         let waiting = self

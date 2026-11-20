@@ -6,8 +6,8 @@ use crate::session::Session;
 use crate::tools::{self, Control, lock};
 use crate::{Out, Work};
 use proto::connectors::Connector;
-use proto::groups::Peer;
 use proto::permissions::{APPROVE, DENY, Kind};
+use proto::projects::Peer;
 use proto::{Event, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ pub struct Turn {
     /// The bot's MCP servers as last sent by the service.
     pub connectors: Vec<Connector>,
     pub control: Arc<Control>,
-    /// The bots this one may message, and whether it leads a group.
+    /// The bots this one may message, and whether it leads its project.
     pub peers: Vec<Peer>,
     pub leads: bool,
     /// Folders whose `skills/` are offered beside the bot's own.
@@ -517,14 +517,18 @@ impl Turn {
              conversation, and replies when it is done:"
         );
         for peer in &self.peers {
-            let role = if peer.lead { " (leads your group)" } else { "" };
+            let role = if peer.lead {
+                " (leads your project)"
+            } else {
+                ""
+            };
             // One line each: a name is the user's text.
             let name = peer.name.replace(char::is_control, " ");
             text.push_str(&format!("\n- {name}{role}"));
         }
         if self.leads {
             text.push_str(
-                "\nYou lead a group: hand out tasks to the others and put their results \
+                "\nYou lead this project: hand out tasks to the others and put their results \
                  together. You cannot stop or redirect a bot once it works on a task.",
             );
         }

@@ -67,8 +67,8 @@ struct Engine {
     /// Running MCP servers; they outlive a conversation.
     mcp: mcp::Servers,
     connectors: Vec<proto::connectors::Connector>,
-    /// The bots this one may message, and whether it leads a group.
-    peers: (Vec<proto::groups::Peer>, bool),
+    /// The bots this one may message, and whether it leads its project.
+    peers: (Vec<proto::projects::Peer>, bool),
     /// Folders whose `skills/` are offered beside the bot's own; set by the service.
     skill_folders: Vec<PathBuf>,
     /// From the user, through the service; first in the system prompt.

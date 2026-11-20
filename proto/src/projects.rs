@@ -3,6 +3,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Another bot of the same project, which this bot may message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Peer {
+    pub id: String,
+    pub name: String,
+    /// It is the project's lead.
+    #[serde(default)]
+    pub lead: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {

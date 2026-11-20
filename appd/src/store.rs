@@ -8,7 +8,6 @@ use crate::keychain;
 use crate::oauth::Tokens;
 use crate::sys::log;
 use proto::connectors::Connector;
-use proto::groups::Group;
 use proto::permissions::{Grant, Kind, Level};
 use proto::projects::Project;
 use proto::routines::{Routine, RoutineRun};
@@ -148,7 +147,6 @@ CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
-CREATE TABLE IF NOT EXISTS groups(id TEXT PRIMARY KEY, grp TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
@@ -353,6 +351,8 @@ impl Store {
         // A blanked secret must not stay in the file as freed bytes.
         conn.pragma_update(None, "secure_delete", true)?;
         conn.execute_batch(SCHEMA)?;
+        // Groups are gone (ADR 0002): a project is how bots work together.
+        conn.execute("DROP TABLE IF EXISTS groups", [])?;
         conn.execute(
             "UPDATE ledger SET state = 'uncertain' WHERE state = 'sending'",
             [],
@@ -1186,27 +1186,6 @@ impl Store {
                 params![bot, c.name, json(c)],
             )
             .map(drop)
-    }
-
-    pub fn groups(&self) -> Result<Vec<Group>> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT grp FROM groups ORDER BY id")?;
-        stmt.query_map([], |r| parse(r.get(0)?))?.collect()
-    }
-
-    pub fn put_group(&self, group: &Group) -> Result<()> {
-        let id = group.id.as_deref().expect("stored groups have an id");
-        self.0
-            .execute(
-                "INSERT OR REPLACE INTO groups(id, grp) VALUES (?1, ?2)",
-                params![id, json(group)],
-            )
-            .map(drop)
-    }
-
-    pub fn delete_group(&self, id: &str) -> Result<bool> {
-        Ok(self.0.execute("DELETE FROM groups WHERE id = ?1", [id])? > 0)
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {

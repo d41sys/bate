@@ -12,7 +12,6 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 pub mod apple;
 pub mod connectors;
 pub mod desktop;
-pub mod groups;
 pub mod memory;
 pub mod paths;
 pub mod permissions;
@@ -83,9 +82,9 @@ pub enum Op {
     SkillFolders { folders: Vec<PathBuf> },
     /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
     StepLimit { steps: u32 },
-    /// The bots this one may message: the whole list each time. `leads`: it leads a group.
+    /// The bots this one may message: the whole list each time. `leads`: it leads its project.
     Peers {
-        peers: Vec<groups::Peer>,
+        peers: Vec<projects::Peer>,
         #[serde(default)]
         leads: bool,
     },

@@ -12,7 +12,6 @@ import { Routines } from "./Routines.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { Memory } from "./Memory.tsx";
 import { Skills } from "./Skills.tsx";
-import { Groups } from "./Groups.tsx";
 import { Projects } from "./Projects.tsx";
 import { Room } from "./Room.tsx";
 import { Settings } from "./Settings.tsx";
@@ -23,7 +22,7 @@ import "./style.css";
 // Only in the build `window/check-frames.sh` makes.
 if (import.meta.env.VITE_FRAME_CHECK) void import("./frameCheck.ts");
 
-const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", memory: "Memory", skills: "Skills", groups: "Groups", projects: "Projects", room: "Room", settings: "Settings" };
+const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", memory: "Memory", skills: "Skills", projects: "Projects", room: "Room", settings: "Settings" };
 type Tab = keyof typeof TABS;
 
 function App() {
@@ -248,7 +247,6 @@ function App() {
               </>
             )}
             {tab === "skills" && <Skills key={`${bot.id}-${connection}`} bot={bot.id} />}
-            {tab === "groups" && <Groups key={connection} bots={bots} />}
             {tab === "projects" && <Projects key={connection} bots={bots} />}
             {tab === "room" && (bot.project ? <Room key={`${bot.project.id}-${connection}`} project={bot.project} bots={bots} /> : <p className="note">This bot is in no project, so it has no room.</p>)}
             {tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setSelected(undefined)} />}
