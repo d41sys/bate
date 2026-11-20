@@ -19,7 +19,9 @@ import { Room } from "./Room.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings } from "./AppSettings.tsx";
 import { endsUnseen, neighbour, rowState, sidebar, waitingCount } from "./nav.ts";
-import { FirstRun } from "./FirstRun.tsx";
+import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
+import { NewBot } from "./NewBot.tsx";
+import { LATER } from "./firstRun.ts";
 import { Palette, type Choice } from "./Palette.tsx";
 import "./highlight.css";
 import "./style.css";
@@ -34,7 +36,7 @@ type BotTab = keyof typeof BOT_TABS;
 type ProjectTab = keyof typeof PROJECT_TABS;
 /** What the page shows. The channels and the surfaces are for Bate's own window only. */
 type View =
-  | { page: "projects" | "workplaces" | "settings" }
+  | { page: "projects" | "workplaces" | "settings" | "new-bot" }
   | { page: "project"; id: string; tab: ProjectTab }
   | { page: "bot"; id: string; tab: BotTab };
 const botTabs = (Object.keys(BOT_TABS) as BotTab[]).filter((t) => inShell || t !== "channels");
@@ -62,7 +64,6 @@ function App() {
   const [bots, setBots] = useState<Bot[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setView] = useState<View>();
-  const [name, setName] = useState("");
   const [error, setError] = useState("");
   // On another device that has not paired yet.
   const [unpaired, setUnpaired] = useState(false);
@@ -72,9 +73,11 @@ function App() {
   const [palette, setPalette] = useState(false);
   const [jump, setJump] = useState<{ seq: number }>();
   const [find, setFind] = useState(false);
+  // "Set up later" on the first screen, which the page remembers; and what the first bot's box starts with.
+  const [later, setLater] = useState(() => localStorage.getItem(LATER) === "1");
+  const [first, setFirst] = useState<{ bot: string; message: string }>();
   // A file a bot shows, or a surface of a project's program, in the pane beside the conversation.
   const [shown, setShown] = useState<{ bot: string; path: string } | { projectId: string; uri: string; name: string }>();
-  const newName = useRef<HTMLInputElement>(null);
   // What the shell says of starting the service with the app (macOS may want an approval).
   const [note, setNote] = useState<string | null>(null);
   // Bots whose turn ended while their chat was not in front of the person (`endsUnseen`).
@@ -134,16 +137,6 @@ function App() {
     });
   }, []);
 
-  const create = async () => {
-    try {
-      const { bot } = await request<{ bot: Bot }>("create_bot", { name: name.trim() });
-      setName("");
-      openBot(bot.id);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
   // Puts `moved` where `onto` is; the service keeps the order.
   const reorder = (moved: string, onto: string) => {
     const ids = bots.map((b) => b.id);
@@ -160,6 +153,12 @@ function App() {
   };
 
   const bot = view?.page === "bot" ? bots.find((b) => b.id === view.id) : undefined;
+  const [needed, refreshProvider] = useNeedsProvider(`${connection}-${view?.page}-${bot?.id}`);
+  const setSetupLater = (on: boolean) => {
+    if (on) localStorage.setItem(LATER, "1");
+    else localStorage.removeItem(LATER);
+    setLater(on);
+  };
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
   const openBot = (id: string, tab: BotTab = "chat") => setView({ page: "bot", id, tab });
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
@@ -171,7 +170,7 @@ function App() {
       openBot(bot.id);
       setFind(true);
     },
-    "new-bot": () => newName.current?.focus(),
+    "new-bot": () => setView({ page: "new-bot" }),
     "new-project": () => setView({ page: "projects" }),
     "new-window": () => void newWindow().catch((e: Error) => setError(e.message)),
   };
@@ -289,12 +288,11 @@ function App() {
           ))}
           <li>{plain("New project", view?.page === "projects", () => setView({ page: "projects" }))}</li>
         </ul>
-        <h2>Bots</h2>
+        <div className="heading">
+          <h2>Bots</h2>
+          <button className="round ghost" aria-label="New bot" data-tip="New bot (⌘N)" onClick={actions["new-bot"]}>+</button>
+        </div>
         <ul>{lists.loose.map(botRow)}</ul>
-        <form onSubmit={(e) => { e.preventDefault(); create(); }}>
-          <input ref={newName} aria-label="New bot's name" placeholder="New bot" maxLength={80} value={name} onChange={(e) => setName(e.target.value)} />
-          <button disabled={!name.trim()}>Create</button>
-        </form>
         <ul className="foot">
           <li>{plain("Workplaces", view?.page === "workplaces", () => setView({ page: "workplaces" }))}</li>
           <li>{plain("Settings", view?.page === "settings", () => setView({ page: "settings" }))}</li>
@@ -303,8 +301,25 @@ function App() {
       <main>
         {state && <p className="note">{state}</p>}
         {note && <p className="note">{note}</p>}
-        {inShell && !state && <FirstRun reload={`${connection}-${view?.page}`} onSettings={() => setView({ page: "settings" })} />}
+        {inShell && !state && !view && !later && (
+          <FirstRun
+            needed={needed}
+            hasBots={bots.length > 0}
+            refresh={refreshProvider}
+            later={() => setSetupLater(true)}
+            opened={(id, message) => {
+              setFirst({ bot: id, message });
+              openBot(id);
+            }}
+          />
+        )}
         {error && <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p>}
+        {view?.page === "new-bot" && (
+          <>
+            <header><div className="who"><h1>New bot</h1></div></header>
+            <NewBot opened={(id) => openBot(id)} report={setError} />
+          </>
+        )}
         {view?.page === "projects" && (
           <>
             <header><div className="who"><h1>Projects</h1></div></header>
@@ -366,7 +381,10 @@ function App() {
                 // Bots' files open in the window's pane only, not on other devices.
                 showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
                 // An installed agent chooses its own model.
-                model={bot.agent ? undefined : <Model key={bot.id} bot={bot} bots={bots} report={setError} />}
+                // With no way to reach a model there is the sign-in instead; an installed agent needs none.
+                model={bot.agent || needed ? undefined : <Model key={bot.id} bot={bot} bots={bots} />}
+                signIn={needed && !bot.agent ? () => { setSetupLater(false); setView(undefined); } : undefined}
+                start={first?.bot === bot.id ? first.message : ""}
                 used={() => {
                   setJump(undefined);
                   setFind(false);
@@ -385,8 +403,17 @@ function App() {
             {view.tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setView(undefined)} />}
           </>
         )}
-        {!state && !(view?.page === "bot" ? bot : view?.page === "project" ? project : view) && (
-          <p className="empty">{bots.length || projects.length ? "Choose a bot or a project." : "Create a bot, or start a project, to begin."}</p>
+        {!state && !(view?.page === "bot" ? bot : view?.page === "project" ? project : view) && !(inShell && needed && !later) && (
+          <div className="empty">
+            <p>
+              {bots.length || projects.length
+                ? "Choose a bot or a project."
+                : inShell
+                  ? "Make a bot with +, or start a project, to begin."
+                  : "Make a bot with +, or start a project, to begin. Its model is set up in Bate on the Mac, under Settings."}
+            </p>
+            {needed && later && <button onClick={() => setSetupLater(false)}>Sign in</button>}
+          </div>
         )}
       </main>
       {shown && "path" in shown && <FilePane bot={shown.bot} path={shown.path} close={() => setShown(undefined)} />}

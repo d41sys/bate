@@ -47,6 +47,9 @@ input:disabled, select:disabled, textarea:disabled { opacity: .5; }
 input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .fields label { display: block; margin: var(--space-3) 0; }
 .fields textarea { display: block; width: 100%; }
+/* A form with each label over its control, as wide as the column. */
+.fields.stack label { display: grid; gap: var(--space-1); }
+.fields.stack input:not([type=checkbox], [type=radio], [type=file], [type=range]) { width: 100%; }
 
 /* ---- Tabs ---- */
 [role=tablist] { display: flex; gap: var(--space-1); overflow-x: auto; }
@@ -68,7 +71,14 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .tools, .find, .surfaces { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
 .card, .question, .first-run { background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); padding: var(--space-3) var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
-.first-run h2 { margin-top: var(--space-1); }
+.first-run { margin-top: var(--space-5); }
+.first-run h1 + p { margin-top: var(--space-1); }
+.first-run h2 { margin-top: var(--space-4); }
+/* Starter cards: a button each, to start a form from. */
+.starters { list-style: none; margin: var(--space-2) 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--popover-w), 1fr)); gap: var(--space-2); }
+.starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
+.starters button[aria-pressed=true] { background: var(--bg-current); border-color: var(--ink); }
+.starters .label { display: grid; gap: var(--space-1); min-width: 0; white-space: normal; }
 .question > p { font-weight: var(--weight-strong); margin-top: 0; }
 
 /* ---- Avatar: the bot's colour as a tint and a ring, so the sign on it always reads ---- */
@@ -78,12 +88,13 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; }
 .sidebar { background: var(--bg-side); border-right: 1px solid var(--border); padding: var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
 .sidebar h2 { font-size: var(--size-small); line-height: var(--leading); color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
+/* A section's heading with its one action beside it. */
+.sidebar .heading { display: flex; align-items: center; justify-content: space-between; }
+.sidebar .heading h2 { margin-block: 0; }
 .sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .sidebar ul ul { padding-left: var(--space-4); }
 /* The pages of the app sit at the foot. */
 .sidebar .foot { margin-top: auto; }
-.sidebar form { display: flex; gap: var(--space-2); padding-top: var(--space-2); }
-.sidebar form input { min-width: 0; flex: 1; }
 .row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
 .row:hover:not(:disabled) { background: var(--bg-hover); }
 .row.current { background: var(--bg-current); font-weight: var(--weight-strong); }
@@ -120,7 +131,7 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
 @media (hover: hover) {
   [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--ink); color: var(--on-ink); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
   /* The last control of a row is at the edge: its tip grows to the left. */
-  .composer > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+  .composer > [data-tip]:last-child::after, .heading > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
   [data-tip][aria-expanded=true]::after { display: none; }
 }
 /* A hint key on a button: the key that does the same. */
@@ -214,11 +225,11 @@ button kbd { padding: 0 var(--space-1); border: 1px solid var(--border-strong); 
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .sidebar { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
   .sidebar h2 { display: none; }
+  .sidebar .heading { flex: none; }
   .sidebar ul, .sidebar li { display: flex; align-items: center; }
   .sidebar ul ul { padding-left: 0; }
-  .sidebar ul, .sidebar li, .sidebar form { flex: none; }
+  .sidebar ul, .sidebar li { flex: none; }
   .sidebar .foot { margin: 0 0 0 auto; }
-  .sidebar form { margin: 0; padding: 0; width: 12rem; }
   .row { width: auto; max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }
   main > header { justify-content: flex-start; }

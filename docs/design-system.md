@@ -54,13 +54,13 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Component | How to write it | States | Built |
 |---|---|---|---|
 | Button | `<button>`; `primary`, `danger`, `ghost`, `small`, `round` (one sign, needs `aria-label`). A form's submit button is primary by itself | hover, pressed, disabled, focus | yes |
-| Text field, select | `<input>`, `<textarea>`, `<select>`; in a form, `.fields` with one `<label>` per control | placeholder, disabled, focus | yes |
+| Text field, select | `<input>`, `<textarea>`, `<select>`; in a form, `.fields` with one `<label>` per control; `.fields.stack` puts each label over its control, as wide as the column | placeholder, disabled, focus | yes |
 | Form row with hint, error and "Saved" | | | #155 |
 | Switch | | on, off, disabled | #155 |
 | Tabs | `role="tablist"` with `role="tab"` buttons | chosen, hover, focus | yes; arrow keys #151 |
 | List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one | hover, chosen, focus | yes |
 | Badge | `.badge` at the end of a `.row`: a dot and one word. Plain (warn) for what needs the person: "Needs you". `.badge.quiet` for what does not: "New reply". A working bot has no badge: its `.label` has a `<small>Working…</small>` line | | yes |
-| Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
+| Sidebar | `<nav class="sidebar">`: an `<h2>` for each section (Projects, Bots; the Bots heading sits in a `.heading` with its `+` beside it, a `round ghost` button), a `<ul>` of rows, a nested `<ul>` for a project's bots, `.row.plain` for a row with no avatar, and `<ul class="foot">` for the app's own pages at the bottom | hover, chosen (`current`, with `aria-current`), focus | yes |
 | Rows of settings or items | `<ul class="rows">` | | yes |
 | Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |
 | Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it | past (greyed), marked (a search hit) | yes |
@@ -69,6 +69,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows, the model chip (a popover) beside it. While the bot works, `.hints` under it says what Queue and Steer do, and Esc stops | empty, typing, bot working, focus | yes |
 | Note, error line | `.note`, `.error` (with `role="alert"`) | | yes |
 | Banner | `.banner`, `.banner.error` | | yes |
+| Starter card | `<ul class="starters">` of `<li><button type="button" aria-pressed>`, each with an `.avatar` and a `.label` (a name and a `<small>` line). A card fills a form; it is not a link | hover, chosen (`aria-pressed`), focus | yes |
 | Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
 | Dialog | scrim, panel, focus kept inside, Esc closes | | palette only; #159 |
 | Tooltip | `data-tip="…"` on a control; the text is shown above it for a pointer or the keyboard, and not on a touch screen, so it never holds the only copy of something a button must say | hover, focus | yes |
@@ -130,7 +131,7 @@ The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx
 |---|---|---|
 | 1 | Sidebar: projects and bots, what needs you | #142, #144 |
 | 2 | Composer and question card | #146, #145 |
-| 3 | First run | #143 |
+| 3 | First run: the sign-in screen, "Set up later", the first bot, the new-bot form with starter cards | #143, done |
 | 4 | Room | #148 |
 | 5 | Projects | #147 |
 | 6 | Add-ons: skills, connectors, workplaces | #150 |

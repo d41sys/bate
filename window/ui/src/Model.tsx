@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { inShell, listen, openInBrowser, request } from "./service.ts";
-import { needsProvider, type Provider } from "./firstRun.ts";
+import { inShell, listen, request } from "./service.ts";
 import { modelChoices } from "./models.ts";
 import type { Bot } from "./types.ts";
 
@@ -8,10 +7,9 @@ const EFFORTS = ["minimal", "low", "medium", "high"];
 
 /**
  * The bot's model and thinking effort, a chip in the composer with a popover; a pick applies from the
- * next model call. Without a way to reach a model the chip is the sign-in. `report` shows an error
- * the popover is not open for.
+ * next model call. Without a way to reach a model there is no chip: the conversation says "Sign in".
  */
-export function Model({ bot, bots, report }: { bot: Bot; bots: Bot[]; report: (message: string) => void }) {
+export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [serverModels, setServerModels] = useState<string[]>([]);
@@ -19,7 +17,6 @@ export function Model({ bot, bots, report }: { bot: Bot; bots: Bot[]; report: (m
   /** Why the model list could not be read. */
   const [listError, setListError] = useState("");
   const [onPlan, setOnPlan] = useState(false);
-  const [provider, setProvider] = useState<Provider>();
   const wrap = useRef<HTMLDivElement>(null);
   const chip = useRef<HTMLButtonElement>(null);
   const loadModels = () =>
@@ -37,10 +34,7 @@ export function Model({ bot, bots, report }: { bot: Bot; bots: Bot[]; report: (m
   // Only Bate's own window may read the sign-in, as in Settings.
   useEffect(() => {
     if (!inShell) return;
-    const load = () => {
-      request<{ signedIn: boolean }>("get_chatgpt").then((c) => setOnPlan(c.signedIn), () => {});
-      request<Provider>("get_provider").then(setProvider, () => {});
-    };
+    const load = () => request<{ signedIn: boolean }>("get_chatgpt").then((c) => setOnPlan(c.signedIn), () => {});
     load();
     return listen((frame) => {
       if (frame.type === "chatgpt_changed") load();
@@ -77,9 +71,6 @@ export function Model({ bot, bots, report }: { bot: Bot; bots: Bot[]; report: (m
     );
   const pick = (m: string) => save(m, effort, () => setOpen(false));
 
-  if (inShell && provider && needsProvider(onPlan, provider) && !model) {
-    return <button type="button" className="small chip" data-tip="Sign in with ChatGPT to give this bot a model" onClick={() => void request<{ url: string }>("sign_in_chatgpt").then((d) => openInBrowser(d.url), (e: Error) => report(e.message))}>Sign in</button>;
-  }
   const row = (m: string, label = m) => (
     <li key={m}>
       <button type="button" role="option" aria-selected={m === model} className="row plain" onClick={() => pick(m)}>
