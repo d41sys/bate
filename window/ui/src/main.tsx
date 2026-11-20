@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { inShell, listen, newWindow, openInBrowser, pair, request, serviceNote } from "./service.ts";
 import { Pair } from "./Devices.tsx";
@@ -17,6 +17,7 @@ import { Room } from "./Room.tsx";
 import { Settings } from "./Settings.tsx";
 import { FirstRun } from "./FirstRun.tsx";
 import { Palette, type Choice } from "./Palette.tsx";
+import "./highlight.css";
 import "./style.css";
 
 // Only in the build `window/check-frames.sh` makes.
@@ -24,6 +25,13 @@ if (import.meta.env.VITE_FRAME_CHECK) void import("./frameCheck.ts");
 
 const TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", memory: "Memory", skills: "Skills", projects: "Projects", room: "Room", settings: "Settings" };
 type Tab = keyof typeof TABS;
+
+/** The bot's sign, or its first letter, on its colour. The name is always beside it. */
+const Avatar = ({ bot }: { bot: Bot }) => (
+  <span className="avatar" aria-hidden="true" style={{ "--tint": bot.color || undefined } as CSSProperties}>
+    {bot.avatar || [...bot.name][0]?.toUpperCase()}
+  </span>
+);
 
 function App() {
   const [state, setState] = useState("Connecting to the service…");
@@ -156,7 +164,8 @@ function App() {
   if (unpaired) return <Pair onPair={pair} />;
   return (
     <div className="app">
-      <nav className="bots" aria-label="Bots">
+      <nav className="sidebar" aria-label="Bots">
+        <h2>Bots</h2>
         <ul>
           {bots.map((b) => (
             <li
@@ -169,10 +178,9 @@ function App() {
                 if (dragged && dragged !== b.id) reorder(dragged, b.id);
                 setDragged(undefined);
               }}
-              style={{ borderLeft: `4px solid ${b.color || "transparent"}` }}
             >
               <button
-                className={b.id === selected ? "current" : ""}
+                className={b.id === selected ? "row current" : "row"}
                 onClick={() => setSelected(b.id)}
                 title="Alt+↑ and Alt+↓ move it"
                 onKeyDown={(e) => {
@@ -182,9 +190,11 @@ function App() {
                   }
                 }}
               >
-                {b.avatar && <span className="avatar">{b.avatar} </span>}
-                {b.name}
-                {b.busy ? " · working" : ""}
+                <Avatar bot={b} />
+                <span className="label">
+                  <span>{b.name}</span>
+                  {b.busy && <small>Working…</small>}
+                </span>
               </button>
             </li>
           ))}
@@ -198,11 +208,14 @@ function App() {
         {state && <p className="note">{state}</p>}
         {note && <p className="note">{note}</p>}
         {inShell && !state && <FirstRun hasBots={bots.length > 0} reload={`${connection}-${tab}`} onSettings={() => open(bot?.id ?? bots[0].id, "settings")} />}
-        {error && <p className="error" role="alert" onClick={() => setError("")}>{error}</p>}
+        {error && <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p>}
         {bot ? (
           <>
             <header>
-              <h1>{bot.avatar && `${bot.avatar} `}{bot.name}</h1>
+              <div className="who">
+                <Avatar bot={bot} />
+                <h1>{bot.name}</h1>
+              </div>
               <div role="tablist">
                 {(Object.keys(TABS) as Tab[]).map((t) => (
                   <button key={t} role="tab" aria-selected={t === tab} onClick={() => setTab(t)}>{TABS[t]}</button>
@@ -252,7 +265,7 @@ function App() {
             {tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setSelected(undefined)} />}
           </>
         ) : (
-          !state && <p className="note">{bots.length ? "Choose a bot." : "Create a bot to begin."}</p>
+          !state && <p className="empty">{bots.length ? "Choose a bot." : "Create a bot to begin."}</p>
         )}
       </main>
       {shown && "path" in shown && <FilePane bot={shown.bot} path={shown.path} close={() => setShown(undefined)} />}

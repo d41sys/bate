@@ -1,0 +1,136 @@
+# Design system
+
+How Bate's window looks and how its screens are built. One set of tokens, one set of components, and rules for layout and accessibility. It answers #138 and takes its inputs from the UX research (`docs/research/ux/`).
+
+## The direction
+
+The owner chose a chat-app look: a bot is a contact, a conversation is messages.
+
+- **Neutral.** White, greys and near-black in light; the same reversed in dark. One ink colour marks what stands out: the person's message, the main button.
+- **Blue is rare.** It is for links, the focus ring and nothing else. A bot's own colour shows on its avatar only.
+- **Round.** Messages are bubbles, buttons and the composer are pills, cards have soft corners.
+- **No bar on top.** Who you are talking to floats above the page as a chip, with the tabs beside it.
+- **The system's font**, 14 px on a 20 px line.
+
+| Light | Dark |
+|---|---|
+| ![The target screen in light](design-system/target-light.webp) | ![The target screen in dark](design-system/target-dark.webp) |
+
+The pictures are `docs/design-system/shell.html`: a static page drawn with the app's own stylesheet. It shows where the window is going, not where it is: projects in the sidebar come with #142, the model in the composer with #146. Open it in a browser to resize it or to see it in dark.
+
+Three other directions were drawn on the same screen and not chosen: one close to the Mac's own controls, one made for reading with a serif face, one dense with monospace labels.
+
+## Rules
+
+1. **Tokens only.** A screen or a component names no colour, size, font, radius or duration. It uses a token from `window/ui/src/tokens.css`. A value that is missing becomes a new token first.
+2. **Elements first.** A plain `<button>`, `<input>`, `<select>`, `<textarea>`, `<fieldset>` or `<h2>` already looks right. A class is for a variant (`primary`, `danger`, `ghost`, `small`, `round`) or a component that has no element.
+3. **No inline `style=` for looks.** Inline style is for values the code computes: a width being dragged, a bot's colour passed as `--tint`.
+4. **Light and dark are the same components.** Dark changes token values under `prefers-color-scheme`, never a component.
+5. **No new dependency.** See "Build or adopt".
+
+## Tokens
+
+All in `window/ui/src/tokens.css`.
+
+| Family | Tokens | Use |
+|---|---|---|
+| Surface | `--bg`, `--bg-side`, `--bg-raised`, `--bg-soft` | The page, the sidebar, what lies above the page (cards, fields, dialogs), a quiet fill (a bot's message, code) |
+| State fill | `--bg-hover`, `--bg-current` | Under the pointer; the chosen row or tab |
+| Text | `--fg`, `--fg-muted` | Text; secondary text and placeholders |
+| Line | `--border`, `--border-strong`, `--border-field` | A divider; the edge of a button or card; the edge of a field (3:1) |
+| Ink | `--ink`, `--on-ink` | The main button and the person's message, and the text on them |
+| Meaning | `--accent`, `--danger`, `--warn`, `--warn-soft`, `--mark` | Links and focus; a destructive action or an error; a warning and its fill; a search hit |
+| Depth | `--shadow-1`, `--shadow-2`, `--scrim`, `--glass` | A card; a dialog or sheet; behind a dialog; behind the floating header |
+| Type | `--font-ui`, `--font-mono`, `--size-small` 12, `--size-ui` 14, `--size-title` 17, `--size-head` 22, `--leading` 20, `--weight-strong` 600 | |
+| Space | `--space-1` to `--space-5`: 4, 8, 12, 16, 24 | A 4 px grid |
+| Shape | `--radius-s` 6, `--radius-m` 10, `--radius-l` 14, `--radius-bubble` 18, `--radius-pill` | Code and small things; fields and rows; cards and dialogs; messages; buttons |
+| Size | `--control-h` 32, `--control-h-small` 24, `--row-h` 44, `--avatar` 28, `--side-w` 280, `--thread-w` 720 | |
+| Motion | `--fast` 100 ms, `--ease` | Hover, press, showing a message's actions |
+
+## Components
+
+All in `window/ui/src/style.css`. "Built" means it is there now; a number is the issue that builds it.
+
+| Component | How to write it | States | Built |
+|---|---|---|---|
+| Button | `<button>`; `primary`, `danger`, `ghost`, `small`, `round` (one sign, needs `aria-label`). A form's submit button is primary by itself | hover, pressed, disabled, focus | yes |
+| Text field, select | `<input>`, `<textarea>`, `<select>`; in a form, `.fields` with one `<label>` per control | placeholder, disabled, focus | yes |
+| Form row with hint, error and "Saved" | | | #155 |
+| Switch | | on, off, disabled | #155 |
+| Tabs | `role="tablist"` with `role="tab"` buttons | chosen, hover, focus | yes; arrow keys #151 |
+| List row | `.row` with an `.avatar` and a `.label` (a name and a `<small>` line under it); `current` for the chosen one | hover, chosen, focus | yes |
+| Rows of settings or items | `<ul class="rows">` | | yes |
+| Avatar | `.avatar` with `--tint` set to the bot's colour | with a sign, with a letter, without a colour | yes |
+| Message | `.item.user` or `.item.reply` with a `.bubble`; `.actions` under it | past (greyed), marked (a search hit) | yes |
+| Step of a turn | `.item.tool` with `<details>` | running, done, failed | yes |
+| Card | `.card`; `.question` for what a bot asks, with `.actions` | | yes; what the card says #145 |
+| Composer | `<form class="composer">`: round buttons, one `<textarea rows="1">` that grows | empty, typing, bot working, focus | yes; model and Esc #146 |
+| Note, error line | `.note`, `.error` (with `role="alert"`) | | yes |
+| Banner | `.banner`, `.banner.error` | | yes |
+| Empty state | `.empty`: one sentence, then one action | | yes; per screen with its issue |
+| Dialog | scrim, panel, focus kept inside, Esc closes | | palette only; #159 |
+| Toast, tooltip, select with search, folder picker | | | #146, #150 |
+| Loading | A `.note` saying what is loading; no spinner | | yes |
+
+## Layout
+
+Three regions in one grid: sidebar, main area, side pane.
+
+| Region | Size | Rule |
+|---|---|---|
+| Sidebar | `--side-w`: 280 px, 220 px under 900 px | Sections with a small heading; rows 44 px high; what is new goes at the bottom |
+| Main area | The rest | Every screen is one column of at most `--thread-w` (720 px), centred. The conversation's scroller is as wide as the area, so its bar is at the window's edge |
+| Side pane | 480 px, dragged wider or narrower | Under 860 px it lies over the conversation (`pane.ts`); as a sheet with a scrim: #158 |
+
+Widths the page must work at: 1200 px and more, 900 px, and 390 px (a phone, since the page is also served to other devices). Under 640 px the sidebar becomes a strip of bots across the top that scrolls sideways, and the header's tabs scroll sideways.
+
+## Accessibility
+
+- **Contrast**, measured for the token pairs in use (WCAG needs 4.5:1 for text, 3:1 for the edge of a control):
+
+  | Pair | Light | Dark |
+  |---|---|---|
+  | Text on the page | 17.4 | 16.3 |
+  | Text on a bot's message | 15.3 | 13.6 |
+  | Secondary text on the page | 6.3 | 7.4 |
+  | Secondary text on the chosen row | 4.8 | 5.7 |
+  | Text on ink | 17.4 | 16.3 |
+  | Link on the page | 5.5 | 7.4 |
+  | Link on a bot's message | 4.8 | 6.2 |
+  | Error text | 5.6 | 5.9 |
+  | Warning text on its fill | 5.7 | 8.8 |
+  | Edge of a field | 3.2 | 3.3 |
+
+- **Focus.** One ring, 2 px of `--accent` with a 2 px gap, on every control, shown for the keyboard only (`:focus-visible`). The composer shows it around the whole pill.
+- **Keyboard.** Every action is a `<button>` or a link, so Tab reaches it and Enter or Space runs it. A message's actions are hidden until the message is pointed at, and shown when the keyboard is inside it or when the device has no pointer. Shortcuts are #151.
+- **Colour is never the only sign.** A working bot says "Working…" under its name; an error is words; a round button has an `aria-label` and a `title`.
+- **Motion.** Nothing longer than 100 ms, and none when the system asks for reduced motion.
+- **Text size.** Sizes are in px today, so the page does not follow a larger text setting. Not done; it comes with the settings (#155).
+
+Not checked: a screen reader, and the page in the system web view of macOS 13.
+
+## Build or adopt
+
+Built: hand-written CSS on tokens, with React components only where there is behaviour.
+
+- The window is 20 screen files of forms, lists and one conversation. Plain elements with one stylesheet cover them in about 190 lines.
+- A component library (Radix, Base UI, shadcn/ui; all MIT) would add a dependency and its own way of styling for what is today two needs: a dialog that keeps the focus, and a select with search. `<dialog>` gives the first. The second is one component (#146).
+- Adopt one later if a third such need comes up. It must be MIT or Apache-2.0.
+
+## Order of the screens
+
+The shell and the conversation are done with this plan: `main.tsx` and `Chat.tsx` are the example. Every other screen already has the new buttons, fields and type, because those are element styles; what is left is its layout, its states and its own components.
+
+| Order | Screen | Issue |
+|---|---|---|
+| 1 | Sidebar: projects and bots, what needs you | #142, #144 |
+| 2 | Composer and question card | #146, #145 |
+| 3 | First run | #143 |
+| 4 | Room | #148 |
+| 5 | Projects | #147 |
+| 6 | Add-ons: skills, connectors, workplaces | #150 |
+| 7 | Settings, the bot's and the app's | #155 |
+| 8 | Routines | #156 |
+| 9 | Memory | #157 |
+| 10 | Side pane and surfaces | #158 |
+| 11 | Palette, pairing page, messages between bots | #159 |

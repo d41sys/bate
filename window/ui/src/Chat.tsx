@@ -218,6 +218,13 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
   useLayoutEffect(() => {
     if (atBottom.current && items.length) rows.scrollToIndex(items.length - 1, { align: "end" });
   }, [items, rows]);
+  // The message box is as tall as its words, up to the limit the style sets.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
   // One file at a time: the service takes only a few at once from a window.
@@ -331,7 +338,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         </div>
       )}
       <div className="tools">
-        <button type="button" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id }).then((d) => setSaved(d.path)))}>
+        <button type="button" className="ghost small" onClick={() => run(request<{ path: string }>("export_chat", { bot: bot.id }).then((d) => setSaved(d.path)))}>
           Export chat
         </button>
         {saved && <span className="note">Saved to <code>{saved}</code></span>}
@@ -380,11 +387,13 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         <div key={q.question} className="question" role="group" aria-label={q.title}>
           <p>{q.title}</p>
           {q.target && <pre>{q.target}</pre>}
-          {q.options.map((choice) => (
-            <button key={choice} onClick={() => run(request("answer", { bot: bot.id, question: q.question, choice }))}>
-              {choice}
-            </button>
-          ))}
+          <div className="actions">
+            {q.options.map((choice) => (
+              <button key={choice} onClick={() => run(request("answer", { bot: bot.id, question: q.question, choice }))}>
+                {choice}
+              </button>
+            ))}
+          </div>
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
@@ -415,7 +424,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
           ))}
         </ol>
       )}
-      <form onSubmit={(e) => { e.preventDefault(); send(); }}>
+      <form className="composer" onSubmit={(e) => { e.preventDefault(); send(); }}>
         <input
           ref={picker}
           type="file"
@@ -426,7 +435,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
             e.target.value = "";
           }}
         />
-        <button type="button" onClick={() => picker.current?.click()}>Attach</button>
+        <button type="button" className="round" aria-label="Attach files" title="Attach files" onClick={() => picker.current?.click()}>+</button>
         {inShell && (
           <button
             type="button"
@@ -441,7 +450,9 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
         )}
         <textarea
           ref={box}
+          rows={1}
           aria-label="Message"
+          placeholder={`Message ${bot.name}`}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -471,7 +482,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
             <button type="button" onClick={() => run(request("abort", { bot: bot.id }))}>Stop</button>
           </>
         ) : (
-          <button disabled={!message || uploading || sending}>Send</button>
+          <button className="round" aria-label="Send" title="Send" disabled={!message || uploading || sending}>↑</button>
         )}
       </form>
     </section>
@@ -502,7 +513,7 @@ function Row({ item, busy, fixed, retry, edit, fork, proceed, latest, open, read
     case "user":
       return (
         <>
-          <p className={item.past ? "past" : undefined}>{item.text}</p>
+          <p className={item.past ? "bubble past" : "bubble"}>{item.text}</p>
           {!item.past && !fixed && (
             <div className="actions">
               <button disabled={busy} onClick={() => retry(item)}>Retry</button>
@@ -577,7 +588,7 @@ function Reply({ item, busy, open, reading, read, stopReading }: {
   const text = useRef<HTMLDivElement>(null);
   return (
     <>
-      <div ref={text}>
+      <div ref={text} className="bubble">
         <Markdown text={item.text} open={open} />
       </div>
       {read && (

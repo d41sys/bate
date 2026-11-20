@@ -3,8 +3,8 @@
 // fit, it floats over the conversation instead.
 export const MIN_PANE = 240;
 export const MIN_CHAT = 340;
-// The bot list's `14rem` at the page's 14px font.
-export const SIDEBAR = 196;
+// The sidebar's `--side-w` (tokens.css). It is narrower only in windows where the pane floats anyway.
+export const SIDEBAR = 280;
 
 export function placePane(want: number, viewport: number): { width: number; overlay: boolean } {
   const room = viewport - SIDEBAR - MIN_CHAT;
