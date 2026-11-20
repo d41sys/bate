@@ -7253,3 +7253,517 @@ fn a_workplace_that_a_project_has_on_is_removed_only_when_forced_and_keeps_the_p
     ask_prompt(&mut w, &a, "n2");
     assert!(last_logged(&home, &a, "connectors.log").contains("\"connectors\":[]"));
 }
+
+/// A stand-in file host: `answer(path, n)` is the whole raw reply to the `n`th request (from 0).
+struct FileHost {
+    base: String,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FileHost {
+    fn start(answer: impl Fn(&str, usize) -> Vec<u8> + Send + 'static) -> FileHost {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+        let counted = hits.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let path = first.split(' ').nth(1).unwrap_or("");
+                let _ = stream.write_all(&answer(path, n));
+            }
+        });
+        FileHost { base, hits }
+    }
+
+    /// Serves `files` by path, and a 404 for the rest.
+    fn of(files: Vec<(&'static str, Vec<u8>)>) -> FileHost {
+        FileHost::start(move |path, _| {
+            files
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map_or_else(|| reply(404, &[]), |(_, body)| reply(200, body))
+        })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    fn addr(&self) -> &str {
+        self.base.strip_prefix("http://").unwrap()
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn reply(status: u16, body: &[u8]) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 {status} -\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+fn sha256_of(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A download entry of a manifest.
+fn download(url: &str, body: &[u8], dest: &str, unpack: Option<&str>) -> Value {
+    let mut d = json!({"url": url, "size": body.len(), "sha256": sha256_of(body), "dest": dest});
+    if let Some(u) = unpack {
+        d["unpack"] = json!(u);
+    }
+    d
+}
+
+/// A copy of the example workplace that lists `downloads`.
+fn workplace_that_fetches(name: &str, downloads: Value) -> Home {
+    let copy = copied_workplace(name);
+    let file = copy.join("workplace.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    manifest["downloads"] = downloads;
+    fs::write(&file, manifest.to_string()).unwrap();
+    copy
+}
+
+/// A `.tar.gz`: `setup` fills a folder and names the members to archive, with `tar`'s `flags`.
+fn tarball(name: &str, flags: &[&str], setup: impl FnOnce(&Path) -> Vec<String>) -> Vec<u8> {
+    let root = std::env::temp_dir().join(format!("appd-{}-tar-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let inside = root.join("in");
+    fs::create_dir_all(&inside).unwrap();
+    let members = setup(&inside);
+    let out = root.join("out.tar.gz");
+    let done = Command::new("/usr/bin/tar")
+        .args(flags)
+        .arg("-czf")
+        .arg(&out)
+        .arg("-C")
+        .arg(&inside)
+        .args(members)
+        .status()
+        .unwrap();
+    assert!(done.success());
+    let bytes = fs::read(&out).unwrap();
+    fs::remove_dir_all(&root).unwrap();
+    bytes
+}
+
+/// An archive of `bin/run` (which runs) and `lib/x.txt`.
+fn tools_archive() -> Vec<u8> {
+    tarball("tools", &[], |dir| {
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("bin/run"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(dir.join("bin/run"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("lib/x.txt"), "x").unwrap();
+        vec!["bin".into(), "lib".into()]
+    })
+}
+
+/// Asking to install `folder` with its downloads fails with `reason`, and nothing is left.
+fn fetch_fails(w: &mut Window, home: &Path, folder: &Path, reason: &str) {
+    let id = w.send(
+        "install_workplace",
+        json!({"path": folder, "download": true}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["code"], "download_failed", "{reply}");
+    let error = reply["error"].as_str().unwrap();
+    assert!(error.contains(reason), "{reason:?} not in {error:?}");
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+    assert!(!home.join("workplaces").join("counter").exists());
+    eventually("the staging folder to be empty", || {
+        fs::read_dir(home.join("staging")).map_or(true, |mut d| d.next().is_none())
+    });
+}
+
+#[test]
+fn a_workplaces_downloads_are_shown_then_fetched_checked_and_unpacked_with_progress() {
+    let home = home("wp-fetch");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let model = vec![7u8; 5000];
+    let tools = tools_archive();
+    let host = FileHost::of(vec![
+        ("/model.bin", model.clone()),
+        ("/tools.tar.gz", tools.clone()),
+    ]);
+    let folder = workplace_that_fetches(
+        "wp-fetch-src",
+        json!([
+            download(&host.url("/model.bin"), &model, "data/model.bin", None),
+            download(&host.url("/tools.tar.gz"), &tools, "tools", Some("tar.gz")),
+        ]),
+    );
+
+    // The window is told the total size and the hosts first.
+    let preview = w.ok("preview_workplace", json!({"path": &folder.0}));
+    assert_eq!(preview["downloadBytes"], model.len() + tools.len());
+    assert_eq!(preview["hosts"], json!([host.addr()]));
+    assert_eq!(preview["manifest"]["downloads"][1]["unpack"], "tar.gz");
+
+    // Without the person's agreement nothing is contacted or installed.
+    let id = w.send("install_workplace", json!({"path": &folder.0}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "download_not_agreed", "{refused}");
+    assert_eq!(host.hits(), 0);
+    assert_eq!(w.ok("list_workplaces", json!({}))["workplaces"], json!([]));
+
+    let id = w.send(
+        "install_workplace",
+        json!({"path": &folder.0, "download": true}),
+    );
+    let mut progress = Vec::new();
+    let done = loop {
+        let f = w.frame();
+        match f["type"].as_str() {
+            Some("workplace_progress") => progress.push(f),
+            Some("response") if f["id"] == id.as_str() => break f,
+            _ => {}
+        }
+    };
+    assert_eq!(done["success"], true, "{done}");
+    let total = model.len() + tools.len();
+    assert!(
+        progress
+            .iter()
+            .all(|f| f["name"] == "counter" && f["total"] == total)
+    );
+    assert_eq!(progress.last().unwrap()["done"], total);
+    assert!(progress.iter().any(|f| f["done"] == model.len()));
+
+    use std::os::unix::fs::MetadataExt;
+    let installed = home.join("workplaces").join("counter");
+    assert_eq!(fs::read(installed.join("data/model.bin")).unwrap(), model);
+    // Unpacked into its own folder, not beside it.
+    assert!(!installed.join("lib").exists());
+    assert_eq!(
+        fs::read_to_string(installed.join("tools/lib/x.txt")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        fs::metadata(installed.join("tools/bin/run"))
+            .unwrap()
+            .mode()
+            & 0o111,
+        0o111
+    );
+    // The archive is not kept, and the folder of the download is not left in staging.
+    eventually("the staging folder to be empty", || {
+        fs::read_dir(home.join("staging")).map_or(true, |mut d| d.next().is_none())
+    });
+    let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
+    assert_eq!(listed[0]["changed"], false, "{listed}");
+    assert_eq!(
+        listed[0]["manifest"]["downloads"][0]["dest"],
+        "data/model.bin"
+    );
+
+    // A downloaded file is part of the fingerprint like any other.
+    fs::write(installed.join("data/model.bin"), b"other").unwrap();
+    assert_eq!(
+        w.ok("list_workplaces", json!({}))["workplaces"][0]["changed"],
+        true
+    );
+}
+
+#[test]
+fn a_download_that_goes_wrong_is_stopped_and_leaves_nothing() {
+    let home = home("wp-fetch-bad");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let body = vec![1u8; 3000];
+    let fetch = |host: &FileHost, name: &str, d: Value| {
+        let _ = host;
+        workplace_that_fetches(name, json!([d]))
+    };
+
+    // The wrong bytes.
+    let host = FileHost::of(vec![("/f", vec![2u8; 3000])]);
+    let folder = fetch(
+        &host,
+        "wp-bad-hash",
+        download(&host.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "sha256");
+
+    // More than the stated size: by its length, and when the host does not give one.
+    let more = vec![1u8; 3100];
+    let host = FileHost::of(vec![("/f", more.clone())]);
+    let folder = fetch(
+        &host,
+        "wp-over-length",
+        download(&host.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "larger than");
+    let unmeasured = more.clone();
+    let host = FileHost::start(move |_, _| {
+        let mut out = b"HTTP/1.1 200 -\r\nconnection: close\r\n\r\n".to_vec();
+        out.extend_from_slice(&unmeasured);
+        out
+    });
+    let folder = fetch(
+        &host,
+        "wp-over-stream",
+        download(&host.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "larger than");
+
+    // Fewer than the stated size.
+    let host = FileHost::of(vec![("/f", vec![1u8; 2000])]);
+    let folder = fetch(
+        &host,
+        "wp-short",
+        download(&host.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "bytes, not the 3000");
+
+    // A missing file, also behind a redirect (followed: GitHub serves release files elsewhere).
+    let missing = FileHost::of(vec![]);
+    let folder = fetch(
+        &missing,
+        "wp-404",
+        download(&missing.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "404");
+    let to = missing.url("/f");
+    let host = FileHost::start(move |_, _| {
+        format!(
+            "HTTP/1.1 302 -\r\nlocation: {to}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+        .into_bytes()
+    });
+    let folder = fetch(
+        &host,
+        "wp-redirect",
+        download(&host.url("/f"), &body, "f", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "404");
+
+    // A place the workplace's own files hold.
+    let host = FileHost::of(vec![("/f", body.clone())]);
+    let folder = fetch(
+        &host,
+        "wp-taken",
+        download(&host.url("/f"), &body, "server.py", None),
+    );
+    fetch_fails(&mut w, &home, &folder, "already");
+    assert_eq!(host.hits(), 0);
+
+    // A later download that fails takes the earlier ones with it.
+    let host = FileHost::of(vec![("/f", body.clone())]);
+    let folder = workplace_that_fetches(
+        "wp-second",
+        json!([
+            download(&host.url("/f"), &body, "first", None),
+            download(&host.url("/nothing"), &body, "second", None),
+        ]),
+    );
+    fetch_fails(&mut w, &home, &folder, "404");
+}
+
+#[test]
+fn an_interrupted_download_is_tried_again_by_installing_again() {
+    let home = home("wp-fetch-retry");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let body = vec![9u8; 1000];
+    let whole = body.clone();
+    // The first answer breaks off after 10 bytes.
+    let host = FileHost::start(move |_, n| {
+        if n == 0 {
+            let mut out = reply(200, &whole);
+            out.truncate(out.len() - 990);
+            out
+        } else {
+            reply(200, &whole)
+        }
+    });
+    let folder = workplace_that_fetches(
+        "wp-retry-src",
+        json!([download(&host.url("/f"), &body, "data/f", None)]),
+    );
+    fetch_fails(&mut w, &home, &folder, "broke off");
+    let made = w.ok(
+        "install_workplace",
+        json!({"path": &folder.0, "download": true}),
+    );
+    assert_eq!(made["workplace"]["name"], "counter");
+    assert_eq!(
+        fs::read(home.join("workplaces/counter/data/f")).unwrap(),
+        body
+    );
+    assert_eq!(host.hits(), 2);
+}
+
+#[test]
+fn an_archive_cannot_write_outside_the_workplaces_folder_or_bring_links() {
+    let home = home("wp-fetch-tar");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let outside = home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret"), "mine").unwrap();
+    let absolute = outside.join("secret").to_str().unwrap().to_owned();
+
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "absolute",
+            tarball("absolute", &["-P"], |_| vec![absolute.clone()]),
+            "outside its folder",
+        ),
+        (
+            "dotdot",
+            tarball("dotdot", &[], |dir| {
+                fs::create_dir_all(dir.join("sub")).unwrap();
+                fs::write(dir.join("escaped.txt"), "x").unwrap();
+                vec!["sub/../../in/escaped.txt".into()]
+            }),
+            "outside its folder",
+        ),
+        (
+            "symlink",
+            tarball("symlink", &[], |dir| {
+                std::os::unix::fs::symlink("/etc", dir.join("etc")).unwrap();
+                vec!["etc".into()]
+            }),
+            "not a plain file",
+        ),
+        (
+            "hardlink",
+            tarball("hardlink", &[], |dir| {
+                fs::write(dir.join("a"), "x").unwrap();
+                fs::hard_link(dir.join("a"), dir.join("b")).unwrap();
+                vec!["a".into(), "b".into()]
+            }),
+            "not a plain file",
+        ),
+    ];
+    for (what, archive, reason) in cases {
+        let host = FileHost::of(vec![("/a.tar.gz", archive.clone())]);
+        let folder = workplace_that_fetches(
+            &format!("wp-tar-{what}"),
+            json!([download(
+                &host.url("/a.tar.gz"),
+                &archive,
+                "tools",
+                Some("tar.gz")
+            )]),
+        );
+        fetch_fails(&mut w, &home, &folder, reason);
+    }
+    assert_eq!(fs::read_to_string(outside.join("secret")).unwrap(), "mine");
+    assert!(!home.join("escaped.txt").exists() && !home.join("staging/escaped.txt").exists());
+    // Only the folders the test made are in the home: nothing was written beside the staging.
+    assert!(!home.join("workplaces").join("escaped.txt").exists());
+}
+
+#[test]
+fn a_manifest_with_a_bad_download_is_refused() {
+    let home = home("wp-fetch-manifest");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let sha = "ab".repeat(32);
+    let good = json!({"url": "https://example.com/f", "size": 10, "sha256": sha, "dest": "data/f"});
+    let with = |key: &str, value: Value| {
+        let mut d = good.clone();
+        d[key] = value;
+        d
+    };
+    let cases = [
+        with("url", json!("http://example.com/f")),
+        with("url", json!("ftp://example.com/f")),
+        with("url", json!("https://user:pw@example.com/f")),
+        with("size", json!(0)),
+        with("size", json!(1u64 << 40)),
+        with("sha256", json!("AB".repeat(32))),
+        with("sha256", json!("ab")),
+        with("dest", json!("/etc/x")),
+        with("dest", json!("../x")),
+        with("dest", json!("a/../x")),
+        with("unpack", json!("zip")),
+    ];
+    for (i, bad) in cases.into_iter().enumerate() {
+        let folder = workplace_that_fetches(&format!("wp-bad-manifest-{i}"), json!([bad]));
+        let id = w.send("preview_workplace", json!({"path": &folder.0}));
+        let r = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(r["code"], "invalid_workplace", "{i}: {r}");
+    }
+    let twice =
+        workplace_that_fetches("wp-bad-manifest-twice", json!([good.clone(), good.clone()]));
+    let id = w.send("preview_workplace", json!({"path": &twice.0}));
+    let r = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(r["code"], "invalid_workplace", "{r}");
+    // An https address, and http to this Mac, are fine.
+    let mut local = with("url", json!("http://127.0.0.1:1/f"));
+    local["dest"] = json!("data/g");
+    let ok = workplace_that_fetches("wp-ok-manifest", json!([good, local]));
+    let hosts = w.ok("preview_workplace", json!({"path": &ok.0}))["hosts"].clone();
+    assert_eq!(hosts, json!(["127.0.0.1:1", "example.com"]));
+}
+
+#[test]
+fn what_a_workplace_fetches_is_never_an_update() {
+    let (key, pubkey) = new_key();
+    let scratch = home("wp-update-files");
+    let archive = release(&scratch, "9.9.9");
+    // The update host has nothing, so the service has no update.
+    let mut u = Updating::start("wp-update", Releases::start(), Some(&pubkey));
+    let id = u.window.send("check_update", json!({}));
+    let nothing = u
+        .window
+        .wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(nothing["code"], "update_failed", "{nothing}");
+
+    // A workplace brings a genuine signed release, and a feed that points at it: data, no more.
+    let bytes = fs::read(&archive).unwrap();
+    let host = FileHost::of(vec![("/release.tar.gz", bytes.clone())]);
+    let feed = signed_feed(&key, &archive, "9.9.9", &host.url("/release.tar.gz")).to_string();
+    let host2 = FileHost::of(vec![("/feed.json", feed.clone().into_bytes())]);
+    let folder = workplace_that_fetches(
+        "wp-update-src",
+        json!([
+            download(
+                &host.url("/release.tar.gz"),
+                &bytes,
+                "release/release.tar.gz",
+                None
+            ),
+            download(
+                &host2.url("/feed.json"),
+                feed.as_bytes(),
+                "release/feed.json",
+                None
+            ),
+        ]),
+    );
+    u.window.ok(
+        "install_workplace",
+        json!({"path": &folder.0, "download": true}),
+    );
+    assert!(u.home.join("workplaces/counter/release/feed.json").exists());
+    let state = u.window.ok("get_update", json!({}));
+    assert_eq!(
+        (state["state"].as_str(), state["available"].clone()),
+        (Some("error"), Value::Null)
+    );
+    assert!(!u.staged() && u.untouched());
+}

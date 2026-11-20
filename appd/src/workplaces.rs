@@ -5,6 +5,7 @@
 //! looks.
 
 use crate::core::check_connector_name;
+use crate::download;
 use crate::skills::{self, Limits};
 use crate::store::Workplace;
 use crate::sys::Dir;
@@ -17,6 +18,8 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const FILE: &str = "workplace.json";
 const MAX_MANIFEST: u64 = 64 * 1024;
@@ -30,6 +33,9 @@ const LIMITS: Limits = Limits {
 /// Most entries in a list of the manifest, and most characters of one entry.
 const MOST: usize = 50;
 const LONGEST: usize = 200;
+const MOST_DOWNLOADS: usize = 20;
+/// The most one download may be, and the stated size cannot be more.
+const LARGEST_DOWNLOAD: u64 = 16 << 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -40,6 +46,38 @@ pub struct Manifest {
     pub program: Program,
     #[serde(default)]
     pub needs: Needs,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<Download>,
+}
+
+impl Manifest {
+    /// What the downloads come to, the stated sizes added.
+    pub fn download_bytes(&self) -> u64 {
+        self.downloads.iter().map(|d| d.size).sum()
+    }
+
+    /// The hosts (with a port, if there is one) the downloads contact, each once.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<_> = (self.downloads.iter())
+            .filter_map(|d| host_of(&d.url).ok())
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+}
+
+/// A file the workplace needs that is too big to ship in its folder. Bate fetches it at
+/// install, checks `size` and `sha256`, and puts it at `dest` in the workplace's folder, or,
+/// with `unpack: "tar.gz"`, unpacks the archive into the folder `dest`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Download {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+    pub dest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpack: Option<String>,
 }
 
 /// `command` is a path in the workplace's folder, or a name on the service's `PATH`; `args`
@@ -122,6 +160,61 @@ fn list_of(what: &str, items: &[String]) -> Result<(), String> {
     items.iter().try_for_each(|item| line(what, item, LONGEST))
 }
 
+/// `host[:port]` of an address that may be downloaded from: https, or http to this Mac.
+fn host_of(url: &str) -> Result<String, String> {
+    let bad = || format!("`downloads.url` {url:?} must be an https address");
+    let uri: ureq::http::Uri = url.parse().map_err(|_| bad())?;
+    let authority = uri.authority().ok_or_else(bad)?;
+    let host = authority.host().to_ascii_lowercase();
+    let local = ["127.0.0.1", "localhost", "[::1]"].contains(&host.as_str());
+    let scheme_ok = match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") => local,
+        _ => false,
+    };
+    if !scheme_ok || host.is_empty() || authority.as_str().contains('@') {
+        return Err(bad());
+    }
+    Ok(authority.as_str().to_ascii_lowercase())
+}
+
+fn check_downloads(list: &[Download]) -> Result<(), String> {
+    if list.len() > MOST_DOWNLOADS {
+        return Err(format!("`downloads` has at most {MOST_DOWNLOADS} entries"));
+    }
+    for (i, d) in list.iter().enumerate() {
+        line("downloads.url", &d.url, 2000)?;
+        host_of(&d.url)?;
+        if d.size == 0 || d.size > LARGEST_DOWNLOAD {
+            return Err(format!("`downloads.size` is 1 to {LARGEST_DOWNLOAD} bytes"));
+        }
+        let hex = d
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if d.sha256.len() != 64 || !hex {
+            return Err("`downloads.sha256` is 64 lowercase hex digits".into());
+        }
+        line("downloads.dest", &d.dest, LONGEST)?;
+        if !Path::new(&d.dest)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(
+                "`downloads.dest` is a path inside the workplace's folder: not absolute, no `..`"
+                    .into(),
+            );
+        }
+        if d.unpack.as_deref().is_some_and(|u| u != "tar.gz") {
+            return Err("`downloads.unpack` is `tar.gz` or left out".into());
+        }
+        if list[..i].iter().any(|o| o.dest == d.dest) {
+            return Err(format!("`downloads.dest` {:?} is used twice", d.dest));
+        }
+    }
+    Ok(())
+}
+
 fn parse(text: &str) -> Result<Manifest, String> {
     let m: Manifest = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
     check_connector_name(&m.name)?;
@@ -143,6 +236,7 @@ fn parse(text: &str) -> Result<Manifest, String> {
     list_of("needs.folders", &m.needs.folders)?;
     list_of("needs.hosts", &m.needs.hosts)?;
     list_of("needs.commands", &m.needs.commands)?;
+    check_downloads(&m.downloads)?;
     Ok(m)
 }
 
@@ -162,6 +256,29 @@ fn read(folder: &Dir) -> Result<Manifest, String> {
     parse(&text)
 }
 
+type Key = (u64, u64, u64, i64, i64, i64, i64);
+type Sums = std::collections::HashMap<PathBuf, (Key, Vec<u8>)>;
+/// What is known of each file the fingerprint read: where it was, and its SHA-256.
+static READ: std::sync::Mutex<Option<Sums>> = std::sync::Mutex::new(None);
+
+/// The folder `from` was renamed `to`: what is known of its files goes with it, so that big
+/// downloaded files, hashed while they were staged, are not read again at the first look.
+fn moved(from: &Path, to: &Path) {
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(read) = read.as_mut() else { return };
+    read.retain(|path, _| !path.starts_with(to));
+    let known: Vec<PathBuf> = read
+        .keys()
+        .filter(|p| p.starts_with(from))
+        .cloned()
+        .collect();
+    for path in known {
+        if let (Some(sum), Ok(rest)) = (read.remove(&path), path.strip_prefix(from)) {
+            read.insert(to.join(rest), sum);
+        }
+    }
+}
+
 /// SHA-256 over the folder's entries, each folder's in order of name, depth first: for each,
 /// its path from `root`, its kind, and for a file whether it runs, its length and the SHA-256
 /// of its bytes. A link or special file counts as itself, so one added later changes it.
@@ -169,9 +286,6 @@ fn read(folder: &Dir) -> Result<Manifest, String> {
 /// service's one thread checks a workplace at each listing and each start of its program, and
 /// ctime cannot be set back by the file's owner.
 pub fn fingerprint(root: &Path) -> io::Result<String> {
-    type Key = (u64, u64, u64, i64, i64, i64, i64);
-    type Sums = std::collections::HashMap<PathBuf, (Key, Vec<u8>)>;
-    static READ: std::sync::Mutex<Option<Sums>> = std::sync::Mutex::new(None);
     fn walk(
         root: &Path,
         at: &Path,
@@ -300,30 +414,107 @@ pub fn inspect(row: &Workplace, used_by: Vec<String>) -> Listed {
 
 type Refusal = (&'static str, String);
 
-/// Copies the folder `source` in as a workplace, in place of one of the same name unless
-/// `in_use` says a project has it on. Gives what to record.
-pub fn install(source: &Path, in_use: impl FnOnce(&str) -> bool) -> Result<Workplace, Refusal> {
+/// The manifest of the folder `source`, for the person to see before installing.
+pub fn preview(source: &Path) -> Result<Manifest, Refusal> {
+    let invalid = |e: String| ("invalid_workplace", e);
+    let from = Dir::open(source)
+        .map_err(|e| invalid(format!("{} is not a folder: {e}", source.display())))?;
+    read(&from).map_err(invalid)
+}
+
+/// A workplace copied and fetched into a staging folder, ready to be moved into place.
+pub struct Prepared {
+    pub manifest: Manifest,
+    staged: PathBuf,
+    fingerprint: String,
+}
+
+/// Copies the folder `source` and fetches what its manifest lists into a staging folder: the
+/// slow part of an install, for a thread of its own. Downloads need `fetch` (the person saw
+/// their size and hosts and agreed). `report` gets the bytes fetched so far and the total.
+/// Whatever fails leaves nothing behind.
+pub fn prepare(
+    source: &Path,
+    fetch: bool,
+    in_use: impl FnOnce(&str) -> bool,
+    report: &mut dyn FnMut(&str, u64, u64),
+) -> Result<Prepared, Refusal> {
     let invalid = |e: String| ("invalid_workplace", e);
     // Held open like a skill's folder: the picked folder may be one a bot can write in.
     let from = Dir::open(source)
         .map_err(|e| invalid(format!("{} is not a folder: {e}", source.display())))?;
     let manifest = read(&from).map_err(invalid)?;
     if in_use(&manifest.name) {
+        return Err(in_use_refusal(&manifest.name));
+    }
+    if !manifest.downloads.is_empty() && !fetch {
         return Err((
-            "workplace_in_use",
+            "download_not_agreed",
             format!(
-                "the workplace {} is switched on in a project: switch it off first",
-                manifest.name
+                "the workplace {} downloads {} bytes from {}: say `download: true` once the person has agreed",
+                manifest.name,
+                manifest.download_bytes(),
+                manifest.hosts().join(", ")
             ),
         ));
     }
     let failed = |e: io::Error| invalid(format!("cannot install the workplace: {e}"));
     let staged = skills::staging().map_err(failed)?;
-    let installed = skills::copy(&from, &staged, &LIMITS, 0, &mut (0, 0))
+    let scratch = skills::staging().map_err(failed)?;
+    let name = manifest.name.clone();
+    let prepared = skills::copy(&from, &staged, &LIMITS, 0, &mut (0, 0))
         .map_err(invalid)
-        .and_then(|()| check_program(&manifest, &staged).map_err(invalid))
         .and_then(|()| {
+            // The archives are unpacked from here, apart from the workplace's folder.
+            sys::create_private_dir(&scratch).map_err(failed)?;
+            fetch_all(&manifest, &staged, &scratch, &mut |done, total| {
+                report(&name, done, total)
+            })
+            .map_err(|e| ("download_failed", e))?;
+            check_program(&manifest, &staged).map_err(invalid)?;
+            // The downloaded files count in it like the rest: too many is found here.
             let fingerprint = fingerprint(&staged).map_err(failed)?;
+            Ok(fingerprint)
+        });
+    skills::discard(Some(scratch));
+    match prepared {
+        Ok(fingerprint) => Ok(Prepared {
+            manifest,
+            staged,
+            fingerprint,
+        }),
+        Err(e) => {
+            skills::discard(Some(staged));
+            Err(e)
+        }
+    }
+}
+
+fn in_use_refusal(name: &str) -> Refusal {
+    (
+        "workplace_in_use",
+        format!("the workplace {name} is switched on in a project: switch it off first"),
+    )
+}
+
+/// Moves a prepared workplace into place, in place of one of the same name unless `in_use`
+/// says a project has it on. Gives what to record.
+pub fn commit(prepared: Prepared, in_use: impl FnOnce(&str) -> bool) -> Result<Workplace, Refusal> {
+    let Prepared {
+        manifest,
+        staged,
+        fingerprint,
+    } = prepared;
+    let failed = |e: io::Error| {
+        (
+            "invalid_workplace",
+            format!("cannot install the workplace: {e}"),
+        )
+    };
+    let installed = if in_use(&manifest.name) {
+        Err(in_use_refusal(&manifest.name))
+    } else {
+        (|| {
             sys::create_private_dir(&dir()).map_err(failed)?;
             let target = folder(&manifest.name);
             let old = skills::staging().map_err(failed)?;
@@ -338,6 +529,7 @@ pub fn install(source: &Path, in_use: impl FnOnce(&str) -> bool) -> Result<Workp
                 }
                 return Err(failed(e));
             }
+            moved(&staged, &target);
             if moved_out {
                 skills::discard(Some(old));
             }
@@ -346,11 +538,120 @@ pub fn install(source: &Path, in_use: impl FnOnce(&str) -> bool) -> Result<Workp
                 version: manifest.version.clone(),
                 fingerprint,
             })
-        });
+        })()
+    };
     if installed.is_err() {
         skills::discard(Some(staged));
     }
     installed
+}
+
+/// Fetches each download of the manifest into `staged`, one after the other. A download is
+/// hashed as it arrives and stops at its stated size; it never writes where something is
+/// already, and an archive is unpacked only after its hash is right.
+fn fetch_all(
+    manifest: &Manifest,
+    staged: &Path,
+    scratch: &Path,
+    report: &mut dyn FnMut(u64, u64),
+) -> Result<(), String> {
+    let total = manifest.download_bytes();
+    let mut before = 0;
+    for d in &manifest.downloads {
+        let dest = staged.join(&d.dest);
+        if fs::symlink_metadata(&dest).is_ok() {
+            return Err(format!(
+                "`{}` is in the workplace's folder already: a download needs a place of its own",
+                d.dest
+            ));
+        }
+        let archive = scratch.join("archive");
+        let (target, parent) = match d.unpack {
+            Some(_) => (&archive, dest.as_path()),
+            None => (&dest, dest.parent().unwrap_or(staged)),
+        };
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot make the place for `{}`: {e}", d.dest))?;
+        // The time allowed grows with the size: 100 KiB a second is slow enough. Redirects are
+        // followed: GitHub serves release files from another host, and the hash is what counts.
+        let agent = download::agent(5, Duration::from_secs(600 + d.size / (100 << 10)));
+        let mut last = Instant::now();
+        let got = download::to_file(&agent, &d.url, d.size, target, |n| {
+            if last.elapsed() >= Duration::from_millis(250) {
+                last = Instant::now();
+                report(before + n, total);
+            }
+        })
+        .map_err(|e| format!("`{}`: {e}", d.dest))?;
+        if got.size != d.size {
+            return Err(format!(
+                "{} is {} bytes, not the {} the manifest says",
+                d.url, got.size, d.size
+            ));
+        }
+        if got.sha256 != d.sha256 {
+            return Err(format!(
+                "the sha256 of {} is {}, not the manifest's {}",
+                d.url, got.sha256, d.sha256
+            ));
+        }
+        if d.unpack.is_some() {
+            unpack(&archive, &dest)?;
+            fs::remove_file(&archive).map_err(|e| format!("cannot remove the archive: {e}"))?;
+        }
+        before += d.size;
+        report(before, total);
+    }
+    Ok(())
+}
+
+/// Unpacks the `.tar.gz` at `archive` into the folder `dest` with `/usr/bin/tar`, once the
+/// listing shows that every entry is a plain file or folder and stays inside `dest`: no
+/// absolute path, no `..`, no link, device or other special file.
+// shortcut: the unpacked size is not capped (the hash pins the archive, and its maker is the
+// workplace's, who also supplies the program); cap it if archives from others are ever taken.
+fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
+    let tar = |flags: &str, into: Option<&Path>| {
+        let mut tar = Command::new("/usr/bin/tar");
+        tar.arg(flags).arg(archive);
+        if let Some(into) = into {
+            tar.arg("-C").arg(into);
+        }
+        let out =
+            (tar.stdin(Stdio::null()).output()).map_err(|e| format!("cannot run tar: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "cannot unpack the archive: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        String::from_utf8(out.stdout)
+            .map_err(|_| "the archive has names that are not text".to_owned())
+    };
+    let (names, kinds) = (tar("-tzf", None)?, tar("-tvzf", None)?);
+    if names.lines().count() != kinds.lines().count() || names.lines().count() > LIMITS.files {
+        return Err(format!(
+            "the archive has more than {} files and folders, or a listing that cannot be read",
+            LIMITS.files
+        ));
+    }
+    for (name, kind) in names.lines().zip(kinds.lines()) {
+        let inside = Path::new(name)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        if name.is_empty() || !inside {
+            return Err(format!(
+                "the archive has {name:?}, which is outside its folder"
+            ));
+        }
+        // `-` a file, `d` a folder; a link shows as `l` or `h`, a device or pipe as another.
+        if !kind.starts_with(['-', 'd']) {
+            return Err(format!(
+                "the archive has {name:?}, which is not a plain file or folder"
+            ));
+        }
+    }
+    tar("-xzf", Some(dest)).map(drop)
 }
 
 /// A program that is a file of the workplace must be there and run.

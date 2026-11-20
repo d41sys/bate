@@ -441,6 +441,7 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "delete_project",
     "read_roles",
     "add_roles",
+    "preview_workplace",
     "install_workplace",
     "approve_workplace",
     "remove_workplace",

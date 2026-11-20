@@ -10,6 +10,7 @@ mod chatgpt;
 mod clients;
 mod core;
 mod desktop;
+mod download;
 mod gate;
 mod hooks;
 mod keychain;

@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { request } from "./service.ts";
-import type { Project, Workplace } from "./types.ts";
-import { needsLines } from "./workplaces.ts";
+import { useEffect, useState } from "react";
+import { listen, request } from "./service.ts";
+import type { Project, Workplace, WorkplacePreview } from "./types.ts";
+import { downloadText, needsLines, progressText } from "./workplaces.ts";
 
 /** Installed workplaces: install from a folder, look at what each needs, approve a changed one, remove. */
 export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; projects: Project[] }) {
@@ -12,10 +12,27 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
   /** Whether it worked; if not, the error shows. */
   const run = (p: Promise<unknown>) =>
     p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
-  const install = async () => {
+  /** What the person is asked to agree to before the downloads start. */
+  const [asking, setAsking] = useState<string>();
+  /** The bytes fetched so far and in all, while an install downloads. */
+  const [progress, setProgress] = useState<[number, number]>();
+  useEffect(
+    () => listen((f) => f.type === "workplace_progress" && setProgress([f.done as number, f.total as number])),
+    [],
+  );
+  const install = async (download: boolean) => {
     // As for a skill: the service does not expand `~`.
     if (!path.startsWith("/")) return setError("Give the whole path, starting with /, for example /Users/you/Downloads/my-workplace.");
-    if (await run(request("install_workplace", { path }))) setPath("");
+    if (!download) {
+      const preview = await request<WorkplacePreview>("preview_workplace", { path }).catch((e: Error) => (setError(e.message), undefined));
+      if (!preview) return;
+      const text = downloadText(preview);
+      if (text) return setAsking(text), setError("");
+    }
+    setAsking(undefined);
+    setProgress(undefined);
+    if (await run(request("install_workplace", { path, download }))) setPath("");
+    setProgress(undefined);
   };
   const using = (w: Workplace) => w.usedBy.map((id) => projects.find((p) => p.id === id)?.name ?? id);
 
@@ -55,16 +72,23 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
           </li>
         ))}
       </ul>
-      <form className="fields" onSubmit={(e) => { e.preventDefault(); install(); }}>
+      <form className="fields" onSubmit={(e) => { e.preventDefault(); install(false); }}>
         <h3>Install a workplace</h3>
         <p className="note">
-          A workplace is a folder on the Mac that runs Bate, with a <code>workplace.json</code> in it (format: <code>docs/workplaces.md</code>). It may hold up to 2000 files and folders and 200 MiB, and no links. Installing one with a name that is installed replaces it, unless a project has it on.
+          A workplace is a folder on the Mac that runs Bate, with a <code>workplace.json</code> in it (format: <code>docs/workplaces.md</code>). It may hold up to 2000 files and folders and 200 MiB, and no links; what it lists under <code>downloads</code> is fetched at install, after you have seen its size and hosts. Installing one with a name that is installed replaces it, unless a project has it on.
         </p>
         <label>
           Folder path <input required size={50} placeholder="/Users/you/Downloads/my-workplace" value={path} onChange={(e) => setPath(e.target.value)} />
         </label>
-        <button>Install</button>
+        <button disabled={!!progress}>Install</button>
       </form>
+      {asking && (
+        <p role="alert">
+          {asking} Nothing is downloaded until you agree. <button onClick={() => install(true)}>Download and install</button>{" "}
+          <button onClick={() => setAsking(undefined)}>Cancel</button>
+        </p>
+      )}
+      {progress && <p className="note" role="status">{progressText(...progress)}</p>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>
   );
