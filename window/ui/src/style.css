@@ -37,6 +37,8 @@ button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg
 button.small { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
 /* A button that is one sign: it needs an aria-label. */
 button.round { width: var(--control-h); padding: 0; flex: none; }
+/* A sign drawn inline: it takes the button's colour. */
+button.round svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 button.file { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; font-weight: inherit; text-decoration: underline; white-space: normal; }
 
 /* ---- Text field, select ---- */
