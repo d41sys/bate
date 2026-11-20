@@ -7934,4 +7934,15 @@ fn a_project_room_sends_by_name_to_the_lead_by_default_waits_for_a_busy_bot_and_
         seen.len()
     );
     assert!(seen.len() < 4000 + 600, "{}", seen.len());
+
+    // The project owns the room: a deleted bot's lines stay, under its id.
+    w.ok("delete_bot", json!({"bot": bo}));
+    let kept = room(&mut w);
+    assert!(
+        kept.as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["to"] == bo.as_str() && l["text"].as_str().unwrap().contains("LONG1")),
+        "{kept}"
+    );
 }

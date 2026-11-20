@@ -262,7 +262,7 @@ Same shape as `proto::projects`. A project is `{id, name, folder, bots, lead, in
 
 ### Room
 
-A project has a room: one conversation in which the person writes to its bots and the bots' replies come back, in one timeline (the window's Room tab). The project owns it: the service keeps the room's lines in its database (`room`), each with who wrote it (a bot's id, or the person), the bot it was addressed to (none for a bot's reply), the text and the time. Deleting the project deletes its room; deleting a bot deletes the lines it wrote or got.
+A project has a room: one conversation in which the person writes to its bots and the bots' replies come back, in one timeline (the window's Room tab). The project owns it: the service keeps the room's lines in its database (`room`), each with who wrote it (a bot's id, or the person), the bot it was addressed to (none for a bot's reply), the text and the time. Deleting the project deletes its room; a deleted bot's lines stay, under its id (the window shows "(deleted bot)").
 
 - **Addressing:** `send_room` text that starts with `@name` goes to the bot of the project with that name (any case; the longest name that fits, so names may hold spaces; the name must be followed by a space or the end), and the message is what follows. Anything else goes to the project's `lead`. The line is added to the room before anything else, and `room_changed` follows.
 - **Delivery:** the message is an ordinary prompt of that bot, nonce `room-<seq>`: it is in the bot's queue and goes as a typed prompt goes (at once to a free bot, else when its turn ends, behind the prompts waiting; `queue_full` at 20), so the bot's own conversation holds it and its reply as it holds any turn.
