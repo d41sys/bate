@@ -274,7 +274,8 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
   useEffect(() => {
     if (!bot.busy && !asked) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) run(asked ? answer(asked, "Deny") : stop());
+      // A question with no "Deny" among its choices is not answered by Esc: Esc stops the bot then.
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing) run(asked?.options.includes("Deny") ? answer(asked, "Deny") : stop());
     };
     const onChord = (e: KeyboardEvent) => {
       if (!asked || e.key !== "Enter" || !(e.metaKey || e.ctrlKey) || e.isComposing || !asked.options.includes("Approve")) return;
@@ -350,7 +351,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
     try {
       // A message while a card is open denies it: "not this, do that". The bot reads it as a steer.
       const instead = questions.length > 0 && !bot.agent?.length;
-      for (const q of questions) await answer(q, "Deny");
+      for (const q of questions) if (q.options.includes("Deny")) await answer(q, "Deny");
       if (editing) {
         await request("rewind", { bot: bot.id, entry: editing, fork: false });
         // Gone from the chat: a second try only sends.
