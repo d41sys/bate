@@ -9195,10 +9195,44 @@ fn a_database_from_before_foreign_keys_is_moved_once_and_all_of_it_is_found_afte
     let moved = dump(&db);
     drop(db);
 
-    // A second start finds the same and changes nothing.
+    // The database as it was is kept, private, in its old shape, and named in the log.
+    let kept = home.join("app.db.before-1");
+    assert_eq!(
+        fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!home.join("app.db.before-1.part").exists());
+    assert!(log.contains("app.db.before-1: kept as it was"), "{log}");
+    let before = rusqlite::Connection::open(&kept).unwrap();
+    let listed: String = before
+        .query_row("SELECT project FROM projects WHERE id = 'p1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed).unwrap()["bots"],
+        json!(["b2", "b1", "ghost"])
+    );
+    let version: i64 = before
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 0);
+    let ghosts: i64 = before
+        .query_row(
+            "SELECT count(*) FROM transcript WHERE bot = 'ghost'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghosts, 1, "the copy keeps what the move dropped");
+    drop(before);
+    let copy = fs::read(&kept).unwrap();
+
+    // A second start finds the same and changes nothing, the copy included.
     found(&home);
     let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
     assert_eq!(dump(&db), moved);
+    assert_eq!(fs::read(&kept).unwrap(), copy);
 }
 
 #[test]

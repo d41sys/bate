@@ -199,6 +199,59 @@ fn refused(why: &str) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(code, Some(why.to_owned()))
 }
 
+/// Whether `conn` holds a database from before relations were foreign keys.
+fn is_old(conn: &Connection) -> Result<bool> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(version == 0 && has_table(conn, "bots")?)
+}
+
+/// The move cannot be undone, and an older version cannot read its result: before it, keeps one
+/// copy of the database next to it, `<file>.before-1`, readable by its owner only. A copy that is
+/// already there is kept (a move that failed is tried again from the same database). Without
+/// the copy there is no move.
+fn back_up(conn: &Connection, path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !is_old(conn)? {
+        return Ok(());
+    }
+    let file = path.file_name().expect("a database file").to_string_lossy();
+    let (copy, part) = (
+        path.with_file_name(format!("{file}.before-1")),
+        path.with_file_name(format!("{file}.before-1.part")),
+    );
+    if copy.exists() {
+        return Ok(());
+    }
+    let failed = |e: String| rusqlite::Error::ToSqlConversionFailure(e.into());
+    let _ = std::fs::remove_file(&part);
+    // `VACUUM INTO` writes into an empty file, so it can be made private first. Under another
+    // name until whole: a half-written copy is not kept.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&part)
+        .map_err(|e| failed(format!("{}: {e}", part.display())))?;
+    let target = part
+        .to_str()
+        .ok_or_else(|| failed("the path is not text".into()))?;
+    let copied = conn
+        .execute("VACUUM INTO ?1", [target])
+        .map(drop)
+        .and_then(|()| {
+            std::fs::rename(&part, &copy).map_err(|e| failed(format!("{}: {e}", copy.display())))
+        });
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    log!(
+        "{}: kept as it was before the move to foreign keys",
+        copy.display()
+    );
+    Ok(())
+}
+
 /// Creates the tables, and first moves an `app.db` written before the relations were foreign
 /// keys, once, in one transaction. SQLite cannot add a foreign key to a table, so each table
 /// that gets one is rebuilt, with foreign keys off as its documentation describes. A row that
@@ -206,8 +259,7 @@ fn refused(why: &str) -> rusqlite::Error {
 fn migrate(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", false)?;
     let tx = conn.unchecked_transaction()?;
-    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let old = version == 0 && has_table(&tx, "bots")?;
+    let old = is_old(&tx)?;
     // The tables to rebuild: an older database may lack some that a still older one never made.
     let mut moved = Vec::new();
     for table in BOT_TABLES.into_iter().chain(["mail", "projects", "bots"]) {
@@ -489,6 +541,7 @@ impl Store {
         conn.pragma_update(None, "synchronous", "FULL")?;
         // A blanked secret must not stay in the file as freed bytes.
         conn.pragma_update(None, "secure_delete", true)?;
+        back_up(&conn, path)?;
         migrate(&conn)?;
         // Off in SQLite unless asked, for each connection.
         conn.pragma_update(None, "foreign_keys", true)?;
@@ -1763,6 +1816,25 @@ mod tests {
         assert_eq!(count(&store, "bots", "project", "p1"), 0);
         assert_eq!(store.bot("b").unwrap().unwrap().id, "b");
         assert_eq!(store.project_of("b").unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_database_is_not_moved_when_its_copy_cannot_be_written() {
+        let dir = std::env::temp_dir().join(format!("appd-store-copy-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("app.db.before-1.part")).unwrap();
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        db.execute_batch("CREATE TABLE bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT);")
+            .unwrap();
+        drop(db);
+        assert!(Store::open(&dir.join("app.db")).is_err());
+        assert!(!dir.join("app.db.before-1").exists());
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(!has_table(&db, "bots_old").unwrap() && !has_table(&db, "projects").unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
