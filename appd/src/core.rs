@@ -3668,11 +3668,13 @@ impl Core {
         }
     }
 
-    /// Whether a prompt sent to `bot` now would be refused: a turn runs, or a prompt is with
-    /// the engine and not answered yet.
+    /// Whether a prompt sent to `bot` now would be refused, or the engine is not ours to stop:
+    /// a turn runs, a prompt is with the engine and not answered yet, or a switch of
+    /// conversation or a rewind is.
     fn occupied(&self, bot: &str) -> bool {
         self.engines.get(bot).is_some_and(|engine| {
             engine.busy
+                || engine.opening > 0
                 || engine.waiting.values().any(|waiter| {
                     matches!(
                         waiter,
@@ -3680,7 +3682,7 @@ impl Core {
                             | Waiter::Peer { .. }
                             | Waiter::Queued { .. }
                             | Waiter::Window {
-                                settles: Settles::Prompt(_),
+                                settles: Settles::Prompt(_) | Settles::Rewind(..),
                                 ..
                             }
                     )
@@ -3688,23 +3690,17 @@ impl Core {
         })
     }
 
-    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction, and
-    /// no switch of conversation or rewind the engine has not answered yet.
+    /// Whether `bot` can take a prompt now: not occupied, and no compaction.
     fn free(&self, bot: &str) -> bool {
-        !self.occupied(bot)
-            && self.engines.get(bot).is_none_or(|r| {
-                r.compacting == 0
-                    && r.opening == 0
-                    && !r.waiting.values().any(|w| {
-                        matches!(
-                            w,
-                            Waiter::Window {
-                                settles: Settles::Rewind(..),
-                                ..
-                            }
-                        )
-                    })
-            })
+        !self.occupied(bot) && self.engines.get(bot).is_none_or(|r| r.compacting == 0)
+    }
+
+    /// A project change that waited for a turn, a switch or a rewind is done once the engine
+    /// is not occupied: no turn ends after a switch or a rewind to do it.
+    fn restart_if_unoccupied(&mut self, bot: &str) {
+        if self.project_restarts.contains(bot) && !self.occupied(bot) {
+            self.on_engine_gone(bot);
+        }
     }
 
     /// The prompts waiting in one of the bot's conversations.
@@ -4105,7 +4101,7 @@ impl Core {
             return self.say(bot, kind, chat, "Only text is read here.");
         }
         // One at a time, as for a webhook: whoever wrote should hear it now.
-        if self.occupied(bot) {
+        if !self.free(bot) {
             return self.say(
                 bot,
                 kind,
@@ -4788,7 +4784,10 @@ impl Core {
                 let waiter = r.waiting.remove(id);
                 let error = error.clone();
                 match waiter {
-                    Some(w) => self.on_response(bot, w, error),
+                    Some(w) => {
+                        self.on_response(bot, w, error);
+                        self.restart_if_unoccupied(bot);
+                    }
                     None => log!("bot {bot}: response to unknown request {id}"),
                 }
                 return;
@@ -5155,9 +5154,16 @@ impl Core {
             .into_iter()
             .filter_map(|(id, op)| Some((r.waiting.remove(&id)?, matches!(op, Op::Abort))))
             .collect();
+        // A prompt that waits in the queue is not lost, but nothing sends it until the next request.
+        let queued = self.store.queue(bot).is_ok_and(|q| !q.is_empty());
+        let more = if queued {
+            "; a prompt still waits in the queue"
+        } else {
+            ""
+        };
         for (waiter, abort) in waiters {
-            let error =
-                (!abort).then(|| format!("the engine could not open the conversation: {why}"));
+            let error = (!abort)
+                .then(|| format!("the engine could not open the conversation: {why}{more}"));
             self.on_response(bot, waiter, error);
         }
     }
@@ -5382,7 +5388,7 @@ impl Core {
         };
         // One at a time: a prompt the engine has not answered yet, or a turn that runs, would
         // have it refuse this one, and whoever called should hear that now.
-        if self.occupied(&bot) {
+        if !self.free(&bot) {
             return (409, "the bot is busy".into());
         }
         let id = r.id.clone().unwrap_or_default();
