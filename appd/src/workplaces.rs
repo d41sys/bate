@@ -572,8 +572,9 @@ fn fetch_all(
         };
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot make the place for `{}`: {e}", d.dest))?;
-        // The time allowed grows with the size: 100 KiB a second is slow enough.
-        let agent = download::agent(0, Duration::from_secs(600 + d.size / (100 << 10)));
+        // The time allowed grows with the size: 100 KiB a second is slow enough. Redirects are
+        // followed: GitHub serves release files from another host, and the hash is what counts.
+        let agent = download::agent(5, Duration::from_secs(600 + d.size / (100 << 10)));
         let mut last = Instant::now();
         let got = download::to_file(&agent, &d.url, d.size, target, |n| {
             if last.elapsed() >= Duration::from_millis(250) {

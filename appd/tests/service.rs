@@ -7536,20 +7536,27 @@ fn a_download_that_goes_wrong_is_stopped_and_leaves_nothing() {
     );
     fetch_fails(&mut w, &home, &folder, "bytes, not the 3000");
 
-    // A missing file, and an address that redirects (the hosts shown are the ones contacted).
-    let host = FileHost::of(vec![]);
-    let folder = fetch(&host, "wp-404", download(&host.url("/f"), &body, "f", None));
+    // A missing file, also behind a redirect (followed: GitHub serves release files elsewhere).
+    let missing = FileHost::of(vec![]);
+    let folder = fetch(
+        &missing,
+        "wp-404",
+        download(&missing.url("/f"), &body, "f", None),
+    );
     fetch_fails(&mut w, &home, &folder, "404");
-    let host = FileHost::start(|_, _| {
-        b"HTTP/1.1 302 -\r\nlocation: http://127.0.0.1:9/f\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            .to_vec()
+    let to = missing.url("/f");
+    let host = FileHost::start(move |_, _| {
+        format!(
+            "HTTP/1.1 302 -\r\nlocation: {to}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+        .into_bytes()
     });
     let folder = fetch(
         &host,
         "wp-redirect",
         download(&host.url("/f"), &body, "f", None),
     );
-    fetch_fails(&mut w, &home, &folder, "redirect that is not followed");
+    fetch_fails(&mut w, &home, &folder, "404");
 
     // A place the workplace's own files hold.
     let host = FileHost::of(vec![("/f", body.clone())]);
