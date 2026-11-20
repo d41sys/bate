@@ -1536,33 +1536,39 @@ fn a_database_at_version_1_moves_to_conversations_and_every_row_is_found_after()
     let mut service = Service::start(&home);
     let mut w = Window::connect(&home);
     let opened = w.ok("open_bot", json!({"bot": "b1"}));
-    let texts: Vec<&Value> = opened["history"]
+    // The queued prompt goes by itself once the service is up, so only the first entries are the old ones.
+    let kinds: Vec<Value> = opened["history"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| &e["entry"]["type"])
+        .take(3)
+        .map(|e| e["entry"]["type"].clone())
         .collect();
-    assert_eq!(texts, ["prompt", "text", "turn_end"]);
+    assert_eq!(kinds, [json!("prompt"), json!("text"), json!("turn_end")]);
     assert_eq!(opened["history"][0]["entry"]["text"], "Plan the garden");
     // A question never outlives a start of the service: as before the move.
     assert_eq!(opened["questions"], json!([]));
-    assert_eq!(opened["queue"][0]["text"], "later");
 
     // Each bot has its transcript as its first conversation, titled, as last used when it was.
     let first = conversations(&mut w, "b1");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0]["id"], opened["conversation"]);
     assert_eq!(first[0]["title"], "Plan the garden");
-    assert_eq!(first[0]["touchedAt"], 1002);
+    assert!(first[0]["touchedAt"].as_i64().unwrap() >= 1002);
     let second = conversations(&mut w, "b2");
     assert_eq!((second.len(), &second[0]["title"]), (1, &json!("Other")));
 
-    // The bot goes on in it, and its engine session came with it.
-    w.ok(
-        "prompt",
-        json!({"bot": "b1", "nonce": "n3", "text": "go on"}),
-    );
-    turn_ended(&mut w);
+    // The queued prompt came through the move and went to the engine, into the same conversation.
+    eventually("the queued prompt to reach the engine", || {
+        prompts_received(&home, "b1", "n2") == 1
+    });
+    eventually("the prompt in the conversation", || {
+        w.ok("open_bot", json!({"bot": "b1"}))["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["entry"]["nonce"] == "n2")
+    });
     assert_eq!(conversations(&mut w, "b1").len(), 1);
     drop(w);
     service.kill();
@@ -1578,7 +1584,7 @@ fn a_database_at_version_1_moves_to_conversations_and_every_row_is_found_after()
         one("SELECT session FROM conversations WHERE bot = 'b1'"),
         "Text(\"sess-1\")"
     );
-    assert_eq!(one("SELECT count(*) FROM queue"), "Integer(1)");
+    assert_eq!(one("SELECT count(*) FROM queue"), "Integer(0)");
     assert_eq!(
         one("SELECT count(*) FROM pragma_foreign_key_check"),
         "Integer(0)"
