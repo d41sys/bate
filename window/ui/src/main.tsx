@@ -204,13 +204,16 @@ function App() {
   const act = useRef(actions);
   act.current = actions;
   useEffect(() => {
-    // Behind the palette nothing else runs.
-    const run = (id: string) => now.current.palette || act.current[id]?.();
+    // Behind the palette or an open <dialog> nothing else runs.
+    const covered = () => now.current.palette || !!document.querySelector("dialog[open]");
+    const run = (id: string) => covered() || act.current[id]?.();
     // This is the first of the window's keydown listeners (the chat's come later), so Esc is spent
-    // here before the chat's own sees it: the palette closes first, then the pane, and only then
-    // does Esc deny a question or stop the bot.
+    // here before the chat's own sees it: a <dialog> keeps it (the browser closes the dialog, and
+    // nothing behind reacts), then the palette closes, then the pane, and only then does Esc deny a
+    // question or stop the bot.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (document.querySelector("dialog[open]")) return e.stopImmediatePropagation();
         if (e.defaultPrevented || e.isComposing || !(now.current.palette || now.current.shown)) return;
         e.preventDefault();
         if (now.current.palette) setPalette(false);
