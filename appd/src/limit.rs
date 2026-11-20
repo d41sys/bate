@@ -23,7 +23,8 @@ use std::{fs, io};
 ///   project folder does not gain socket access. Connecting is not reading: the service's own
 ///   socket would take the engine for a window and lift the limit on request, and the user's
 ///   key agent would sign for it.
-/// - The network stays open: the engine has to reach its model.
+/// - The network stays open unless the command is given an `Egress`: the engine has to reach its
+///   model.
 // The two socket rules stay apart: a `subpath` beside `path-literal`s in one rule matches nothing.
 const PROFILE: &str = r#"(version 1)
 (allow default)
@@ -68,6 +69,27 @@ const PROFILE: &str = r#"(version 1)
 (allow network-outbound (remote unix-socket (subpath (param "FOLDER"))))
 "#;
 
+/// Added for a process held to its hosts: no outgoing connection but to the service's proxy (and
+/// the service's own port, for an engine), and to unix sockets in its folder. Names are not looked
+/// up (that goes through a socket too): the proxy does it.
+const NETWORK: &str = r#"
+(deny network-outbound)
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/syslog")))
+(allow network-outbound (remote unix-socket (subpath (param "FOLDER"))))
+(allow network-outbound (remote ip (string-append "localhost:" (param "PROXY"))))
+(allow network-outbound (remote ip (string-append "localhost:" (param "SERVICE"))))
+"#;
+
+/// Where a limited process may connect, and how it is told to use it.
+pub struct Egress<'a> {
+    /// The service's proxy (`egress`).
+    pub proxy: u16,
+    /// The service's own port, for an engine's tools; a program has no use for it.
+    pub service: Option<u16>,
+    /// The proxy's user name for this process: the service says which hosts it may reach.
+    pub key: &'a str,
+}
+
 /// The model server's key: no engine gets it in its environment. The service hands it over for
 /// each model call.
 const KEY: &str = "BATE_MODEL_API_KEY";
@@ -81,7 +103,8 @@ const WORK: &str = "BATE_WORK_DIR";
 
 /// The command that starts engine `program` in `folder`, limited to it and to `work` (the
 /// folder of the bot's project, or `folder` again) unless `whole_disk`. `read`: one more
-/// folder it may read, which the service has checked (a workplace's).
+/// folder it may read, which the service has checked (a workplace's). With `egress` it reaches
+/// no host but through the service's proxy.
 // shortcut: macOS only; elsewhere a limited bot's engine does not start. Add the system's own
 // mechanism (Landlock on Linux) when the service runs there.
 pub fn command(
@@ -90,8 +113,14 @@ pub fn command(
     work: &Path,
     read: Option<&Path>,
     whole_disk: bool,
+    egress: Option<&Egress>,
 ) -> io::Result<Command> {
     if whole_disk {
+        if egress.is_some() {
+            return Err(io::Error::other(
+                "the network limit is the system's: not with the whole disk",
+            ));
+        }
         let mut command = Command::new(program);
         command.current_dir(folder).env_remove(KEY).env(WORK, work);
         return Ok(command);
@@ -114,8 +143,12 @@ pub fn command(
     // Without one, the program again: the sandbox needs a value, and that is let through anyway.
     let read = read.map_or(Ok(program.clone()), Path::canonicalize)?;
     let mut command = Command::new("/usr/bin/sandbox-exec");
+    let profile = match egress {
+        Some(_) => [PROFILE, NETWORK].concat(),
+        None => PROFILE.to_owned(),
+    };
     command
-        .args(["-p", PROFILE, "-D"])
+        .args(["-p", &profile, "-D"])
         .arg(param("FOLDER", &folder))
         .arg("-D")
         .arg(param("APP", &app))
@@ -125,7 +158,6 @@ pub fn command(
         .arg(param("READ", &read))
         .arg("-D")
         .arg(param("ENGINE", &program))
-        .arg(&program)
         .env_clear()
         .envs(std::env::vars_os().filter(|(name, _)| {
             name.to_str().is_some_and(|name| {
@@ -137,6 +169,21 @@ pub fn command(
         .env("TMPDIR", &tmp)
         .env(WORK, work)
         .current_dir(&folder);
+    if let Some(e) = egress {
+        // Without a service port, the proxy's again: the sandbox needs a value.
+        let ports = [
+            ("PROXY", e.proxy),
+            ("SERVICE", e.service.unwrap_or(e.proxy)),
+        ];
+        for (name, port) in ports {
+            command.arg("-D").arg(format!("{name}={port}"));
+        }
+        let proxy = format!("http://{}:x@127.0.0.1:{}", e.key, e.proxy);
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            command.env(name, &proxy).env(name.to_lowercase(), &proxy);
+        }
+    }
+    command.arg(&program);
     Ok(command)
 }
 

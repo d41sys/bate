@@ -145,7 +145,7 @@ fn ask(tx: &Sender<Msg>, token: String, data: String) -> Answer {
 
 /// Reads from the connection until a moment that holds for the whole request, however slowly
 /// its bytes come.
-struct Until<'a>(&'a TcpStream, Instant);
+pub struct Until<'a>(pub &'a TcpStream, pub Instant);
 
 impl Read for Until<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

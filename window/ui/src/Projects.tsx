@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { listen, request } from "./service.ts";
 import type { Bot, Project, Role, Workplace } from "./types.ts";
 import { Workplaces } from "./Workplaces.tsx";
+import { hostLines, hostsHint } from "./network.ts";
 import { needsLines, unusable } from "./workplaces.ts";
 
-const blank: Project = { name: "", folder: "", bots: [] };
+const blank: Project = { name: "", folder: "", bots: [], hosts: [] };
 
 export function Projects({ bots }: { bots: Bot[] }) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -16,6 +17,8 @@ export function Projects({ bots }: { bots: Bot[] }) {
   const [error, setError] = useState("");
   /** The connector's program and arguments, as one line to type. */
   const [line, setLine] = useState("");
+  /** The hosts added for its limited bots, one per line. */
+  const [hosts, setHosts] = useState("");
 
   useEffect(() => {
     const load = () => request<{ projects: Project[] }>("list_projects").then((d) => setProjects(d.projects), (e) => setError(e.message));
@@ -42,12 +45,13 @@ export function Projects({ bots }: { bots: Bot[] }) {
   const edit = (p: Project) => {
     setForm(p);
     setConfirmed(false);
+    setHosts((p.hosts ?? []).join("\n"));
     setLine(p.connector ? [p.connector.command, ...p.connector.args].join(" ") : "");
   };
   const save = async () => {
     const [command, ...args] = line.trim().split(/\s+/);
     const connector = line.trim() && !form.workplace ? { name: form.connector?.name ?? "", command, args } : undefined;
-    if (await run(request("set_project", { project: { ...form, connector, connectorError: undefined } }))) edit(blank);
+    if (await run(request("set_project", { project: { ...form, hosts: hostLines(hosts), connector, connectorError: undefined } }))) edit(blank);
   };
   const saved = projects.find((p) => p.id === form.id);
   const chosen = workplaces.find((w) => w.name === form.workplace);
@@ -101,6 +105,11 @@ export function Projects({ bots }: { bots: Bot[] }) {
           Instructions for all its bots, after their own{" "}
           <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
         </label>
+        <label>
+          Hosts its bots with a network limit may also reach{" "}
+          <textarea rows={3} placeholder="example.com" value={hosts} onChange={(e) => setHosts(e.target.value)} />
+        </label>
+        <p className="note">{hostsHint}</p>
         <fieldset>
           <legend>Workplace</legend>
           <label>
@@ -117,7 +126,7 @@ export function Projects({ bots }: { bots: Bot[] }) {
           {chosen && (
             <>
               <p className="note">{chosen.name} needs: {needsLines(chosen).join("; ")}.</p>
-              <p className="note">Its program runs as this project's connector, and its skills go to every bot of the project.</p>
+              <p className="note">Its program runs as this project's connector and reaches only the network hosts listed above; its skills go to every bot of the project.</p>
               {switchingOn && (
                 <label>
                   <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I have read what {chosen.name} needs, and I switch it on for this project

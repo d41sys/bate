@@ -11,6 +11,7 @@ mod clients;
 mod core;
 mod desktop;
 mod download;
+mod egress;
 mod gate;
 mod hooks;
 mod keychain;
@@ -112,7 +113,10 @@ fn serve() -> io::Result<()> {
     let hook_port = hooks::start(tx.clone())
         .inspect_err(|e| log!("webhooks are off: {e}"))
         .ok();
+    let egress_port = egress::start(tx.clone())
+        .inspect_err(|e| log!("the network limit's proxy is off: {e}"))
+        .ok();
     let lan = lan::Lan::start();
-    core::Core::new(store, tx, hook_port, lan).run(rx);
+    core::Core::new(store, tx, hook_port, egress_port, lan).run(rx);
     Ok(())
 }

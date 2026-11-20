@@ -23,6 +23,10 @@ pub struct Project {
     /// Instructions every bot of the project gets after its own, at most 8000 characters.
     #[serde(default)]
     pub instructions: String,
+    /// Hosts added to what each of the project's bots with a network limit may reach, at most
+    /// 50: `host`, `*.domain`, with an optional `:port`.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     /// A program the service runs once for the whole project; every bot gets its tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector: Option<ProjectConnector>,

@@ -87,8 +87,8 @@ fn resolve(command: &str, work: &std::path::Path) -> io::Result<PathBuf> {
 }
 
 /// Starts the program for project `id` for `work`, its folder. A workplace's program (`home`:
-/// its folder) starts there and may read it; else it starts in `work`. `Msg::ProjectExited`
-/// follows when it ends.
+/// its folder) starts there and may read it; else it starts in `work`. `egress`: the program
+/// reaches no host but through the service's proxy. `Msg::ProjectExited` follows when it ends.
 pub fn start(
     id: &str,
     spec: &ProjectConnector,
@@ -96,6 +96,7 @@ pub fn start(
     home: Option<&std::path::Path>,
     generation: u64,
     tx: Sender<Msg>,
+    egress: Option<&limit::Egress>,
 ) -> io::Result<Program> {
     let work = PathBuf::from(work);
     let data = data_dir(id);
@@ -112,7 +113,7 @@ pub fn start(
     let _ = fs::remove_file(&socket);
     let start = home.unwrap_or(&work);
     let program = resolve(&spec.command, start)?;
-    let mut command = limit::command(&program, &data, &work, home, false)?;
+    let mut command = limit::command(&program, &data, &work, home, false, egress)?;
     command
         .args(&spec.args)
         .env("BATE_MCP_SOCKET", &socket)

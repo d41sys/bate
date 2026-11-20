@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
 /// `probe work <path>` says whether that is the folder the engine was told to work in.
+/// `probe fetch <url>` gets a page as a tool would with proxy settings from the environment
+/// (`tunnel`: through `CONNECT`; `direct`: ignoring them) and says `ok` or `refused`.
 /// `apple <tool> <action> <field>=<word>…` asks the service to run that action in an Apple app; the
 /// `apple_result` is logged to `apple.log` and ends the turn.
 /// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
@@ -52,6 +54,9 @@ while IFS= read -r line; do
             prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
             env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
             work) [ "$BATE_WORK_DIR" = "$path" ] && r=ok || r=refused ;;
+            fetch) curl -sf -m 5 -o /dev/null "$path" && r=ok || r=refused ;;
+            tunnel) curl -sf -m 5 -p -o /dev/null "$path" && r=ok || r=refused ;;
+            direct) curl -sf -m 5 --noproxy '*' -o /dev/null "$path" && r=ok || r=refused ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -750,6 +755,28 @@ fn the_real_engine_runs_a_turn_through_the_service() {
         json!({"role": "user", "content": "hi"})
     );
     assert_eq!(authorization, None);
+}
+
+#[test]
+fn the_engine_of_a_bot_with_a_network_limit_still_reaches_its_model() {
+    build_engine();
+    let (url, requests) = mock_model();
+    let home = home("agentcore-net");
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env_remove("BATE_MODEL_API_KEY")
+            .env("BATE_MODEL_BASE_URL", &url);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // No host of its own: its commands reach nothing, and its model is not its commands.
+    w.ok("set_network", json!({"bot": bot, "hosts": []}));
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    let end = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert_eq!(end["entry"]["reason"], "done", "{end}");
+    let (request, _) = requests.recv_timeout(TIMEOUT).unwrap();
+    assert_eq!(request["model"], "m1");
 }
 
 #[test]
@@ -1699,6 +1726,7 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("9", "remove_chat"),
         ("10", "install_update"),
         ("11", "set_disk_access"),
+        ("18", "set_network"),
         ("12", "set_project"),
         ("13", "delete_project"),
         // Surfaces are for the window on this Mac.
@@ -2384,6 +2412,241 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(refused["code"], "busy", "{refused}");
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"], false);
+}
+
+/// A web server on a port of this machine that answers every request `hello`, and counts them.
+fn web() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut head = [0u8; 4096];
+            let _ = stream.read(&mut head);
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello",
+            );
+        }
+    });
+    (port, hits)
+}
+
+fn wait_for_stop(w: &mut Window) {
+    eventually("the engine to stop", || {
+        w.ok("list_bots", json!({}))["bots"][0]["running"] == false
+    });
+}
+
+#[test]
+fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the_proxy_is_refused()
+{
+    let home = home("network");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let ((a, _), (b, b_hits)) = (web(), web());
+    let (url_a, url_b) = (
+        format!("http://127.0.0.1:{a}/"),
+        format!("http://127.0.0.1:{b}/"),
+    );
+    let hits = || b_hits.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Open unless the person says otherwise: nothing changes for a bot that was never limited.
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0]["network"],
+        Value::Null
+    );
+    assert_eq!(probe(&mut w, &bot, "n1", &format!("direct {url_a}")), "ok");
+    assert_eq!(probe(&mut w, &bot, "n2", &format!("direct {url_b}")), "ok");
+    assert_eq!(probe(&mut w, &bot, "n3", &format!("fetch {url_b}")), "ok");
+    assert_eq!(hits(), 2);
+
+    // Not a list the service cannot read, and not with the whole disk.
+    let refused = |w: &mut Window, args: Value| {
+        let id = w.send("set_network", args);
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+    };
+    for bad in [
+        json!(["a.com/x"]),
+        json!(["*"]),
+        json!(["a.com:0"]),
+        json!("a.com"),
+    ] {
+        assert_eq!(
+            refused(&mut w, json!({"bot": bot, "hosts": bad})),
+            "bad_request"
+        );
+    }
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    assert_eq!(
+        refused(&mut w, json!({"bot": bot, "hosts": []})),
+        "bad_request"
+    );
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": false}));
+
+    // Only `a`. The engine is stopped: the system's rule is set when one starts.
+    w.ok(
+        "set_network",
+        json!({"bot": bot, "hosts": [format!("127.0.0.1:{a}")]}),
+    );
+    wait_for_stop(&mut w);
+    let listed = w.ok("list_bots", json!({}))["bots"][0]["network"].clone();
+    assert_eq!(listed, json!([format!("127.0.0.1:{a}")]));
+    // An allowed host passes, as a plain request and as a tunnel.
+    assert_eq!(probe(&mut w, &bot, "n4", &format!("fetch {url_a}")), "ok");
+    assert_eq!(probe(&mut w, &bot, "n5", &format!("tunnel {url_a}")), "ok");
+    // Another is refused by the proxy, and never reached.
+    assert_eq!(
+        probe(&mut w, &bot, "n6", &format!("fetch {url_b}")),
+        "refused"
+    );
+    assert_eq!(
+        probe(&mut w, &bot, "n7", &format!("tunnel {url_b}")),
+        "refused"
+    );
+    // A tool that ignores the proxy is refused by the system, even for the allowed host.
+    assert_eq!(
+        probe(&mut w, &bot, "n8", &format!("direct {url_a}")),
+        "refused"
+    );
+    assert_eq!(
+        probe(&mut w, &bot, "n9", &format!("direct {url_b}")),
+        "refused"
+    );
+    assert_eq!(hits(), 2);
+    // Not the whole disk of a limited bot, nor a limit for a bot in a turn.
+    assert_eq!(
+        {
+            let id = w.send("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+            w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
+        },
+        "bad_request"
+    );
+
+    // The project's list adds to it, with no new start: the next connection is judged anew.
+    let project = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [bot]}}),
+    )["project"]
+        .clone();
+    assert_eq!(project["hosts"], json!([]));
+    wait_for_stop(&mut w);
+    assert_eq!(
+        probe(&mut w, &bot, "n10", &format!("fetch {url_b}")),
+        "refused"
+    );
+    let mut wider = project.clone();
+    wider["hosts"] = json!([format!(" 127.0.0.1:{b} ")]);
+    let stored = w.ok("set_project", json!({"project": wider}))["project"].clone();
+    assert_eq!(stored["hosts"], json!([format!("127.0.0.1:{b}")]));
+    assert_eq!(probe(&mut w, &bot, "n11", &format!("fetch {url_b}")), "ok");
+    assert_eq!(hits(), 3);
+    let id = w.send(
+        "set_project",
+        json!({"project": {"id": project["id"], "name": "Site", "bots": [bot], "hosts": ["a b"]}}),
+    );
+    let bad = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(bad["code"], "invalid_project");
+    // And a list taken back narrows it at once.
+    w.ok("set_project", json!({"project": project}));
+    assert_eq!(
+        probe(&mut w, &bot, "n12", &format!("fetch {url_b}")),
+        "refused"
+    );
+
+    // Not in the middle of a turn: it would go on under the old rule.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n13", "text": "hi"}));
+    w.wait_for(|f| f["entry"]["type"] == "turn_start");
+    assert_eq!(refused(&mut w, json!({"bot": bot})), "busy");
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+
+    // Open again.
+    w.ok("set_network", json!({"bot": bot, "hosts": null}));
+    wait_for_stop(&mut w);
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0]["network"],
+        Value::Null
+    );
+    assert_eq!(probe(&mut w, &bot, "n14", &format!("direct {url_b}")), "ok");
+}
+
+#[test]
+fn a_workplaces_program_reaches_only_the_hosts_of_its_manifest_and_still_serves_its_socket() {
+    let home = home("wpnet");
+    let site = Home(std::env::temp_dir().join(format!("appd-{}-wpnet-site", std::process::id())));
+    let _ = fs::remove_dir_all(&site.0);
+    fs::create_dir_all(&site.0).unwrap();
+    let ((a, _), (b, _)) = (web(), web());
+
+    // The counter, which first says what it can reach.
+    let copy = copied_workplace("wpnet-src");
+    let manifest = fs::read_to_string(copy.join("workplace.json")).unwrap();
+    let hosts = format!(r#""hosts": ["127.0.0.1:{a}"]"#);
+    let limited = manifest.replace(r#""hosts": []"#, &hosts);
+    assert_ne!(limited, manifest);
+    fs::write(copy.join("workplace.json"), limited).unwrap();
+    let script = fs::read_to_string(copy.join("server.py")).unwrap();
+    let probes = format!(
+        r#"
+import urllib.request
+def reach(url, direct=False):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}} if direct else None))
+    try:
+        opener.open(url, timeout=3).read()
+        return "ok"
+    except Exception:
+        return "refused"
+with open(os.path.join(os.path.dirname(sock), "net.json"), "w") as f:
+    json.dump({{"allowed": reach("http://127.0.0.1:{a}/"), "other": reach("http://127.0.0.1:{b}/"),
+               "direct": reach("http://127.0.0.1:{a}/", True)}}, f)
+"#
+    );
+    let marker = "count = 0\n";
+    assert!(script.contains(marker));
+    fs::write(
+        copy.join("server.py"),
+        script.replacen(marker, &format!("{probes}{marker}"), 1),
+    )
+    .unwrap();
+
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("install_workplace", json!({"path": &copy.0}));
+    let real = site.canonicalize().unwrap();
+    let project = json!({"name": "Site", "folder": real, "bots": [bot], "workplace": "counter"});
+    let made = w.ok("set_project", json!({"project": project}))["project"].clone();
+    let id = made["id"].as_str().unwrap();
+    ask_prompt(&mut w, &bot, "n1");
+    let last = last_logged(&home, &bot, "connectors.log");
+    let url = last.split("\"url\":\"http://").nth(1).unwrap();
+    let url = url.split('"').next().unwrap().to_owned();
+
+    // The service still reaches the program's socket: a tool call is answered.
+    assert_eq!(call_tool(&url, "tick", json!({}))["count"], 1);
+    // The program reaches its host, and nothing else, whether it uses the proxy or not.
+    let data = home.canonicalize().unwrap().join("project-data").join(id);
+    let net: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("net.json")).unwrap()).unwrap();
+    assert_eq!(
+        net,
+        json!({"allowed": "ok", "other": "refused", "direct": "refused"})
+    );
+
+    // A host the manifest writes badly is a malformed manifest, not a limit that is not held.
+    let broken = copied_workplace("wpnet-bad");
+    let text = fs::read_to_string(broken.join("workplace.json")).unwrap();
+    fs::write(
+        broken.join("workplace.json"),
+        text.replace(r#""hosts": []"#, r#""hosts": ["a b"]"#),
+    )
+    .unwrap();
+    assert_eq!(
+        install_refused(&mut w, &broken.0)["code"],
+        "invalid_workplace"
+    );
 }
 
 #[test]

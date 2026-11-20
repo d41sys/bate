@@ -5,10 +5,10 @@
 //! looks.
 
 use crate::core::check_connector_name;
-use crate::download;
 use crate::skills::{self, Limits};
 use crate::store::Workplace;
 use crate::sys::Dir;
+use crate::{download, egress};
 use crate::{paths, sys};
 use proto::skills::Skill;
 use ring::digest;
@@ -89,8 +89,8 @@ pub struct Program {
     pub args: Vec<String>,
 }
 
-/// What the person is shown before switching the workplace on. Hosts are stored and shown,
-/// not yet enforced.
+/// What the person is shown before switching the workplace on. The program is held to the hosts
+/// (see `egress`); the other needs are shown only.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Needs {
     #[serde(default)]
@@ -235,6 +235,11 @@ fn parse(text: &str) -> Result<Manifest, String> {
     list_of("program.args", &m.program.args)?;
     list_of("needs.folders", &m.needs.folders)?;
     list_of("needs.hosts", &m.needs.hosts)?;
+    m.needs
+        .hosts
+        .iter()
+        .try_for_each(|h| egress::check(h))
+        .map_err(|e| format!("`needs.hosts`: {e}"))?;
     list_of("needs.commands", &m.needs.commands)?;
     check_downloads(&m.downloads)?;
     Ok(m)
