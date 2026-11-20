@@ -5,9 +5,10 @@
 
 use crate::core::Msg;
 use crate::sys::{self, log};
-use crate::{limit, paths};
+use crate::{limit, paths, surfaces};
 use proto::projects::ProjectConnector;
 use std::io::{self, BufRead};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
@@ -20,6 +21,8 @@ use std::{fs, thread};
 const MAX_SOCKET_PATH: usize = 103;
 /// How often the exit of a program is looked for.
 const LOOK: Duration = Duration::from_millis(100);
+/// How long a program just started may take to listen.
+const LISTEN: Duration = Duration::from_secs(5);
 
 /// Where project `id`'s program keeps its files and its socket. Mode 0700.
 pub fn data_dir(id: &str) -> PathBuf {
@@ -32,6 +35,28 @@ pub struct Program {
     /// Closes when the service goes, however it goes: the program may watch for that.
     _stdin: ChildStdin,
     pub socket: PathBuf,
+    /// The service's own MCP session with it, for surfaces.
+    pub link: Arc<surfaces::Link>,
+}
+
+/// Connects to a program's socket, waiting for a program just started to listen.
+pub fn connect(socket: &std::path::Path) -> io::Result<UnixStream> {
+    let until = std::time::Instant::now() + LISTEN;
+    loop {
+        match UnixStream::connect(socket) {
+            // Not listening yet (or no more): a started program is given its time.
+            Err(e)
+                if std::time::Instant::now() < until
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
+                thread::sleep(Duration::from_millis(50))
+            }
+            found => return found,
+        }
+    }
 }
 
 impl Program {
@@ -136,6 +161,7 @@ pub fn start(
     Ok(Program {
         child,
         _stdin: stdin,
+        link: Arc::new(surfaces::Link::new(socket.clone())),
         socket,
     })
 }

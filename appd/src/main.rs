@@ -28,6 +28,7 @@ mod roles;
 mod schedule;
 mod skills;
 mod store;
+mod surfaces;
 mod sys;
 mod update;
 mod workplaces;

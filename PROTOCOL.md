@@ -108,7 +108,7 @@ Each request is `{"id":…,"type":"<command>",…fields}`. The reply is
 {"id":…,"type":"response","command":"<command>","success":false,"error":"text","code":"<code>"}
 ```
 
-Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_workplace`, `invalid_workplace`, `workplace_in_use`, `no_such_prompt`, `queue_full`, `cannot_steer`, `no_such_message`, `not_waiting`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
+Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknown_command`, `bad_request`, `no_such_bot`, `no_such_question`, `no_such_routine`, `invalid_routine`, `no_such_connector`, `invalid_connector`, `sign_in_failed`, `no_such_grant`, `no_such_note`, `no_such_skill`, `invalid_skill`, `no_such_group`, `invalid_group`, `no_such_project`, `invalid_project`, `no_such_workplace`, `invalid_workplace`, `workplace_in_use`, `no_such_surface`, `surface_failed`, `no_such_prompt`, `queue_full`, `cannot_steer`, `no_such_message`, `not_waiting`, `busy`, `export_failed`, `trash_failed`, `engine_failed`, `engine_error`, `engine_stopped`, `internal`.
 
 | Command | Fields | `data` |
 |---|---|---|
@@ -149,6 +149,10 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `install_workplace` | `path` | `{workplace}`; copies the folder at `path` in, in place of one of the same name. `invalid_workplace`; `workplace_in_use` when a project has that name on. Refused (`forbidden`) for a device on the network |
 | `approve_workplace` | `name` | `{}`: records the files as they are now and starts the workplace again in the projects that have it on. `no_such_workplace`, `invalid_workplace`. Refused (`forbidden`) for a device on the network |
 | `remove_workplace` | `name`, `force?` | `{}`: forgets the workplace and deletes its folder. `workplace_in_use` while a project has it on, unless `force` is true, which switches it off in those projects first; `project-data/<id>/` stays. `no_such_workplace`. Refused (`forbidden`) for a device on the network |
+| `list_surfaces` | `projectId` | `{surfaces:[{uri, name, description?, kind}]}` (see Surfaces); empty for a project with no program. Starts the program if it is not running. `no_such_project`, `surface_failed`. Refused (`forbidden`) for a device on the network |
+| `read_surface` | `projectId`, `uri`, `offset?`, `limit?` | One part of a surface's content (see Surfaces). `no_such_project`, `no_such_surface`, `surface_failed`. Refused (`forbidden`) for a device on the network |
+| `act_surface` | `projectId`, `uri`, `tool`, `target?` | `{ok, text}`: the person's action, the call of the program's tool `tool` (see Surfaces). `surface_failed` when the surface does not offer `tool`. Refused (`forbidden`) for a device on the network |
+| `watch_surfaces` | `projectId` or `null`, `uri?` | `{}`: this window shows the surfaces of that project, and has `uri` open, or none (`null`); it gets `surfaces_changed` and `surface_changed` for those only. Refused (`forbidden`) for a device on the network |
 | `read_roles` | `paths` | `{roles:[{path, name, instructions, model, effort, skills, levels, raises}]}`: what each role file (whole paths, 1 to 20) would create; `raises` names the kinds whose level allows more than a new bot's. `invalid_role` with the file and the reason. Refused (`forbidden`) for a device on the network |
 | `add_roles` | `projectId`, `paths`, `raise` | `{bots:[id]}`: a bot for each role, in the project; levels in `raises` are applied only with `raise: true`. All or none: `invalid_role` or `no_such_project` and no bot is created. Refused (`forbidden`) for a device on the network |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
@@ -210,6 +214,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `{"type":"groups_changed"}` | Re-run `list_groups`. |
 | `{"type":"projects_changed"}` | Re-run `list_projects`. |
 | `{"type":"workplaces_changed"}` | Re-run `list_workplaces`: one was installed, approved or removed. |
+| `{"type":"surfaces_changed","projectId"}` | Re-run `list_surfaces`: the program's list of surfaces changed. Sent only to a window that said `watch_surfaces` for the project. |
+| `{"type":"surface_changed","projectId","uri"}` | Re-run `read_surface` for what is open: the program says the surface changed (a bot's tool call, or any other cause). Sent only to a window that has `uri` open (`watch_surfaces`). |
 | `{"type":"skills_changed","bot"}` | Re-run `list_skills`. |
 | `{"type":"memory_changed","bot"}` or `{"type":"memory_changed","projectId"}` | A window changed a note of the bot or of the project: re-run `list_memory`. What a bot writes itself is not announced. |
 
@@ -270,6 +276,24 @@ A workplace is a folder with a `workplace.json` and a program (format and exampl
 - **Changed files:** the files are compared with the fingerprint when the program starts (including each start after it ended) and when `list_workplaces` runs, and a mismatch, or a manifest that no longer parses, switches the workplace off in every project that has it on: the program stops, `connectorError` says so and that the person has to look and approve, the bots get no tools from it (`connectors`) and no skills (`skill_folders` with none) from their next turn, and the project and its bots go on. `approve_workplace` records the files as they are (after checking the manifest again) and starts the program again. A new version is another matter: while a project has the workplace on, `install_workplace` is refused, so switch it off in the project, install, and switch it on. A change made while the program runs is noticed at the next of those two moments, not at once.
 - **A program that does not start:** reported in `connectorError` as for any project connector; the project opens and its bots answer without its tools.
 - **Removing:** see `remove_workplace`. Deleting a project, or switching a workplace off in it, stops the program but never deletes `project-data/<projectId>/`.
+
+### Surfaces
+
+A surface is a table, a tree or a code view that a project's program fills and that the window draws itself, as text, in its pane beside the conversation. The program offers it as an MCP resource; there is no second protocol. The service is the MCP client of the program here (as a program's `initialize` sees it, a client that names itself `bate` and offers no capabilities), over the same socket the bots' calls come through, and the window never reaches the program. A program with no `resources` capability has no surfaces.
+
+- **The kinds:** a resource whose `mimeType` is `application/vnd.bate.table+json`, `application/vnd.bate.tree+json` or `application/vnd.bate.code+json` is a surface of that kind (`table`, `tree`, `code`); other resources are not listed. `list_surfaces` follows `resources/list` (`nextCursor`: at most 10 pages), keeps at most 100 surfaces, and gives `uri`, `name` (at most 200 bytes), `description?` (500) and `kind`.
+- **Content:** `resources/read` answers with one `text` content that is a JSON object. Everything in it is data: each string is shown as text, never as markup, script or a link; a number, boolean or other value is shown as its JSON text, `null` as nothing. Besides the fields of each kind, any of them may name what the person can do: `select` and `open`, each the name of a tool, and `actions`, a list of `{tool, label}` (at most 20).
+
+  | Kind | Fields |
+  |---|---|
+  | table | `columns`: the headings (at most 20); `rows`: `[{id?, cells: [...]}]` (at most 20 cells; `id` is the row's place in the whole when missing) |
+  | tree | `nodes`: `[{id?, label, depth}]` in the order of a depth-first walk, where `depth` is 0 for a top node (at most 64) and a node's children are the deeper ones that follow it |
+  | code | `lines`: the lines of text, `language?`: a name to show (at most 40 bytes) |
+
+- **Parts:** content is read in parts and the service sets the size. `read_surface` takes `offset` (default 0) and `limit` (default 100, at most 500) in rows, nodes or lines, and asks the program for that part with `params._meta["bate/part"] = {offset, limit}` on `resources/read`. A program that honours it sends only those items and `offset` (where they begin in the whole) and `total` (how many the whole has). A program that does not sends everything and no `offset`: the service cuts the part out. Either way the service gives at most `limit` items, stops earlier when the part passes 512 KiB, cuts a cell, label or line at 1000 (a line 2000) bytes, and reads at most 16 MiB of an answer, so a program cannot make a window load more. The answer is `{kind, offset, total, <rows|nodes|lines>, columns?, language?, select?, open?, actions}`; `total` is never less than what the part reaches.
+- **Changes:** a program that says `resources.subscribe` is sent `resources/subscribe` for a surface the first time it is read, and the service reads its `GET /mcp` stream of server-sent events (as MCP's HTTP transport has it; at most one, restarted once a second until the program is gone or offers none) for `notifications/resources/updated` and `notifications/resources/list_changed`. Each becomes a `surface_changed` or `surfaces_changed` frame for the windows that `watch_surfaces` named the project (and, for `surface_changed`, the surface), and nobody else: a device on the network never. The frame holds no content; the window reads again. Every window reads from the one program, so two windows on a project show the same content. A program that cannot tell of changes is read again by a window after that window's own actions.
+- **Actions:** `act_surface` first reads the surface's first item to see what it offers, and refuses (`surface_failed`) a `tool` that none of `select`, `open` and `actions` names, so the window cannot call any other tool of the program. Then it sends `tools/call` with `name` `tool` and `arguments` `{uri, target?}`: `target` is the id of the row or node the person chose, or the number of the line (from 1); a named action takes the chosen one, if any. The answer is `{ok, text}`: `ok` is false when the tool says `isError`, and `text` is what it said (at most 2000 bytes). A choice is `select`, a double click or Enter is `open`. The result is the program's own change of the content, which it announces, and the window reads again after the call.
+- **Where:** the window offers a project's surfaces under the conversation of a bot of the project (Bate's own window on this Mac only; the web client on the local network has no surfaces, and the service refuses these commands to it) and draws the chosen one in the pane, one part at a time. A program that is not running is started by `list_surfaces`; one that failed to start is reported as `surface_failed` with the reason `connectorError` gives.
 
 ### Skills
 
@@ -502,7 +526,7 @@ The same page is reachable from the user's own Tailscale network (no relay of Ba
 - All API requests require the `X-Bate: 1` header.
 - Each paired web client opens a session via `POST /api/session`, which connects to Bate's Unix domain socket as an independent window connection. Commands are sent via `POST /api/send?session=…` and received via long-polling `GET /api/recv?session=…`.
 - Removing a device in Settings terminates its sessions and revokes its cookie immediately.
-- Files (`botfile://`) open in the pane of Bate's native window only and are not served to LAN devices.
+- Files (`botfile://`) and surfaces open in the pane of Bate's native window only and are not served to LAN devices.
 
 ### Speech (the window, not the service)
 

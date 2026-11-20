@@ -37,7 +37,7 @@ An installed feature that equips a project for one kind of work, such as coding 
 _Avoid_: plugin, extension, feature, app
 
 **Surface**:
-Something in the window that the person and the bots both see and act on.
+Something in the window that the person and the bots both see and act on: a table, a tree or a code view that a workplace's program fills.
 _Avoid_: pane, panel, view, block
 
 **Connector**:

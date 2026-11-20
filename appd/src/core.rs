@@ -31,7 +31,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, desktop, oauth, project_server, workplaces};
+use crate::{apple, browser, desktop, oauth, project_server, surfaces, workplaces};
 use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
@@ -116,6 +116,19 @@ pub enum Msg {
         id: String,
         generation: u64,
         why: String,
+    },
+    /// What came of a request about a project's surfaces, made off the core's thread.
+    Surface {
+        client: u64,
+        id: Value,
+        command: String,
+        result: Result<Value, Refusal>,
+    },
+    /// A project's program says a surface changed (`uri`), or that its list did (`None`).
+    SurfaceNews {
+        id: String,
+        generation: u64,
+        uri: Option<String>,
     },
     /// The wait before starting a project's connector program again is over.
     ProjectRetry {
@@ -296,6 +309,8 @@ fn field<T: serde::de::DeserializeOwned>(f: &Value, key: &str) -> Result<T, Refu
 struct Client {
     handle: ClientHandle,
     hello: bool,
+    /// The project whose surfaces this window shows, and the one it has open (`watch_surfaces`).
+    watching: Option<(String, Option<String>)>,
     /// Files this window is sending, by upload id; they go with the window.
     uploads: HashMap<String, attach::Upload>,
 }
@@ -607,6 +622,7 @@ impl Core {
                     Client {
                         handle,
                         hello: false,
+                        watching: None,
                         uploads: HashMap::new(),
                     },
                 );
@@ -631,6 +647,42 @@ impl Core {
                 why,
             } => self.on_project_exited(&id, generation, &why),
             Msg::ProjectRetry { id, generation } => self.on_project_retry(&id, generation),
+            Msg::Surface {
+                client,
+                id,
+                command,
+                result,
+            } => self.reply(client, &id, &command, result),
+            Msg::SurfaceNews {
+                id,
+                generation,
+                uri,
+            } => {
+                if self
+                    .servers
+                    .get(&id)
+                    .is_none_or(|s| s.generation != generation)
+                {
+                    return;
+                }
+                let frame = match &uri {
+                    Some(uri) => json!({"type": "surface_changed", "projectId": id, "uri": uri}),
+                    None => json!({"type": "surfaces_changed", "projectId": id}),
+                };
+                let bytes = encode(&frame);
+                // Only the windows that show it: a device on the network never does.
+                self.clients.retain(|_, c| {
+                    let shows = c.hello
+                        && c.watching.as_ref().is_some_and(|(project, open)| {
+                            *project == id && (uri.is_none() || *open == uri)
+                        });
+                    let kept = !shows || c.handle.send(&bytes);
+                    if !kept {
+                        c.handle.close();
+                    }
+                    kept
+                });
+            }
             Msg::Shutdown => {
                 for id in self.servers.keys().cloned().collect::<Vec<_>>() {
                     self.stop_server(&id);
@@ -1224,6 +1276,17 @@ impl Core {
                 let name = str_field(f, "name")?;
                 let force = f.get("force").and_then(Value::as_bool).unwrap_or(false);
                 self.remove_workplace(name, force)?;
+                Ok(Some(json!({})))
+            }
+            "list_surfaces" | "read_surface" | "act_surface" => {
+                self.surface_request(client, id, command, f)
+            }
+            "watch_surfaces" => {
+                let project = f.get("projectId").and_then(Value::as_str);
+                let open = f.get("uri").and_then(Value::as_str);
+                if let Some(c) = self.clients.get_mut(&client) {
+                    c.watching = project.map(|p| (p.to_owned(), open.map(str::to_owned)));
+                }
                 Ok(Some(json!({})))
             }
             "read_roles" => Ok(Some(json!({"roles": self.read_roles(f)?}))),
@@ -2359,6 +2422,59 @@ impl Core {
             self.stop_server(id);
         }
         self.start_server(id, spec, home, project.folder.clone(), 0);
+    }
+
+    /// A request about the surfaces of the project `projectId`: the program is asked off this
+    /// thread, and `Msg::Surface` brings the answer. Asking starts the program, as an engine's
+    /// start does.
+    fn surface_request(&mut self, client: u64, id: &Value, command: &str, f: &Value) -> Reply {
+        let pid = str_field(f, "projectId")?;
+        let projects = self.store.projects().map_err(internal)?;
+        let Some(project) = projects.iter().find(|p| p.id.as_deref() == Some(pid)) else {
+            return Err(("no_such_project", "no such project".into()));
+        };
+        let number = |key: &str| f.get(key).and_then(Value::as_u64);
+        let job: surfaces::Job = match command {
+            "list_surfaces" => Box::new(|link| link.list()),
+            "read_surface" => {
+                let uri = str_field(f, "uri")?.to_owned();
+                let (offset, limit) = (number("offset"), number("limit"));
+                Box::new(move |link| link.read(&uri, offset, limit))
+            }
+            _ => {
+                let uri = str_field(f, "uri")?.to_owned();
+                let tool = str_field(f, "tool")?.to_owned();
+                let target = f.get("target").and_then(Value::as_str).map(str::to_owned);
+                Box::new(move |link| link.act(&uri, &tool, target.as_deref()))
+            }
+        };
+        // A program that failed to start is not tried again by every look at its surfaces: each
+        // try tells the windows, which look again.
+        if !self.servers.contains_key(pid) {
+            self.ensure_server(project);
+        }
+        let running = self.servers.get(pid).filter(|s| s.program.is_some());
+        let Some((link, generation)) =
+            running.and_then(|s| Some((s.program.as_ref()?.link.clone(), s.generation)))
+        else {
+            return match (self.server_error(project), command) {
+                (Some(why), _) => Err(("surface_failed", why)),
+                (None, "list_surfaces") => Ok(Some(json!({"surfaces": []}))),
+                _ => Err(("no_such_surface", "the project has no program".into())),
+            };
+        };
+        link.listen(pid, generation, &self.tx);
+        let (tx, id, command) = (self.tx.clone(), id.clone(), command.to_owned());
+        thread::spawn(move || {
+            let result = job(&link).map_err(|e| ("surface_failed", e));
+            let _ = tx.send(Msg::Surface {
+                client,
+                id,
+                command,
+                result,
+            });
+        });
+        Ok(None)
     }
 
     /// What runs as `project`'s connector: its own program, or its workplace's, which is the
