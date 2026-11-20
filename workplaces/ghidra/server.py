@@ -80,8 +80,9 @@ class Ghidra:
         if not launcher or not jdk:
             raise Failed("Ghidra or its Java is missing from the workplace's folder: install the workplace again")
         natives(launcher)
-        # Java takes the home from the system, not from HOME: Ghidra keeps its settings there.
-        env = dict(os.environ, JAVA_HOME=jdk, JAVA_TOOL_OPTIONS=f"-Duser.home={DATA}",
+        # Java takes its home and temporary folder from the system, not from HOME and TMPDIR: Ghidra
+        # keeps its settings and caches there, and the sandbox lets it write only the data folder.
+        env = dict(os.environ, JAVA_HOME=jdk, JAVA_TOOL_OPTIONS=f"-Duser.home={DATA} -Djava.io.tmpdir={os.environ.get('TMPDIR', DATA)}",
                    PATH=f"{jdk}/bin:{os.environ.get('PATH', '')}")
         os.makedirs(PROJECT, exist_ok=True)
         # With no binary to import, the script runs by itself and answers until stdin closes.
