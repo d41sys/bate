@@ -81,8 +81,28 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .rows { list-style: none; padding: 0; margin: var(--space-2) 0; }
 .rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
 /* A label over a box and the buttons beside it (a path and its Choose button). */
-.field > label { margin-bottom: var(--space-1); }
+.field { margin: var(--space-3) 0; }
+.field > label { margin: 0 0 var(--space-1); }
 .field > small { display: block; margin-top: var(--space-1); }
+/* "Saved" beside the control that was saved: words, not colour. */
+.saved { color: var(--fg-muted); font-size: var(--size-small); white-space: nowrap; }
+.saved:not(:empty)::before { content: "✓ "; }
+/* A code, an address or a fingerprint, with its Copy button. */
+/* The colour well is a swatch, not a bar. */
+.fields.stack input[type=color] { width: calc(var(--control-h) * 2); flex: none; padding: var(--space-1); }
+.codeblock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
+.codeblock pre { flex: 1 1 var(--popover-w); min-width: 0; margin: 0; }
+.rows li > .error { flex: 1 0 100%; margin: 0; }
+/* The app's settings: a list of sections, and the chosen one beside it; a strip across the top on a phone. */
+.settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.settings > section > h2:first-child { margin-top: 0; }
+.settings code { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .settings { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+  .settings nav ul { display: flex; overflow-x: auto; }
+  .settings nav li { flex: none; }
+}
 /* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
 .row:has(input:disabled) { opacity: .6; cursor: default; }

@@ -20,7 +20,7 @@ import { Channels } from "./Channels.tsx";
 import { Room } from "./Room.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
-import { AppSettings } from "./AppSettings.tsx";
+import { AppSettings, type SettingsSection } from "./AppSettings.tsx";
 import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab, waitingCount } from "./nav.ts";
 import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
 import { NewBot } from "./NewBot.tsx";
@@ -42,7 +42,8 @@ type ProjectTab = keyof typeof PROJECT_TABS;
 type AddonTab = keyof typeof ADDON_TABS;
 /** What the page shows. The channels and the surfaces are for Bate's own window only. */
 type View =
-  | { page: "settings" | "new-bot" }
+  | { page: "new-bot" }
+  | { page: "settings"; section?: SettingsSection }
   | { page: "addons"; tab: AddonTab }
   /** `asked`: when "New project" was asked for, so that its dialog opens at once, each time. */
   | { page: "projects"; asked?: number }
@@ -185,9 +186,9 @@ function App() {
   // Like a click on its row: the tab in front stays.
   const goBot = (b?: Bot) => b && openBot(b.id, view?.page === "bot" ? view.tab : "chat");
   // The app's settings, at one of its sections.
-  const settingsAt = (id: string) => {
-    flushSync(() => setView({ page: "settings" }));
-    document.getElementById(id)?.focus();
+  const settingsAt = (section: SettingsSection) => {
+    flushSync(() => setView({ page: "settings", section }));
+    document.getElementById(`settings-${section}`)?.focus();
   };
   // What the menus, the keys and the palette can do, by the menu item's id.
   const actions: Record<string, () => void> = {
@@ -272,11 +273,11 @@ function App() {
     { label: "App settings", hint: "⌘,", run: actions.settings },
     ...(inShell
       ? [
-          { label: "ChatGPT sign-in", hint: "app settings", run: () => settingsAt("settings-chatgpt") },
-          { label: "Devices", hint: "app settings", run: () => settingsAt("settings-devices") },
+          { label: "ChatGPT sign-in", hint: "app settings", run: () => settingsAt("chatgpt") },
+          { label: "Devices", hint: "app settings", run: () => settingsAt("devices") },
         ]
       : []),
-    { label: "Updates", hint: "app settings", run: () => settingsAt("settings-updates") },
+    { label: "Updates", hint: "app settings", run: () => settingsAt("updates") },
     { label: "New window", hint: "⇧⌘N", run: actions["new-window"] },
   ];
 
@@ -393,7 +394,7 @@ function App() {
         {view?.page === "settings" && (
           <>
             <header><div className="who"><h1>Settings</h1></div></header>
-            <AppSettings key={connection} />
+            <AppSettings key={connection} section={view.section} choose={(section) => setView({ page: "settings", section })} />
           </>
         )}
         {view?.page === "project" && project && (
