@@ -3688,9 +3688,23 @@ impl Core {
         })
     }
 
-    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction.
+    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction, and
+    /// no switch of conversation or rewind the engine has not answered yet.
     fn free(&self, bot: &str) -> bool {
-        !self.occupied(bot) && self.engines.get(bot).is_none_or(|r| r.compacting == 0)
+        !self.occupied(bot)
+            && self.engines.get(bot).is_none_or(|r| {
+                r.compacting == 0
+                    && r.opening == 0
+                    && !r.waiting.values().any(|w| {
+                        matches!(
+                            w,
+                            Waiter::Window {
+                                settles: Settles::Rewind(..),
+                                ..
+                            }
+                        )
+                    })
+            })
     }
 
     /// The prompts waiting in one of the bot's conversations.
@@ -5024,12 +5038,17 @@ impl Core {
                     }
                     _ => {}
                 }
+                let rewound = matches!(settles, Settles::Rewind(..));
                 let result = match (&settles, error) {
                     (Settles::Steer(_), Some(_)) => Ok(json!({"queued": true})),
                     (_, Some(e)) => Err(("engine_error", e)),
                     (_, None) => Ok(forked.map_or(json!({}), |c| json!({"conversation": c.id}))),
                 };
                 self.reply(client, &id, &command, result);
+                // The engine may now be moved again: what waited in the queue goes.
+                if rewound {
+                    self.drain_queue(bot);
+                }
             }
             Waiter::Routine { routine, prompt } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
@@ -5105,6 +5124,8 @@ impl Core {
                             r.session_of = Some(opened);
                         }
                         self.release_held(bot, None);
+                        // What waited in the queue for the switch goes now.
+                        self.drain_queue(bot);
                     }
                     Some(e) => self.open_refused(bot, opened, e),
                 }
@@ -5129,16 +5150,15 @@ impl Core {
             }
             return;
         };
-        let waiters: Vec<Waiter> = held
+        // An `abort` has nothing left to stop: it is answered as done.
+        let waiters: Vec<(Waiter, bool)> = held
             .into_iter()
-            .filter_map(|(id, _)| r.waiting.remove(&id))
+            .filter_map(|(id, op)| Some((r.waiting.remove(&id)?, matches!(op, Op::Abort))))
             .collect();
-        for waiter in waiters {
-            self.on_response(
-                bot,
-                waiter,
-                Some(format!("the engine could not open the conversation: {why}")),
-            );
+        for (waiter, abort) in waiters {
+            let error =
+                (!abort).then(|| format!("the engine could not open the conversation: {why}"));
+            self.on_response(bot, waiter, error);
         }
     }
 
@@ -5571,7 +5591,13 @@ impl Core {
 /// Writes a request for the engine, but holds one that belongs to a conversation while the
 /// engine has not yet said it opened that conversation: an agent switches only when it answers.
 fn dispatch(bot: &str, r: &mut Running, id: String, op: Op) {
-    if r.opening > 0 && matches!(op, Op::Prompt { .. } | Op::Rewind { .. } | Op::Compact) {
+    // An `abort` goes after what it is meant to stop, as when everything waited for `ready`.
+    let hold = match op {
+        Op::Prompt { .. } | Op::Rewind { .. } | Op::Compact => true,
+        Op::Abort => !r.held.is_empty(),
+        _ => false,
+    };
+    if r.opening > 0 && hold {
         r.held.push((id, op));
     } else {
         write_op(bot, r, &id, &op);

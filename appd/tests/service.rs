@@ -40,6 +40,8 @@ while IFS= read -r line; do
       echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"
       echo "{\"type\":\"session\",\"session\":\"s$(wc -l < starts.log | tr -d ' ')\"}" ;;
     *'"type":"open"'*'"session":"gone-'*) echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
+    *'"type":"open"'*'"session":"slowgone-'*) sleep 0.5; echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
+    *'"type":"open"'*'"session":"slow-'*) sleep 0.5; echo "$ok" ;;
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
@@ -1642,6 +1644,145 @@ fn a_conversation_the_engine_cannot_open_gets_nothing_meant_for_it() {
         "nonce",
         "n3"
     ));
+}
+
+fn set_session(home: &Path, conversation: &Value, session: &str) {
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "UPDATE conversations SET session = ?1 WHERE id = ?2",
+        [session, conversation.as_str().unwrap()],
+    )
+    .unwrap();
+}
+
+fn reply_to(w: &mut Window, id: &str) -> Value {
+    w.wait_for(|f| f["type"] == "response" && f["id"] == id)
+}
+
+/// A bot with a conversation of two turns (`n1`, `n2`) and a fork of it from before `n2`, which
+/// has `n1` as well. The service is stopped: its engine is started again by the next request.
+/// Gives the home, the bot, the conversation and its fork.
+fn forked_bot(name: &str) -> (Home, String, Value, Value) {
+    let home = home(name);
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    for nonce in ["n1", "n2"] {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        turn_ended(&mut w);
+    }
+    let fork =
+        w.ok("rewind", json!({"bot": bot, "entry": "n2", "fork": true}))["conversation"].clone();
+    drop(w);
+    service.kill();
+    (home, bot, first, fork)
+}
+
+fn prompts_in(entries: &[Value]) -> Vec<&str> {
+    entries
+        .iter()
+        .filter(|e| e["type"] == "prompt")
+        .map(|e| e["nonce"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_rewind_waiting_for_its_conversation_is_not_overtaken_by_a_move_into_another() {
+    let (home, bot, first, fork) = forked_bot("settling-rewind");
+    // The engine takes its time to open the fork.
+    set_session(&home, &fork, "slow-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let rewind = w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    let compact = w.send("compact", json!({"bot": bot, "conversation": first}));
+    let refused = reply_to(&mut w, &compact);
+    assert_eq!(refused["code"], "busy", "{refused}");
+    assert_eq!(reply_to(&mut w, &rewind)["success"], true);
+
+    // The rewind cut the fork, and nothing of the first conversation.
+    let kept = entries_of(&mut w, &bot, &first);
+    assert_eq!(prompts_in(&kept), ["n1", "n2"], "{kept:?}");
+    assert_eq!(
+        prompts_in(&entries_of(&mut w, &bot, &fork)),
+        Vec::<&str>::new()
+    );
+    assert_eq!(session_of(&home, &first).as_deref(), Some("s1"));
+}
+
+#[test]
+fn a_prompt_during_a_switch_waits_in_its_queue_and_runs_in_its_own_conversation() {
+    let (home, bot, first, fork) = forked_bot("settling-prompt");
+    set_session(&home, &fork, "slow-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    // The engine is still opening the fork when this comes, for the first conversation.
+    let sent = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n9", "conversation": first, "text": "hi"}),
+    );
+    assert_eq!(sent, json!({"queued": true}));
+    eventually("the queued prompt to run in the first conversation", || {
+        let entries = entries_of(&mut w, &bot, &first);
+        prompts_in(&entries) == ["n1", "n2", "n9"]
+            && entries.iter().filter(|e| e["type"] == "turn_end").count() == 3
+    });
+    // Nothing of the first conversation's turn reached the fork, which the rewind emptied.
+    assert_eq!(
+        prompts_in(&entries_of(&mut w, &bot, &fork)),
+        Vec::<&str>::new()
+    );
+    assert_eq!(session_of(&home, &first).as_deref(), Some("s1"));
+}
+
+#[test]
+fn a_second_move_while_a_session_is_refused_does_not_change_the_other_session() {
+    let (home, bot, first, fork) = forked_bot("settling-refused");
+    // Its session cannot be opened (after a while), and the engine starts another.
+    set_session(&home, &fork, "slowgone-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let into_fork = w.send(
+        "rewind",
+        json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
+    );
+    let into_first = w.send("compact", json!({"bot": bot, "conversation": first}));
+    let refused = reply_to(&mut w, &into_first);
+    assert_eq!(refused["code"], "busy", "{refused}");
+    // The first request goes on in a new session of the fork, once the old one is refused.
+    assert_eq!(reply_to(&mut w, &into_fork)["success"], true);
+    eventually("the fork's new session", || {
+        session_of(&home, &fork).is_some_and(|s| s != "slowgone-fork")
+    });
+    assert_eq!(session_of(&home, &first).as_deref(), Some("s1"));
+}
+
+#[test]
+fn an_abort_sent_while_a_prompt_waits_for_its_conversation_stops_that_prompt() {
+    let (home, bot, _first, fork) = forked_bot("settling-abort");
+    set_session(&home, &fork, "slow-fork");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    // A turn that runs until it is stopped, and the stop, while the fork is being opened.
+    w.send(
+        "prompt",
+        json!({"bot": bot, "nonce": "n9", "conversation": fork, "text": "work"}),
+    );
+    w.ok("abort", json!({"bot": bot}));
+    eventually("the turn to end, after it began", || {
+        let entries = entries_of(&mut w, &bot, &fork);
+        let at = entries
+            .iter()
+            .position(|e| e["type"] == "prompt" && e["nonce"] == "n9");
+        at.is_some_and(|at| entries[at..].iter().any(|e| e["type"] == "turn_end"))
+    });
 }
 
 #[test]
