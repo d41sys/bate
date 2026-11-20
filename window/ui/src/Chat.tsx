@@ -18,7 +18,7 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, jump, find = false, used = () => {}, showFile, model }: {
+export function Chat({ bot, jump, find = false, used = () => {}, showFile, model, signIn, start = "" }: {
   bot: Bot;
   jump?: { seq: number };
   find?: boolean;
@@ -27,12 +27,16 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
   showFile?: (path: string) => void;
   // The model and thinking chip, which sits in the message box.
   model?: ReactNode;
+  // Set while the bot has no way to reach a model: opens the sign-in, and nothing is sent until then.
+  signIn?: () => void;
+  // What the message box starts with: a first message to send as it is.
+  start?: string;
 }) {
   // Prompts the service holds until the bot is free, in the order they go.
   const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [text, setText] = useState("");
+  const [text, setText] = useState(start);
   const [error, setError] = useState("");
   const [compacted, setCompacted] = useState(false);
   const [sending, setSending] = useState(false);
@@ -307,7 +311,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
   /** `steer`: into the turn that runs; otherwise a prompt, which the service queues while the bot is busy. */
   const send = async (steer = false) => {
     // The text stays until the service has it.
-    if (!message || uploading || (bot.busy && editing) || inFlight.current) return;
+    if (!message || uploading || signIn || (bot.busy && editing) || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     try {
@@ -422,6 +426,11 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
+      {signIn && (
+        <p className="banner" role="status">
+          {bot.name} has no model to answer with yet. <button type="button" onClick={signIn}>Sign in</button>
+        </p>
+      )}
       {compacted && <p className="note" role="status">Done: the bot keeps the last four messages as they are and a summary of anything older. The chat here is unchanged.</p>}
       {(files.length > 0 || editing) && (
         <ul className="attached">
@@ -508,7 +517,7 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile, model
             <button type="button" data-tip="Stop the bot (Esc)" onClick={stop}>Stop <kbd>Esc</kbd></button>
           </>
         ) : (
-          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending}>↑</button>
+          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn}>↑</button>
         )}
       </form>
       {bot.busy && (
