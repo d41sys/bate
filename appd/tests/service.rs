@@ -5129,7 +5129,8 @@ fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
                 // chosen in its text, and how often it was fetched.
                 "/tools" => {
                     let loads = log.lock().unwrap().iter().filter(|p| *p == "/tools").count();
-                    r#"<title>Tools</title><script>addEventListener('scroll', () => document.title = 'Scrolled ' + Math.round(scrollY)); addEventListener('focusin', e => document.title = 'Focus ' + e.target.id); addEventListener('change', e => document.getElementById('c').textContent = 'Chose ' + e.target.value)</script><input id=a placeholder=First><input id=b placeholder=Second><select id=s><option>Red</option><option>Green tea</option><option>Blue</option></select><form action='/sent'><input id=q name=q placeholder=Query></form><p id=c></p><p>Load @LOADS@</p><div style='height:3000px'>Tall</div>"#.replace("@LOADS@", &loads.to_string())
+                    // Taller than any window, so one screen down never reaches the end.
+                    r#"<title>Tools</title><script>addEventListener('scroll', () => document.title = 'Scrolled ' + Math.round(scrollY)); addEventListener('focusin', e => document.title = 'Focus ' + e.target.id); addEventListener('change', e => document.getElementById('c').textContent = 'Chose ' + e.target.value)</script><input id=a placeholder=First><input id=b placeholder=Second><select id=s><option>Red</option><option>Green tea</option><option>Blue</option></select><form action='/sent'><input id=q name=q placeholder=Query></form><p id=c></p><p>Load @LOADS@</p><div style='height:100000px'>Tall</div>"#.replace("@LOADS@", &loads.to_string())
                 }
                 // The page's own script plays at being the user: that is not taking over.
                 other => format!("<title>Other</title><p>You are at {other}</p><script>window.dispatchEvent(new MouseEvent('mousedown'))</script>"),

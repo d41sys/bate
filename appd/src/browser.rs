@@ -590,6 +590,13 @@ impl Chrome {
         Ok(result["result"]["value"].clone())
     }
 
+    /// Waits for the page's next frame, at most a second (a page that is not drawn has none):
+    /// the page's scroll events are sent in it, so they have run before the page is read.
+    fn frame(&mut self, page: &str) -> Result<(), String> {
+        let script = "new Promise(r => { requestAnimationFrame(() => r()); setTimeout(r, 1000); })";
+        self.eval(page, script).map(drop)
+    }
+
     /// Waits until the page has loaded, for at most `LOAD_MS`.
     fn settle(&mut self, page: &str) {
         let end = now_ms() + LOAD_MS;
@@ -650,7 +657,7 @@ impl Chrome {
                     page,
                     &format!("window.scrollBy(0, {sign}window.innerHeight * 0.9)"),
                 )?;
-                thread::sleep(Duration::from_millis(300));
+                self.frame(page)?;
             }
             Action::Press { key, element } => {
                 if let Some(n) = element {
@@ -673,6 +680,7 @@ impl Chrome {
                 thread::sleep(Duration::from_millis(300));
                 self.acting.store(false, Ordering::SeqCst);
                 sent?;
+                self.frame(page)?;
             }
             Action::Select { element, option } => {
                 let option = serde_json::to_string(option).expect("a string");
