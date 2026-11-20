@@ -129,7 +129,7 @@ export function Model({ bot, bots, report }: { bot: Bot; bots: Bot[]; report: (m
             {models.map((m) => row(m))}
             {typed && row(typed, `Use “${typed}”`)}
           </ul>
-          {!models.length && !typed && <p className="note">No model matches.</p>}
+          {query.trim() && !models.length && !typed && <p className="note">No model matches.</p>}
           <label>
             Thinking{" "}
             <select value={effort} disabled={!model} aria-describedby={model ? undefined : "effort-why"} onChange={(e) => void save(model, e.target.value)}>
