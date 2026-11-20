@@ -12,7 +12,7 @@ import type { Conversation } from "./types.ts";
 export function Conversations({ bot, want, children }: {
   bot: string;
   want?: string;
-  children: (conversation: string, show: (id: string) => void) => ReactNode;
+  children: (conversation: string, show: (id: string) => void, offerCompact: (item: { run: () => void; disabled: boolean } | null) => void) => ReactNode;
 }) {
   const [all, setAll] = useState<Conversation[]>([]);
   const [current, setCurrent] = useState<string>();
@@ -27,6 +27,8 @@ export function Conversations({ bot, want, children }: {
   const [archived, setArchived] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; name: string }>();
   const [error, setError] = useState("");
+  // Compact, offered by the chat while it can run: it lives in this list because it acts on the shown conversation.
+  const [compact, offerCompact] = useState<{ run: () => void; disabled: boolean } | null>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const chip = useRef<HTMLButtonElement>(null);
 
@@ -147,13 +149,28 @@ export function Conversations({ bot, want, children }: {
                   <input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} />
                 </label>
               )}
+              {compact && (
+                <button
+                  type="button"
+                  className="row plain"
+                  disabled={compact.disabled}
+                  data-tip="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole"
+                  onClick={() => {
+                    setOpen(false);
+                    chip.current?.focus();
+                    compact.run();
+                  }}
+                >
+                  Compact this conversation
+                </button>
+              )}
             </div>
           )}
         </div>
         <button type="button" className="small" onClick={() => void make()}>New conversation</button>
       </div>
       {error && <p className="error" role="alert">{error}</p>}
-      {children(shown, show)}
+      {children(shown, show, offerCompact)}
     </>
   );
 }

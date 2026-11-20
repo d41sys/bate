@@ -29,7 +29,7 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, conversation, onFork, jump, find = false, used = () => {}, showFile, model, signIn, start = "", started = () => {} }: {
+export function Chat({ bot, conversation, onFork, jump, find = false, used = () => {}, showFile, model, signIn, start = "", started = () => {}, offerCompact }: {
   bot: Bot;
   /** The conversation shown; the service holds the rest. */
   conversation: string;
@@ -47,6 +47,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   // What the message box starts with: a first message to send as it is; `started` says it took it.
   start?: string;
   started?: () => void;
+  // Where Compact lives: the conversation chip's list. Offered while the bot can take it, `disabled` while a message goes out.
+  offerCompact: (item: { run: () => void; disabled: boolean } | null) => void;
 }) {
   // Prompts the service holds until the bot is free, in the order they go.
   const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
@@ -353,6 +355,11 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
       await request("compact", { bot: bot.id, conversation });
       setCompacted(true);
     });
+  const canCompact = !bot.busy && !bot.agent?.length;
+  useEffect(() => {
+    offerCompact(canCompact ? { run: () => void compact(), disabled: sending } : null);
+    return () => offerCompact(null);
+  }, [canCompact, sending]);
   /** `steer`: into the turn that runs; otherwise a prompt, which the service queues while the bot is busy. */
   const send = async (steer = false) => {
     // The text stays until the service has it.
@@ -532,13 +539,18 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         {inShell && (
           <button
             type="button"
+            className="round"
+            aria-label="Dictate"
             data-tip="Dictate with the system's Dictation (on this Mac)"
             onClick={() => {
               box.current?.focus();
               run(startDictation());
             }}
           >
-            Dictate
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+            </svg>
           </button>
         )}
         <textarea
@@ -562,9 +574,6 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           }}
         />
         {model}
-        {!bot.busy && !bot.agent?.length && (
-          <button type="button" disabled={sending} data-tip="Have the bot go on from a summary of the older messages, to make room in what it can hold; the chat here stays whole" onClick={compact}>Compact</button>
-        )}
         {bot.busy ? (
           <>
             <button disabled={!message || uploading || sending} data-tip="Send this when the bot is done with what it is doing">Queue</button>

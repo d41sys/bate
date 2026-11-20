@@ -433,11 +433,12 @@ function App() {
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
               <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation}>
-                {(conversation, show) => <Chat
+                {(conversation, show, offerCompact) => <Chat
                   key={`${bot.id}-${conversation}-${connection}`}
                   bot={bot}
                   conversation={conversation}
                   onFork={show}
+                  offerCompact={offerCompact}
                   jump={jump}
                   find={find}
                   // Bots' files open in the window's pane only, not on other devices.
