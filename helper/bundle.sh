@@ -4,8 +4,9 @@
 #
 #   helper/bundle.sh [folder]     folder defaults to ~/Applications
 #
-# SIGN_IDENTITY names the certificate to sign with; the default, "-", signs ad hoc, which
-# macOS treats as a new app after every rebuild (the permissions must be given again).
+# SIGN_IDENTITY names the certificate to sign with (SIGN_KEYCHAIN: the keychain file it is in,
+# when that is not one of the user's); the default, "-", signs ad hoc, which macOS treats as a
+# new app after every rebuild (the permissions must be given again).
 # BATE_HELPER_BIN names a built bate-helper to wrap instead of building one.
 set -eu
 
@@ -37,5 +38,5 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
-codesign --force --sign "${SIGN_IDENTITY:--}" "$app"
+codesign --force --sign "${SIGN_IDENTITY:--}" ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} "$app"
 echo "$app"
