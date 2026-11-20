@@ -1,7 +1,7 @@
 import type { CatalogPreview, Workplace, WorkplacePreview } from "./types.ts";
 
 /** What a workplace needs, one line per kind, as the person is shown it before switching it on. */
-export function needsLines(w: Workplace): string[] {
+export function needsLines(w: Pick<Workplace, "manifest">): string[] {
   const n = w.manifest?.needs;
   const lines = (
     [

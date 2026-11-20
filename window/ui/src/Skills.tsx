@@ -1,62 +1,82 @@
-import { useEffect, useState } from "react";
-import { listen, request } from "./service.ts";
-import type { Skill } from "./types.ts";
+import { useState } from "react";
+import { each, madeBy, placed } from "./addons.ts";
+import { Pick, Sheet } from "./Sheet.tsx";
+import { usePerBot } from "./usePerBot.ts";
+import { request } from "./service.ts";
+import type { Bot, Skill, SkillPreview } from "./types.ts";
+import { sizeText } from "./workplaces.ts";
 
-export function Skills({ bot }: { bot: string }) {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [path, setPath] = useState("");
-  const [deleting, setDeleting] = useState<string>();
+/** Where a skill is copied from: a folder, or the same skill on a bot that has it. */
+type Source = { path: string } | { fromBot: string; name: string };
+type Ask = { preview: SkillPreview; source: Source; maker: string } | { remove: string };
+
+/** The skills of every bot in one list: what each is, who has it, and one install for as many bots as chosen. */
+export function Skills({ bots }: { bots: Bot[] }) {
+  const { lists, error: loadError } = usePerBot<Skill>(bots, "list_skills", "skills", "skills_changed");
+  const rows = placed(lists);
+  const [ask, setAsk] = useState<Ask>();
   const [error, setError] = useState("");
+  const names = (ids: string[]) => ids.map((id) => bots.find((b) => b.id === id)?.name ?? id).join(", ");
+  const has = (name: string) => rows.find((r) => r.name === name)?.users.map((u) => u.bot) ?? [];
 
-  useEffect(() => {
-    const load = () =>
-      request<{ skills: Skill[] }>("list_skills", { bot }).then((d) => setSkills(d.skills), (e) => setError(e.message));
-    load();
-    return listen((frame) => {
-      if (frame.type === "skills_changed" && frame.bot === bot) load();
-    });
-  }, [bot]);
-
-  /** Whether it worked; if not, the error shows. */
-  const run = (p: Promise<unknown>) =>
-    p.then(() => (setError(""), true), (e: Error) => (setError(e.message), false));
-  const install = async () => {
-    // The service does not expand `~` or look in a folder of its own: a short path would only fail with a puzzling message.
-    if (!path.startsWith("/")) return setError("Give the whole path, starting with /, for example /Users/you/Downloads/my-skill.");
-    if (await run(request("install_skill", { bot, path }))) setPath("");
-  };
+  const look = (source: Source, maker: string) =>
+    request<SkillPreview>("preview_skill", source).then((preview) => (setAsk({ preview, source, maker }), setError("")), (e: Error) => setError(e.message));
 
   return (
     <section>
-      {skills.length === 0 && <p className="note">No skills yet.</p>}
+      <p className="note">A skill is a set of instructions for a bot, with the files that go with it. Each bot keeps its own copy; here they are listed together.</p>
+      <h2>Installed</h2>
+      {rows.length === 0 && <p className="note">No skills yet. Choose a folder under Browse to add one.</p>}
       <ul className="rows">
-        {skills.map((s) => (
-          <li key={s.name}>
-            <strong>{s.name}</strong>
-            <span className="note">{s.description}</span>
-            {deleting === s.name ? (
-              <span>
-                Delete {s.name}?{" "}
-                <button onClick={() => run(request("delete_skill", { bot, name: s.name })).then(() => setDeleting(undefined))}>Delete</button>{" "}
-                <button onClick={() => setDeleting(undefined)}>Cancel</button>
-              </span>
-            ) : (
-              <button aria-label={`Delete ${s.name}`} onClick={() => setDeleting(s.name)}>Delete…</button>
-            )}
+        {rows.map((r) => (
+          <li key={r.name}>
+            <div className="what">
+              <strong>{r.name}</strong> <span className="note">{r.users[0].item.description}</span>
+              <small>On: {names(r.users.map((u) => u.bot))}</small>
+            </div>
+            <div className="actions">
+              <button className="small" onClick={() => void look({ fromBot: r.users[0].bot, name: r.name }, madeBy.copy(names([r.users[0].bot])))}>Add to bots…</button>
+              <button className="small danger" onClick={() => setAsk({ remove: r.name })}>Remove…</button>
+            </div>
           </li>
         ))}
       </ul>
-      <form className="fields" onSubmit={(e) => { e.preventDefault(); install(); }}>
-        <h2>Install a skill</h2>
-        <p className="note">
-          A skill is a folder on the Mac that runs Bate, with a <code>SKILL.md</code> in it. The file starts with a <code>---</code> block holding a <code>name</code> (a-z, 0-9 and -) and a one-line <code>description</code>. Installing a skill with a name the bot already has replaces it. A folder may hold up to 500 files and folders and 20 MiB, and no links.
-        </p>
-        <label>
-          Folder path <input required placeholder="/Users/you/Downloads/my-skill" value={path} onChange={(e) => setPath(e.target.value)} />
-        </label>
-        <button>Install</button>
-      </form>
-      {error && <p className="error" role="alert">{error}</p>}
+      <h2>Browse</h2>
+      <p className="note">
+        Bate has no online list of skills yet, so a skill comes from a folder on this Mac: one with a <code>SKILL.md</code> in it. You see what it is, how big, and who gets it before anything is copied. A skill with the name a bot already has replaces it.
+      </p>
+      <Pick folder pick={(path) => void look({ path }, madeBy.folder)} fail={setError} />
+      {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
+      {ask && "preview" in ask && (
+        <Sheet
+          title={`Install ${ask.preview.skill.name}`}
+          about={ask.preview.skill.description}
+          maker={ask.maker}
+          facts={[`${ask.preview.entries} ${ask.preview.entries === 1 ? "file or folder" : "files and folders"}, ${sizeText(ask.preview.bytes)}`, "Instructions in SKILL.md, and the files they refer to."]}
+          may={[
+            "It does nothing by itself: the bot reads it when a task fits, and may use the files in it.",
+            "Each command or file access the bot makes for it is asked about under that bot's permissions.",
+          ]}
+          who={{
+            legend: "Install for",
+            items: bots.map((b) => ({ id: b.id, bot: b, label: b.name, note: has(ask.preview.skill.name).includes(b.id) ? "Has it already: this replaces it" : undefined })),
+          }}
+          action="Install"
+          go={(ids) => each(ids, (bot) => request("install_skill", { bot, ...ask.source }))}
+          close={() => setAsk(undefined)}
+        />
+      )}
+      {ask && "remove" in ask && (
+        <Sheet
+          title={`Remove ${ask.remove}`}
+          about={`This deletes the folder skills/${ask.remove} and everything in it from each bot ticked, including files the bot added there. The folder it was installed from is not touched.`}
+          who={{ legend: "Remove from", items: bots.filter((b) => has(ask.remove).includes(b.id)).map((b) => ({ id: b.id, bot: b, label: b.name })), ticked: has(ask.remove) }}
+          action="Remove"
+          danger
+          go={(ids) => each(ids, (bot) => request("delete_skill", { bot, name: ask.remove }))}
+          close={() => setAsk(undefined)}
+        />
+      )}
     </section>
   );
 }

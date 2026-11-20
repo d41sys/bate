@@ -139,7 +139,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `set_routine` | `bot`, `routine` | `{routine}`. No `routine.id`: create; with one: replace |
 | `delete_routine` | `bot`, `routineId` | `{}`. Its past runs go with it. |
 | `list_routine_runs` | `bot`, `routineId` | `{runs:[RoutineRun]}`, newest first, at most the last 50 |
-| `list_connectors` | `bot` | `{connectors:[Connector]}` |
+| `list_connectors` | `bot` | `{connectors:[Connector]}`; a connector its engine could not load has `error`, what the engine said (the engine's standard error line `connector <name>: <why>`). It goes when the connector is changed or removed and when the bot's engine starts again; `connectors_changed` follows its coming. A connector with no `error` has had none reported, which is not proof that it works |
 | `set_connector` | `bot`, `connector` | `{connector}`. Creates or replaces by `name` |
 | `delete_connector` | `bot`, `name` | `{}` |
 | `sign_in_connector` | `bot`, `name` | `{url}`: open it in the browser. `sign_in_failed` when the server cannot be reached or does not say how to sign in |
@@ -162,7 +162,8 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `read_roles` | `paths` | `{roles:[{path, name, instructions, model, effort, skills, levels, raises}]}`: what each role file (whole paths, 1 to 20) would create; `raises` names the kinds whose level allows more than a new bot's. `invalid_role` with the file and the reason. Refused (`forbidden`) for a device on the network |
 | `add_roles` | `projectId`, `paths`, `raise` | `{bots:[id]}`: a bot for each role, in the project; levels in `raises` are applied only with `raise: true`. All or none: `invalid_role` or `no_such_project` and no bot is created. Refused (`forbidden`) for a device on the network |
 | `list_skills` | `bot` | `{skills:[{name, description}]}`, by name |
-| `install_skill` | `bot`, `path` | `{skill}`; copies the skill folder at `path`, or `invalid_skill` |
+| `install_skill` | `bot`, `path` or `fromBot` and `name` | `{skill}`; copies the skill folder at `path`, or the skill `name` of the bot `fromBot` (`no_such_bot`), or `invalid_skill` |
+| `preview_skill` | `path` or `fromBot` and `name` | `{skill, entries, bytes}` of the folder at `path`: what `install_skill` would copy in (files and folders, bytes), checked as it checks, to show before it is installed. Nothing is kept. `invalid_skill` |
 | `delete_skill` | `bot`, `name` | `{}`, or `no_such_skill` |
 | `list_memory` | `bot` or `projectId` | `{notes:[{name, bytes, modifiedMs}]}`, by name; with `projectId` the project's notes, or `no_such_project` |
 | `read_memory` | `bot` or `projectId`, `name` | `{text}`, or `no_such_note` |

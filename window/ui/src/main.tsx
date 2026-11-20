@@ -33,13 +33,17 @@ import "./style.css";
 if (import.meta.env.VITE_FRAME_CHECK) void import("./frameCheck.ts");
 
 // A bot opens to its own things, a project to its own. What belongs to neither is in the sidebar's foot.
-const BOT_TABS = { chat: "Chat", routines: "Routines", connectors: "Connectors", memory: "Memory", skills: "Skills", channels: "Channels", settings: "Settings" };
+const BOT_TABS = { chat: "Chat", routines: "Routines", memory: "Memory", channels: "Channels", settings: "Settings" };
+// What a bot can be given, for every bot and project at once.
+const ADDON_TABS = { connectors: "Connectors", skills: "Skills", workplaces: "Workplaces" };
 const PROJECT_TABS = { room: "Room", bots: "Bots", surfaces: "Surfaces", memory: "Memory", settings: "Settings" };
 type BotTab = keyof typeof BOT_TABS;
 type ProjectTab = keyof typeof PROJECT_TABS;
+type AddonTab = keyof typeof ADDON_TABS;
 /** What the page shows. The channels and the surfaces are for Bate's own window only. */
 type View =
-  | { page: "workplaces" | "settings" | "new-bot" }
+  | { page: "settings" | "new-bot" }
+  | { page: "addons"; tab: AddonTab }
   /** `asked`: when "New project" was asked for, so that its dialog opens at once, each time. */
   | { page: "projects"; asked?: number }
   | { page: "project"; id: string; tab: ProjectTab }
@@ -264,7 +268,7 @@ function App() {
     ...(bot ? [{ label: "Find in chat", hint: "⌘F", run: actions.find }] : []),
     { label: "New bot", hint: "⌘N", run: actions["new-bot"] },
     { label: "New project", run: actions["new-project"] },
-    { label: "Workplaces", run: () => setView({ page: "workplaces" }) },
+    ...(Object.keys(ADDON_TABS) as AddonTab[]).map((t) => ({ label: `Add-ons: ${ADDON_TABS[t]}`, run: () => setView({ page: "addons", tab: t }) })),
     { label: "App settings", hint: "⌘,", run: actions.settings },
     ...(inShell
       ? [
@@ -341,7 +345,7 @@ function App() {
         </div>
         <ul>{lists.loose.map(botRow)}</ul>
         <ul className="foot">
-          <li>{plain("Workplaces", view?.page === "workplaces", () => setView({ page: "workplaces" }))}</li>
+          <li>{plain("Add-ons", view?.page === "addons", () => setView({ page: "addons", tab: view?.page === "addons" ? view.tab : "connectors" }))}</li>
           <li>{plain("Settings", view?.page === "settings", () => setView({ page: "settings" }))}</li>
         </ul>
       </nav>
@@ -373,10 +377,17 @@ function App() {
             <Projects key={`${connection}-${view.asked}`} adding={view.asked !== undefined} bots={bots} projects={projects} open={openProject} />
           </>
         )}
-        {view?.page === "workplaces" && (
+        {view?.page === "addons" && (
           <>
-            <header><div className="who"><h1>Workplaces</h1></div></header>
-            <Workplaces key={connection} projects={projects} />
+            <header>
+              <div className="who"><h1>Add-ons</h1></div>
+              <Tabs ids={Object.keys(ADDON_TABS) as AddonTab[]} names={ADDON_TABS} tab={view.tab} set={(tab) => setView({ page: "addons", tab })} />
+            </header>
+            <Panel tab={view.tab}>
+              {view.tab === "connectors" && <Connectors key={connection} bots={bots} />}
+              {view.tab === "skills" && <Skills key={connection} bots={bots} />}
+              {view.tab === "workplaces" && <Workplaces key={connection} projects={projects} />}
+            </Panel>
           </>
         )}
         {view?.page === "settings" && (
@@ -457,14 +468,12 @@ function App() {
               </Conversations>
             )}
             {view.tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
-            {view.tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "memory" && (
               <>
                 {bot.agent && <p className="note">An installed agent keeps its own memory: these notes, and the project's notes and instructions, do not reach it.</p>}
                 <Memory key={`${bot.id}-${connection}`} target={{ bot: bot.id }} />
               </>
             )}
-            {view.tab === "skills" && <Skills key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "channels" && inShell && <Channels key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setView(undefined)} />}
             </Panel>

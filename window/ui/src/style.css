@@ -52,6 +52,15 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 /* A form with each label over its control, as wide as the column. */
 .fields.stack label { display: grid; gap: var(--space-1); }
 .fields.stack input:not([type=checkbox], [type=radio], [type=file], [type=range]) { width: 100%; }
+/* A label that is one checkbox and its words stays in a line, in a stacked form too. */
+.fields.stack label:has(> input[type=checkbox]) { display: flex; align-items: center; gap: var(--space-2); }
+/* ---- Switch: a checkbox that takes effect at once. `<input type="checkbox" role="switch">` in a label with its words ---- */
+input[role=switch] { -webkit-appearance: none; appearance: none; position: relative; flex: none; width: var(--switch-w); height: var(--switch-h); margin: 0; border-radius: var(--radius-pill); background: var(--border-strong); cursor: pointer; transition: background-color var(--fast) var(--ease); }
+input[role=switch]::after { content: ""; position: absolute; top: calc(var(--space-1) / 2); left: calc(var(--space-1) / 2); width: calc(var(--switch-h) - var(--space-1)); height: calc(var(--switch-h) - var(--space-1)); border-radius: 50%; background: var(--bg-raised); transition: transform var(--fast) var(--ease); }
+input[role=switch]:checked { background: var(--ink); }
+input[role=switch]:checked::after { transform: translateX(calc(var(--switch-w) - var(--switch-h))); background: var(--on-ink); }
+input[role=switch]:disabled { opacity: .45; cursor: default; }
+label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
 /* ---- Tabs ---- */
 [role=tablist] { display: flex; gap: var(--space-1); overflow-x: auto; }
@@ -78,6 +87,12 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
 .row:has(input:disabled) { opacity: .6; cursor: default; }
 .rows li:has(> label.row) { padding: 0; }
+/* An add-on's row: what it is, its buttons at the end, and under them a line for each bot or project that has it. */
+.rows li > .what { flex: 1 1 var(--popover-w); min-width: 0; overflow-wrap: anywhere; }
+.rows li > .what > small { display: block; }
+.rows li > .actions { margin-left: auto; }
+.rows li > .rows { flex: 1 0 100%; margin: 0; }
+.rows li > .rows li { padding: var(--space-1) 0; border-bottom: 0; }
 .actions, .tools, .find, .surfaces { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .tools, .find, .surfaces { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
@@ -105,6 +120,10 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .sheet[open] { display: flex; }
 .sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-4); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
 .sheet .rows li button { margin-left: auto; }
+.sheet h3 { margin-top: var(--space-3); }
+.sheet ul:not(.rows) { margin: var(--space-1) 0; padding-left: var(--space-4); }
+.sheet .error { white-space: pre-line; }
+.sheet button.danger { background: var(--bg-raised); color: var(--danger); border-color: var(--danger); }
 /* The buttons stay in sight while a long dialog scrolls. */
 .sheet .actions { position: sticky; bottom: 0; padding: var(--space-2) 0 var(--space-4); background: var(--bg-raised); }
 

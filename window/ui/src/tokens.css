@@ -59,6 +59,8 @@
   --thread-w: 720px;
   --popover-w: 300px;
   --chip-w: 180px;
+  --switch-w: 36px;
+  --switch-h: 20px;
   --tip-w: 240px;
 
   /* Motion: short, and none when the system asks for less. */

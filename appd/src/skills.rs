@@ -72,8 +72,8 @@ pub fn staging() -> io::Result<PathBuf> {
     Ok(dir.join(sys::random_hex(8)))
 }
 
-/// Copies the skill folder `source` into the bot's skills, in place of one of the same name.
-pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
+/// The folder `source`, held open, and the skill its `SKILL.md` describes.
+fn open(source: &Path) -> Result<(Dir, Skill), String> {
     // Held open like a bot's folder: the picked folder may be one a bot can write in.
     let from =
         Dir::open(source).map_err(|e| format!("{} is not a folder: {e}", source.display()))?;
@@ -82,6 +82,24 @@ pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
         Ok(None) => return Err(format!("the folder has no {FILE}")),
         Err(e) => return Err(format!("cannot read {FILE}: {e}")),
     };
+    Ok((from, skill))
+}
+
+/// What `install` would copy in, checked as it checks: the skill, and how many files and
+/// folders and how many bytes the folder holds. Nothing is kept.
+pub fn preview(source: &Path) -> Result<(Skill, usize, u64), String> {
+    let (from, skill) = open(source)?;
+    let failed = |e: io::Error| format!("cannot look at the skill: {e}");
+    let staged = staging().map_err(failed)?;
+    let mut seen = (0, 0);
+    let counted = copy(&from, &staged, &SKILL, 0, &mut seen);
+    discard(Some(staged));
+    counted.map(|()| (skill, seen.0, seen.1))
+}
+
+/// Copies the skill folder `source` into the bot's skills, in place of one of the same name.
+pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
+    let (from, skill) = open(source)?;
     let failed = |e: io::Error| format!("cannot install the skill: {e}");
     let staged = staging().map_err(failed)?;
     let installed = copy(&from, &staged, &SKILL, 0, &mut (0, 0)).and_then(|()| {

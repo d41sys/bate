@@ -141,6 +141,13 @@ pub enum Msg {
         generation: u64,
         why: String,
     },
+    /// A bot's engine could not load one of its connectors (`why` is what it said on stderr).
+    ConnectorFailed {
+        bot: String,
+        generation: u64,
+        name: String,
+        why: String,
+    },
     /// What came of a request about a project's surfaces, made off the core's thread.
     Surface {
         client: u64,
@@ -572,6 +579,9 @@ pub struct Core {
     workplaces_off: HashMap<String, String>,
     /// Bots whose project change takes effect after the turn now running.
     project_restarts: HashSet<String>,
+    /// What each bot's engine last said of a connector that failed to load, by bot and name;
+    /// cleared when the connector changes and when the bot's engine starts.
+    connector_errors: HashMap<String, HashMap<String, String>>,
     /// Engine request ids and engine generations.
     counter: u64,
     /// Earliest `nextRunMs` of any enabled routine; 0 forces a recheck.
@@ -664,6 +674,7 @@ impl Core {
             servers: HashMap::new(),
             workplaces_off: HashMap::new(),
             project_restarts: HashSet::new(),
+            connector_errors: HashMap::new(),
             counter: 0,
             next_due: 0,
         }
@@ -731,6 +742,28 @@ impl Core {
                 why,
             } => self.on_project_exited(&id, generation, &why),
             Msg::ProjectRetry { id, generation } => self.on_project_retry(&id, generation),
+            Msg::ConnectorFailed {
+                bot,
+                generation,
+                name,
+                why,
+            } => {
+                let current = self
+                    .engines
+                    .get(&bot)
+                    .is_some_and(|r| r.generation == generation);
+                let known = self
+                    .store
+                    .connectors(&bot)
+                    .is_ok_and(|all| all.iter().any(|c| c.name == name));
+                if current && known {
+                    self.connector_errors
+                        .entry(bot.clone())
+                        .or_default()
+                        .insert(name, why);
+                    self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                }
+            }
             Msg::Surface {
                 client,
                 id,
@@ -1644,10 +1677,17 @@ impl Core {
             }
             "install_skill" => {
                 let bot = self.bot_of(f)?;
-                let skill = skills::install(&bot, std::path::Path::new(str_field(f, "path")?))
+                let skill = skills::install(&bot, &self.skill_source(f)?)
                     .map_err(|e| ("invalid_skill", e))?;
                 self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
                 Ok(Some(json!({"skill": skill})))
+            }
+            "preview_skill" => {
+                let (skill, entries, bytes) =
+                    skills::preview(&self.skill_source(f)?).map_err(|e| ("invalid_skill", e))?;
+                Ok(Some(
+                    json!({"skill": skill, "entries": entries, "bytes": bytes}),
+                ))
             }
             "delete_skill" => {
                 let bot = self.bot_of(f)?;
@@ -2240,6 +2280,17 @@ impl Core {
                     let tokens = self.store.tokens(&bot, &c.name).map_err(internal)?;
                     c.signed_in = Some(tokens.is_some());
                 }
+                let failed = self.connector_errors.get(&bot);
+                let connectors: Vec<Value> = connectors
+                    .iter()
+                    .map(|c| {
+                        let mut shown = json!(c);
+                        if let Some(why) = failed.and_then(|m| m.get(&c.name)) {
+                            shown["error"] = json!(why);
+                        }
+                        shown
+                    })
+                    .collect();
                 Ok(Some(json!({"connectors": connectors})))
             }
             "sign_in_connector" => {
@@ -2286,6 +2337,9 @@ impl Core {
                     self.store.delete_oauth(&bot, &c.name).map_err(internal)?;
                 }
                 self.store.put_connector(&bot, &c).map_err(internal)?;
+                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                    m.remove(&c.name);
+                }
                 self.forget_connector_grants(&bot, &c.name);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({"connector": c})))
@@ -2380,6 +2434,9 @@ impl Core {
                 self.store
                     .delete_oauth(&bot, str_field(f, "name")?)
                     .map_err(internal)?;
+                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                    m.remove(str_field(f, "name")?);
+                }
                 self.forget_connector_grants(&bot, str_field(f, "name")?);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({})))
@@ -2397,6 +2454,20 @@ impl Core {
             Some((url, key)) => (Some(url), key, false),
             None => (env("BATE_MODEL_BASE_URL"), env("BATE_MODEL_API_KEY"), true),
         })
+    }
+
+    /// The folder a skill is installed from: the one at `path`, or the skill `name` of another
+    /// bot (`fromBot`), so a skill the person has on one bot goes to others without a path.
+    fn skill_source(&self, f: &Value) -> Result<std::path::PathBuf, Refusal> {
+        let Some(from) = f.get("fromBot").and_then(Value::as_str) else {
+            return Ok(str_field(f, "path")?.into());
+        };
+        let name = str_field(f, "name")?;
+        proto::skills::check_name(name).map_err(bad)?;
+        if self.store.bot(from).map_err(internal)?.is_none() {
+            return Err(("no_such_bot", format!("no bot `{from}`")));
+        }
+        Ok(paths::bot_dir(from).join(proto::skills::DIR).join(name))
     }
 
     fn bot_of(&self, f: &Value) -> Result<String, Refusal> {
@@ -2688,7 +2759,10 @@ impl Core {
             Engine::run(command)
         })
         .map_err(failed)?;
-        let name = bot.to_owned();
+        self.counter += 1;
+        let generation = self.counter;
+        self.connector_errors.remove(bot);
+        let (name, failures) = (bot.to_owned(), self.tx.clone());
         // Engine diagnostics go through the service log, so they are rotated with it.
         // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),
         // and a line longer than `MAX_STDERR_LINE` is logged in pieces so memory stays bounded.
@@ -2704,13 +2778,20 @@ impl Core {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf);
-                        log!("bot {name}: engine: {}", line.trim_end_matches('\n'));
+                        let line = line.trim_end_matches('\n');
+                        log!("bot {name}: engine: {line}");
+                        if let Some((connector, why)) = connector_failure(line) {
+                            let _ = failures.send(Msg::ConnectorFailed {
+                                bot: name.clone(),
+                                generation,
+                                name: connector.to_owned(),
+                                why: why.chars().take(500).collect(),
+                            });
+                        }
                     }
                 }
             }
         });
-        self.counter += 1;
-        let generation = self.counter;
         let (tx, name) = (self.tx.clone(), bot.to_owned());
         thread::spawn(move || {
             loop {
@@ -5625,6 +5706,13 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
     if let Err(e) = r.input.send(id, op) {
         log!("bot {bot}: cannot write to the engine: {e}");
     }
+}
+
+/// `connector <name>: <why>`: how the engine reports, on stderr, a connector it could not load.
+fn connector_failure(line: &str) -> Option<(&str, &str)> {
+    let (name, why) = line.strip_prefix("connector ")?.split_once(": ")?;
+    check_connector_name(name).ok()?;
+    Some((name, why))
 }
 
 pub fn check_connector_name(name: &str) -> Result<(), String> {
