@@ -652,7 +652,6 @@ impl Store {
             tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [bot])?;
         }
         tx.execute("DELETE FROM mail WHERE from_bot = ?1 OR to_bot = ?1", [bot])?;
-        tx.execute("DELETE FROM room WHERE author = ?1 OR to_bot = ?1", [bot])?;
         tx.commit()
     }
 
