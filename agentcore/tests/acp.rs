@@ -14,7 +14,8 @@ use std::process::Command;
 /// done, leaving the call unfinished); `make a plan` sends a plan and then an emptied one;
 /// `hang` works until cancelled; `stop early` runs out of tokens; `die` exits; anything else
 /// is answered with a thought and two pieces of text.
-/// With a file `signed-out` in the folder, no conversation is opened.
+/// With a file `signed-out` in the folder, no conversation is opened; with `no-load`, none is
+/// reopened; with `slow-load`, reopening takes a while.
 const AGENT: &str = r#"#!/bin/sh
 say() { printf '%s\n' "$1"; }
 result() { say "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":$2}"; }
@@ -34,8 +35,13 @@ while IFS= read -r line; do
         result "$id" '{"sessionId":"s1"}'
       fi ;;
     *'"method":"session/load"'*)
-      chunk agent_message_chunk "words from before"
-      result "$id" null ;;
+      if [ -e no-load ]; then
+        say "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32002,\"message\":\"Resource not found\"}}"
+      else
+        [ -e slow-load ] && sleep 0.3
+        chunk agent_message_chunk "words from before"
+        result "$id" null
+      fi ;;
     *'"method":"session/prompt"'*)
       prompt=$id
       case "$line" in
@@ -441,4 +447,87 @@ fn the_bots_connectors_are_given_to_the_agent() {
         log.contains(r#""mcpServers":[{"args":["--all"],"command":"/bin/notes","env":[{"name":"KEY","value":"v"}],"name":"notes"}]"#),
         "{log}"
     );
+}
+
+/// Sends `op` without waiting for its response: gives its id.
+fn send(bridge: &mut Bridge, op: Op) -> String {
+    bridge.sent += 1;
+    let id = format!("r{}", bridge.sent);
+    bridge.engine.input.send(&id, &op).unwrap();
+    id
+}
+
+#[test]
+fn a_prompt_that_comes_before_the_agent_has_opened_the_conversation_is_refused() {
+    let mut bridge = Bridge::start_in("opening", |dir| {
+        fs::write(dir.join("slow-load"), "").unwrap()
+    });
+    assert_eq!(bridge.request(Op::Start { bot: "b".into() }), None);
+    assert_eq!(
+        bridge.next(),
+        Event::Session {
+            session: "s1".into()
+        }
+    );
+    let open = send(
+        &mut bridge,
+        Op::Open {
+            bot: "b".into(),
+            session: "s7".into(),
+        },
+    );
+    let (nonce, text) = ("n".to_owned(), "hello".to_owned());
+    let prompt = send(&mut bridge, Op::Prompt { nonce, text });
+    // The agent still holds the first conversation: the prompt is not run in it.
+    match bridge.next() {
+        Event::Response { id, error } if id == prompt => {
+            assert!(error.unwrap().contains("being opened"))
+        }
+        other => panic!("expected the refusal of the prompt, got {other:?}"),
+    }
+    assert_eq!(
+        bridge.next(),
+        Event::Response {
+            id: open,
+            error: None
+        }
+    );
+    assert_eq!(
+        bridge.next(),
+        Event::Session {
+            session: "s7".into()
+        }
+    );
+    assert!(!bridge.log().contains("session/prompt"), "{}", bridge.log());
+    // Opened, it takes the prompt, into its own conversation.
+    bridge.turn("hello");
+    bridge.rest();
+    let log = bridge.log();
+    let prompted = log.lines().find(|l| l.contains("session/prompt")).unwrap();
+    assert!(prompted.contains(r#""sessionId":"s7""#), "{prompted}");
+}
+
+#[test]
+fn a_conversation_the_agent_cannot_reopen_leaves_no_conversation_open() {
+    let mut bridge = Bridge::start_in("no-reopen", |dir| {
+        fs::write(dir.join("no-load"), "").unwrap()
+    });
+    assert_eq!(bridge.request(Op::Start { bot: "b".into() }), None);
+    assert_eq!(
+        bridge.next(),
+        Event::Session {
+            session: "s1".into()
+        }
+    );
+    let open = Op::Open {
+        bot: "b".into(),
+        session: "s7".into(),
+    };
+    let error = bridge.request(open).unwrap();
+    assert!(error.contains("Resource not found"), "{error}");
+    // Not the first conversation either: a prompt would be run in the wrong one.
+    let (nonce, text) = ("n".to_owned(), "hello".to_owned());
+    let error = bridge.request(Op::Prompt { nonce, text }).unwrap();
+    assert!(error.contains("no conversation is open"), "{error}");
+    assert!(!bridge.log().contains("session/prompt"), "{}", bridge.log());
 }

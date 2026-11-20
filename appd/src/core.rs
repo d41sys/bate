@@ -450,6 +450,12 @@ struct Running {
     /// The conversation the next `session` event is of: set once the engine took its `start`
     /// or `open`, or forked.
     session_of: Option<String>,
+    /// `open` and `start` requests the engine has not answered yet.
+    opening: u32,
+    /// Requests for the open conversation held back until those are answered, as `queued`.
+    held: Vec<(String, Op)>,
+    /// The conversation the engine had open before the switch in flight.
+    was: String,
 }
 
 /// Who, other than the windows, a turn's last words go to.
@@ -2499,7 +2505,9 @@ impl Core {
     /// the bot's engine has open, else the current one.
     fn working_conversation(&self, f: &Value, bot: &str) -> Result<String, Refusal> {
         match (f.get("conversation"), self.engines.get(bot)) {
-            (None | Some(Value::Null), Some(r)) => Ok(r.conversation.clone()),
+            (None | Some(Value::Null), Some(r)) if !r.conversation.is_empty() => {
+                Ok(r.conversation.clone())
+            }
             _ => self.conversation_of(f, bot),
         }
     }
@@ -2513,15 +2521,16 @@ impl Core {
     /// that works in another conversation moves to this one between turns only.
     fn focus(&mut self, bot: &str, conversation: &str) -> Result<(), Refusal> {
         self.ensure_engine(bot, Some(conversation))?;
-        let r = self.engines.get_mut(bot).expect("engine just ensured");
-        if r.conversation == conversation {
+        if self.engines[bot].conversation == conversation {
             return Ok(());
         }
-        if r.busy || r.compacting > 0 {
+        // No turn, no prompt on its way, no compaction: else the engine is not ours to move.
+        if !self.free(bot) {
             return Err(("busy", "the bot is working in another conversation".into()));
         }
-        r.conversation = conversation.to_owned();
         let op = self.open_op(bot, conversation)?;
+        let r = self.engines.get_mut(bot).expect("engine just ensured");
+        r.was = std::mem::replace(&mut r.conversation, conversation.to_owned());
         self.send_op(bot, op, Waiter::Open(conversation.to_owned()))
     }
 
@@ -2546,7 +2555,12 @@ impl Core {
         if let Err(e) = stored {
             log!("bot {bot}: ledger not updated: {e}");
         }
-        let Some(conversation) = self.engines.get(bot).map(|r| r.conversation.clone()) else {
+        let Some(conversation) = self.engines.get_mut(bot).map(|r| {
+            // A turn is under way from the moment the engine took the prompt, though its
+            // `turn_start` is still to come: the bot does not move to another conversation.
+            r.busy |= admitted;
+            r.conversation.clone()
+        }) else {
             return;
         };
         if admitted {
@@ -2569,8 +2583,11 @@ impl Core {
         let id = self.counter.to_string();
         let r = self.engines.get_mut(bot).expect("engine just ensured");
         r.waiting.insert(id.clone(), waiter);
+        if matches!(op, Op::Open { .. } | Op::Start { .. }) {
+            r.opening += 1;
+        }
         if r.ready {
-            write_op(bot, r, &id, &op);
+            dispatch(bot, r, id, op);
         } else {
             r.queued.push((id, op));
         }
@@ -2740,6 +2757,9 @@ impl Core {
                 steered: Vec::new(),
                 conversation: conversation.clone(),
                 session_of: None,
+                opening: 0,
+                held: Vec::new(),
+                was: String::new(),
             },
         );
         self.send_op(bot, open, Waiter::Open(conversation))?;
@@ -4746,7 +4766,7 @@ impl Core {
                 }
                 r.ready = true;
                 for (id, op) in std::mem::take(&mut r.queued) {
-                    write_op(bot, r, &id, &op);
+                    dispatch(bot, r, id, op);
                 }
                 return;
             }
@@ -5076,30 +5096,93 @@ impl Core {
                 }
             }
             Waiter::Open(opened) => {
-                let Some(e) = error else {
-                    if let Some(r) = self.engines.get_mut(bot) {
-                        r.session_of = Some(opened);
+                if let Some(r) = self.engines.get_mut(bot) {
+                    r.opening = r.opening.saturating_sub(1);
+                }
+                match error {
+                    None => {
+                        if let Some(r) = self.engines.get_mut(bot) {
+                            r.session_of = Some(opened);
+                        }
+                        self.release_held(bot, None);
                     }
-                    return;
-                };
-                // Only a refused `open` has a session to blame; a refused `start` is just logged.
-                if !matches!(self.store.session(&opened), Ok(Some(_))) {
-                    log!("bot {bot}: engine refused to start a conversation: {e}");
-                    return;
-                }
-                // A stale session would fail every later start too: forget it and begin anew.
-                log!("bot {bot}: engine refused to open the conversation: {e}; starting a new one");
-                if let Err(e) = self.store.clear_session(&opened) {
-                    log!("bot {bot}: session not cleared: {e}");
-                    return;
-                }
-                if let Err((_, e)) =
-                    self.send_op(bot, Op::Start { bot: bot.into() }, Waiter::Open(opened))
-                {
-                    log!("bot {bot}: {e}");
+                    Some(e) => self.open_refused(bot, opened, e),
                 }
             }
         }
+    }
+
+    /// The engine answered the last open request in flight. Success: what waited for the
+    /// switch goes now. Refusal: it never goes (the engine has another conversation's session,
+    /// or none), and each of those requests is answered with the refusal.
+    fn release_held(&mut self, bot: &str, refused: Option<&str>) {
+        let Some(r) = self.engines.get_mut(bot) else {
+            return;
+        };
+        if r.opening > 0 {
+            return;
+        }
+        let held = std::mem::take(&mut r.held);
+        let Some(why) = refused else {
+            for (id, op) in held {
+                write_op(bot, r, &id, &op);
+            }
+            return;
+        };
+        let waiters: Vec<Waiter> = held
+            .into_iter()
+            .filter_map(|(id, _)| r.waiting.remove(&id))
+            .collect();
+        for waiter in waiters {
+            self.on_response(
+                bot,
+                waiter,
+                Some(format!("the engine could not open the conversation: {why}")),
+            );
+        }
+    }
+
+    /// The engine refused to open `opened`. A session it cannot open is forgotten and the
+    /// conversation starts anew, unless the engine was busy (then the session is fine).
+    fn open_refused(&mut self, bot: &str, opened: String, why: String) {
+        let working = self.engines.get(bot).is_some_and(|r| {
+            let compacting = r
+                .held
+                .iter()
+                .filter(|(_, op)| matches!(op, Op::Compact))
+                .count();
+            r.busy || r.compacting as usize > compacting
+        });
+        if working {
+            log!("bot {bot}: engine refused to open the conversation: {why}; it is working");
+            if let Some(r) = self.engines.get_mut(bot) {
+                r.conversation = std::mem::take(&mut r.was);
+            }
+        } else {
+            if matches!(self.store.session(&opened), Ok(Some(_))) {
+                // A stale session would fail every later open too: forget it and begin anew.
+                log!(
+                    "bot {bot}: engine refused to open the conversation: {why}; starting a new one"
+                );
+                match self.store.clear_session(&opened) {
+                    Ok(()) => {
+                        let start = Op::Start { bot: bot.into() };
+                        match self.send_op(bot, start, Waiter::Open(opened.clone())) {
+                            Ok(()) => return,
+                            Err((_, e)) => log!("bot {bot}: {e}"),
+                        }
+                    }
+                    Err(e) => log!("bot {bot}: session not cleared: {e}"),
+                }
+            } else {
+                log!("bot {bot}: engine refused to start a conversation: {why}");
+            }
+            // It has no session open now: the next request opens one.
+            if let Some(r) = self.engines.get_mut(bot) {
+                r.conversation.clear();
+            }
+        }
+        self.release_held(bot, Some(&why));
     }
 
     fn on_engine_gone(&mut self, bot: &str) {
@@ -5135,7 +5218,12 @@ impl Core {
         let steered = std::mem::take(&mut r.steered);
         self.requeue(bot, &r.conversation, steered);
         // Prompts still queued were never written: the engine cannot have them.
-        let unwritten: Vec<String> = r.queued.iter().map(|(id, _)| id.clone()).collect();
+        let unwritten: Vec<String> = r
+            .queued
+            .iter()
+            .chain(r.held.iter())
+            .map(|(id, _)| id.clone())
+            .collect();
         for (req, waiter) in r.waiting {
             if let Waiter::Window {
                 settles: Settles::Prompt(p),
@@ -5477,6 +5565,16 @@ impl Core {
             log!("bot {bot}: routine {id} not stored: {e}");
         }
         self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+    }
+}
+
+/// Writes a request for the engine, but holds one that belongs to a conversation while the
+/// engine has not yet said it opened that conversation: an agent switches only when it answers.
+fn dispatch(bot: &str, r: &mut Running, id: String, op: Op) {
+    if r.opening > 0 && matches!(op, Op::Prompt { .. } | Op::Rewind { .. } | Op::Compact) {
+        r.held.push((id, op));
+    } else {
+        write_op(bot, r, &id, &op);
     }
 }
 

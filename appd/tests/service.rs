@@ -33,8 +33,13 @@ echo '{"type":"ready","protocol":1}'
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
   ok="{\"type\":\"response\",\"id\":\"$id\"}"
+  printf '%s\n' "$line" | sed 's/^{"id":"[^"]*","type":"\([a-z_]*\)".*/\1/' >> ops.log
   case "$line" in
-    *'"type":"start"'*) echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"; echo '{"type":"session","session":"s1"}' ;;
+    *'"type":"start"'*)
+      if [ -e refuse-start ]; then echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot start\"}"; continue; fi
+      echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"
+      echo "{\"type\":\"session\",\"session\":\"s$(wc -l < starts.log | tr -d ' ')\"}" ;;
+    *'"type":"open"'*'"session":"gone-'*) echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
@@ -1461,6 +1466,182 @@ fn each_conversation_has_its_own_queue_and_the_busy_bot_goes_on_in_the_next_one(
     });
     assert_eq!(queue(&mut w, &second), Vec::<Value>::new());
     assert_eq!(prompts_received(&home, &bot, "n2"), 1);
+}
+
+/// What the bot's conversation shows: the entries of `conversation`, oldest first.
+fn entries_of(w: &mut Window, bot: &str, conversation: &Value) -> Vec<Value> {
+    let opened = w.ok(
+        "open_bot",
+        json!({"bot": bot, "conversation": conversation}),
+    );
+    let history = opened["history"].as_array().unwrap();
+    history.iter().map(|e| e["entry"].clone()).collect()
+}
+
+fn has_entry(entries: &[Value], kind: &str, field: &str, value: &str) -> bool {
+    entries
+        .iter()
+        .any(|e| e["type"] == kind && e[field] == value)
+}
+
+/// What the engine of `bot` was asked, in order, by the name of each request.
+fn ops_of(home: &Path, bot: &str) -> Vec<String> {
+    fs::read_to_string(home.join("bots").join(bot).join("ops.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn session_of(home: &Path, conversation: &Value) -> Option<String> {
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.query_row(
+        "SELECT session FROM conversations WHERE id = ?1",
+        [conversation.as_str().unwrap()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_prompt_on_its_way_to_one_conversation_is_not_followed_by_a_move_into_another() {
+    let home = home("conversations-in-flight");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    turn_ended(&mut w);
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+
+    // The second one gets a prompt; at once a request that would take the engine back to the
+    // first (as a routine, or a second window, can).
+    w.send(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "conversation": second, "text": "work"}),
+    );
+    let id = w.send("compact", json!({"bot": bot, "conversation": first}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "busy", "{refused}");
+
+    eventually("the turn to run", || {
+        has_entry(&entries_of(&mut w, &bot, &second), "prompt", "nonce", "n2")
+    });
+    w.ok("abort", json!({"bot": bot}));
+    eventually("the turn to end", || {
+        let entries = entries_of(&mut w, &bot, &second);
+        entries.iter().any(|e| e["type"] == "turn_end")
+            && has_entry(&entries, "text", "delta", "working")
+    });
+    // Every entry of that turn is in the second conversation, and none in the first.
+    let kept = entries_of(&mut w, &bot, &first);
+    assert!(!has_entry(&kept, "prompt", "nonce", "n2"), "{kept:?}");
+    assert!(!has_entry(&kept, "text", "delta", "working"), "{kept:?}");
+    assert_eq!(kept.iter().filter(|e| e["type"] == "turn_end").count(), 1);
+    // The engine was never asked to move or to compact.
+    assert_eq!(
+        ops_of(&home, &bot)
+            .iter()
+            .filter(|o| *o == "compact")
+            .count(),
+        0
+    );
+    drop(w);
+    service.kill();
+    // Each conversation has its own session, as it had.
+    assert_eq!(session_of(&home, &first).as_deref(), Some("s1"));
+    assert_eq!(session_of(&home, &second).as_deref(), Some("s2"));
+}
+
+#[test]
+fn a_conversation_the_engine_cannot_open_gets_nothing_meant_for_it() {
+    let home = home("conversations-refused");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    turn_ended(&mut w);
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "conversation": second, "text": "hi"}),
+    );
+    turn_ended(&mut w);
+    drop(w);
+    service.kill();
+
+    // The first conversation's session is gone for the engine, and it cannot start another.
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "UPDATE conversations SET session = 'gone-1' WHERE id = ?1",
+        [first.as_str().unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    let bot_dir = home.join("bots").join(&bot);
+    fs::write(bot_dir.join("refuse-start"), "").unwrap();
+    let before = ops_of(&home, &bot).len();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+
+    // The engine is in the second one. Neither a prompt, a compaction nor a fork for the first
+    // is run in it: each is refused, and nothing reaches the engine but the `open` and `start`.
+    let sent = [
+        (
+            "prompt",
+            json!({"bot": bot, "nonce": "n3", "conversation": first, "text": "again"}),
+        ),
+        ("compact", json!({"bot": bot, "conversation": first})),
+        (
+            "rewind",
+            json!({"bot": bot, "conversation": first, "entry": "n1", "fork": true}),
+        ),
+    ];
+    for (command, fields) in sent {
+        let id = w.send(command, fields);
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(reply["success"], false, "{command}: {reply}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("could not open"),
+            "{command}: {reply}"
+        );
+    }
+    assert_eq!(prompts_received(&home, &bot, "n3"), 0);
+    let ops = ops_of(&home, &bot);
+    let asked: Vec<&str> = ops[before..].iter().map(String::as_str).collect();
+    assert!(
+        asked
+            .iter()
+            .all(|o| !matches!(*o, "prompt" | "compact" | "rewind")),
+        "{asked:?}"
+    );
+    // Nothing of them was kept: the first conversation is as it was, and its prompt can be sent again.
+    assert!(!has_entry(
+        &entries_of(&mut w, &bot, &first),
+        "prompt",
+        "nonce",
+        "n3"
+    ));
+    fs::remove_file(bot_dir.join("refuse-start")).unwrap();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n3", "conversation": first, "text": "again"}),
+    );
+    eventually("the prompt in the first conversation", || {
+        let entries = entries_of(&mut w, &bot, &first);
+        has_entry(&entries, "prompt", "nonce", "n3")
+            && entries.iter().any(|e| e["type"] == "turn_end")
+    });
+    assert!(!has_entry(
+        &entries_of(&mut w, &bot, &second),
+        "prompt",
+        "nonce",
+        "n3"
+    ));
 }
 
 #[test]
