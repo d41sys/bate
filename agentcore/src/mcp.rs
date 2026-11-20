@@ -207,10 +207,15 @@ impl Server {
                 }
             }
             Transport::Http { url, headers } => {
-                let config = ureq::Agent::config_builder()
+                let mut config = ureq::Agent::config_builder()
                     .http_status_as_error(false)
-                    .timeout_global(Some(CALL))
-                    .build();
+                    .timeout_global(Some(CALL));
+                // The service's own port is reached direct: a network limit lets the engine
+                // connect to it, and sends every other connection through its proxy.
+                if url.starts_with("http://127.0.0.1:") {
+                    config = config.proxy(None);
+                }
+                let config = config.build();
                 Link::Http {
                     agent: ureq::Agent::new_with_config(config),
                     url: url.clone(),

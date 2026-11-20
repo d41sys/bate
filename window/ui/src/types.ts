@@ -7,6 +7,8 @@ export type Bot = {
   running: boolean;
   busy: boolean;
   wholeDisk: boolean;
+  /** The hosts the bot's commands may reach (its project's are added); `null`: any. */
+  network: string[] | null;
   agent?: string[];
   browserTaken?: boolean;
   instructions: string;
@@ -79,6 +81,8 @@ export type Project = {
   lead?: string;
   /** What every bot of the project follows after its own instructions, at most 8000 characters. */
   instructions?: string;
+  /** Hosts added for each of its bots that has a network limit: `host`, `*.domain`, with an optional `:port`. */
+  hosts?: string[];
   /** A program the service runs once for the whole project; every bot gets its tools. */
   connector?: { name: string; command: string; args: string[] };
   /** The name of an installed workplace whose program is the project's connector; not together with `connector`. */

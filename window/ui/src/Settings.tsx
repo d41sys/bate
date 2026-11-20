@@ -4,6 +4,7 @@ import { Helper } from "./Helper.tsx";
 import { Updates } from "./Updates.tsx";
 import { useEffect, useState } from "react";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
+import { hostLines, hostsHint } from "./network.ts";
 import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
 
 const ACTIONS: Record<Kind, string> = {
@@ -23,6 +24,8 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [deleting, setDeleting] = useState(false);
   // Saved here or elsewhere: show what the service has.
   useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
+  const [hosts, setHosts] = useState((bot.network ?? []).join("\n"));
+  useEffect(() => setHosts((bot.network ?? []).join("\n")), [bot.id, (bot.network ?? []).join("\n")]);
   const [agent, setAgent] = useState((bot.agent ?? []).join(" "));
   const [report, setReport] = useState("");
   const [serverUrl, setServerUrl] = useState("");
@@ -108,8 +111,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         </>
       )}
       <label>
-        <input type="checkbox" checked={bot.wholeDisk} onChange={(e) => run(request("set_disk_access", { bot: bot.id, wholeDisk: e.target.checked }))} /> Whole disk (otherwise only the bot's folder)
+        <input type="checkbox" checked={bot.wholeDisk} disabled={bot.network !== null} onChange={(e) => run(request("set_disk_access", { bot: bot.id, wholeDisk: e.target.checked }))} /> Whole disk (otherwise only the bot's folder)
       </label>
+      <label>
+        <input type="checkbox" checked={bot.network !== null} disabled={bot.wholeDisk} onChange={(e) => run(request("set_network", { bot: bot.id, hosts: e.target.checked ? hostLines(hosts) : null }))} /> Commands reach only these hosts (otherwise any host)
+      </label>
+      {bot.network !== null && (
+        <form onSubmit={(e) => { e.preventDefault(); run(request("set_network", { bot: bot.id, hosts: hostLines(hosts) })); }}>
+          <textarea rows={4} placeholder="example.com" value={hosts} onChange={(e) => setHosts(e.target.value)} />
+          <button>Save hosts</button>
+          <p className="note">{hostsHint} The hosts of the bot's project are added. A tool that ignores the proxy Bate sets cannot connect. The bot's model is reached as before. Needs the folder limit (not the whole disk).</p>
+        </form>
+      )}
       {bot.browserTaken && (
         <p>
           You have the bot's browser. <button onClick={() => run(request("hand_back_browser", { bot: bot.id }))}>Hand it back</button>

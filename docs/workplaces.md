@@ -35,7 +35,7 @@ my-workplace/
 | `description` | Optional. One line, at most 500 characters. |
 | `program.command` | Required. A path inside the workplace's folder (no leading `/`, no `..`), which must be there and be runnable, or a bare name such as `python3` that is looked up on the `PATH` Bate runs with. |
 | `program.args` | Optional list of arguments. A relative path in them starts in the workplace's folder. |
-| `needs.folders`, `needs.hosts`, `needs.commands` | Optional lists (at most 50 entries of one line, 200 characters each): the folders, network hosts and commands the workplace uses. The window shows them before a person switches the workplace on, and Bate stores them. Bate does not yet enforce the hosts. |
+| `needs.folders`, `needs.hosts`, `needs.commands` | Optional lists (at most 50 entries of one line, 200 characters each): the folders, network hosts and commands the workplace uses. The window shows them before a person switches the workplace on, and Bate stores them. Bate enforces the hosts: the program reaches no network host but those, and cannot widen them (see Network below). |
 
 | `downloads` | Optional list of at most 20 files to fetch at install (see Downloads). |
 
@@ -62,6 +62,12 @@ A workplace has no signature: only the hashes in its manifest, which the person 
 ## The program
 
 Bate starts it once for each project that has the workplace on, under the same folder limit as a project's own connector (`PROTOCOL.md`, A project's connector): it serves MCP over HTTP on the unix socket named in `BATE_MCP_SOCKET`, and ends when its standard input closes. Its working directory is the workplace's folder, which it can read but not write. It writes only the data folder that Bate keeps for the project (`project-data/<projectId>/`, where the socket is) and the project's folder, which is `BATE_WORK_DIR`. Every bot of the project gets its tools, and all of them reach the same program, so they share one state.
+
+### Network
+
+The program is held to the hosts in `needs.hosts`, by the system and not by its good behaviour (`PROTOCOL.md`, Network limit). Each is `host`, `*.domain` (the subdomains of `domain`) or either with `:port`; with no port, 80 and 443. A host that is written some other way makes the manifest malformed. With none listed, the program reaches no host at all; it still serves its socket.
+
+Bate sets `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and the lower-case names) for the program to a proxy of its own, which lets through only those hosts. A program that opens connections itself, ignoring those settings, is refused by the system. The downloads are fetched by Bate at install, not by the program; their hosts are shown for the person to agree, and are not added to what the program may reach. The program cannot widen the list: only the manifest the person saw and approved sets it.
 
 ## Surfaces
 

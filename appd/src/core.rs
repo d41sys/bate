@@ -31,7 +31,7 @@ use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
 use crate::store::{Ledger, Store};
 use crate::sys::{self, log, now_ms};
-use crate::{apple, browser, desktop, oauth, project_server, surfaces, workplaces};
+use crate::{apple, browser, desktop, egress, oauth, project_server, surfaces, workplaces};
 use crate::{limit, memory, paths, roles, schedule, skills, store, update};
 
 pub enum Msg {
@@ -51,6 +51,7 @@ pub enum Msg {
     },
     Hook(Hit),
     Proxy(proxy::Ask),
+    Egress(egress::Ask),
     /// A sign-in's address is ready (or not) for the window that asked.
     SignIn {
         client: u64,
@@ -263,6 +264,22 @@ fn link_work_bot(store: &Store, bot: &str) {
 
 fn bad(msg: impl Into<String>) -> Refusal {
     ("bad_request", msg.into())
+}
+
+/// The hosts of a `set_network` or `set_project`, as stored: trimmed, in lower case, each once.
+fn clean_hosts(hosts: Vec<String>) -> Result<Vec<String>, String> {
+    if hosts.len() > 50 {
+        return Err("at most 50 hosts".into());
+    }
+    let mut clean: Vec<String> = Vec::new();
+    for host in hosts {
+        let host = host.trim().to_ascii_lowercase();
+        egress::check(&host)?;
+        if !clean.contains(&host) {
+            clean.push(host);
+        }
+    }
+    Ok(clean)
 }
 
 /// The channel a request names.
@@ -502,6 +519,12 @@ pub struct Core {
     chatgpt_signing: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Where webhooks are served; `None` if the port could not be opened.
     hook_port: Option<u16>,
+    /// The network limit's proxy; `None` if its port could not be opened: a process that is to
+    /// be limited does not start then.
+    egress_port: Option<u16>,
+    /// The proxy key of each limited process, by owner (`bot:<id>`, `project:<id>`), and what a
+    /// program may reach (a bot's hosts are read each time they are asked).
+    net_keys: HashMap<String, (String, Option<Vec<String>>)>,
     /// The page for other devices on the network.
     lan: Arc<crate::lan::Lan>,
     /// The reader of each channel that has a token.
@@ -558,6 +581,7 @@ impl Core {
         store: Store,
         tx: Sender<Msg>,
         hook_port: Option<u16>,
+        egress_port: Option<u16>,
         lan: Arc<crate::lan::Lan>,
     ) -> Core {
         if hook_port.is_none() {
@@ -598,6 +622,8 @@ impl Core {
             update: Updates::default(),
             installing: false,
             hook_port,
+            egress_port,
+            net_keys: HashMap::new(),
             lan,
             channels: readers,
             channel_errors: HashMap::new(),
@@ -675,6 +701,7 @@ impl Core {
                 let _ = hit.answer.send(answer);
             }
             Msg::Proxy(ask) => self.on_proxy(ask),
+            Msg::Egress(ask) => self.on_egress(ask),
             Msg::ProjectExited {
                 id,
                 generation,
@@ -1479,12 +1506,48 @@ impl Core {
                     }
                 }
             }
+            "set_network" => {
+                let bot = self.bot_of(f)?;
+                let hosts = match f.get("hosts") {
+                    None | Some(Value::Null) => None,
+                    Some(list) => {
+                        let list = serde_json::from_value(list.clone())
+                            .map_err(|_| bad("`hosts` must be a list of hosts, or null"))?;
+                        Some(clean_hosts(list).map_err(|e| bad(format!("`hosts`: {e}")))?)
+                    }
+                };
+                if hosts.is_some() && self.store.whole_disk(&bot).map_err(internal)? {
+                    return Err(bad(
+                        "a bot with the whole disk cannot have a network limit: the system holds it only with the folder limit",
+                    ));
+                }
+                let limited = |s: &Store| s.network(&bot).map(|n| n.is_some());
+                let switched = limited(&self.store).map_err(internal)? != hosts.is_some();
+                if switched && self.engines.get(&bot).is_some_and(|r| r.busy) {
+                    return Err(("busy", "the bot is in a turn; stop it first".into()));
+                }
+                self.store
+                    .set_network(&bot, hosts.as_deref())
+                    .map_err(internal)?;
+                // A list is read for each connection; the system's rule is set when an engine
+                // starts, so the idle one is stopped.
+                if switched && let Some(r) = self.engines.get_mut(&bot) {
+                    let _ = r.child.kill();
+                }
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
+            }
             "set_disk_access" => {
                 let bot = self.bot_of(f)?;
                 let whole_disk = f
                     .get("wholeDisk")
                     .and_then(Value::as_bool)
                     .ok_or(bad("`wholeDisk` must be true or false"))?;
+                if whole_disk && self.store.network(&bot).map_err(internal)?.is_some() {
+                    return Err(bad(
+                        "a bot with a network limit keeps its folder limit: lift the network limit first",
+                    ));
+                }
                 if self.store.whole_disk(&bot).map_err(internal)? != whole_disk {
                     // A turn would go on under the old rule, and so would what it started.
                     if self.engines.get(&bot).is_some_and(|r| r.busy) {
@@ -2169,6 +2232,7 @@ impl Core {
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
+        row["network"] = json!(self.store.network(bot).unwrap_or(None));
         if self.browsers.get(bot).is_some_and(browser::Handle::taken) {
             row["browserTaken"] = json!(true);
         }
@@ -2300,6 +2364,16 @@ impl Core {
                     .into(),
             ));
         }
+        // The key the limited engine's commands use at the proxy; without a proxy it does not start.
+        let held = match self.store.network(bot).map_err(internal)? {
+            Some(_) => Some(self.held(format!("bot:{bot}"), None).map_err(failed)?),
+            None => None,
+        };
+        let egress = held.as_ref().map(|(proxy, key)| limit::Egress {
+            proxy: *proxy,
+            service: self.hook_port,
+            key,
+        });
         let open = match self.store.session(bot).map_err(internal)? {
             Some(session) => Op::Open {
                 bot: bot.into(),
@@ -2312,19 +2386,26 @@ impl Core {
             input,
             mut output,
             stderr,
-        } = limit::command(&engine_program(), &dir, &work, read.as_deref(), whole_disk)
-            .map(|mut command| {
-                // The engine program's other half: it runs the agent and translates.
-                if let Some(agent) = &agent {
-                    command.arg("acp").args(agent);
-                }
-                command
-            })
-            .and_then(|command| {
-                let _spawning = sys::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-                Engine::run(command)
-            })
-            .map_err(failed)?;
+        } = limit::command(
+            &engine_program(),
+            &dir,
+            &work,
+            read.as_deref(),
+            whole_disk,
+            egress.as_ref(),
+        )
+        .map(|mut command| {
+            // The engine program's other half: it runs the agent and translates.
+            if let Some(agent) = &agent {
+                command.arg("acp").args(agent);
+            }
+            command
+        })
+        .and_then(|command| {
+            let _spawning = sys::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            Engine::run(command)
+        })
+        .map_err(failed)?;
         let name = bot.to_owned();
         // Engine diagnostics go through the service log, so they are rotated with it.
         // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),
@@ -2488,6 +2569,54 @@ impl Core {
         Ok(projects.find(|p| p.bots.iter().any(|b| b == bot)))
     }
 
+    /// What holds a limited process of `owner` (`bot:<id>`, `project:<id>`) to its hosts: the
+    /// proxy's port and a new key for it, which takes the place of the owner's last. `hosts`:
+    /// what a program may reach; for a bot, none: they are read each time they are asked. Without
+    /// the proxy, an error: a limit that cannot hold is no reason to start.
+    fn held(&mut self, owner: String, hosts: Option<Vec<String>>) -> io::Result<(u16, String)> {
+        let port = (self.egress_port)
+            .ok_or_else(|| io::Error::other("the network limit's proxy is not running"))?;
+        let key = sys::random_hex(16);
+        self.net_keys.insert(owner, (key.clone(), hosts));
+        Ok((port, key))
+    }
+
+    /// The hosts the commands of `bot` may reach: its own, its project's, and its model's
+    /// (the engine calls the model through the same proxy). `None`: its network is open.
+    fn hosts_of(&self, bot: &str) -> rusqlite::Result<Option<Vec<String>>> {
+        let Some(mut hosts) = self.store.network(bot)? else {
+            return Ok(None);
+        };
+        hosts.extend(self.project_of(bot)?.into_iter().flat_map(|p| p.hosts));
+        let plan = matches!(self.store.chatgpt()?, Some(saved) if saved.signed_in());
+        let servers = [plan.then(chatgpt::api), self.provider()?.0];
+        for url in servers.into_iter().flatten() {
+            if let Ok(uri) = url.parse::<ureq::http::Uri>()
+                && let Some(host) = uri.host()
+            {
+                let port = uri
+                    .port_u16()
+                    .unwrap_or(if uri.scheme_str() == Some("http") {
+                        80
+                    } else {
+                        443
+                    });
+                hosts.push(format!("{host}:{port}"));
+            }
+        }
+        Ok(Some(hosts))
+    }
+
+    /// The proxy's threads ask which hosts the holder of a key may reach.
+    fn on_egress(&mut self, ask: egress::Ask) {
+        let held = self.net_keys.iter().find(|(_, (key, _))| *key == ask.key);
+        let hosts = held.and_then(|(owner, (_, fixed))| match owner.strip_prefix("bot:") {
+            Some(bot) => self.hosts_of(bot).ok().flatten(),
+            None => fixed.clone(),
+        });
+        let _ = ask.answer.send(hosts);
+    }
+
     /// The projects as a window sees them: with why a connector's program is not running.
     fn projects(&self) -> rusqlite::Result<Vec<Project>> {
         let mut projects = self.store.projects()?;
@@ -2626,14 +2755,31 @@ impl Core {
     ) {
         self.counter += 1;
         let generation = self.counter;
-        let started = project_server::start(
-            id,
-            &spec,
-            &folder,
-            home.as_deref(),
-            generation,
-            self.tx.clone(),
-        );
+        // A workplace's program reaches only the hosts its manifest names.
+        let held = match &home {
+            Some(_) => self
+                .workplace_ready(&spec.name)
+                .map_err(io::Error::other)
+                .and_then(|m| self.held(format!("project:{id}"), Some(m.needs.hosts)))
+                .map(Some),
+            None => Ok(None),
+        };
+        let started = held.and_then(|held| {
+            let egress = held.as_ref().map(|(proxy, key)| limit::Egress {
+                proxy: *proxy,
+                service: None,
+                key,
+            });
+            project_server::start(
+                id,
+                &spec,
+                &folder,
+                home.as_deref(),
+                generation,
+                self.tx.clone(),
+                egress.as_ref(),
+            )
+        });
         let (program, error) = match started {
             Ok(program) => (Some(program), None),
             Err(e) => {
@@ -3023,6 +3169,7 @@ impl Core {
                 "`instructions` may be at most 8000 characters".into(),
             ));
         }
+        p.hosts = clean_hosts(p.hosts).map_err(|e| invalid(format!("`hosts`: {e}")))?;
         p.connector_error = None;
         if let Some(c) = &p.connector {
             check_connector_name(&c.name).map_err(invalid)?;

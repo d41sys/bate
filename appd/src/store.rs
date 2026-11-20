@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state 
 CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
 CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
 CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY, hosts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY, command TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
@@ -163,12 +164,13 @@ CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 ";
 
 /// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 18] = [
+const BOT_TABLES: [&str; 19] = [
     "transcript",
     "ledger",
     "queue",
     "questions",
     "access",
+    "network",
     "agents",
     "permissions",
     "grants",
@@ -1043,6 +1045,27 @@ impl Store {
             })
             .optional()?;
         Ok(stored.unwrap_or(false))
+    }
+
+    /// The hosts the bot's commands may reach, or `None` if the network is open to them (the
+    /// default).
+    pub fn network(&self, bot: &str) -> Result<Option<Vec<String>>> {
+        self.0
+            .query_row("SELECT hosts FROM network WHERE bot = ?1", [bot], |r| {
+                parse(r.get(0)?)
+            })
+            .optional()
+    }
+
+    pub fn set_network(&self, bot: &str, hosts: Option<&[String]>) -> Result<()> {
+        match hosts {
+            Some(hosts) => self.0.execute(
+                "INSERT OR REPLACE INTO network(bot, hosts) VALUES (?1, ?2)",
+                params![bot, json(&hosts)],
+            ),
+            None => self.0.execute("DELETE FROM network WHERE bot = ?1", [bot]),
+        }
+        .map(drop)
     }
 
     pub fn set_whole_disk(&self, bot: &str, whole_disk: bool) -> Result<()> {
