@@ -96,6 +96,7 @@ export type Workplace = {
     description?: string;
     program: { command: string; args: string[] };
     needs: { folders: string[]; hosts: string[]; commands: string[] };
+    downloads?: { url: string; size: number; sha256: string; dest: string; unpack?: string }[];
   } | null;
   skills: Skill[];
   /** Whole paths of its role files, for "Add bots from role files". */
@@ -142,3 +143,10 @@ export type SurfacePart = {
   | { kind: "tree"; nodes: { id: string; label: string; depth: number }[] }
   | { kind: "code"; language: string; lines: string[] }
 );
+
+/** What `preview_workplace` says of a folder: its manifest and what installing it would fetch. */
+export type WorkplacePreview = {
+  manifest: NonNullable<Workplace["manifest"]>;
+  downloadBytes: number;
+  hosts: string[];
+};

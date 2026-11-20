@@ -20,7 +20,11 @@ my-workplace/
   "version": "1.0.0",
   "description": "A counter that every bot of a project shares.",
   "program": { "command": "python3", "args": ["server.py"] },
-  "needs": { "folders": [], "hosts": [], "commands": ["python3"] }
+  "needs": { "folders": [], "hosts": [], "commands": ["python3"] },
+  "downloads": [
+    { "url": "https://example.com/model.bin", "size": 123456789, "sha256": "<64 hex digits>", "dest": "data/model.bin" },
+    { "url": "https://example.com/tools.tar.gz", "size": 2345678, "sha256": "<64 hex digits>", "dest": "tools", "unpack": "tar.gz" }
+  ]
 }
 ```
 
@@ -33,7 +37,27 @@ my-workplace/
 | `program.args` | Optional list of arguments. A relative path in them starts in the workplace's folder. |
 | `needs.folders`, `needs.hosts`, `needs.commands` | Optional lists (at most 50 entries of one line, 200 characters each): the folders, network hosts and commands the workplace uses. The window shows them before a person switches the workplace on, and Bate stores them. Bate does not yet enforce the hosts. |
 
+| `downloads` | Optional list of at most 20 files to fetch at install (see Downloads). |
+
 Anything else in the file is ignored. The file is at most 64 KiB.
+
+## Downloads
+
+Files too big to ship in the folder are listed under `downloads`. Each entry has:
+
+| Key | Value |
+|---|---|
+| `url` | Required. `https://…` (or `http://127.0.0.1…`, to this Mac), no user name. Redirects are not followed: give the address the file is at, so that the hosts Bate shows are the hosts it contacts. |
+| `size` | Required. The size in bytes, 1 to 16 GiB. A download that sends more stops at once; one that sends less is refused. |
+| `sha256` | Required. 64 lowercase hex digits. |
+| `dest` | Required. A path inside the workplace's folder (no leading `/`, no `..`), different for each entry, and not a name the workplace's own files use. Folders on the way are made. |
+| `unpack` | Optional: `tar.gz`. The archive is unpacked into the folder `dest` instead of being saved as a file. It is the only format: Bate unpacks it with the system's `/usr/bin/tar`, as it does for its own updates. Make the files that must run executable in the archive. |
+
+Before it installs a workplace with downloads, the window shows how much it will download and from which hosts, and asks. Nothing is contacted until the person agrees. Then Bate fetches the files one after the other, with a progress line, into the same staging folder the workplace is copied to, and checks each as it arrives: more than `size` bytes, a different length, a wrong hash, a redirect, an HTTP error or a broken connection stops the install, and everything fetched so far is deleted. Nothing is installed in that case, and nothing is resumed: install again to start over. An archive is unpacked only after its hash matched, and only if it holds nothing but plain files and folders: a link, an absolute path or one with `..` is refused, so unpacking cannot write outside the workplace's folder.
+
+The downloaded files are part of the workplace's folder: they count toward its limit of 2000 files and folders and 12 levels (not toward the 200 MiB of the copy), and the fingerprint covers them, so a change to one switches the workplace off until it is approved. Bate does not check the free disk space, nor cap the size an archive unpacks to.
+
+A workplace has no signature: only the hashes in its manifest, which the person chose to install, pin its downloads. App updates are another matter: they are accepted only with an Ed25519 signature over `bate-update\n<version>\n<sha256>` by the key built into Bate, from Bate's own feed address, so nothing a workplace lists or downloads, a signed release included, counts as an update.
 
 ## The program
 
@@ -55,7 +79,7 @@ The person's actions are tool calls. Name them in the content: `"select"` (a too
 
 ## Installing, switching on, removing
 
-- **Install** (Projects tab, Workplaces; or `install_workplace`): Bate copies the folder as it copies a skill: into a staging folder first, no links or special files, at most 2000 files and folders, 200 MiB and 12 folders deep. A malformed manifest or a program that is missing is refused with the reason. A workplace of the same name is replaced, unless a project has it on.
+- **Install** (Projects tab, Workplaces; or `install_workplace`): Bate copies the folder as it copies a skill: into a staging folder first, no links or special files, at most 2000 files and folders, 200 MiB and 12 folders deep, then fetches its downloads there. A malformed manifest or a program that is missing is refused with the reason. A workplace of the same name is replaced, unless a project has it on.
 - **Switch on** (in the project; or `workplace` in `set_project`): the window shows what the workplace needs and asks first. A project has a workplace *or* a connector of its own, not both. The workplace's skills are offered to every bot of the project, from the workplace's own folder (nothing is copied into the bots' folders). Its roles are added through "Add bots from role files", whose paths the list shows.
 - **Change on disk:** Bate keeps a SHA-256 fingerprint of the installed files. When they differ (checked when the program starts and whenever the list is shown), the workplace is switched off in every project: the program stops, the project says why, and the bots go on without its tools and skills. After you have looked at the files, **Approve** records them as they are and the program starts again.
 - **Switch off:** choose no workplace in the project. The program stops, and each bot loses its tools and skills at its next turn.

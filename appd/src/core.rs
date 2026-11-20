@@ -77,6 +77,18 @@ pub enum Msg {
     UpdateDue,
     /// What came of reading the feed: a release staged, nothing new, or why not.
     Update(Result<Option<update::Staged>, String>),
+    /// How far a workplace's downloads are.
+    WorkplaceProgress {
+        name: String,
+        done: u64,
+        total: u64,
+    },
+    /// A workplace is copied and fetched, or why not; `id` is the `install_workplace` request.
+    WorkplacePrepared {
+        client: u64,
+        id: Value,
+        result: Result<workplaces::Prepared, Refusal>,
+    },
     /// News from the reader of a bot's channel; `reader` says which reader.
     Channel {
         bot: String,
@@ -459,6 +471,8 @@ pub struct Core {
     /// The key releases must be signed with; `None`: updates are off.
     update_key: Option<Vec<u8>>,
     update: Updates,
+    /// A workplace is being copied and fetched, on a thread of its own: one at a time.
+    installing: bool,
     /// The `token` requests, as `(bot, request)`, that wait for the ChatGPT sign-in to be
     /// renewed; `Some` while a renewal runs, so that there is one at a time.
     chatgpt_waiting: Option<Vec<(String, String)>>,
@@ -563,6 +577,7 @@ impl Core {
         Core {
             update_key,
             update: Updates::default(),
+            installing: false,
             hook_port,
             lan,
             channels: readers,
@@ -805,6 +820,20 @@ impl Core {
             Msg::ChatGpt(news) => self.on_chatgpt(news),
             Msg::UpdateDue => self.start_check(),
             Msg::Update(result) => self.on_update(result),
+            Msg::WorkplaceProgress { name, done, total } => self.broadcast(
+                &json!({"type": "workplace_progress", "name": name, "done": done, "total": total}),
+            ),
+            Msg::WorkplacePrepared { client, id, result } => {
+                self.installing = false;
+                let result = result.and_then(|prepared| {
+                    let used = self.workplaces_in_use().map_err(internal)?;
+                    let row = workplaces::commit(prepared, |name| used.iter().any(|u| u == name))?;
+                    self.store.put_workplace(&row).map_err(internal)?;
+                    self.broadcast(&json!({"type": "workplaces_changed"}));
+                    Ok(json!({"workplace": workplaces::inspect(&row, Vec::new())}))
+                });
+                self.reply(client, &id, "install_workplace", result);
+            }
             Msg::Channel {
                 bot,
                 kind,
@@ -1248,18 +1277,40 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_workplaces" => Ok(Some(json!({"workplaces": self.list_workplaces()?}))),
+            "preview_workplace" => {
+                let from = std::path::Path::new(str_field(f, "path")?);
+                let manifest = workplaces::preview(from)?;
+                Ok(Some(json!({
+                    "manifest": manifest,
+                    "downloadBytes": manifest.download_bytes(),
+                    "hosts": manifest.hosts(),
+                })))
+            }
             "install_workplace" => {
-                let projects = self.store.projects().map_err(internal)?;
-                let in_use = |name: &str| {
-                    projects
-                        .iter()
-                        .any(|p| p.workplace.as_deref() == Some(name))
-                };
-                let row = workplaces::install(std::path::Path::new(str_field(f, "path")?), in_use)?;
-                self.store.put_workplace(&row).map_err(internal)?;
-                self.broadcast(&json!({"type": "workplaces_changed"}));
-                let listed = workplaces::inspect(&row, Vec::new());
-                Ok(Some(json!({"workplace": listed})))
+                if self.installing {
+                    return Err(("busy", "a workplace is being installed: wait for it".into()));
+                }
+                let source = std::path::PathBuf::from(str_field(f, "path")?);
+                let fetch = f.get("download").and_then(Value::as_bool).unwrap_or(false);
+                let used = self.workplaces_in_use().map_err(internal)?;
+                self.installing = true;
+                // Answered by `WorkplacePrepared`. Slow: the folder is copied, files fetched.
+                let tx = self.tx.clone();
+                let (client, id) = (client, id.clone());
+                thread::spawn(move || {
+                    let progress = tx.clone();
+                    let result = workplaces::prepare(
+                        &source,
+                        fetch,
+                        |name| used.iter().any(|u| u == name),
+                        &mut |name, done, total| {
+                            let name = name.to_owned();
+                            let _ = progress.send(Msg::WorkplaceProgress { name, done, total });
+                        },
+                    );
+                    let _ = tx.send(Msg::WorkplacePrepared { client, id, result });
+                });
+                Ok(None)
             }
             "approve_workplace" => {
                 let name = str_field(f, "name")?;
@@ -2607,6 +2658,12 @@ impl Core {
 
     /// The workplaces with what is on disk now. One that may not run is switched off in every
     /// project that has it on.
+    /// The names of the workplaces that some project has on.
+    fn workplaces_in_use(&self) -> rusqlite::Result<Vec<String>> {
+        let projects = self.store.projects()?;
+        Ok(projects.into_iter().filter_map(|p| p.workplace).collect())
+    }
+
     fn list_workplaces(&mut self) -> Result<Vec<workplaces::Listed>, Refusal> {
         let projects = self.store.projects().map_err(internal)?;
         let mut all = Vec::new();

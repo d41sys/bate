@@ -404,4 +404,35 @@ mod tests {
             assert_eq!(attach::base64(&base64(&bytes)).unwrap(), bytes);
         }
     }
+
+    /// Only a signature over `bate-update\n<version>\n<sha256>` makes a release. What a
+    /// workplace supplies (a hash its manifest names, a signature made for another purpose)
+    /// is not one, and a release's own signature is not read by the workplace code at all
+    /// (a workplace download is checked by hash alone).
+    #[test]
+    fn only_a_signature_in_the_update_domain_is_an_update() {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let key = pair.public_key().as_ref().to_vec();
+        let sha256 = "ab".repeat(32);
+        let feed = |signed: &str| Feed {
+            version: "9.9.9".into(),
+            url: "http://127.0.0.1:9/release.tar.gz".into(),
+            sha256: sha256.clone(),
+            signature: base64(pair.sign(signed.as_bytes()).as_ref()),
+        };
+        assert_eq!(
+            judge(&feed(&message("9.9.9", &sha256)), &key, "1.0.0"),
+            Ok(true)
+        );
+        for other in [
+            // The same key signing a workplace, or the bare hash a manifest lists.
+            format!("bate-workplace\n9.9.9\n{sha256}"),
+            sha256.clone(),
+            format!("9.9.9\n{sha256}"),
+            format!("bate-update\n{sha256}\n9.9.9"),
+        ] {
+            assert!(judge(&feed(&other), &key, "1.0.0").is_err(), "{other:?}");
+        }
+    }
 }
