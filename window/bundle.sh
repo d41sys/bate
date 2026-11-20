@@ -5,10 +5,10 @@
 #
 #   window/bundle.sh [folder]     folder defaults to target/release; Bate.app is made in it
 #
-# SIGN_IDENTITY names the certificate to sign with. Unset: "Bate Dev" (window/sign-dev.sh, #21)
-# if the Mac has it, else "-", an ad-hoc signature. A Developer ID Application identity, once
-# there is one, goes here too. An ad-hoc app is a new app to macOS after every rebuild: the
-# Keychain and the privacy permissions ask again.
+# SIGN_IDENTITY names the certificate to sign with. Unset: "Bate Dev" if window/dev-identity.sh
+# has made it on this Mac (#21; run it once), else "-", an ad-hoc signature. A Developer ID
+# Application identity, once there is one, goes here too. An ad-hoc app is a new app to macOS
+# after every rebuild: the Keychain and the privacy permissions ask again.
 #
 # Notarisation needs an Apple Developer ID, so it runs only when BATE_NOTARIZE_PROFILE names a
 # `notarytool` keychain profile (`xcrun notarytool store-credentials`) and SIGN_IDENTITY is a
@@ -22,8 +22,15 @@ target=${CARGO_TARGET_DIR:-target}
 app="${1:-$target/release}/Bate.app"
 
 identity=${SIGN_IDENTITY:-}
+# The keychain file "Bate Dev" is in; a named identity is looked for in the user's own.
+keychain=
 if [ -z "$identity" ]; then
-    if security find-identity -v -p codesigning | grep -q '"Bate Dev"'; then identity="Bate Dev"; else identity="-"; fi
+    if [ -f "$HOME/Library/Keychains/bate-dev.keychain-db" ]; then
+        identity="Bate Dev"
+        keychain=$(window/dev-identity.sh)
+    else
+        identity="-"
+    fi
 fi
 # The hardened runtime always: without it a program ignores DYLD_INSERT_LIBRARIES, and code
 # injected into the window would pass the service's signature check. A secure timestamp is
@@ -48,18 +55,18 @@ iconset=$(mktemp -d)/Bate.iconset
 mkdir "$iconset"
 sips -z 128 128 window/icons/icon.png --out "$iconset/icon_128x128.png" > /dev/null
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/Bate.icns"
-SIGN_IDENTITY=$identity helper/bundle.sh "$app/Contents/Helpers" > /dev/null
+SIGN_IDENTITY=$identity SIGN_KEYCHAIN=$keychain helper/bundle.sh "$app/Contents/Helpers" > /dev/null
 
 # Nested code first, the app last: its signature seals what is inside. The identifiers are the
 # ones window/sign-dev.sh gives, so the Keychain still knows the service by them.
 for program in appd agentcore; do
     # shellcheck disable=SC2086
-    codesign --force --sign "$identity" $sign_options --identifier "com.oursnever.bate.$program" "$app/Contents/MacOS/$program"
+    codesign --force --sign "$identity" ${keychain:+--keychain "$keychain"} $sign_options --identifier "com.oursnever.bate.$program" "$app/Contents/MacOS/$program"
 done
 # shellcheck disable=SC2086
-codesign --force --sign "$identity" $sign_options "$app/Contents/Helpers/Bate Helper.app"
+codesign --force --sign "$identity" ${keychain:+--keychain "$keychain"} $sign_options "$app/Contents/Helpers/Bate Helper.app"
 # shellcheck disable=SC2086
-codesign --force --sign "$identity" $sign_options "$app"
+codesign --force --sign "$identity" ${keychain:+--keychain "$keychain"} $sign_options "$app"
 codesign --verify --strict "$app"
 
 if [ -n "${BATE_NOTARIZE_PROFILE:-}" ]; then
