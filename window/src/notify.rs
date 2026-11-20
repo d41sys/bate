@@ -119,11 +119,7 @@ pub fn waiting(bot: &str, question: &str, title: &str, body: &str) -> Result<(),
     if !bundled() {
         return Err("notifications need Bate.app".into());
     }
-    let (id, title, body) = (
-        identifier(bot, question),
-        title.to_owned(),
-        body.to_owned(),
-    );
+    let (id, title, body) = (identifier(bot, question), title.to_owned(), body.to_owned());
     let granted = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
         if !granted.as_bool() {
             return;
