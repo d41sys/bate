@@ -23,6 +23,19 @@ use std::time::Duration;
 const CALL: Duration = Duration::from_secs(30);
 /// How long a page may take to load after an action.
 const LOAD_MS: u64 = 15_000;
+/// The keys `press` knows: the name the bot gives, the key's virtual code, and the text it types.
+static KEYS: [(&str, u32, &str); 10] = [
+    ("Enter", 13, "\r"),
+    ("Tab", 9, ""),
+    ("Escape", 27, ""),
+    ("Backspace", 8, ""),
+    ("ArrowLeft", 37, ""),
+    ("ArrowUp", 38, ""),
+    ("ArrowRight", 39, ""),
+    ("ArrowDown", 40, ""),
+    ("PageUp", 33, ""),
+    ("PageDown", 34, ""),
+];
 /// Most characters of a page's text the bot is given.
 const MAX_TEXT: usize = 20_000;
 /// Most elements listed.
@@ -52,6 +65,23 @@ pub enum Action {
         submit: bool,
     },
     Back,
+    Forward,
+    Reload,
+    /// One screen up or down.
+    Scroll {
+        down: bool,
+    },
+    /// A key, after focusing `element` when one is given.
+    Press {
+        key: &'static str,
+        element: Option<u32>,
+    },
+    /// The option of a dropdown with this visible text.
+    Select {
+        element: u32,
+        option: String,
+    },
+    Wait(u64),
 }
 
 impl Action {
@@ -83,7 +113,41 @@ impl Action {
                 })
             }
             Some("back") => Ok(Action::Back),
-            _ => Err("`action` must be open, look, click, type or back".into()),
+            Some("forward") => Ok(Action::Forward),
+            Some("reload") => Ok(Action::Reload),
+            Some("scroll") => match args.get("direction").and_then(Value::as_str) {
+                Some("up") => Ok(Action::Scroll { down: false }),
+                Some("down") => Ok(Action::Scroll { down: true }),
+                _ => Err("`direction` must be up or down".into()),
+            },
+            Some("press") => {
+                let name = args.get("key").and_then(Value::as_str).unwrap_or("");
+                let Some(&(key, ..)) = KEYS.iter().find(|k| k.0 == name) else {
+                    let names: Vec<_> = KEYS.iter().map(|k| k.0).collect();
+                    return Err(format!("`key` must be one of {}", names.join(", ")));
+                };
+                let element = match args.get("element") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(element()?),
+                };
+                Ok(Action::Press { key, element })
+            }
+            Some("select") => {
+                let element = element()?;
+                let option = args.get("option").and_then(Value::as_str).unwrap_or("").trim();
+                if option.is_empty() || option.chars().count() > 200 {
+                    return Err("`option` must be the visible text of an option, at most 200 characters".into());
+                }
+                Ok(Action::Select {
+                    element,
+                    option: option.to_owned(),
+                })
+            }
+            Some("wait") => match args.get("seconds").and_then(Value::as_u64) {
+                Some(seconds @ 1..=10) => Ok(Action::Wait(seconds)),
+                _ => Err("`seconds` must be a whole number from 1 to 10".into()),
+            },
+            _ => Err("`action` must be open, look, click, type, scroll, press, select, back, forward, reload or wait".into()),
         }
     }
 }
@@ -132,7 +196,9 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn start(bot: &str, profile: PathBuf, tx: Sender<Msg>) -> Handle {
+    /// `proxy`: the port of the proxy that holds the browser to the bot's hosts, for a bot
+    /// with a network limit.
+    pub fn start(bot: &str, profile: PathBuf, tx: Sender<Msg>, proxy: Option<u16>) -> Handle {
         let (work, jobs) = mpsc::channel();
         let taken = Arc::new(AtomicBool::new(false));
         let mut browser = Browser {
@@ -140,6 +206,7 @@ impl Handle {
             profile,
             tx,
             taken: taken.clone(),
+            proxy,
             chrome: None,
         };
         thread::spawn(move || browser.serve(jobs));
@@ -173,6 +240,8 @@ struct Chrome {
     next: u64,
     /// The page's DevTools session, once attached.
     page: Option<String>,
+    /// Set while the service itself presses a key: Chrome makes that a person's input.
+    acting: Arc<AtomicBool>,
 }
 
 struct Browser {
@@ -180,6 +249,7 @@ struct Browser {
     profile: PathBuf,
     tx: Sender<Msg>,
     taken: Arc<AtomicBool>,
+    proxy: Option<u16>,
     chrome: Option<Chrome>,
 }
 
@@ -268,6 +338,16 @@ impl Browser {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // A bot with a network limit: every request of the browser goes to the proxy that holds
+        // it to the bot's hosts (`<-loopback>`: this Mac's own addresses too, which Chrome
+        // would otherwise reach direct), and no peer-to-peer way round it.
+        if let Some(port) = self.proxy {
+            command.args([
+                format!("--proxy-server=http://127.0.0.1:{port}"),
+                "--proxy-bypass-list=<-loopback>".to_owned(),
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+            ]);
+        }
         let (fd_in, fd_out) = (chrome_in, chrome_out);
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
@@ -298,11 +378,13 @@ impl Browser {
         let (to, from) = unsafe { (File::from_raw_fd(to_chrome), File::from_raw_fd(from_chrome)) };
         let (replies_tx, replies) = mpsc::channel();
         let gone = Arc::new(AtomicBool::new(false));
-        let (taken, tx, bot, ended) = (
+        let acting = Arc::new(AtomicBool::new(false));
+        let (taken, tx, bot, ended, quiet) = (
             self.taken.clone(),
             self.tx.clone(),
             self.bot.clone(),
             gone.clone(),
+            acting.clone(),
         );
         thread::spawn(move || {
             let mut reader = BufReader::new(from);
@@ -334,7 +416,7 @@ impl Browser {
                 if message["method"] == "Runtime.bindingCalled"
                     && message["params"]["name"] == BINDING
                 {
-                    if !taken.swap(true, Ordering::SeqCst) {
+                    if !quiet.load(Ordering::SeqCst) && !taken.swap(true, Ordering::SeqCst) {
                         let _ = tx.send(Msg::BrowserTaken { bot: bot.clone() });
                     }
                 } else if message.get("id").is_some() && replies_tx.send(message).is_err() {
@@ -349,6 +431,7 @@ impl Browser {
             gone,
             next: 0,
             page: None,
+            acting,
         };
         // No downloads: Chrome is not kept to the bot's folder, and would write wherever the
         // folder's links point.
@@ -379,6 +462,10 @@ fn pipe() -> io::Result<(RawFd, RawFd)> {
     }
     // Read end, write end.
     Ok((fds[0], fds[1]))
+}
+
+fn gone(n: u32) -> String {
+    format!("There is no element {n} on the page now: look again.")
 }
 
 impl Chrome {
@@ -529,9 +616,7 @@ impl Chrome {
             Action::Click(n) => {
                 let done = self.eval(page, &format!("(() => {{ const e = (window.__bate || [])[{n} - 1]; if (!e || !e.isConnected) return false; e.scrollIntoView({{block: 'center'}}); e.focus(); e.click(); return true; }})()"))?;
                 if done != true {
-                    return Err(format!(
-                        "There is no element {n} on the page now: look again."
-                    ));
+                    return Err(gone(*n));
                 }
                 thread::sleep(Duration::from_millis(300));
             }
@@ -543,9 +628,7 @@ impl Chrome {
                 let text = serde_json::to_string(text).expect("a string");
                 let done = self.eval(page, &format!("(() => {{ const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return false; e.focus(); if (e.isContentEditable) {{ e.textContent = {text}; }} else {{ const kind = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : e instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement; const set = Object.getOwnPropertyDescriptor(kind.prototype, 'value').set; set.call(e, {text}); }} e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); if ({submit}) {{ if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})); }} return true; }})()"))?;
                 if done != true {
-                    return Err(format!(
-                        "There is no element {element} on the page now: look again."
-                    ));
+                    return Err(gone(*element));
                 }
                 thread::sleep(Duration::from_millis(300));
             }
@@ -553,6 +636,55 @@ impl Chrome {
                 self.eval(page, "history.back()")?;
                 thread::sleep(Duration::from_millis(300));
             }
+            Action::Forward => {
+                self.eval(page, "history.forward()")?;
+                thread::sleep(Duration::from_millis(300));
+            }
+            Action::Reload => {
+                self.call(Some(page), "Page.reload", json!({}))?;
+                thread::sleep(Duration::from_millis(300));
+            }
+            Action::Scroll { down } => {
+                let sign = if *down { "" } else { "-" };
+                self.eval(
+                    page,
+                    &format!("window.scrollBy(0, {sign}window.innerHeight * 0.9)"),
+                )?;
+                thread::sleep(Duration::from_millis(300));
+            }
+            Action::Press { key, element } => {
+                if let Some(n) = element {
+                    let done = self.eval(page, &format!("(() => {{ const e = (window.__bate || [])[{n} - 1]; if (!e || !e.isConnected) return false; e.scrollIntoView({{block: 'center'}}); e.focus(); return true; }})()"))?;
+                    if done != true {
+                        return Err(gone(*n));
+                    }
+                }
+                let &(_, code, text) = KEYS.iter().find(|k| k.0 == *key).expect("parsed");
+                // The page cannot tell this key from a person's: the watch must not take it
+                // for the user, so it is silent until the key has been handled.
+                self.acting.store(true, Ordering::SeqCst);
+                let sent = [if text.is_empty() { "rawKeyDown" } else { "keyDown" }, "keyUp"]
+                    .into_iter()
+                    .try_for_each(|kind| {
+                        let text = if kind == "keyUp" { "" } else { text };
+                        let key = json!({"type": kind, "key": key, "code": key, "windowsVirtualKeyCode": code, "text": text});
+                        self.call(Some(page), "Input.dispatchKeyEvent", key).map(drop)
+                    });
+                thread::sleep(Duration::from_millis(300));
+                self.acting.store(false, Ordering::SeqCst);
+                sent?;
+            }
+            Action::Select { element, option } => {
+                let option = serde_json::to_string(option).expect("a string");
+                let done = self.eval(page, &format!("(() => {{ const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return null; if (!(e instanceof HTMLSelectElement) || e.multiple) return 'Element {element} is not a dropdown.'; const norm = s => s.trim().replace(/\\s+/g, ' '); const o = [...e.options].find(o => norm(o.text) === norm({option})); if (!o) return 'Element {element} has no option with that text. Its options: ' + [...e.options].map(o => norm(o.text)).join(' | ').slice(0, 500); if (o.disabled) return 'That option is disabled.'; e.focus(); o.selected = true; e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); return 'ok'; }})()"))?;
+                match done.as_str() {
+                    Some("ok") => {}
+                    Some(why) => return Err(why.to_owned()),
+                    None => return Err(gone(*element)),
+                }
+                thread::sleep(Duration::from_millis(300));
+            }
+            Action::Wait(seconds) => thread::sleep(Duration::from_secs(*seconds)),
         }
         self.settle(page);
         self.look(page)
@@ -567,7 +699,7 @@ impl Chrome {
             window.__bate = shown;
             const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code';
             const name = e => (e.getAttribute('aria-label') || e.innerText || (secret(e) ? '' : e.value) || e.placeholder || e.title || e.name || e.getAttribute('href') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
-            const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : secret(e) ? 'password field' : 'field') : 'button';
+            const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' + (e.multiple || !e.selectedOptions.length ? '' : ' (' + e.selectedOptions[0].text.trim().replace(/\\s+/g, ' ') + ')') : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : secret(e) ? 'password field' : 'field') : 'button';
             const text = (document.body ? document.body.innerText : '').replace(/\\n{{3,}}/g, '\\n\\n');
             return {{title: document.title.slice(0, 300), url: location.href.slice(0, 2000), text: text.slice(0, {MAX_TEXT}), cut: text.length > {MAX_TEXT},
                 elements: shown.map((e, i) => `[${{i + 1}}] ${{kind(e)}} \"${{name(e)}}\"`).join('\\n')}};
@@ -643,5 +775,97 @@ mod tests {
         assert!(
             Action::parse(&args(json!({"action": "type", "element": 1, "text": long}))).is_err()
         );
+    }
+
+    #[test]
+    fn the_new_actions_are_checked_when_parsed() {
+        let parse = |value: Value| Action::parse(&args(value));
+        for (value, want) in [
+            (json!({"action": "forward"}), Action::Forward),
+            (json!({"action": "reload"}), Action::Reload),
+            (
+                json!({"action": "scroll", "direction": "up"}),
+                Action::Scroll { down: false },
+            ),
+            (
+                json!({"action": "scroll", "direction": "down"}),
+                Action::Scroll { down: true },
+            ),
+            (
+                json!({"action": "press", "key": "Tab"}),
+                Action::Press {
+                    key: "Tab",
+                    element: None,
+                },
+            ),
+            (
+                json!({"action": "press", "key": "PageDown", "element": 4}),
+                Action::Press {
+                    key: "PageDown",
+                    element: Some(4),
+                },
+            ),
+            (
+                json!({"action": "press", "key": "Enter", "element": null}),
+                Action::Press {
+                    key: "Enter",
+                    element: None,
+                },
+            ),
+            (
+                json!({"action": "select", "element": 2, "option": "  Green  tea "}),
+                Action::Select {
+                    element: 2,
+                    option: "Green  tea".into(),
+                },
+            ),
+            (json!({"action": "wait", "seconds": 1}), Action::Wait(1)),
+            (json!({"action": "wait", "seconds": 10}), Action::Wait(10)),
+        ] {
+            assert_eq!(parse(value.clone()), Ok(want), "{value}");
+        }
+        for key in [
+            "Enter",
+            "Tab",
+            "Escape",
+            "Backspace",
+            "ArrowUp",
+            "ArrowDown",
+            "ArrowLeft",
+            "ArrowRight",
+            "PageUp",
+            "PageDown",
+        ] {
+            assert!(
+                parse(json!({"action": "press", "key": key})).is_ok(),
+                "{key}"
+            );
+        }
+        let long = "x".repeat(201);
+        for bad in [
+            json!({"action": "scroll"}),
+            json!({"action": "scroll", "direction": "left"}),
+            json!({"action": "scroll", "direction": 1}),
+            json!({"action": "press"}),
+            json!({"action": "press", "key": "enter"}),
+            json!({"action": "press", "key": "F5"}),
+            json!({"action": "press", "key": "Control+c"}),
+            json!({"action": "press", "key": "Tab", "element": 0}),
+            json!({"action": "press", "key": "Tab", "element": "1"}),
+            json!({"action": "select", "option": "Red"}),
+            json!({"action": "select", "element": 0, "option": "Red"}),
+            json!({"action": "select", "element": 1}),
+            json!({"action": "select", "element": 1, "option": "  "}),
+            json!({"action": "select", "element": 1, "option": 5}),
+            json!({"action": "select", "element": 1, "option": long}),
+            json!({"action": "wait"}),
+            json!({"action": "wait", "seconds": 0}),
+            json!({"action": "wait", "seconds": 11}),
+            json!({"action": "wait", "seconds": -1}),
+            json!({"action": "wait", "seconds": "3"}),
+            json!({"action": "wait", "seconds": 1.5}),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
     }
 }

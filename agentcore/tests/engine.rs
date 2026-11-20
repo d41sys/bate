@@ -2001,7 +2001,91 @@ fn the_browser_tool_asks_once_for_the_browser_and_waits_for_what_the_service_did
     // Not an action: not asked about, nor sent.
     assert_eq!(
         result(3),
-        "`fly` is not an action: open, look, click, type or back."
+        "`fly` is not an action: open, look, click, type, scroll, press, select, back, forward, reload or wait."
+    );
+}
+
+#[test]
+fn each_new_browser_action_is_asked_about_as_the_browser_with_what_it_will_do() {
+    let dir = workdir("browser-actions");
+    let actions = [
+        (
+            json!({"action": "scroll", "direction": "up"}),
+            "Browser: scroll up",
+        ),
+        (
+            json!({"action": "press", "key": "Tab"}),
+            "Browser: press Tab",
+        ),
+        (
+            json!({"action": "press", "key": "Enter", "element": 2}),
+            "Browser: press Enter on element 2",
+        ),
+        (
+            json!({"action": "select", "element": 3, "option": "Green tea"}),
+            "Browser: choose Green tea in element 3",
+        ),
+        (json!({"action": "forward"}), "Browser: go forward"),
+        (json!({"action": "reload"}), "Browser: reload the page"),
+        (
+            json!({"action": "wait", "seconds": 5}),
+            "Browser: wait 5 seconds",
+        ),
+    ];
+    let mut replies: Vec<_> = actions
+        .iter()
+        .enumerate()
+        .map(|(i, (args, _))| vec![call(&format!("c{i}"), "browser", args.clone())])
+        .collect();
+    replies.push(vec![text("Done.")]);
+    let model = Model::serve(replies);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("use the browser");
+    for (args, want) in &actions {
+        let events = answer(&mut engine, "Approve");
+        let Some(Event::Question {
+            kind,
+            target,
+            title,
+            ..
+        }) = events.last()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (kind, target.as_deref(), title.as_str()),
+            (&Some(Kind::Connector), Some("browser"), *want)
+        );
+        let asked = engine.until(|e| matches!(e, Event::Browser { .. }));
+        let Some(Event::Browser { request, action }) = asked.last() else {
+            unreachable!()
+        };
+        // The service gets the action as the model gave it.
+        assert_eq!(&Value::Object(action.clone()), args);
+        let done = Op::BrowserResult {
+            request: request.clone(),
+            output: Some("Title: Example".into()),
+            error: None,
+        };
+        assert_eq!(engine.request(done), None);
+    }
+    engine.until(is_turn_end);
+    let requests = model.requests();
+    let tools = &requests[0]["tools"];
+    let browser = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "browser")
+        .unwrap();
+    let offered = browser["function"]["parameters"]["properties"]["action"]["enum"].clone();
+    assert_eq!(
+        offered,
+        json!([
+            "open", "look", "click", "type", "scroll", "press", "select", "back", "forward",
+            "reload", "wait"
+        ])
     );
 }
 

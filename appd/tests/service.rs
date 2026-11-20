@@ -21,7 +21,8 @@ use serde_json::{Value, json};
 /// (`tunnel`: through `CONNECT`; `direct`: ignoring them) and says `ok` or `refused`.
 /// `apple <tool> <action> <field>=<word>…` asks the service to run that action in an Apple app; the
 /// `apple_result` is logged to `apple.log` and ends the turn.
-/// `browse open <url>` (or `look`, `click <n>`, `type <n> <word> [go]`, which with `go` submits) asks the
+/// `browse open <url>` (or `look`, `back`, `forward`, `reload`, `click <n>`, `type <n> <word> [go]`, which with `go` submits;
+/// `scroll <up|down>`, `press <key> [n]`, `select <n> <word>`, `wait <seconds>`) asks the
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
@@ -99,6 +100,11 @@ while IFS= read -r line; do
           case "$1" in
             open) action="{\"action\":\"open\",\"url\":\"$2\"}" ;;
             click) action="{\"action\":\"click\",\"element\":$2}" ;;
+            scroll) action="{\"action\":\"scroll\",\"direction\":\"$2\"}" ;;
+            press) action="{\"action\":\"press\",\"key\":\"$2\"}"
+              [ -n "$3" ] && action="{\"action\":\"press\",\"key\":\"$2\",\"element\":$3}" ;;
+            select) action="{\"action\":\"select\",\"element\":$2,\"option\":\"$3\"}" ;;
+            wait) action="{\"action\":\"wait\",\"seconds\":$2}" ;;
             type) submit=false; [ "$4" = go ] && submit=true
               action="{\"action\":\"type\",\"element\":$2,\"text\":\"$3\",\"submit\":$submit}" ;;
             *) action="{\"action\":\"$1\"}" ;;
@@ -5119,6 +5125,12 @@ fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             log.lock().unwrap().push(path.clone());
             let page = match path.as_str() {
                 "/" => "<title>Front</title><h1>Hello there</h1><a href='/two'>Next page</a><form action='/sent'><input name='q' placeholder='Query'><input type='password' name='pw'><button>Go</button></form>".to_owned(),
+                // Reports how far it was scrolled and what has the focus in its title, what was
+                // chosen in its text, and how often it was fetched.
+                "/tools" => {
+                    let loads = log.lock().unwrap().iter().filter(|p| *p == "/tools").count();
+                    r#"<title>Tools</title><script>addEventListener('scroll', () => document.title = 'Scrolled ' + Math.round(scrollY)); addEventListener('focusin', e => document.title = 'Focus ' + e.target.id); addEventListener('change', e => document.getElementById('c').textContent = 'Chose ' + e.target.value)</script><input id=a placeholder=First><input id=b placeholder=Second><select id=s><option>Red</option><option>Green tea</option><option>Blue</option></select><form action='/sent'><input id=q name=q placeholder=Query></form><p id=c></p><p>Load @LOADS@</p><div style='height:3000px'>Tall</div>"#.replace("@LOADS@", &loads.to_string())
+                }
                 // The page's own script plays at being the user: that is not taking over.
                 other => format!("<title>Other</title><p>You are at {other}</p><script>window.dispatchEvent(new MouseEvent('mousedown'))</script>"),
             };
@@ -5132,11 +5144,9 @@ fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     (base, seen)
 }
 
-#[test]
-fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
-    let home = home("browser");
-    // Chrome without a window, and with a debugging port through which this test acts as the
-    // person at the window.
+/// A Chrome without a window, and with a debugging port through which a test can act as the
+/// person at the window: the program for `APPD_CHROME`.
+fn headless_chrome(home: &Home) -> PathBuf {
     let chrome = home.join("chrome");
     fs::write(
         &chrome,
@@ -5144,6 +5154,40 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     )
     .unwrap();
     fs::set_permissions(&chrome, fs::Permissions::from_mode(0o755)).unwrap();
+    chrome
+}
+
+/// What the bot's browser answered to `browse <what>` (see the fake engine), from `browser.log`.
+fn browse(w: &mut Window, home: &Home, bot: &str, nonce: &str, what: &str) -> Value {
+    let log = home.join("bots").join(bot).join("browser.log");
+    let count = || fs::read_to_string(&log).map_or(0, |all| all.lines().count());
+    let before = count();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": nonce, "text": format!("browse {what}")}),
+    );
+    // A real Chrome: on a machine busy with the other tests it alone can take longer than
+    // `TIMEOUT` (#162). Still failing after this is a hang, not slowness.
+    within(6 * TIMEOUT, "the browser's result", || count() > before);
+    let all = fs::read_to_string(&log).unwrap();
+    let result: Value = serde_json::from_str(all.lines().last().unwrap()).unwrap();
+    assert_eq!(result["request"], format!("b-{nonce}"));
+    result
+}
+
+/// The page a result gives, or a failure of the test that says what was given instead.
+fn page(result: &Value) -> &str {
+    result["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no page: {result}"))
+}
+
+#[test]
+fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
+    let home = home("browser");
+    // Chrome without a window, and with a debugging port through which this test acts as the
+    // person at the window.
+    let chrome = headless_chrome(&home);
     let service = Service::start_with(&home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"))
             .env("APPD_CHROME", &chrome);
@@ -5291,6 +5335,231 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     eventually("Chrome to end", || {
         fs::symlink_metadata(profile.join("SingletonLock")).is_err()
     });
+}
+
+#[test]
+fn a_bot_scrolls_presses_keys_chooses_from_a_dropdown_goes_forward_reloads_and_waits() {
+    let home = home("browser-actions");
+    let chrome = headless_chrome(&home);
+    let service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_CHROME", &chrome);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let (site, seen) = web_site();
+    let tools = format!("{site}/tools");
+    let loads = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/tools")
+            .count()
+    };
+    let mut n = 0;
+    let mut browse = |w: &mut Window, what: &str| {
+        n += 1;
+        browse(w, &home, &bot, &format!("n{n}"), what)
+    };
+
+    let first = browse(&mut w, &format!("open {tools}"));
+    assert!(
+        page(&first).starts_with(&format!("Title: Tools\nAddress: {tools}\n\n")),
+        "{first}"
+    );
+    assert!(
+        page(&first).ends_with("Elements:\n[1] field \"First\"\n[2] field \"Second\"\n[3] select (Red) \"Red Green tea Blue\"\n[4] field \"Query\""),
+        "{first}"
+    );
+
+    // One screen down moves the page; one screen up brings it back.
+    let down = browse(&mut w, "scroll down");
+    let title = page(&down).lines().next().unwrap();
+    assert!(
+        title.starts_with("Title: Scrolled ") && title != "Title: Scrolled 0",
+        "{down}"
+    );
+    let up = browse(&mut w, "scroll up");
+    assert!(page(&up).starts_with("Title: Scrolled 0\n"), "{up}");
+
+    // A key goes to the element named first, and Tab moves on from it.
+    let tab = browse(&mut w, "press Tab 1");
+    assert!(page(&tab).starts_with("Title: Focus b\n"), "{tab}");
+    let paged = browse(&mut w, "press PageDown");
+    let title = page(&paged).lines().next().unwrap();
+    assert!(
+        title.starts_with("Title: Scrolled ") && title != "Title: Scrolled 0",
+        "{paged}"
+    );
+    let escape = browse(&mut w, "press Escape");
+    assert!(escape.get("error").is_none(), "{escape}");
+    // The bot's own keys are not the user taking the browser over.
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"][0].get("browserTaken"),
+        None
+    );
+
+    // A dropdown takes an option by its text, and the page hears the change.
+    let chose = browse(&mut w, "select 3 Blue");
+    assert!(page(&chose).contains("\nChose Blue\n"), "{chose}");
+    assert!(page(&chose).contains("[3] select (Blue) "), "{chose}");
+    let refused = browse(&mut w, "select 1 Red");
+    assert_eq!(refused["error"], "Element 1 is not a dropdown.");
+    let refused = browse(&mut w, "select 3 Purple");
+    assert_eq!(
+        refused["error"],
+        "Element 3 has no option with that text. Its options: Red | Green tea | Blue"
+    );
+
+    // Enter sends the form of the field it is pressed in; back and forward walk the history.
+    let sent = browse(&mut w, "press Enter 4");
+    assert!(page(&sent).contains("You are at /sent?q="), "{sent}");
+    let back = browse(&mut w, "back");
+    assert!(page(&back).contains(&format!("Address: {tools}")), "{back}");
+    let forward = browse(&mut w, "forward");
+    assert!(page(&forward).contains("You are at /sent?q="), "{forward}");
+
+    // A reload fetches the page again.
+    browse(&mut w, &format!("open {tools}"));
+    let before = loads();
+    let again = browse(&mut w, "reload");
+    assert_eq!(loads(), before + 1);
+    assert!(
+        page(&again).contains(&format!("Load {}", before + 1)),
+        "{again}"
+    );
+
+    // Waiting takes the time asked for, and answers with the page.
+    let start = std::time::Instant::now();
+    let waited = browse(&mut w, "wait 2");
+    assert!(
+        start.elapsed() >= Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(page(&waited).starts_with("Title: Tools\n"), "{waited}");
+
+    // Wrong arguments are refused where the actions are parsed.
+    for (what, error) in [
+        ("scroll sideways", "`direction` must be up or down"),
+        (
+            "press F5",
+            "`key` must be one of Enter, Tab, Escape, Backspace, ArrowLeft, ArrowUp, ArrowRight, ArrowDown, PageUp, PageDown",
+        ),
+        (
+            "select 0 Red",
+            "`element` must be the number of an element on the page",
+        ),
+        ("wait 11", "`seconds` must be a whole number from 1 to 10"),
+    ] {
+        assert_eq!(browse(&mut w, what)["error"], error, "{what}");
+    }
+    drop(service);
+}
+
+#[test]
+fn a_bots_browser_reaches_only_the_hosts_of_its_network_limit() {
+    let home = home("browser-net");
+    let chrome = headless_chrome(&home);
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_CHROME", &chrome);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let ((a, _), (b, b_hits)) = (web(), web());
+    let hits = || b_hits.load(std::sync::atomic::Ordering::SeqCst);
+    w.ok(
+        "set_network",
+        json!({"bot": bot, "hosts": [format!("127.0.0.1:{a}")]}),
+    );
+
+    // The host on the list opens.
+    let open = browse(
+        &mut w,
+        &home,
+        &bot,
+        "n1",
+        &format!("open http://127.0.0.1:{a}/"),
+    );
+    assert!(page(&open).contains("hello"), "{open}");
+    // Another does not, as a page or as a tunnel, and is never reached.
+    for (nonce, scheme) in [("n2", "http"), ("n3", "https")] {
+        let refused = browse(
+            &mut w,
+            &home,
+            &bot,
+            nonce,
+            &format!("open {scheme}://127.0.0.1:{b}/"),
+        );
+        let error = refused["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{refused}"));
+        assert!(error.contains("did not open"), "{error}");
+    }
+    assert_eq!(hits(), 0);
+
+    // The list is read for each connection: a host added opens at once.
+    w.ok(
+        "set_network",
+        json!({"bot": bot, "hosts": [format!("127.0.0.1:{a}"), format!("127.0.0.1:{b}")]}),
+    );
+    let open = browse(
+        &mut w,
+        &home,
+        &bot,
+        "n4",
+        &format!("open http://127.0.0.1:{b}/"),
+    );
+    assert!(page(&open).contains("hello"), "{open}");
+    assert!(hits() > 0);
+
+    // A list taken back narrows it at once.
+    w.ok(
+        "set_network",
+        json!({"bot": bot, "hosts": [format!("127.0.0.1:{a}")]}),
+    );
+    // Chrome asks for the site's icon a moment after the page.
+    std::thread::sleep(Duration::from_millis(800));
+    let seen = hits();
+    let refused = browse(
+        &mut w,
+        &home,
+        &bot,
+        "n5",
+        &format!("open http://127.0.0.1:{b}/?again"),
+    );
+    assert!(refused["error"].as_str().unwrap().contains("did not open"));
+    assert_eq!(hits(), seen);
+
+    // Without a limit the browser goes where it likes: it is started again for that.
+    let profile = home.join("browsers").join(&bot);
+    // Chrome's lock is a link to `<host>-<pid>`.
+    let lock = fs::read_link(profile.join("SingletonLock")).unwrap();
+    let pid = lock
+        .to_string_lossy()
+        .rsplit('-')
+        .next()
+        .unwrap()
+        .to_owned();
+    w.ok("set_network", json!({"bot": bot, "hosts": null}));
+    eventually("the held Chrome to end", || {
+        !std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    });
+    let open = browse(
+        &mut w,
+        &home,
+        &bot,
+        "n6",
+        &format!("open http://127.0.0.1:{b}/"),
+    );
+    assert!(page(&open).contains("hello"), "{open}");
+    assert!(hits() > seen);
 }
 
 #[test]

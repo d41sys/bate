@@ -88,8 +88,9 @@ fn permit<'a>(rules: &'a [Rule], host: &str, port: u16) -> Option<&'a Rule> {
     })
 }
 
-/// Starts listening and returns the port.
-pub fn start(tx: Sender<Msg>) -> io::Result<u16> {
+/// Starts listening and returns the port. With `fixed`, every connection is the holder of that
+/// key and needs no credentials: for a client that cannot send them (Chrome).
+pub fn start(tx: Sender<Msg>, fixed: Option<String>) -> io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     static OPEN: AtomicUsize = AtomicUsize::new(0);
@@ -99,9 +100,9 @@ pub fn start(tx: Sender<Msg>) -> io::Result<u16> {
                 OPEN.fetch_sub(1, Ordering::SeqCst);
                 continue;
             }
-            let tx = tx.clone();
+            let (tx, fixed) = (tx.clone(), fixed.clone());
             thread::spawn(move || {
-                if let Err((status, line)) = serve(&stream, &tx) {
+                if let Err((status, line)) = serve(&stream, &tx, fixed.as_deref()) {
                     let _ = reply(&stream, status, &line);
                 }
                 let _ = stream.shutdown(Shutdown::Both);
@@ -125,7 +126,7 @@ fn reply(mut stream: &TcpStream, status: u16, line: &str) -> io::Result<()> {
 }
 
 /// Serves one connection. An error is the answer still to be sent.
-fn serve(stream: &TcpStream, tx: &Sender<Msg>) -> Result<(), (u16, String)> {
+fn serve(stream: &TcpStream, tx: &Sender<Msg>, fixed: Option<&str>) -> Result<(), (u16, String)> {
     let bad = |line: &str| (400, line.to_owned());
     let deadline = Instant::now() + WAIT;
     let mut reader = BufReader::new(Until(stream, deadline).take(MAX_HEAD));
@@ -166,6 +167,7 @@ fn serve(stream: &TcpStream, tx: &Sender<Msg>) -> Result<(), (u16, String)> {
     }
     let rules = {
         let (answer, answered) = mpsc::channel();
+        let key = fixed.map(str::to_owned).or(key);
         let key = key.ok_or((407, "the proxy needs its key".to_owned()))?;
         tx.send(Msg::Egress(Ask { key, answer }))
             .map_err(|_| (503, "the service is stopping".to_owned()))?;
@@ -305,7 +307,7 @@ mod tests {
     #[test]
     fn the_engines_http_client_gets_through_for_its_key_and_hosts_only() {
         let (tx, rx) = mpsc::channel();
-        let proxy = start(tx).unwrap();
+        let proxy = start(tx, None).unwrap();
         let serve = |listener: TcpListener| {
             thread::spawn(move || {
                 for mut stream in listener.incoming().flatten() {
@@ -351,5 +353,48 @@ mod tests {
         // Neither is let through, whatever the client makes of the proxy's 403 and 407.
         assert_ne!(status("k", other_port).ok(), Some(200));
         assert_ne!(status("wrong", web_port).ok(), Some(200));
+    }
+
+    #[test]
+    fn a_listener_with_a_fixed_key_needs_no_credentials_and_still_checks_the_hosts() {
+        let (tx, rx) = mpsc::channel();
+        let (proxy, other) = (
+            start(tx.clone(), Some("fixed".into())).unwrap(),
+            start(tx, None).unwrap(),
+        );
+        let web = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = web.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut stream in web.incoming().flatten() {
+                let _ = stream.read(&mut [0; 4096]);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                );
+            }
+        });
+        thread::spawn(move || {
+            for msg in rx {
+                if let Msg::Egress(ask) = msg {
+                    let _ = ask
+                        .answer
+                        .send((ask.key == "fixed").then(|| vec![format!("127.0.0.1:{port}")]));
+                }
+            }
+        });
+        let status = |proxy: u16, to: u16| {
+            let via = ureq::Proxy::new(&format!("http://127.0.0.1:{proxy}")).unwrap();
+            let config = ureq::Agent::config_builder()
+                .proxy(Some(via))
+                .http_status_as_error(false)
+                .build();
+            ureq::Agent::new_with_config(config)
+                .get(&format!("http://127.0.0.1:{to}/"))
+                .call()
+                .map(|r| r.status().as_u16())
+        };
+        assert_eq!(status(proxy, port).unwrap(), 200);
+        // Not on the host that is off the list, and not through the listener that has no key.
+        assert_ne!(status(proxy, port.wrapping_add(1)).ok(), Some(200));
+        assert_ne!(status(other, port).ok(), Some(200));
     }
 }

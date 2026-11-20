@@ -111,13 +111,17 @@ fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
     if let Value::Array(list) = &mut tools {
         list.extend(mcp.definitions().cloned());
         list.push(json!({"type": "function", "function": {"name": BROWSER,
-            "description": "Use your own web browser, which the user can watch. `open` a web address, `look` at the page, `click` or `type` into one of the numbered elements that every result lists, or go `back`. Each result is the page as it is after the action: its title, address, text and elements. If the user takes the browser over, you wait until they hand it back.",
+            "description": "Use your own web browser, which the user can watch. `open` a web address, `look` at the page, `click` or `type` into one of the numbered elements that every result lists, `scroll` up or down by one screen, `press` a key (optionally on an element), `select` an option of a dropdown element by its text, go `back` or `forward`, `reload` the page, or `wait` a few seconds for a slow page. Each result is the page as it is after the action: its title, address, text and elements. If the user takes the browser over, you wait until they hand it back.",
             "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["open", "look", "click", "type", "back"]},
+                "action": {"type": "string", "enum": ["open", "look", "click", "type", "scroll", "press", "select", "back", "forward", "reload", "wait"]},
                 "url": {"type": "string", "description": "For `open`: an http or https address"},
-                "element": {"type": "integer", "description": "For `click` and `type`: the element's number"},
+                "element": {"type": "integer", "description": "For `click`, `type` and `select`, and optionally `press`: the element's number"},
                 "text": {"type": "string", "description": "For `type`: what to put in the field"},
-                "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"}},
+                "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"},
+                "direction": {"type": "string", "enum": ["up", "down"], "description": "For `scroll`"},
+                "key": {"type": "string", "enum": ["Enter", "Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"], "description": "For `press`"},
+                "option": {"type": "string", "description": "For `select`: the option's visible text"},
+                "seconds": {"type": "integer", "minimum": 1, "maximum": 10, "description": "For `wait`"}},
                 "required": ["action"]}}}));
         list.push(json!({"type": "function", "function": {"name": DESKTOP,
             "description": "See and control other apps on this Mac without taking the focus from the user. `apps` lists the apps and their windows (window ids). `look` reads a window as a tree of numbered elements; `press` or `set_value` act on an element by its number from the latest `look` of that window, and `type` types text into an element or into whatever has the focus. `screenshot` saves a picture of a window in your folder and gives its path. Look again after any action: the numbers change. If the user lacks a macOS permission, the result says which.",
@@ -700,9 +704,26 @@ impl Turn {
                 arg("text")
             ),
             "back" => "Browser: go back".to_owned(),
+            "forward" => "Browser: go forward".to_owned(),
+            "reload" => "Browser: reload the page".to_owned(),
+            "scroll" => format!("Browser: scroll {}", arg("direction")),
+            "press" => match args.get("element") {
+                Some(_) => format!(
+                    "Browser: press {} on element {}",
+                    arg("key"),
+                    arg("element")
+                ),
+                None => format!("Browser: press {}", arg("key")),
+            },
+            "select" => format!(
+                "Browser: choose {} in element {}",
+                arg("option"),
+                arg("element")
+            ),
+            "wait" => format!("Browser: wait {} seconds", arg("seconds")),
             other => {
                 return Err(format!(
-                    "`{other}` is not an action: open, look, click, type or back."
+                    "`{other}` is not an action: open, look, click, type, scroll, press, select, back, forward, reload or wait."
                 ));
             }
         };

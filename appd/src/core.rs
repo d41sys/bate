@@ -555,6 +555,10 @@ pub struct Core {
     /// The proxy key of each limited process, by owner (`bot:<id>`, `project:<id>`), and what a
     /// program may reach (a bot's hosts are read each time they are asked).
     net_keys: HashMap<String, (String, Option<Vec<String>>)>,
+    /// The port of the proxy that holds each limited bot's browser to its hosts. Chrome cannot
+    /// send a key, so each such bot has a listener of its own, kept while the service runs.
+    // shortcut: one listener thread and port per limited bot, none freed when the bot is deleted; fine for tens of bots.
+    browser_proxies: HashMap<String, u16>,
     /// The page for other devices on the network.
     lan: Arc<crate::lan::Lan>,
     /// The reader of each channel that has a token.
@@ -657,6 +661,7 @@ impl Core {
             hook_port,
             egress_port,
             net_keys: HashMap::new(),
+            browser_proxies: HashMap::new(),
             lan,
             channels: readers,
             channel_errors: HashMap::new(),
@@ -1764,6 +1769,11 @@ impl Core {
                 // starts, so the idle one is stopped.
                 if switched && let Some(r) = self.engines.get_mut(&bot) {
                     let _ = r.child.kill();
+                }
+                // Likewise its browser, which is held to the proxy, or not, from its start; its
+                // Chrome closes with the handle.
+                if switched {
+                    self.browsers.remove(&bot);
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
@@ -2961,11 +2971,46 @@ impl Core {
     /// The proxy's threads ask which hosts the holder of a key may reach.
     fn on_egress(&mut self, ask: egress::Ask) {
         let held = self.net_keys.iter().find(|(_, (key, _))| *key == ask.key);
-        let hosts = held.and_then(|(owner, (_, fixed))| match owner.strip_prefix("bot:") {
-            Some(bot) => self.hosts_of(bot).ok().flatten(),
-            None => fixed.clone(),
+        let hosts = held.and_then(|(owner, (_, fixed))| {
+            match owner
+                .strip_prefix("bot:")
+                .or_else(|| owner.strip_prefix("browser:"))
+            {
+                Some(bot) => self.hosts_of(bot).ok().flatten(),
+                None => fixed.clone(),
+            }
         });
         let _ = ask.answer.send(hosts);
+    }
+
+    /// The port of the proxy that holds `bot`'s browser to the bot's hosts, made on first need.
+    fn browser_proxy(&mut self, bot: &str) -> io::Result<u16> {
+        if let Some(port) = self.browser_proxies.get(bot) {
+            return Ok(*port);
+        }
+        let (_, key) = self.held(format!("browser:{bot}"), None)?;
+        let port = egress::start(self.tx.clone(), Some(key))?;
+        self.browser_proxies.insert(bot.to_owned(), port);
+        Ok(port)
+    }
+
+    /// Starts `bot`'s browser unless it runs. A bot with a network limit has it held to its
+    /// hosts from the start, or not started at all.
+    fn start_browser(&mut self, bot: &str) -> Result<(), String> {
+        if self.browsers.contains_key(bot) {
+            return Ok(());
+        }
+        let proxy = match self.store.network(bot) {
+            Ok(Some(_)) => Some(self.browser_proxy(bot).map_err(|e| {
+                format!("the browser was not started: the network limit's proxy failed: {e}")
+            })?),
+            Ok(None) => None,
+            Err(e) => return Err(format!("the bot's network limit could not be read: {e}")),
+        };
+        let profile = browser::profile(&paths::home(), bot);
+        let handle = browser::Handle::start(bot, profile, self.tx.clone(), proxy);
+        self.browsers.insert(bot.to_owned(), handle);
+        Ok(())
     }
 
     /// The projects as a window sees them: with why a connector's program is not running.
@@ -4349,10 +4394,14 @@ impl Core {
     /// The engine asks for an action in the bot's browser: checked here, run on the browser's
     /// own thread, and answered with `browser_result` when done.
     fn on_browser(&mut self, bot: &str, request: String, action: &serde_json::Map<String, Value>) {
-        let Some(r) = self.engines.get_mut(bot) else {
+        if !self.engines.contains_key(bot) {
             return;
-        };
-        let action = match browser::Action::parse(action) {
+        }
+        let action = browser::Action::parse(action).and_then(|action| {
+            self.start_browser(bot)?;
+            Ok(action)
+        });
+        let action = match action {
             Ok(action) => action,
             Err(e) => {
                 let op = Op::BrowserResult {
@@ -4366,17 +4415,13 @@ impl Core {
                 return;
             }
         };
+        let r = self.engines.get_mut(bot).expect("checked above");
         let cancelled = Arc::new(AtomicBool::new(false));
         if let Some(old) = r.browsing.replace(cancelled.clone()) {
             old.store(true, Ordering::SeqCst);
         }
         let generation = r.generation;
-        let tx = self.tx.clone();
-        let handle = self.browsers.entry(bot.to_owned()).or_insert_with(|| {
-            let profile = browser::profile(&paths::home(), bot);
-            browser::Handle::start(bot, profile, tx)
-        });
-        handle.act(browser::Job {
+        self.browsers[bot].act(browser::Job {
             request,
             generation,
             action,
