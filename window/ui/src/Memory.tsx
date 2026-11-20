@@ -113,7 +113,7 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
       <div className="actions">
         <button disabled={!dirty && editor.open !== ""}>Save</button>
         {dirty && <button type="button" onClick={discard}>Discard changes</button>}
-        <span className="note" role="status">{saved === editor.open && !dirty ? "Saved" : ""}</span>
+        <span className="note" role="status">{saved !== "" && saved === editor.open && !dirty ? "Saved" : ""}</span>
         {dirty && <span className="note">Unsaved{restored ? ", kept from before you left this tab" : ""}. Save or discard before opening another note.</span>}
       </div>
       {errorAt(editor.open!)}
