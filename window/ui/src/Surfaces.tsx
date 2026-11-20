@@ -3,7 +3,7 @@ import { listen, request } from "./service.ts";
 import { PART, clampOffset, nextOffset, prevOffset, range, visibleNodes } from "./surface.ts";
 import type { Surface, SurfacePart } from "./types.ts";
 
-/** The surfaces a project's program offers, to open one in the pane. Nothing when there are none. */
+/** The surfaces a project's program offers, to open one in the pane. */
 export function Surfaces({ projectId, open }: { projectId: string; open: (s: Surface) => void }) {
   const [list, setList] = useState<Surface[]>([]);
   useEffect(() => {
@@ -19,7 +19,7 @@ export function Surfaces({ projectId, open }: { projectId: string; open: (s: Sur
       off();
     };
   }, [projectId]);
-  if (!list.length) return null;
+  if (!list.length) return <p className="note">The project's program offers no surfaces.</p>;
   return (
     <div className="surfaces" role="group" aria-label="Surfaces of the project">
       <span className="note">Surfaces:</span>

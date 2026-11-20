@@ -18,7 +18,7 @@ pre { background: var(--bg-soft); padding: var(--space-2) var(--space-3); border
 pre code { background: none; padding: 0; }
 summary { cursor: pointer; }
 table { border-collapse: collapse; }
-fieldset { border: 1px solid var(--border); border-radius: var(--radius-m); margin: var(--space-3) 0; padding: var(--space-2) var(--space-3); }
+fieldset { border: 1px solid var(--border); border-radius: var(--radius-m); margin: var(--space-3) 0; padding: var(--space-2) var(--space-3); min-width: 0; }
 legend { color: var(--fg-muted); font-size: var(--size-small); padding: 0 var(--space-1); }
 /* One focus ring, on every control, only when the keyboard is in use. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -79,7 +79,10 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .sidebar { background: var(--bg-side); border-right: 1px solid var(--border); padding: var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
 .sidebar h2 { font-size: var(--size-small); line-height: var(--leading); color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
 .sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.sidebar form { display: flex; gap: var(--space-2); margin-top: auto; padding-top: var(--space-2); }
+.sidebar ul ul { padding-left: var(--space-4); }
+/* The pages of the app sit at the foot. */
+.sidebar .foot { margin-top: auto; }
+.sidebar form { display: flex; gap: var(--space-2); padding-top: var(--space-2); }
 .sidebar form input { min-width: 0; flex: 1; }
 .row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
 .row:hover:not(:disabled) { background: var(--bg-hover); }
@@ -87,6 +90,8 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .row .label { display: grid; min-width: 0; line-height: 18px; }
 .row .label > * { overflow: hidden; text-overflow: ellipsis; }
 .row small { font-weight: 400; }
+/* A row with no avatar: a project, or a page of the app. */
+.row.plain { min-height: var(--control-h); }
 
 main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
@@ -95,6 +100,8 @@ main > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: n
 main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-2) var(--space-4); padding: var(--space-2) 0; background: var(--glass); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
 .who { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); box-shadow: var(--shadow-1); }
 .who h1 { font-size: var(--size-ui); line-height: var(--leading); }
+/* A project or a page has no avatar before its name. */
+.who > h1:first-child { margin-left: var(--space-2); }
 
 .pane { position: relative; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg); min-width: 0; padding: 0 var(--space-2) var(--space-2); }
 .pane.overlay { position: fixed; top: 0; right: 0; bottom: 0; box-shadow: var(--shadow-2); }
@@ -175,12 +182,14 @@ main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: 
   :root { --side-w: 220px; }
 }
 @media (max-width: 640px) {
-  /* The sidebar becomes a strip of bots across the top. */
+  /* The sidebar becomes a strip of projects and bots across the top. */
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .sidebar { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
   .sidebar h2 { display: none; }
-  .sidebar ul { display: flex; }
+  .sidebar ul, .sidebar li { display: flex; align-items: center; }
+  .sidebar ul ul { padding-left: 0; }
   .sidebar ul, .sidebar li, .sidebar form { flex: none; }
+  .sidebar .foot { margin: 0 0 0 auto; }
   .sidebar form { margin: 0; padding: 0; width: 12rem; }
   .row { width: auto; max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }

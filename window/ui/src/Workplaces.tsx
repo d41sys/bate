@@ -3,8 +3,24 @@ import { listen, request } from "./service.ts";
 import type { CatalogEntry, CatalogPreview, Project, Workplace, WorkplacePreview } from "./types.ts";
 import { downloadText, needsLines, newlyLines, progressText, sizeText } from "./workplaces.ts";
 
+/** The installed workplaces, read again when they or the projects change. */
+export function useWorkplaces() {
+  const [workplaces, setWorkplaces] = useState<Workplace[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const load = () =>
+      request<{ workplaces: Workplace[] }>("list_workplaces").then((d) => setWorkplaces(d.workplaces), (e) => setError(e.message));
+    load();
+    return listen((frame) => {
+      if (frame.type === "workplaces_changed" || frame.type === "projects_changed") load();
+    });
+  }, []);
+  return { workplaces, error };
+}
+
 /** Installed workplaces: install from the catalog or a folder, look at what each needs, approve a changed one, remove. */
-export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; projects: Project[] }) {
+export function Workplaces({ projects }: { projects: Project[] }) {
+  const { workplaces, error: loadError } = useWorkplaces();
   const [path, setPath] = useState("");
   const [removing, setRemoving] = useState<string>();
   const [error, setError] = useState("");
@@ -64,7 +80,6 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
 
   return (
     <section>
-      <h2>Workplaces</h2>
       <p className="note">A workplace equips a project for one kind of work: a program that Bate runs for the project, with skills and roles. Install one from a folder, then choose it in a project.</p>
       {workplaces.length === 0 && <p className="note">No workplaces installed.</p>}
       <ul className="rows">
@@ -145,7 +160,7 @@ export function Workplaces({ workplaces, projects }: { workplaces: Workplace[]; 
         </p>
       )}
       {progress && <p className="note" role="status">{progressText(...progress)}</p>}
-      {error && <p className="error" role="alert">{error}</p>}
+      {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
     </section>
   );
 }

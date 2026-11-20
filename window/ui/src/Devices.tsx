@@ -96,7 +96,7 @@ export function Pair({ onPair }: { onPair: (code: string, name: string) => Promi
       }}
     >
       <h1>Pair with Bate</h1>
-      <p>In Bate on your Mac, open a bot's Settings and choose “Pair a device”.</p>
+      <p>In Bate on your Mac, open Settings and choose “Pair a device”.</p>
       <label>
         Code <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" autoFocus required />
       </label>

@@ -30,6 +30,6 @@ The rest of the file, at most 8000 characters, is the bot's instructions. The fi
 
 ## Adding roles to a project
 
-In the Projects tab, give the whole paths of one or more role files to a project. Bate shows what each will create: the name, model, skills and permission levels. A level that lets the bot do more than a new bot may (`always` for anything but `read`) is listed, and is applied only if you agree; otherwise that kind stays on `ask`.
+On a project's Bots page, give the whole paths of one or more role files to the project. Bate shows what each will create: the name, model, skills and permission levels. A level that lets the bot do more than a new bot may (`always` for anything but `read`) is listed, and is applied only if you agree; otherwise that kind stays on `ask`.
 
 A file that is malformed, or names a skill folder that is missing or holds another skill, is refused with the reason, and no bot is created. The protocol is in `PROTOCOL.md` (`read_roles`, `add_roles`).
