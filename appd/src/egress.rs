@@ -196,21 +196,19 @@ fn serve(stream: &TcpStream, tx: &Sender<Msg>) -> Result<(), (u16, String)> {
     let upstream = connect_to(&host, port, rule)
         .map_err(|e| (502, format!("cannot reach {host}:{port}: {e}")))?;
     let mut to = &upstream;
+    // One write for the head and what came with it (a request's start, for a plain request): a
+    // host that answers as soon as it has read something never sees half a head.
+    let mut first = Vec::new();
     if connect {
         let mut out = stream;
         out.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .map_err(|_| bad("gone"))?;
     } else {
         let path = uri.path_and_query().map_or("/", |p| p.as_str());
-        write!(
-            to,
-            "{method} {path} HTTP/1.1\r\n{kept}connection: close\r\n\r\n"
-        )
-        .map_err(|e| (502, e.to_string()))?;
+        first = format!("{method} {path} HTTP/1.1\r\n{kept}connection: close\r\n\r\n").into_bytes();
     }
-    // What came with the head (a request's start, for a plain request) goes first.
-    to.write_all(reader.buffer())
-        .map_err(|e| (502, e.to_string()))?;
+    first.extend_from_slice(reader.buffer());
+    to.write_all(&first).map_err(|e| (502, e.to_string()))?;
     pipe(stream, &upstream);
     Ok(())
 }
