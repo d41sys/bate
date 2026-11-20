@@ -14,10 +14,10 @@ use objc2_user_notifications::{
 use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 
-/// A notification's identifier carries where a click goes: the window that asked, the bot, and
-/// the question (so the copy a second window sends replaces this one instead of adding another).
-fn identifier(window: &str, bot: &str, question: &str) -> String {
-    format!("{window}\n{bot}\n{question}")
+/// A notification's identifier is the bot and the question: every open window asks for the same
+/// question, and the system keeps one notification per identifier, so there is one banner.
+fn identifier(bot: &str, question: &str) -> String {
+    format!("{bot}\n{question}")
 }
 
 /// A bot's id, as the page writes it into a script when a click opens the bot: nothing else
@@ -30,24 +30,18 @@ pub fn is_bot_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// The window and the bot a notification's identifier names.
-fn target(identifier: &str) -> Option<(&str, &str)> {
-    let mut parts = identifier.splitn(3, '\n');
-    let (window, bot) = (parts.next()?, parts.next()?);
-    is_bot_id(bot).then_some((window, bot))
+/// The bot a notification's identifier names.
+fn target(identifier: &str) -> Option<&str> {
+    let bot = identifier.split('\n').next()?;
+    is_bot_id(bot).then_some(bot)
 }
 
-/// A click: the window that asked (or any open one) comes forward and opens the bot.
+/// A click: an open window comes forward and opens the bot.
 fn clicked(app: &AppHandle, identifier: &str) {
-    let Some((label, bot)) = target(identifier) else {
+    let Some(bot) = target(identifier) else {
         return;
     };
-    let windows = app.webview_windows();
-    let Some(window) = windows
-        .get(label)
-        .or_else(|| windows.values().next())
-        .cloned()
-    else {
+    let Some(window) = app.webview_windows().into_values().next() else {
         // No window is open: Bate opens one; the person finds the bot in its list.
         let _ = crate::open_window(app);
         return;
@@ -115,16 +109,10 @@ pub fn listen(app: &AppHandle) {
         .setDelegate(Some(ProtocolObject::from_ref(&**delegate)));
 }
 
-/// Shows "<title>" and "<body>" for `bot`'s open `question`, asked by `window`. The first time,
-/// macOS asks the user's leave; without it nothing is shown. While Bate is the frontmost app
-/// macOS shows no banner: the row's badge is the notice then.
-pub fn waiting(
-    window: &str,
-    bot: &str,
-    question: &str,
-    title: &str,
-    body: &str,
-) -> Result<(), String> {
+/// Shows "<title>" and "<body>" for `bot`'s open `question`. The first time, macOS asks the
+/// user's leave; without it nothing is shown. While Bate is the frontmost app macOS shows no
+/// banner: the row's badge is the notice then.
+pub fn waiting(bot: &str, question: &str, title: &str, body: &str) -> Result<(), String> {
     if !is_bot_id(bot) {
         return Err("not a bot's id".into());
     }
@@ -132,7 +120,7 @@ pub fn waiting(
         return Err("notifications need Bate.app".into());
     }
     let (id, title, body) = (
-        identifier(window, bot, question),
+        identifier(bot, question),
         title.to_owned(),
         body.to_owned(),
     );
@@ -161,9 +149,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_click_finds_the_window_and_the_bot_in_the_identifier() {
-        let id = identifier("bate-2", "b_1-x", "q7");
-        assert_eq!(target(&id), Some(("bate-2", "b_1-x")));
+    fn a_click_finds_the_bot_in_the_identifier() {
+        assert_eq!(target(&identifier("b_1-x", "q7")), Some("b_1-x"));
     }
 
     #[test]
@@ -172,7 +159,7 @@ mod tests {
         for refused in ["", "a'b", "a b", "a\nb", "a);alert(1", &"a".repeat(65)] {
             assert!(!is_bot_id(refused), "{refused:?}");
         }
-        assert_eq!(target("bate-1\na'b\nq"), None);
-        assert_eq!(target("bate-1"), None);
+        assert_eq!(target("a'b\nq"), None);
+        assert_eq!(target(""), None);
     }
 }
