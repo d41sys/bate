@@ -218,12 +218,25 @@ export function Chat({ bot, jump, find = false, used = () => {}, showFile }: {
   useLayoutEffect(() => {
     if (atBottom.current && items.length) rows.scrollToIndex(items.length - 1, { align: "end" });
   }, [items, rows]);
+  // So does a shorter scroller: the message box grew, or a question came up under it.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    // Through the list: it puts back a position written past it.
+    const watch = new ResizeObserver(() => {
+      if (atBottom.current) rows.scrollToEnd();
+    });
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, []);
   // The message box is as tall as its words, up to the limit the style sets.
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
+    // Measuring made the box one line for a moment, which pulled the chat off its end.
+    if (atBottom.current) rows.scrollToEnd();
   }, [text]);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
