@@ -61,8 +61,9 @@ jobs:
 
   # A `wp-<name>-v<version>` tag publishes the workplace `workplaces/<name>/` as a release asset
   # that `catalog/workplaces.json` points at. The archive is packed by the script that made the
-  # entry's size and hash, and must equal them. The release is never the latest one: the updater
-  # reads `releases/latest/download/feed.json`, which only a `v*` release may own.
+  # entry's size and hash, and must equal them. The release is a prerelease, which GitHub never
+  # takes as the latest one (`--latest=false` alone does not hold while it is the only release):
+  # the updater reads `releases/latest/download/feed.json`, which only a `v*` release may own.
   workplace:
     if: startsWith(github.ref, 'refs/tags/wp-')
     needs: check
@@ -82,8 +83,9 @@ jobs:
             '.workplaces[] | select(.name == $n and .version == $v and .url == $u and (.size | tostring) == $s and .sha256 == $h)' \
             catalog/workplaces.json
           test "$(jq -r .version "workplaces/$name/workplace.json")" = "$version"
-          gh release create "$GITHUB_REF_NAME" "$file" --latest=false --verify-tag \
+          gh release create "$GITHUB_REF_NAME" "$file" --prerelease --verify-tag \
             --title "Workplace $name $version" --notes "The workplace $name $version, pinned by catalog/workplaces.json (size $size, sha256 $sha)."
-          test "$(gh release view "$GITHUB_REF_NAME" --json isLatest --jq .isLatest)" = false
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          test "$latest" != "$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}
