@@ -28,7 +28,7 @@ use crate::chatgpt;
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
-use crate::store::{Ledger, Store};
+use crate::store::{Conversation, Ledger, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
     apple, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
@@ -384,8 +384,8 @@ enum Waiter {
         routine: String,
         prompt: Outgoing,
     },
-    /// The service's own `start` or `open`.
-    Service,
+    /// The service's own `start` or `open` of this conversation.
+    Open(String),
     /// The service's own `connectors`.
     Connectors,
     /// A message from another bot or from a chat, sent on as a prompt.
@@ -414,7 +414,7 @@ enum Settles {
     /// The answered question is closed, and an "Always" answer is remembered as this grant.
     Question(String, Option<(Kind, String)>),
     /// The transcript goes back to before the prompt with this nonce; or, for a fork (true),
-    /// keeps everything and notes where the bot went on from.
+    /// the bot goes on in a new conversation that is a copy up to that prompt.
     Rewind(String, bool),
     /// The bot stops counting as busy with this compaction.
     Compact,
@@ -444,6 +444,18 @@ struct Running {
     /// Steers sent to the running turn that it has not taken in yet. One still here when the
     /// turn ends never reached it, and goes to the bot as the next prompt.
     steered: Vec<String>,
+    /// The conversation the engine has open, which its events belong to. It changes only
+    /// between turns.
+    conversation: String,
+    /// The conversation the next `session` event is of: set once the engine took its `start`
+    /// or `open`, or forked.
+    session_of: Option<String>,
+    /// `open` and `start` requests the engine has not answered yet.
+    opening: u32,
+    /// Requests for the open conversation held back until those are answered, as `queued`.
+    held: Vec<(String, Op)>,
+    /// The conversation the engine had open before the switch in flight.
+    was: String,
 }
 
 /// Who, other than the windows, a turn's last words go to.
@@ -1062,13 +1074,13 @@ impl Core {
         });
     }
 
-    /// Appends an entry to the bot's transcript and sends it to the windows.
-    fn record(&mut self, bot: &str, entry: Value) {
+    /// Appends an entry to the conversation's transcript and sends it to the windows.
+    fn record(&mut self, bot: &str, conversation: &str, entry: Value) {
         let at = now_ms();
-        match self.store.append(bot, at, &entry) {
-            Ok(seq) => self.broadcast(
-                &json!({"type": "transcript", "bot": bot, "seq": seq, "at": at, "entry": entry}),
-            ),
+        match self.store.append(conversation, at, &entry) {
+            Ok(seq) => self.broadcast(&json!({
+                "type": "transcript", "bot": bot, "conversation": conversation, "seq": seq, "at": at, "entry": entry,
+            })),
             Err(e) => log!("bot {bot}: transcript not written: {e}"),
         }
     }
@@ -1113,6 +1125,7 @@ impl Core {
             }
             "open_bot" => {
                 let bot = self.bot_of(f)?;
+                let conversation = self.conversation_of(f, &bot)?;
                 let row = self
                     .store
                     .bot(&bot)
@@ -1126,17 +1139,22 @@ impl Core {
                         .ok_or_else(|| bad(format!("`{key}` must be a whole number above 0"))),
                 };
                 let (before, limit) = (number("before", i64::MAX)?, number("limit", i64::MAX)?);
-                let (history, more) = self.store.history(&bot, before, limit).map_err(internal)?;
+                let (history, more) = self
+                    .store
+                    .history(&conversation, before, limit)
+                    .map_err(internal)?;
                 Ok(Some(json!({
                     "bot": self.bot_info(&bot, serde_json::to_value(&row).expect("serializable")),
+                    "conversation": conversation,
                     "history": history,
                     "more": more,
-                    "questions": self.store.questions(&bot).map_err(internal)?,
-                    "queue": self.queue_of(&bot)?,
+                    "questions": self.store.questions(&conversation).map_err(internal)?,
+                    "queue": self.queue_of(&bot, &conversation)?,
                 })))
             }
             "prompt" => {
                 let bot = self.bot_of(f)?;
+                let conversation = self.conversation_of(f, &bot)?;
                 let nonce = str_field(f, "nonce")?;
                 if nonce.is_empty()
                     || nonce.len() > 128
@@ -1154,7 +1172,7 @@ impl Core {
                         // One at a time and in order: a bot that is busy, or has prompts waiting,
                         // takes this one into its queue.
                         let waiting = self.store.queue(&bot).map_err(internal)?;
-                        if waiting.iter().any(|(n, _)| n == nonce) {
+                        if waiting.iter().any(|q| q.nonce == nonce) {
                             return Ok(Some(json!({"duplicate": true, "queued": true})));
                         }
                         if !waiting.is_empty() || !self.free(&bot) {
@@ -1165,9 +1183,9 @@ impl Core {
                                 ));
                             }
                             self.store
-                                .enqueue(&bot, nonce, text, false)
+                                .enqueue(&conversation, nonce, text, false)
                                 .map_err(internal)?;
-                            self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                            self.broadcast(&json!({"type": "queue_changed", "bot": bot, "conversation": conversation}));
                             self.drain_queue(&bot);
                             return Ok(Some(json!({"queued": true})));
                         }
@@ -1175,11 +1193,13 @@ impl Core {
                             nonce: nonce.into(),
                             text: text.into(),
                         };
-                        self.send_prompt(&bot, prompt, |p| Waiter::Window {
-                            client,
-                            id: id.clone(),
-                            command: command.into(),
-                            settles: Settles::Prompt(p),
+                        self.send_prompt_to(&bot, Some(&conversation), prompt, |p| {
+                            Waiter::Window {
+                                client,
+                                id: id.clone(),
+                                command: command.into(),
+                                settles: Settles::Prompt(p),
+                            }
                         })?;
                         Ok(None)
                     }
@@ -1187,8 +1207,9 @@ impl Core {
             }
             "answer" => {
                 let bot = self.bot_of(f)?;
+                let conversation = self.working_conversation(f, &bot)?;
                 let (question, choice) = (str_field(f, "question")?, str_field(f, "choice")?);
-                let open = self.store.questions(&bot).map_err(internal)?;
+                let open = self.store.questions(&conversation).map_err(internal)?;
                 let Some(asked) = open.iter().find(|q| q["question"] == question) else {
                     return Err((
                         "no_such_question",
@@ -1230,6 +1251,7 @@ impl Core {
             }
             "steer" => {
                 let bot = self.bot_of(f)?;
+                let conversation = self.working_conversation(f, &bot)?;
                 let text = str_field(f, "text")?.trim();
                 if text.is_empty() {
                     return Err(bad("`text` must not be empty"));
@@ -1241,9 +1263,13 @@ impl Core {
                             .into(),
                     ));
                 }
-                if !self.engines.get(&bot).is_some_and(|r| r.busy) {
-                    // No turn to steer: the message is the bot's next prompt.
-                    self.requeue(&bot, vec![text.to_owned()]);
+                if !self
+                    .engines
+                    .get(&bot)
+                    .is_some_and(|r| r.busy && r.conversation == conversation)
+                {
+                    // No turn to steer: the message is the conversation's next prompt.
+                    self.requeue(&bot, &conversation, vec![text.to_owned()]);
                     self.drain_queue(&bot);
                     return Ok(Some(json!({"queued": true})));
                 }
@@ -1279,6 +1305,10 @@ impl Core {
                     Op::SetModel { model, effort } => Some((model.clone(), effort.clone())),
                     _ => None,
                 };
+                if matches!(command, "rewind" | "compact") {
+                    let conversation = self.conversation_of(f, &bot)?;
+                    self.focus(&bot, &conversation)?;
+                }
                 self.send_op(
                     &bot,
                     op,
@@ -1304,18 +1334,74 @@ impl Core {
             }
             "list_queue" => {
                 let bot = self.bot_of(f)?;
-                Ok(Some(json!({"queue": self.queue_of(&bot)?})))
+                let conversation = self.conversation_of(f, &bot)?;
+                Ok(Some(json!({"queue": self.queue_of(&bot, &conversation)?})))
             }
             "remove_queued" => {
                 let bot = self.bot_of(f)?;
                 let nonce = str_field(f, "nonce")?;
                 // A prompt that has gone to the engine is no longer the queue's to take back.
-                if self.store.ledger(&bot, nonce).map_err(internal)?.is_some()
-                    || !self.store.dequeue(&bot, nonce).map_err(internal)?
-                {
+                let waited = match self.store.ledger(&bot, nonce).map_err(internal)? {
+                    Some(_) => None,
+                    None => self.store.dequeue(&bot, nonce).map_err(internal)?,
+                };
+                let Some(conversation) = waited else {
                     return Err(("no_such_prompt", "that prompt is not waiting".into()));
+                };
+                self.broadcast(
+                    &json!({"type": "queue_changed", "bot": bot, "conversation": conversation}),
+                );
+                Ok(Some(json!({})))
+            }
+            "list_conversations" => {
+                let bot = self.bot_of(f)?;
+                let working = self
+                    .engines
+                    .get(&bot)
+                    .filter(|r| r.busy || r.compacting > 0)
+                    .map(|r| r.conversation.clone());
+                let mut list = Vec::new();
+                for c in self.store.conversations(&bot).map_err(internal)? {
+                    let mut c = serde_json::to_value(&c).expect("serializable");
+                    c["busy"] = json!(working.as_deref() == c["id"].as_str());
+                    list.push(c);
                 }
-                self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                let current = self.current_conversation(&bot)?;
+                Ok(Some(json!({"conversations": list, "current": current})))
+            }
+            "new_conversation" => {
+                let bot = self.bot_of(f)?;
+                let conversation = self
+                    .store
+                    .new_conversation(&bot, now_ms())
+                    .map_err(internal)?;
+                self.broadcast(&json!({"type": "conversations_changed", "bot": bot}));
+                Ok(Some(json!({"conversation": conversation.id})))
+            }
+            "set_conversation" => {
+                let bot = self.bot_of(f)?;
+                if f.get("conversation").is_none_or(Value::is_null) {
+                    return Err(bad("`conversation` must be a conversation's id"));
+                }
+                let conversation = self.conversation_of(f, &bot)?;
+                let name = match f.get("name") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => match v.as_str().map(str::trim) {
+                        Some(n) if n.chars().count() <= 80 => Some(n),
+                        _ => return Err(bad("`name` must be at most 80 characters")),
+                    },
+                };
+                let flag = |key: &str| match f.get(key) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(v) => v
+                        .as_bool()
+                        .map(Some)
+                        .ok_or_else(|| bad(format!("`{key}` must be true or false"))),
+                };
+                self.store
+                    .set_conversation(&conversation, name, flag("pinned")?, flag("archived")?)
+                    .map_err(internal)?;
+                self.broadcast(&json!({"type": "conversations_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
             "list_routines" => {
@@ -1507,23 +1593,27 @@ impl Core {
                 let project = self.project_by_id(f)?;
                 let id = project.id.clone().unwrap_or_default();
                 let (to, text) = self.room_target(&project, str_field(f, "text")?)?;
-                if self.store.queue(&to).map_err(internal)?.len() >= QUEUE_MAX {
+                let queued = self.store.queue(&to).map_err(internal)?;
+                if queued.len() >= QUEUE_MAX {
                     return Err((
                         "queue_full",
                         format!("{QUEUE_MAX} prompts are already waiting"),
                     ));
                 }
-                let waits = !self.free(&to) || !self.store.queue(&to).map_err(internal)?.is_empty();
+                let waits = !self.free(&to) || !queued.is_empty();
                 let seq = self
                     .store
                     .put_room(&id, "", &to, text, now_ms())
                     .map_err(internal)?;
                 let nonce = format!("room-{seq}");
+                let conversation = self.current_conversation(&to)?;
                 self.store
-                    .enqueue(&to, &nonce, text, false)
+                    .enqueue(&conversation, &nonce, text, false)
                     .map_err(internal)?;
                 self.broadcast(&json!({"type": "room_changed", "projectId": id}));
-                self.broadcast(&json!({"type": "queue_changed", "bot": to}));
+                self.broadcast(
+                    &json!({"type": "queue_changed", "bot": to, "conversation": conversation}),
+                );
                 // Sent now if the bot is free, else it waits its turn like a typed prompt.
                 self.drain_queue(&to);
                 Ok(Some(json!({"seq": seq, "to": to, "queued": waits})))
@@ -1702,7 +1792,9 @@ impl Core {
                         .set_agent(&bot, command.as_deref())
                         .map_err(internal)?;
                     // The conversation is the other engine's: this one could not reopen it.
-                    self.store.clear_session(&bot).map_err(internal)?;
+                    for c in self.store.conversations(&bot).map_err(internal)? {
+                        self.store.clear_session(&c.id).map_err(internal)?;
+                    }
                     if let Some(r) = self.engines.get_mut(&bot) {
                         let _ = r.child.kill();
                     }
@@ -1801,6 +1893,7 @@ impl Core {
             }
             "export_chat" => {
                 let bot = self.bot_of(f)?;
+                let conversation = self.conversation_of(f, &bot)?;
                 let name = self
                     .store
                     .bot(&bot)
@@ -1809,7 +1902,7 @@ impl Core {
                     .name;
                 let (history, _) = self
                     .store
-                    .history(&bot, i64::MAX, i64::MAX)
+                    .history(&conversation, i64::MAX, i64::MAX)
                     .map_err(internal)?;
                 let path = attach::export(&bot, &name, &history, now_ms())
                     .map_err(|e| ("export_failed", e.to_string()))?;
@@ -1956,6 +2049,11 @@ impl Core {
                     Some(Value::Null) | None => None,
                     Some(_) => Some(self.bot_of(f)?),
                 };
+                let conversation = match (f.get("conversation"), &bot) {
+                    (None | Some(Value::Null), _) => None,
+                    (Some(_), Some(bot)) => Some(self.conversation_of(f, bot)?),
+                    (Some(_), None) => return Err(bad("`conversation` needs its `bot`")),
+                };
                 let limit = f
                     .get("limit")
                     .and_then(Value::as_u64)
@@ -1963,7 +2061,12 @@ impl Core {
                     .min(200);
                 let hits = self
                     .store
-                    .search(bot.as_deref(), text, limit as usize)
+                    .search(
+                        bot.as_deref(),
+                        conversation.as_deref(),
+                        text,
+                        limit as usize,
+                    )
                     .map_err(internal)?;
                 Ok(Some(json!({"hits": hits})))
             }
@@ -2306,7 +2409,7 @@ impl Core {
         row["running"] = json!(running.is_some());
         row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
         // An open question: the bot waits for the person's answer, which is not thinking.
-        row["waiting"] = json!(self.store.questions(bot).is_ok_and(|q| !q.is_empty()));
+        row["waiting"] = json!(self.store.has_questions(bot).unwrap_or(false));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
         row["wholeDisk"] = json!(self.store.whole_disk(bot).unwrap_or(false));
         row["network"] = json!(self.store.network(bot).unwrap_or(None));
@@ -2337,13 +2440,30 @@ impl Core {
         row
     }
 
-    /// Records the prompt in the ledger (committed before the engine sees it), then sends it.
+    /// Records the prompt in the ledger (committed before the engine sees it), then sends it to
+    /// the bot's current conversation: where a prompt goes that does not name one (a routine, a
+    /// chat, a message of another bot, the room).
     fn send_prompt(
         &mut self,
         bot: &str,
         prompt: Outgoing,
         waiter: impl FnOnce(Outgoing) -> Waiter,
     ) -> Result<(), Refusal> {
+        self.send_prompt_to(bot, None, prompt, waiter)
+    }
+
+    /// `send_prompt` to `conversation`, else the current one.
+    fn send_prompt_to(
+        &mut self,
+        bot: &str,
+        conversation: Option<&str>,
+        prompt: Outgoing,
+        waiter: impl FnOnce(Outgoing) -> Waiter,
+    ) -> Result<(), Refusal> {
+        let conversation = match conversation {
+            Some(c) => c.to_owned(),
+            None => self.current_conversation(bot)?,
+        };
         let nonce = prompt.nonce.clone();
         self.store
             .set_ledger(bot, &nonce, Ledger::Sending, now_ms())
@@ -2352,12 +2472,77 @@ impl Core {
             nonce: nonce.clone(),
             text: prompt.text.clone(),
         };
-        let sent = self.send_op(bot, op, waiter(prompt));
+        let sent = self
+            .focus(bot, &conversation)
+            .and_then(|()| self.send_op(bot, op, waiter(prompt)));
         if sent.is_err() {
             // The engine never started, so it cannot have the prompt.
             let _ = self.store.forget_ledger(bot, &nonce);
         }
         sent
+    }
+
+    /// The conversation a request names, which must be the bot's; else the bot's current one.
+    fn conversation_of(&self, f: &Value, bot: &str) -> Result<String, Refusal> {
+        match f.get("conversation") {
+            None | Some(Value::Null) => self.current_conversation(bot),
+            Some(v) => {
+                let id = v
+                    .as_str()
+                    .ok_or_else(|| bad("`conversation` must be a conversation's id"))?;
+                match self.store.conversation(id).map_err(internal)? {
+                    Some(c) if c.bot == bot => Ok(c.id),
+                    _ => Err((
+                        "no_such_conversation",
+                        format!("the bot has no conversation `{id}`"),
+                    )),
+                }
+            }
+        }
+    }
+
+    /// The conversation a request about the turn that runs is for: the one it names, else the one
+    /// the bot's engine has open, else the current one.
+    fn working_conversation(&self, f: &Value, bot: &str) -> Result<String, Refusal> {
+        match (f.get("conversation"), self.engines.get(bot)) {
+            (None | Some(Value::Null), Some(r)) if !r.conversation.is_empty() => {
+                Ok(r.conversation.clone())
+            }
+            _ => self.conversation_of(f, bot),
+        }
+    }
+
+    /// The conversation a prompt goes to that names none: the one last used.
+    fn current_conversation(&self, bot: &str) -> Result<String, Refusal> {
+        self.store.current_conversation(bot).map_err(internal)
+    }
+
+    /// Has the bot's engine open `conversation`, starting the engine if it has none. An engine
+    /// that works in another conversation moves to this one between turns only.
+    fn focus(&mut self, bot: &str, conversation: &str) -> Result<(), Refusal> {
+        self.ensure_engine(bot, Some(conversation))?;
+        if self.engines[bot].conversation == conversation {
+            return Ok(());
+        }
+        // No turn, no prompt on its way, no compaction: else the engine is not ours to move.
+        if !self.free(bot) {
+            return Err(("busy", "the bot is working in another conversation".into()));
+        }
+        let op = self.open_op(bot, conversation)?;
+        let r = self.engines.get_mut(bot).expect("engine just ensured");
+        r.was = std::mem::replace(&mut r.conversation, conversation.to_owned());
+        self.send_op(bot, op, Waiter::Open(conversation.to_owned()))
+    }
+
+    /// What makes the engine open `conversation`: its session, or a new one.
+    fn open_op(&self, bot: &str, conversation: &str) -> Result<Op, Refusal> {
+        Ok(match self.store.session(conversation).map_err(internal)? {
+            Some(session) => Op::Open {
+                bot: bot.into(),
+                session,
+            },
+            None => Op::Start { bot: bot.into() },
+        })
     }
 
     /// The engine answered a prompt: admitted (`sent`, and into the transcript) or refused (forgotten).
@@ -2370,29 +2555,47 @@ impl Core {
         if let Err(e) = stored {
             log!("bot {bot}: ledger not updated: {e}");
         }
+        let Some(conversation) = self.engines.get_mut(bot).map(|r| {
+            // A turn is under way from the moment the engine took the prompt, though its
+            // `turn_start` is still to come: the bot does not move to another conversation.
+            r.busy |= admitted;
+            r.conversation.clone()
+        }) else {
+            return;
+        };
         if admitted {
             self.record(
                 bot,
+                &conversation,
                 json!({"type": "prompt", "nonce": p.nonce, "text": p.text}),
             );
+            // It is the one last used now.
+            match self.store.touch_conversation(&conversation, now_ms()) {
+                Ok(()) => self.broadcast(&json!({"type": "conversations_changed", "bot": bot})),
+                Err(e) => log!("bot {bot}: conversation not touched: {e}"),
+            }
         }
     }
 
     fn send_op(&mut self, bot: &str, op: Op, waiter: Waiter) -> Result<(), Refusal> {
-        self.ensure_engine(bot)?;
+        self.ensure_engine(bot, None)?;
         self.counter += 1;
         let id = self.counter.to_string();
         let r = self.engines.get_mut(bot).expect("engine just ensured");
         r.waiting.insert(id.clone(), waiter);
+        if matches!(op, Op::Open { .. } | Op::Start { .. }) {
+            r.opening += 1;
+        }
         if r.ready {
-            write_op(bot, r, &id, &op);
+            dispatch(bot, r, id, op);
         } else {
             r.queued.push((id, op));
         }
         Ok(())
     }
 
-    fn ensure_engine(&mut self, bot: &str) -> Result<(), Refusal> {
+    /// Starts the bot's engine if it has none, with `conversation` open, else the current one.
+    fn ensure_engine(&mut self, bot: &str, conversation: Option<&str>) -> Result<(), Refusal> {
         if self.engines.contains_key(bot) {
             return Ok(());
         }
@@ -2451,13 +2654,11 @@ impl Core {
             service: self.hook_port,
             key,
         });
-        let open = match self.store.session(bot).map_err(internal)? {
-            Some(session) => Op::Open {
-                bot: bot.into(),
-                session,
-            },
-            None => Op::Start { bot: bot.into() },
+        let conversation = match conversation {
+            Some(c) => c.to_owned(),
+            None => self.current_conversation(bot)?,
         };
+        let open = self.open_op(bot, &conversation)?;
         let Engine {
             child,
             input,
@@ -2554,9 +2755,14 @@ impl Core {
                 routine: None,
                 browsing: None,
                 steered: Vec::new(),
+                conversation: conversation.clone(),
+                session_of: None,
+                opening: 0,
+                held: Vec::new(),
+                was: String::new(),
             },
         );
-        self.send_op(bot, open, Waiter::Service)?;
+        self.send_op(bot, open, Waiter::Open(conversation))?;
         self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)?;
         if !instructions.is_empty() {
             let text = instructions;
@@ -3482,29 +3688,48 @@ impl Core {
         })
     }
 
-    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction.
+    /// Whether `bot` can take a prompt now: no turn, no prompt unanswered, no compaction, and
+    /// no switch of conversation or rewind the engine has not answered yet.
     fn free(&self, bot: &str) -> bool {
-        !self.occupied(bot) && self.engines.get(bot).is_none_or(|r| r.compacting == 0)
+        !self.occupied(bot)
+            && self.engines.get(bot).is_none_or(|r| {
+                r.compacting == 0
+                    && r.opening == 0
+                    && !r.waiting.values().any(|w| {
+                        matches!(
+                            w,
+                            Waiter::Window {
+                                settles: Settles::Rewind(..),
+                                ..
+                            }
+                        )
+                    })
+            })
     }
 
-    fn queue_of(&self, bot: &str) -> Result<Value, Refusal> {
+    /// The prompts waiting in one of the bot's conversations.
+    fn queue_of(&self, bot: &str, conversation: &str) -> Result<Value, Refusal> {
         let queue = self.store.queue(bot).map_err(internal)?;
         Ok(queue
             .into_iter()
-            .map(|(nonce, text)| json!({"nonce": nonce, "text": text}))
+            .filter(|q| q.conversation == conversation)
+            .map(|q| json!({"nonce": q.nonce, "text": q.text}))
             .collect())
     }
 
-    /// Puts steers that never reached a turn first in the queue, in the order they were sent.
-    fn requeue(&mut self, bot: &str, texts: Vec<String>) {
+    /// Puts steers that never reached a turn first in the conversation's queue, in the order
+    /// they were sent.
+    fn requeue(&mut self, bot: &str, conversation: &str, texts: Vec<String>) {
         for text in texts.iter().rev() {
             let nonce = format!("steer-{}", sys::random_hex(4));
-            if let Err(e) = self.store.enqueue(bot, &nonce, text, true) {
+            if let Err(e) = self.store.enqueue(conversation, &nonce, text, true) {
                 log!("bot {bot}: steer not queued: {e}");
             }
         }
         if !texts.is_empty() {
-            self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+            self.broadcast(
+                &json!({"type": "queue_changed", "bot": bot, "conversation": conversation}),
+            );
         }
     }
 
@@ -3516,13 +3741,19 @@ impl Core {
                 Ok(queue) => queue.into_iter().next(),
                 Err(e) => return log!("bot {bot}: queue not read: {e}"),
             };
-            let Some((nonce, text)) = first else {
+            let Some(Queued {
+                conversation,
+                nonce,
+                text,
+            }) = first
+            else {
                 return self.deliver_mail(bot);
             };
             match self.store.ledger(bot, &nonce) {
                 Ok(None) => {
                     let (text, caller) = self.room_prompt(bot, &nonce, text);
-                    let sent = self.send_prompt(bot, Outgoing { nonce, text }, |prompt| {
+                    let prompt = Outgoing { nonce, text };
+                    let sent = self.send_prompt_to(bot, Some(&conversation), prompt, |prompt| {
                         Waiter::Queued { prompt, caller }
                     });
                     if let Err((_, e)) = sent {
@@ -3535,7 +3766,9 @@ impl Core {
                 Ok(Some(_)) => {
                     log!("bot {bot}: queued prompt {nonce} may have been sent; dropped");
                     let _ = self.store.dequeue(bot, &nonce);
-                    self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                    self.broadcast(
+                        &json!({"type": "queue_changed", "bot": bot, "conversation": conversation}),
+                    );
                 }
                 Err(e) => return log!("bot {bot}: ledger not read: {e}"),
             }
@@ -3787,13 +4020,19 @@ impl Core {
                 format!("[Your message to the bot {name:?} got no answer: {e}. It was: {asked:?}]")
             }
         };
+        let conversation = match self.store.current_conversation(&mail.from) {
+            Ok(c) => c,
+            Err(e) => return log!("bot {}: answer {seq} not queued: {e}", mail.from),
+        };
         if let Err(e) = self
             .store
-            .enqueue(&mail.from, &format!("answer-{seq}"), &text, false)
+            .enqueue(&conversation, &format!("answer-{seq}"), &text, false)
         {
             return log!("bot {}: answer {seq} not queued: {e}", mail.from);
         }
-        self.broadcast(&json!({"type": "queue_changed", "bot": mail.from}));
+        self.broadcast(
+            &json!({"type": "queue_changed", "bot": mail.from, "conversation": conversation}),
+        );
         self.drain_queue(&mail.from);
     }
 
@@ -4426,7 +4665,7 @@ impl Core {
                     None,
                     None,
                     Some(
-                        "No model is set up yet. Open this bot's Settings and sign in with \
+                        "No model is set up yet. Open the app's Settings and sign in with \
                          ChatGPT, or give a model server."
                             .into(),
                     ),
@@ -4541,7 +4780,7 @@ impl Core {
                 }
                 r.ready = true;
                 for (id, op) in std::mem::take(&mut r.queued) {
-                    write_op(bot, r, &id, &op);
+                    dispatch(bot, r, id, op);
                 }
                 return;
             }
@@ -4563,7 +4802,8 @@ impl Core {
                 let routine = if r.busy { None } else { r.routine.take() };
                 if !r.busy {
                     // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
-                    self.close_questions(bot);
+                    let conversation = r.conversation.clone();
+                    self.close_questions(bot, &conversation);
                 }
                 if let (Some(call), Event::TurnEnd { reason, error }) = (answered, &ev) {
                     let reply = match (reason, call.reply.trim()) {
@@ -4604,7 +4844,11 @@ impl Core {
                 }
             }
             Event::Session { session } => {
-                if let Err(e) = self.store.set_session(bot, session) {
+                let conversation = r
+                    .session_of
+                    .take()
+                    .unwrap_or_else(|| r.conversation.clone());
+                if let Err(e) = self.store.set_session(&conversation, session) {
                     log!("bot {bot}: session not stored: {e}");
                 }
             }
@@ -4612,7 +4856,8 @@ impl Core {
                 question, title, ..
             } => {
                 let entry = with_folder(&ev);
-                if let Err(e) = self.store.put_question(bot, question, &entry) {
+                let conversation = r.conversation.clone();
+                if let Err(e) = self.store.put_question(&conversation, question, &entry) {
                     log!("bot {bot}: question not stored: {e}");
                 }
                 // The chat cannot answer it: whoever wrote there is told where to.
@@ -4628,9 +4873,24 @@ impl Core {
             }
             _ => {}
         }
-        self.record(bot, with_folder(&ev));
+        let Some(conversation) = self.engines.get(bot).map(|r| r.conversation.clone()) else {
+            return;
+        };
+        self.record(bot, &conversation, with_folder(&ev));
         if matches!(ev, Event::Question { .. }) {
             self.broadcast(&json!({"type": "bots_changed"}));
+        }
+        // The bot has replied: the conversation is titled, if it has no title yet.
+        if let Event::TurnEnd {
+            reason: proto::TurnEnd::Done,
+            ..
+        } = ev
+        {
+            match self.store.title_conversation(&conversation) {
+                Ok(true) => self.broadcast(&json!({"type": "conversations_changed", "bot": bot})),
+                Ok(false) => {}
+                Err(e) => log!("bot {bot}: conversation not titled: {e}"),
+            }
         }
         if matches!(ev, Event::TurnEnd { .. }) && self.project_restarts.contains(bot) {
             self.on_engine_gone(bot);
@@ -4638,7 +4898,7 @@ impl Core {
         if matches!(ev, Event::TurnEnd { .. }) {
             if let Some(r) = self.engines.get_mut(bot) {
                 let steered = std::mem::take(&mut r.steered);
-                self.requeue(bot, steered);
+                self.requeue(bot, &conversation, steered);
             }
             self.drain_queue(bot);
         }
@@ -4673,23 +4933,49 @@ impl Core {
         })
     }
 
-    fn close_questions(&mut self, bot: &str) {
-        let open = match self.store.questions(bot) {
+    fn close_questions(&mut self, bot: &str, conversation: &str) {
+        let open = match self.store.questions(conversation) {
             Ok(open) => open,
             Err(e) => return log!("bot {bot}: store: {e}"),
         };
         for q in open {
             let q = q["question"].as_str().unwrap_or_default();
-            match self.store.take_question(bot, q) {
-                Ok(_) => {
-                    self.broadcast(&json!({"type": "question_closed", "bot": bot, "question": q}))
-                }
+            match self.store.take_question(conversation, q) {
+                Ok(_) => self.broadcast(&json!({
+                    "type": "question_closed", "bot": bot, "conversation": conversation, "question": q,
+                })),
                 Err(e) => log!("bot {bot}: question not closed: {e}"),
             }
         }
     }
 
+    /// "Fork from here": the engine went on in a copy of its conversation `from`. The bot goes on
+    /// in a new conversation, a copy of `from` up to its prompt `nonce`; `from` is left as it was.
+    fn fork_conversation(&mut self, bot: &str, from: &str, nonce: &str) -> Option<Conversation> {
+        let forked = match self.store.fork_conversation(from, nonce, now_ms()) {
+            Ok(forked) => forked,
+            Err(e) => {
+                log!("bot {bot}: conversation not forked: {e}");
+                return None;
+            }
+        };
+        if let Some(r) = self.engines.get_mut(bot) {
+            r.conversation = forked.id.clone();
+            // The engine's `session` event for the copy follows this response.
+            r.session_of = Some(forked.id.clone());
+        }
+        self.broadcast(&json!({"type": "conversations_changed", "bot": bot}));
+        Some(forked)
+    }
+
     fn on_response(&mut self, bot: &str, waiter: Waiter, error: Option<String>) {
+        let conversation = self
+            .engines
+            .get(bot)
+            .expect("checked by generation")
+            .conversation
+            .clone();
+        let mut forked = None;
         match waiter {
             Waiter::Window {
                 client,
@@ -4701,11 +4987,11 @@ impl Core {
                     (Settles::Prompt(p), _) => self.settle_prompt(bot, p, error.is_none()),
                     // A question is closed only once the engine took the answer.
                     (Settles::Question(q, grant), None) => {
-                        match self.store.take_question(bot, q) {
+                        match self.store.take_question(&conversation, q) {
                             Ok(_) => {
-                                self.broadcast(
-                                    &json!({"type": "question_closed", "bot": bot, "question": q}),
-                                );
+                                self.broadcast(&json!({
+                                    "type": "question_closed", "bot": bot, "conversation": conversation, "question": q,
+                                }));
                                 self.broadcast(&json!({"type": "bots_changed"}));
                             }
                             Err(e) => log!("bot {bot}: question not closed: {e}"),
@@ -4723,17 +5009,14 @@ impl Core {
                             }
                         }
                     }
-                    // A fork left the old conversation as it was: history keeps it and says
-                    // from where the bot goes on.
+                    // A fork goes on in a new conversation and leaves this one as it was.
                     (Settles::Rewind(nonce, true), None) => {
-                        self.record(bot, json!({"type": "fork", "nonce": nonce}));
+                        forked = self.fork_conversation(bot, &conversation, nonce);
                     }
                     // The engine's conversation no longer has these entries, so history must not show them.
                     (Settles::Rewind(nonce, false), None) => {
-                        match self.store.rewind_transcript(bot, nonce) {
-                            Ok(()) => {
-                                self.broadcast(&json!({"type": "history_changed", "bot": bot}))
-                            }
+                        match self.store.rewind_transcript(&conversation, nonce) {
+                            Ok(()) => self.broadcast(&json!({"type": "history_changed", "bot": bot, "conversation": conversation})),
                             Err(e) => log!("bot {bot}: history not rewound: {e}"),
                         }
                     }
@@ -4750,17 +5033,22 @@ impl Core {
                         {
                             r.steered.remove(i);
                         }
-                        self.requeue(bot, vec![text.clone()]);
+                        self.requeue(bot, &conversation, vec![text.clone()]);
                         self.drain_queue(bot);
                     }
                     _ => {}
                 }
+                let rewound = matches!(settles, Settles::Rewind(..));
                 let result = match (&settles, error) {
                     (Settles::Steer(_), Some(_)) => Ok(json!({"queued": true})),
                     (_, Some(e)) => Err(("engine_error", e)),
-                    (_, None) => Ok(json!({})),
+                    (_, None) => Ok(forked.map_or(json!({}), |c| json!({"conversation": c.id}))),
                 };
                 self.reply(client, &id, &command, result);
+                // The engine may now be moved again: what waited in the queue goes.
+                if rewound {
+                    self.drain_queue(bot);
+                }
             }
             Waiter::Routine { routine, prompt } => {
                 self.settle_prompt(bot, &prompt, error.is_none());
@@ -4814,7 +5102,7 @@ impl Core {
                                 reply: String::new(),
                             });
                         }
-                        self.broadcast(&json!({"type": "queue_changed", "bot": bot}));
+                        self.broadcast(&json!({"type": "queue_changed", "bot": bot, "conversation": conversation}));
                     }
                     // It stays first in line: the next time the bot is free it is tried again.
                     Some(e) => log!("bot {bot}: engine refused a queued prompt: {e}"),
@@ -4826,26 +5114,95 @@ impl Core {
                     log!("bot {bot}: engine refused the decision: {e}");
                 }
             }
-            Waiter::Service => {
-                let Some(e) = error else { return };
-                // Only a refused `open` has a session to blame; a refused `start` is just logged.
-                if !matches!(self.store.session(bot), Ok(Some(_))) {
-                    log!("bot {bot}: engine refused to start a conversation: {e}");
-                    return;
+            Waiter::Open(opened) => {
+                if let Some(r) = self.engines.get_mut(bot) {
+                    r.opening = r.opening.saturating_sub(1);
                 }
-                // A stale session would fail every later start too: forget it and begin anew.
-                log!("bot {bot}: engine refused to open the conversation: {e}; starting a new one");
-                if let Err(e) = self.store.clear_session(bot) {
-                    log!("bot {bot}: session not cleared: {e}");
-                    return;
-                }
-                if let Err((_, e)) =
-                    self.send_op(bot, Op::Start { bot: bot.into() }, Waiter::Service)
-                {
-                    log!("bot {bot}: {e}");
+                match error {
+                    None => {
+                        if let Some(r) = self.engines.get_mut(bot) {
+                            r.session_of = Some(opened);
+                        }
+                        self.release_held(bot, None);
+                        // What waited in the queue for the switch goes now.
+                        self.drain_queue(bot);
+                    }
+                    Some(e) => self.open_refused(bot, opened, e),
                 }
             }
         }
+    }
+
+    /// The engine answered the last open request in flight. Success: what waited for the
+    /// switch goes now. Refusal: it never goes (the engine has another conversation's session,
+    /// or none), and each of those requests is answered with the refusal.
+    fn release_held(&mut self, bot: &str, refused: Option<&str>) {
+        let Some(r) = self.engines.get_mut(bot) else {
+            return;
+        };
+        if r.opening > 0 {
+            return;
+        }
+        let held = std::mem::take(&mut r.held);
+        let Some(why) = refused else {
+            for (id, op) in held {
+                write_op(bot, r, &id, &op);
+            }
+            return;
+        };
+        // An `abort` has nothing left to stop: it is answered as done.
+        let waiters: Vec<(Waiter, bool)> = held
+            .into_iter()
+            .filter_map(|(id, op)| Some((r.waiting.remove(&id)?, matches!(op, Op::Abort))))
+            .collect();
+        for (waiter, abort) in waiters {
+            let error =
+                (!abort).then(|| format!("the engine could not open the conversation: {why}"));
+            self.on_response(bot, waiter, error);
+        }
+    }
+
+    /// The engine refused to open `opened`. A session it cannot open is forgotten and the
+    /// conversation starts anew, unless the engine was busy (then the session is fine).
+    fn open_refused(&mut self, bot: &str, opened: String, why: String) {
+        let working = self.engines.get(bot).is_some_and(|r| {
+            let compacting = r
+                .held
+                .iter()
+                .filter(|(_, op)| matches!(op, Op::Compact))
+                .count();
+            r.busy || r.compacting as usize > compacting
+        });
+        if working {
+            log!("bot {bot}: engine refused to open the conversation: {why}; it is working");
+            if let Some(r) = self.engines.get_mut(bot) {
+                r.conversation = std::mem::take(&mut r.was);
+            }
+        } else {
+            if matches!(self.store.session(&opened), Ok(Some(_))) {
+                // A stale session would fail every later open too: forget it and begin anew.
+                log!(
+                    "bot {bot}: engine refused to open the conversation: {why}; starting a new one"
+                );
+                match self.store.clear_session(&opened) {
+                    Ok(()) => {
+                        let start = Op::Start { bot: bot.into() };
+                        match self.send_op(bot, start, Waiter::Open(opened.clone())) {
+                            Ok(()) => return,
+                            Err((_, e)) => log!("bot {bot}: {e}"),
+                        }
+                    }
+                    Err(e) => log!("bot {bot}: session not cleared: {e}"),
+                }
+            } else {
+                log!("bot {bot}: engine refused to start a conversation: {why}");
+            }
+            // It has no session open now: the next request opens one.
+            if let Some(r) = self.engines.get_mut(bot) {
+                r.conversation.clear();
+            }
+        }
+        self.release_held(bot, Some(&why));
     }
 
     fn on_engine_gone(&mut self, bot: &str) {
@@ -4864,7 +5221,11 @@ impl Core {
                 reason: proto::TurnEnd::Error,
                 error: Some("the engine stopped".into()),
             };
-            self.record(bot, serde_json::to_value(&end).expect("serializable"));
+            self.record(
+                bot,
+                &r.conversation,
+                serde_json::to_value(&end).expect("serializable"),
+            );
         }
         for e in [
             self.store.ledger_engine_stopped(bot),
@@ -4875,9 +5236,14 @@ impl Core {
             }
         }
         let steered = std::mem::take(&mut r.steered);
-        self.requeue(bot, steered);
+        self.requeue(bot, &r.conversation, steered);
         // Prompts still queued were never written: the engine cannot have them.
-        let unwritten: Vec<String> = r.queued.iter().map(|(id, _)| id.clone()).collect();
+        let unwritten: Vec<String> = r
+            .queued
+            .iter()
+            .chain(r.held.iter())
+            .map(|(id, _)| id.clone())
+            .collect();
         for (req, waiter) in r.waiting {
             if let Waiter::Window {
                 settles: Settles::Prompt(p),
@@ -4913,7 +5279,7 @@ impl Core {
                     self.chat_routine_failed(bot, &caller, "the engine stopped");
                     self.answer_caller(bot, caller, Err("its engine stopped".into()))
                 }
-                Waiter::Service
+                Waiter::Open(_)
                 | Waiter::Connectors
                 | Waiter::Decision
                 | Waiter::Quiet
@@ -5219,6 +5585,22 @@ impl Core {
             log!("bot {bot}: routine {id} not stored: {e}");
         }
         self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+    }
+}
+
+/// Writes a request for the engine, but holds one that belongs to a conversation while the
+/// engine has not yet said it opened that conversation: an agent switches only when it answers.
+fn dispatch(bot: &str, r: &mut Running, id: String, op: Op) {
+    // An `abort` goes after what it is meant to stop, as when everything waited for `ready`.
+    let hold = match op {
+        Op::Prompt { .. } | Op::Rewind { .. } | Op::Compact => true,
+        Op::Abort => !r.held.is_empty(),
+        _ => false,
+    };
+    if r.opening > 0 && hold {
+        r.held.push((id, op));
+    } else {
+        write_op(bot, r, &id, &op);
     }
 }
 

@@ -675,6 +675,27 @@ fn a_killed_engine_leaves_its_unfinished_call_interrupted_on_open() {
     assert!(messages.contains("Interrupted"), "{messages}");
 }
 
+#[test]
+fn a_conversation_that_cannot_be_opened_leaves_none_open() {
+    let dir = workdir("open-fails");
+    let model = Model::serve(vec![vec![text("never asked")]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let open = Op::Open {
+        bot: "b1".into(),
+        session: "gone-for-good".into(),
+    };
+    assert!(engine.request(open).is_some());
+    // The first conversation is not the one the person asked for: nothing goes into it.
+    let prompt = Op::Prompt {
+        nonce: "n1".into(),
+        text: "hello".into(),
+    };
+    let error = engine.request(prompt).unwrap();
+    assert!(error.contains("no conversation is open"), "{error}");
+    assert!(model.requests().is_empty());
+}
+
 /// One scripted text reply per string.
 fn replies(texts: &[&str]) -> Vec<Vec<Value>> {
     texts.iter().map(|t| vec![text(t)]).collect()

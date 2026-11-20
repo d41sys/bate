@@ -75,6 +75,7 @@ All in `window/ui/src/style.css`. "Built" means it is there now; a number is the
 | Tooltip | `data-tip="…"` on a control; the text is shown above it for a pointer or the keyboard, and not on a touch screen, so it never holds the only copy of something a button must say | hover, focus | yes |
 | Button with a hint key | `<button>Stop <kbd>Esc</kbd></button>`: the key that does the same, hidden under 640 px | | yes |
 | Popover, select with search | `.menu` around a chip (`<button class="small chip" aria-expanded>`) and a `.popover` (`role="dialog"`) holding a search `<input>`, a `<ul role="listbox">` of `.row.plain` buttons and other controls. A click outside or Esc closes it; Esc is taken there and does not reach the page | closed, open, chosen row, no match | yes |
+| Conversation switcher | `<div class="conversations">` above the chat: a `.menu` with a chip (the conversation's name) whose `.popover.below` lists the bot's conversations as `.row.plain` buttons with a date under the name (or "Working…"), `.actions` of small ghost buttons beside each (Pin, Rename, Archive), and a "Show archived" checkbox; a "New conversation" button after it. A rename is a one-field form in the row | closed, open, chosen row, working, pinned, archived, renaming | yes |
 | Toast, folder picker | | | #150 |
 | Loading | A `.note` saying what is loading; no spinner | | yes |
 

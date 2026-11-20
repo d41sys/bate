@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::keychain;
 use crate::oauth::Tokens;
-use crate::sys::log;
+use crate::sys::{log, random_hex};
 use proto::connectors::Connector;
 use proto::permissions::{Grant, Kind, Level};
 use proto::projects::Project;
@@ -25,6 +25,46 @@ pub struct BotRow {
     pub id: String,
     pub name: String,
     pub created_at: u64,
+}
+
+/// One of a bot's conversations. The engine's session it works in is the store's own.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: String,
+    pub bot: String,
+    pub created_at: u64,
+    /// When a prompt last went into it, in Unix milliseconds.
+    pub touched_at: u64,
+    /// Made from the first prompt once the bot had replied to it; empty before.
+    pub title: String,
+    /// What the person called it; empty when never named.
+    pub name: String,
+    pub pinned: bool,
+    pub archived: bool,
+}
+
+const CONVERSATION: &str =
+    "SELECT id, bot, created_at, touched_at, title, name, pinned, archived FROM conversations";
+
+fn conversation_row(r: &rusqlite::Row) -> Result<Conversation> {
+    Ok(Conversation {
+        id: r.get(0)?,
+        bot: r.get(1)?,
+        created_at: r.get(2)?,
+        touched_at: r.get(3)?,
+        title: r.get(4)?,
+        name: r.get(5)?,
+        pinned: r.get(6)?,
+        archived: r.get(7)?,
+    })
+}
+
+/// A prompt that waits for its bot to be free.
+pub struct Queued {
+    pub conversation: String,
+    pub nonce: String,
+    pub text: String,
 }
 
 /// A message from one bot to another, kept until it is answered and after.
@@ -134,13 +174,15 @@ impl Ledger {
 /// Every relation is a foreign key: the rows of a bot go with it (`ON DELETE CASCADE`), and a
 /// bot's project and a project's lead are cleared when what they point at is deleted.
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT, project TEXT REFERENCES projects(id) ON DELETE SET NULL);
+CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, project TEXT REFERENCES projects(id) ON DELETE SET NULL);
 CREATE INDEX IF NOT EXISTS bots_project ON bots(project);
-CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, at INTEGER NOT NULL, entry TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
+CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, touched_at INTEGER NOT NULL, session TEXT, title TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS conversations_bot ON conversations(bot, touched_at);
+CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, at INTEGER NOT NULL, entry TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS transcript_conversation ON transcript(conversation, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
-CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
-CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(conversation, nonce));
+CREATE TABLE IF NOT EXISTS questions(conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(conversation, question));
 CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, whole_disk INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, hosts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, command TEXT NOT NULL);
@@ -168,15 +210,15 @@ CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 CREATE INDEX IF NOT EXISTS mail_from ON mail(from_bot);
 ";
 
-/// What `PRAGMA user_version` holds once relations are foreign keys; 0 before.
-const SCHEMA_VERSION: i64 = 1;
+/// What `PRAGMA user_version` holds: 0 before relations were foreign keys, 1 for those, 2 once
+/// a bot has many conversations and the transcript, the waiting prompts and the open questions
+/// belong to a conversation.
+const SCHEMA_VERSION: i64 = 2;
 
-/// Every table that holds rows of a bot, in its `bot` column, besides `bots` and `mail`.
-const BOT_TABLES: [&str; 18] = [
-    "transcript",
+/// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
+/// `conversations`.
+const BOT_TABLES: [&str; 15] = [
     "ledger",
-    "queue",
-    "questions",
     "access",
     "network",
     "agents",
@@ -193,31 +235,37 @@ const BOT_TABLES: [&str; 18] = [
     "chats",
 ];
 
+/// The tables that hold rows of a conversation, in their `conversation` column. A database of
+/// version 1 or less holds them in a `bot` column; its bot's one conversation takes them.
+const CONVERSATION_TABLES: [&str; 3] = ["transcript", "queue", "questions"];
+
 /// An error of the kind the database gives for a row it refuses.
 fn refused(why: &str) -> rusqlite::Error {
     let code = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT);
     rusqlite::Error::SqliteFailure(code, Some(why.to_owned()))
 }
 
-/// Whether `conn` holds a database from before relations were foreign keys.
-fn is_old(conn: &Connection) -> Result<bool> {
+/// The `user_version` of `conn` when it holds a database from before this schema, which is to
+/// be moved.
+fn old_version(conn: &Connection) -> Result<Option<i64>> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    Ok(version == 0 && has_table(conn, "bots")?)
+    Ok((version < SCHEMA_VERSION && has_table(conn, "bots")?).then_some(version))
 }
 
 /// The move cannot be undone, and an older version cannot read its result: before it, keeps one
-/// copy of the database next to it, `<file>.before-1`, readable by its owner only. A copy that is
-/// already there is kept (a move that failed is tried again from the same database). Without
-/// the copy there is no move.
+/// copy of the database next to it, `<file>.before-N`, readable by its owner only, where N is
+/// one more than the version the database has (`before-1` holds one from before foreign keys,
+/// `before-2` one of version 1). A copy that is already there is kept (a move that failed is
+/// tried again from the same database). Without the copy there is no move.
 fn back_up(conn: &Connection, path: &Path) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    if !is_old(conn)? {
+    let Some(version) = old_version(conn)? else {
         return Ok(());
-    }
+    };
     let file = path.file_name().expect("a database file").to_string_lossy();
     let (copy, part) = (
-        path.with_file_name(format!("{file}.before-1")),
-        path.with_file_name(format!("{file}.before-1.part")),
+        path.with_file_name(format!("{file}.before-{}", version + 1)),
+        path.with_file_name(format!("{file}.before-{}.part", version + 1)),
     );
     if copy.exists() {
         return Ok(());
@@ -246,43 +294,78 @@ fn back_up(conn: &Connection, path: &Path) -> Result<()> {
         return Err(e);
     }
     log!(
-        "{}: kept as it was before the move to foreign keys",
+        "{}: kept as it was before the move to version {SCHEMA_VERSION}",
         copy.display()
     );
     Ok(())
 }
 
-/// Creates the tables, and first moves an `app.db` written before the relations were foreign
-/// keys, once, in one transaction. SQLite cannot add a foreign key to a table, so each table
-/// that gets one is rebuilt, with foreign keys off as its documentation describes. A row that
-/// points at a bot that does not exist is dropped, and logged.
+/// Creates the tables, and first moves an `app.db` of an older version, once, in one
+/// transaction. SQLite cannot add a foreign key to a table, so each table that gets one is
+/// rebuilt, with foreign keys off as its documentation describes. A row that points at a bot
+/// that does not exist is dropped, and logged. Each bot's transcript, waiting prompts, open
+/// questions and engine session become those of its first conversation, which has the bot's id.
 fn migrate(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", false)?;
     let tx = conn.unchecked_transaction()?;
-    let old = is_old(&tx)?;
+    let old = old_version(&tx)?;
     // The tables to rebuild: an older database may lack some that a still older one never made.
     let mut moved = Vec::new();
-    for table in BOT_TABLES.into_iter().chain(["mail", "projects", "bots"]) {
-        if old && has_table(&tx, table)? {
+    let all = BOT_TABLES.into_iter().chain(CONVERSATION_TABLES);
+    for table in all.chain(["mail", "projects", "bots"]) {
+        if old.is_some() && has_table(&tx, table)? {
             tx.execute(&format!("ALTER TABLE {table} RENAME TO {table}_old"), [])?;
             moved.push(table);
         }
     }
-    if old {
-        // The indexes went with their tables; the new ones take their names.
-        for index in ["transcript_bot", "routine_runs_of", "mail_to"] {
-            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), [])?;
+    if old.is_some() {
+        // The indexes stayed with their tables; the new ones take their names.
+        let mut stmt = tx.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL AND tbl_name LIKE '%\\_old' ESCAPE '\\'",
+        )?;
+        let indexes: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
+        for index in indexes {
+            tx.execute(&format!("DROP INDEX {index}"), [])?;
         }
     }
     tx.execute_batch(SCHEMA)?;
-    if old {
+    if let Some(version) = old {
         copy_old(&tx, "bots", "1")?;
         let known = "IN (SELECT id FROM bots)";
         for table in BOT_TABLES {
             copy_old(&tx, table, &format!("bot {known}"))?;
         }
         copy_old(&tx, "mail", &format!("from_bot {known} AND to_bot {known}"))?;
-        copy_old_projects(&tx)?;
+        if version == 0 {
+            copy_old_projects(&tx)?;
+        } else {
+            copy_old(&tx, "projects", "1")?;
+        }
+        // One conversation for each bot, which has the engine's session the bot had.
+        let session = if has_column(&tx, "bots_old", "session")? {
+            "o.session"
+        } else {
+            "NULL"
+        };
+        tx.execute(
+            &format!(
+                "INSERT INTO conversations(id, bot, created_at, touched_at, session) \
+                 SELECT b.id, b.id, b.created_at, b.created_at, {session} FROM bots b JOIN bots_old o ON o.id = b.id"
+            ),
+            [],
+        )?;
+        for table in CONVERSATION_TABLES {
+            copy_old_conversation_rows(&tx, table)?;
+        }
+        tx.execute(
+            "UPDATE conversations SET touched_at = COALESCE((SELECT max(at) FROM transcript WHERE conversation = conversations.id), created_at)",
+            [],
+        )?;
+        let mut stmt = tx.prepare("SELECT id FROM conversations")?;
+        let ids: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
+        for id in ids {
+            give_title(&tx, &id)?;
+        }
         for table in moved {
             // A table's last number is not given again.
             tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])?;
@@ -307,6 +390,76 @@ fn migrate(conn: &Connection) -> Result<()> {
 fn has_table(conn: &Connection, name: &str) -> Result<bool> {
     conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
         .exists([name])
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
+        .exists([table, column])
+}
+
+/// Copies the rows of `{table}_old`, which hold a `bot`, into `table`, which holds a
+/// `conversation` instead: the one conversation each bot has, which has the bot's id.
+fn copy_old_conversation_rows(tx: &Connection, table: &str) -> Result<()> {
+    if !has_table(tx, &format!("{table}_old"))? {
+        return Ok(());
+    }
+    let (columns, from): (String, String) = tx.query_row(
+        &format!(
+            "SELECT group_concat('\"' || n.name || '\"'), group_concat('o.\"' || n.name || '\"') \
+             FROM pragma_table_info('{table}') n JOIN pragma_table_info('{table}_old') o ON o.name = n.name"
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    tx.execute(
+        &format!(
+            "INSERT INTO {table}(conversation, {columns}) \
+             SELECT c.id, {from} FROM {table}_old o JOIN conversations c ON c.bot = o.bot"
+        ),
+        [],
+    )?;
+    let dropped: i64 = tx.query_row(
+        &format!("SELECT (SELECT count(*) FROM {table}_old) - (SELECT count(*) FROM {table})"),
+        [],
+        |r| r.get(0),
+    )?;
+    if dropped > 0 {
+        log!("app.db: {dropped} rows of {table} pointed at a bot that does not exist; dropped");
+    }
+    Ok(())
+}
+
+/// Longest title, in characters.
+const TITLE_CHARS: usize = 60;
+
+/// A title for a conversation made from its first prompt: its first line with the spaces in it
+/// squeezed, cut short.
+fn title_of(prompt: &str) -> String {
+    let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(TITLE_CHARS) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
+}
+
+/// Gives a conversation that has no title one, from its first prompt, if it has one. `true`
+/// when it got one.
+fn give_title(conn: &Connection, conversation: &str) -> Result<bool> {
+    let first: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(entry, '$.text') FROM transcript WHERE conversation = ?1 \
+             AND json_extract(entry, '$.type') = 'prompt' ORDER BY seq LIMIT 1",
+            [conversation],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let title = first.as_deref().map(title_of).unwrap_or_default();
+    Ok(conn.execute(
+        "UPDATE conversations SET title = ?2 WHERE id = ?1 AND title = '' AND ?2 != ''",
+        params![conversation, title],
+    )? > 0)
 }
 
 /// Copies the rows of `{table}_old` that satisfy `keep` into `table`, in the columns both have.
@@ -383,9 +536,13 @@ const MAX_RUNS: u32 = 50;
 
 /// A place `search` found the words.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Hit {
     pub bot: String,
+    pub conversation: String,
     pub seq: i64,
+    /// When the words were written, in Unix milliseconds.
+    pub at_ms: u64,
     /// `user` (a prompt) or `reply`.
     pub kind: &'static str,
     pub snippet: String,
@@ -556,11 +713,18 @@ impl Store {
         Ok(Store(conn))
     }
 
+    /// A new bot has one conversation.
     pub fn create_bot(&self, id: &str, name: &str, now: u64) -> Result<BotRow> {
-        self.0.execute(
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO bots(id, name, created_at) VALUES (?1, ?2, ?3)",
             params![id, name, now],
         )?;
+        tx.execute(
+            "INSERT INTO conversations(id, bot, created_at, touched_at) VALUES (?1, ?2, ?3, ?3)",
+            params![random_hex(4), id, now],
+        )?;
+        tx.commit()?;
         Ok(BotRow {
             id: id.to_owned(),
             name: name.to_owned(),
@@ -868,88 +1032,201 @@ impl Store {
             .optional()
     }
 
-    pub fn session(&self, bot: &str) -> Result<Option<String>> {
-        self.0
-            .query_row("SELECT session FROM bots WHERE id = ?1", [bot], |r| {
-                r.get(0)
-            })
+    /// The engine's session of a conversation; `None` until the engine made one.
+    pub fn session(&self, conversation: &str) -> Result<Option<String>> {
+        self.0.query_row(
+            "SELECT session FROM conversations WHERE id = ?1",
+            [conversation],
+            |r| r.get(0),
+        )
     }
 
-    pub fn set_session(&self, bot: &str, session: &str) -> Result<()> {
+    pub fn set_session(&self, conversation: &str, session: &str) -> Result<()> {
         self.0
             .execute(
-                "UPDATE bots SET session = ?2 WHERE id = ?1",
-                params![bot, session],
+                "UPDATE conversations SET session = ?2 WHERE id = ?1",
+                params![conversation, session],
             )
             .map(drop)
     }
 
-    pub fn clear_session(&self, bot: &str) -> Result<()> {
+    pub fn clear_session(&self, conversation: &str) -> Result<()> {
         self.0
-            .execute("UPDATE bots SET session = NULL WHERE id = ?1", [bot])
+            .execute(
+                "UPDATE conversations SET session = NULL WHERE id = ?1",
+                [conversation],
+            )
             .map(drop)
     }
 
-    /// Appends one transcript entry; returns its sequence number.
-    pub fn append(&self, bot: &str, at: u64, entry: &Value) -> Result<i64> {
+    /// The bot's conversations: pinned first, then the most recently used.
+    pub fn conversations(&self, bot: &str) -> Result<Vec<Conversation>> {
+        let mut stmt = self.0.prepare_cached(&format!(
+            "{CONVERSATION} WHERE bot = ?1 ORDER BY pinned DESC, touched_at DESC, rowid DESC"
+        ))?;
+        stmt.query_map([bot], conversation_row)?.collect()
+    }
+
+    pub fn conversation(&self, id: &str) -> Result<Option<Conversation>> {
+        self.0
+            .query_row(
+                &format!("{CONVERSATION} WHERE id = ?1"),
+                [id],
+                conversation_row,
+            )
+            .optional()
+    }
+
+    /// The bot's current conversation: the one a prompt that names none goes to. The one last
+    /// used, but not an archived one while another is not archived.
+    pub fn current_conversation(&self, bot: &str) -> Result<String> {
+        self.0.query_row(
+            "SELECT id FROM conversations WHERE bot = ?1 ORDER BY archived, touched_at DESC, rowid DESC LIMIT 1",
+            [bot],
+            |r| r.get(0),
+        )
+    }
+
+    /// A new conversation of the bot, which is then the one last used.
+    pub fn new_conversation(&self, bot: &str, now: u64) -> Result<Conversation> {
+        let id = random_hex(4);
         self.0.execute(
-            "INSERT INTO transcript(bot, at, entry) VALUES (?1, ?2, ?3)",
-            params![bot, at, json(entry)],
+            "INSERT INTO conversations(id, bot, created_at, touched_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, bot, now],
+        )?;
+        Ok(self.conversation(&id)?.expect("just inserted"))
+    }
+
+    /// What the person changed of a conversation; what is `None` stays. An empty `name` is no
+    /// name: the title shows again.
+    pub fn set_conversation(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE conversations SET name = COALESCE(?2, name), pinned = COALESCE(?3, pinned), \
+                 archived = COALESCE(?4, archived) WHERE id = ?1",
+                params![id, name, pinned, archived],
+            )
+            .map(drop)
+    }
+
+    /// A prompt went into the conversation: it is the one last used, and no longer archived.
+    pub fn touch_conversation(&self, id: &str, now: u64) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE conversations SET touched_at = ?2, archived = 0 WHERE id = ?1",
+                params![id, now],
+            )
+            .map(drop)
+    }
+
+    /// The bot has replied: a conversation without a title gets one from its first prompt.
+    /// `true` when it got one.
+    pub fn title_conversation(&self, id: &str) -> Result<bool> {
+        give_title(&self.0, id)
+    }
+
+    /// A new conversation of the bot that begins as a copy of `from` up to, but not with, its
+    /// prompt `nonce`: "fork from here". `from` is left as it was.
+    pub fn fork_conversation(&self, from: &str, nonce: &str, now: u64) -> Result<Conversation> {
+        let tx = self.0.unchecked_transaction()?;
+        let id = random_hex(4);
+        tx.execute(
+            "INSERT INTO conversations(id, bot, created_at, touched_at) \
+             SELECT ?1, bot, ?3, ?3 FROM conversations WHERE id = ?2",
+            params![id, from, now],
+        )?;
+        tx.execute(
+            "INSERT INTO transcript(conversation, at, entry) SELECT ?1, at, entry FROM transcript \
+             WHERE conversation = ?2 AND seq < (SELECT min(seq) FROM transcript WHERE conversation = ?2 \
+             AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?3) ORDER BY seq",
+            params![id, from, nonce],
+        )?;
+        give_title(&tx, &id)?;
+        tx.commit()?;
+        Ok(self.conversation(&id)?.expect("just inserted"))
+    }
+
+    /// Appends one transcript entry; returns its sequence number.
+    pub fn append(&self, conversation: &str, at: u64, entry: &Value) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO transcript(conversation, at, entry) VALUES (?1, ?2, ?3)",
+            params![conversation, at, json(entry)],
         )?;
         Ok(self.0.last_insert_rowid())
     }
 
-    /// The newest `limit` prompts and replies holding `needle` (any case), of `bot` or of all
-    /// bots. A reply is searched whole, as the chat shows it: a run of text pieces, found at the
-    /// `seq` of its first.
+    /// The newest `limit` prompts and replies holding `needle` (any case), of one conversation,
+    /// of the conversations of `bot`, or of all. A reply is searched whole, as the chat shows
+    /// it: a run of text pieces, found at the `seq` of its first.
     // shortcut: reads every transcript entry per search; add an index (FTS5) when that gets slow.
-    pub fn search(&self, bot: Option<&str>, needle: &str, limit: usize) -> Result<Vec<Hit>> {
+    pub fn search(
+        &self,
+        bot: Option<&str>,
+        conversation: Option<&str>,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<Hit>> {
         let mut stmt = self.0.prepare_cached(
-            "SELECT seq, bot, entry FROM transcript WHERE ?1 IS NULL OR bot = ?1 ORDER BY bot, seq",
+            "SELECT t.seq, t.conversation, c.bot, t.at, t.entry FROM transcript t \
+             JOIN conversations c ON c.id = t.conversation \
+             WHERE (?1 IS NULL OR c.bot = ?1) AND (?2 IS NULL OR t.conversation = ?2) \
+             ORDER BY t.conversation, t.seq",
         )?;
-        let mut rows = stmt.query([bot])?;
+        let mut rows = stmt.query(params![bot, conversation])?;
         let needle = needle.to_lowercase();
         let mut hits = Vec::new();
-        // The item being read, as `chat.ts` makes them: (bot, seq, kind, text).
-        let mut item: Option<(String, i64, &'static str, String)> = None;
-        let done = |item: Option<(String, i64, &'static str, String)>, hits: &mut Vec<Hit>| {
-            if let Some((bot, seq, kind, text)) = item
+        // The item being read, as `chat.ts` makes them: where it begins, and its words.
+        let mut item: Option<(Hit, String)> = None;
+        let done = |item: Option<(Hit, String)>, hits: &mut Vec<Hit>| {
+            if let Some((mut hit, text)) = item
                 && let Some(snippet) = snippet(&text, &needle)
             {
-                hits.push(Hit {
-                    bot,
-                    seq,
-                    kind,
-                    snippet,
-                });
+                hit.snippet = snippet;
+                hits.push(hit);
             }
         };
         while let Some(row) = rows.next()? {
-            let (seq, row_bot): (i64, String) = (row.get(0)?, row.get(1)?);
-            let entry: Value = parse(row.get(2)?)?;
-            let same_bot = item.as_ref().is_some_and(|(b, ..)| *b == row_bot);
+            let (seq, row_conversation): (i64, String) = (row.get(0)?, row.get(1)?);
+            let entry: Value = parse(row.get(4)?)?;
+            let same = item
+                .as_ref()
+                .is_some_and(|(h, _)| h.conversation == row_conversation);
             let text = |key: &str| entry[key].as_str().unwrap_or("").to_owned();
             let next = match entry["type"].as_str() {
-                Some("prompt") => Some((seq, "user", text("text"))),
+                Some("prompt") => Some(("user", text("text"))),
                 Some("text") => {
-                    if let Some((_, _, "reply", so_far)) = item.as_mut().filter(|_| same_bot) {
+                    if let Some((Hit { kind: "reply", .. }, so_far)) =
+                        item.as_mut().filter(|_| same)
+                    {
                         so_far.push_str(entry["delta"].as_str().unwrap_or(""));
                         continue;
                     }
-                    Some((seq, "reply", text("delta")))
+                    Some(("reply", text("delta")))
                 }
                 // Items the chat shows that are not searched; they end a reply.
-                Some("thinking" | "tool_start") => Some((seq, "other", String::new())),
-                Some("turn_end") if entry["reason"] != "done" => {
-                    Some((seq, "other", String::new()))
-                }
+                Some("thinking" | "tool_start") => Some(("other", String::new())),
+                Some("turn_end") if entry["reason"] != "done" => Some(("other", String::new())),
                 _ => None,
             };
-            if !same_bot {
+            if !same {
                 done(item.take(), &mut hits);
             }
-            if let Some((seq, kind, text)) = next {
-                done(item.replace((row_bot, seq, kind, text)), &mut hits);
+            if let Some((kind, text)) = next {
+                let hit = Hit {
+                    bot: row.get(2)?,
+                    conversation: row_conversation,
+                    seq,
+                    at_ms: row.get(3)?,
+                    kind,
+                    snippet: String::new(),
+                };
+                done(item.replace((hit, text)), &mut hits);
             }
         }
         done(item, &mut hits);
@@ -960,26 +1237,30 @@ impl Store {
 
     /// Removes the prompt entry with `nonce` and everything after it. Does nothing if there is none.
     /// The ledger keeps the removed prompts: a late retry of one must not undo the rewind.
-    pub fn rewind_transcript(&self, bot: &str, nonce: &str) -> Result<()> {
+    pub fn rewind_transcript(&self, conversation: &str, nonce: &str) -> Result<()> {
         self.0
             .execute(
-                "DELETE FROM transcript WHERE bot = ?1 AND seq >= (SELECT min(seq) FROM transcript
-                 WHERE bot = ?1 AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?2)",
-                [bot, nonce],
+                "DELETE FROM transcript WHERE conversation = ?1 AND seq >= (SELECT min(seq) FROM transcript
+                 WHERE conversation = ?1 AND json_extract(entry, '$.type') = 'prompt' AND json_extract(entry, '$.nonce') = ?2)",
+                [conversation, nonce],
             )
             .map(drop)
     }
 
-    /// A bot's whole transcript, oldest first, as `{seq, at, entry}`.
-    // shortcut: no paging; #13 adds it for long chats.
-    /// The last `limit` entries before `before`, oldest first, and whether there are older ones.
-    pub fn history(&self, bot: &str, before: i64, limit: i64) -> Result<(Vec<Value>, bool)> {
+    /// The last `limit` entries of a conversation before `before`, oldest first, and whether
+    /// there are older ones.
+    pub fn history(
+        &self,
+        conversation: &str,
+        before: i64,
+        limit: i64,
+    ) -> Result<(Vec<Value>, bool)> {
         let mut stmt = self.0.prepare_cached(
-            "SELECT seq, at, entry FROM transcript WHERE bot = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+            "SELECT seq, at, entry FROM transcript WHERE conversation = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
         )?;
         // One more than asked for tells whether there is more.
         let mut page = stmt
-            .query_map(rusqlite::params![bot, before, limit.saturating_add(1)], |r| {
+            .query_map(rusqlite::params![conversation, before, limit.saturating_add(1)], |r| {
                 let entry: Value = parse(r.get(2)?)?;
                 Ok(serde_json::json!({"seq": r.get::<_, i64>(0)?, "at": r.get::<_, i64>(1)?, "entry": entry}))
             })?
@@ -1031,23 +1312,32 @@ impl Store {
             .map(drop)
     }
 
-    /// Prompts waiting for the bot, in the order they go.
-    pub fn queue(&self, bot: &str) -> Result<Vec<(String, String)>> {
-        let mut stmt = self
-            .0
-            .prepare_cached("SELECT nonce, text FROM queue WHERE bot = ?1 ORDER BY seq")?;
-        stmt.query_map([bot], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
+    /// Prompts waiting for the bot, in the conversations of the bot, in the order they go.
+    pub fn queue(&self, bot: &str) -> Result<Vec<Queued>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT q.conversation, q.nonce, q.text FROM queue q JOIN conversations c ON c.id = q.conversation \
+             WHERE c.bot = ?1 ORDER BY q.seq",
+        )?;
+        stmt.query_map([bot], |r| {
+            Ok(Queued {
+                conversation: r.get(0)?,
+                nonce: r.get(1)?,
+                text: r.get(2)?,
+            })
+        })?
+        .collect()
     }
 
     /// Bots with a prompt waiting.
     pub fn queued_bots(&self) -> Result<Vec<String>> {
-        let mut stmt = self.0.prepare_cached("SELECT DISTINCT bot FROM queue")?;
+        let mut stmt = self.0.prepare_cached(
+            "SELECT DISTINCT c.bot FROM queue q JOIN conversations c ON c.id = q.conversation",
+        )?;
         stmt.query_map([], |r| r.get(0))?.collect()
     }
 
-    /// Adds a prompt, at the back, or (`front`) as the next one to go.
-    pub fn enqueue(&self, bot: &str, nonce: &str, text: &str, front: bool) -> Result<()> {
+    /// Adds a prompt to a conversation, at the back, or (`front`) as the next one to go.
+    pub fn enqueue(&self, conversation: &str, nonce: &str, text: &str, front: bool) -> Result<()> {
         let seq = if front {
             "(SELECT COALESCE(MIN(seq), 1) - 1 FROM queue)"
         } else {
@@ -1055,18 +1345,25 @@ impl Store {
         };
         self.0
             .execute(
-                &format!("INSERT INTO queue(seq, bot, nonce, text) VALUES ({seq}, ?1, ?2, ?3)"),
-                [bot, nonce, text],
+                &format!(
+                    "INSERT INTO queue(seq, conversation, nonce, text) VALUES ({seq}, ?1, ?2, ?3)"
+                ),
+                [conversation, nonce, text],
             )
             .map(drop)
     }
 
-    /// Removes a waiting prompt; `false` if it was not waiting.
-    pub fn dequeue(&self, bot: &str, nonce: &str) -> Result<bool> {
-        Ok(self.0.execute(
-            "DELETE FROM queue WHERE bot = ?1 AND nonce = ?2",
-            [bot, nonce],
-        )? > 0)
+    /// Removes a waiting prompt of the bot; the conversation it waited in, or `None` if it was
+    /// not waiting.
+    pub fn dequeue(&self, bot: &str, nonce: &str) -> Result<Option<String>> {
+        self.0
+            .query_row(
+                "DELETE FROM queue WHERE nonce = ?2 AND conversation IN (SELECT id FROM conversations WHERE bot = ?1) \
+                 RETURNING conversation",
+                [bot, nonce],
+                |r| r.get(0),
+            )
+            .optional()
     }
 
     /// Stores a message; its number.
@@ -1115,33 +1412,47 @@ impl Store {
             .map(drop)
     }
 
-    pub fn put_question(&self, bot: &str, question: &str, entry: &Value) -> Result<()> {
+    pub fn put_question(&self, conversation: &str, question: &str, entry: &Value) -> Result<()> {
         self.0
             .execute(
-                "INSERT OR REPLACE INTO questions(bot, question, entry) VALUES (?1, ?2, ?3)",
-                params![bot, question, json(entry)],
+                "INSERT OR REPLACE INTO questions(conversation, question, entry) VALUES (?1, ?2, ?3)",
+                params![conversation, question, json(entry)],
             )
             .map(drop)
     }
 
     /// Removes an open question; `false` if it was not open.
-    pub fn take_question(&self, bot: &str, question: &str) -> Result<bool> {
+    pub fn take_question(&self, conversation: &str, question: &str) -> Result<bool> {
         Ok(self.0.execute(
-            "DELETE FROM questions WHERE bot = ?1 AND question = ?2",
-            [bot, question],
+            "DELETE FROM questions WHERE conversation = ?1 AND question = ?2",
+            [conversation, question],
         )? > 0)
     }
 
-    pub fn questions(&self, bot: &str) -> Result<Vec<Value>> {
+    pub fn questions(&self, conversation: &str) -> Result<Vec<Value>> {
         let mut stmt = self
             .0
-            .prepare_cached("SELECT entry FROM questions WHERE bot = ?1 ORDER BY rowid")?;
-        stmt.query_map([bot], |r| parse(r.get(0)?))?.collect()
+            .prepare_cached("SELECT entry FROM questions WHERE conversation = ?1 ORDER BY rowid")?;
+        stmt.query_map([conversation], |r| parse(r.get(0)?))?
+            .collect()
     }
 
+    /// Whether a question is open in any conversation of the bot.
+    pub fn has_questions(&self, bot: &str) -> Result<bool> {
+        self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM questions q JOIN conversations c ON c.id = q.conversation WHERE c.bot = ?1)",
+            [bot],
+            |r| r.get(0),
+        )
+    }
+
+    /// The bot's engine stopped: none of its conversations has an open question.
     pub fn clear_questions(&self, bot: &str) -> Result<()> {
         self.0
-            .execute("DELETE FROM questions WHERE bot = ?1", [bot])
+            .execute(
+                "DELETE FROM questions WHERE conversation IN (SELECT id FROM conversations WHERE bot = ?1)",
+                [bot],
+            )
             .map(drop)
     }
 
@@ -1764,11 +2075,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("appd-store-delete-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("app.db")).unwrap();
+        let mut conversation = std::collections::HashMap::new();
         for id in ["a", "b"] {
             store.create_bot(id, id, 1).unwrap();
+            let c = store.current_conversation(id).unwrap();
             store
-                .append(id, 1, &serde_json::json!({"type": "prompt"}))
+                .append(&c, 1, &serde_json::json!({"type": "prompt"}))
                 .unwrap();
+            store.put_question(&c, "q", &serde_json::json!({})).unwrap();
+            store.enqueue(&c, "n", "text", false).unwrap();
+            conversation.insert(id, c);
             store.set_ledger(id, "n", Ledger::Sent, 1).unwrap();
             store.set_model(id, "m", None).unwrap();
             store
@@ -1793,11 +2109,19 @@ mod tests {
         for table in BOT_TABLES {
             assert_eq!(count(&store, table, "bot", "a"), 0, "{table}");
         }
-        assert_eq!(
-            count(&store, "transcript", "bot", "b"),
-            1,
-            "b keeps its own"
-        );
+        assert_eq!(count(&store, "conversations", "bot", "a"), 0);
+        for table in CONVERSATION_TABLES {
+            assert_eq!(
+                count(&store, table, "conversation", &conversation["a"]),
+                0,
+                "{table}"
+            );
+            assert_eq!(
+                count(&store, table, "conversation", &conversation["b"]),
+                1,
+                "b keeps its own {table}"
+            );
+        }
         assert_eq!(count(&store, "bots", "id", "a"), 0);
         for column in ["from_bot", "to_bot"] {
             assert_eq!(count(&store, "mail", column, "a"), 0);
@@ -1835,6 +2159,115 @@ mod tests {
             .unwrap();
         assert_eq!(version, 0);
         assert!(!has_table(&db, "bots_old").unwrap() && !has_table(&db, "projects").unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_title_is_the_first_line_of_the_first_prompt_and_is_made_once() {
+        assert_eq!(title_of("\n  Plan   the\tgarden \nmore"), "Plan the garden");
+        let long = "é".repeat(TITLE_CHARS + 5);
+        assert_eq!(title_of(&long), format!("{}…", "é".repeat(TITLE_CHARS)));
+
+        let dir = std::env::temp_dir().join(format!("appd-store-title-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        store.create_bot("a", "a", 1).unwrap();
+        let c = store.current_conversation("a").unwrap();
+        assert!(
+            !store.title_conversation(&c).unwrap(),
+            "nothing to title yet"
+        );
+        for (nonce, text) in [("n1", "first"), ("n2", "second")] {
+            let entry = serde_json::json!({"type": "prompt", "nonce": nonce, "text": text});
+            store.append(&c, 1, &entry).unwrap();
+        }
+        assert!(store.title_conversation(&c).unwrap());
+        assert!(!store.title_conversation(&c).unwrap(), "once");
+        assert_eq!(store.conversation(&c).unwrap().unwrap().title, "first");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fork_copies_the_conversation_up_to_the_prompt_and_the_last_used_one_is_current() {
+        let dir = std::env::temp_dir().join(format!("appd-store-fork-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        store.create_bot("a", "a", 1).unwrap();
+        let old = store.current_conversation("a").unwrap();
+        for (nonce, text) in [("n1", "first"), ("n2", "second")] {
+            let entry = serde_json::json!({"type": "prompt", "nonce": nonce, "text": text});
+            store.append(&old, 2, &entry).unwrap();
+            let end = serde_json::json!({"type": "turn_end", "reason": "done"});
+            store.append(&old, 3, &end).unwrap();
+        }
+        let forked = store.fork_conversation(&old, "n2", 10).unwrap();
+        assert_eq!((forked.bot.as_str(), forked.title.as_str()), ("a", "first"));
+        let (copy, more) = store.history(&forked.id, i64::MAX, i64::MAX).unwrap();
+        assert_eq!((copy.len(), more), (2, false));
+        assert_eq!(store.history(&old, i64::MAX, i64::MAX).unwrap().0.len(), 4);
+        assert_eq!(store.current_conversation("a").unwrap(), forked.id);
+
+        // An archived conversation is not current while another is not; a prompt brings it back.
+        store
+            .set_conversation(&forked.id, None, None, Some(true))
+            .unwrap();
+        assert_eq!(store.current_conversation("a").unwrap(), old);
+        store.touch_conversation(&forked.id, 20).unwrap();
+        assert_eq!(store.current_conversation("a").unwrap(), forked.id);
+        assert!(!store.conversation(&forked.id).unwrap().unwrap().archived);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_database_of_version_1_keeps_its_queue_questions_and_session_as_the_first_conversation() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE projects(id TEXT PRIMARY KEY, project TEXT NOT NULL, lead TEXT);
+             CREATE TABLE bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT, project TEXT);
+             CREATE TABLE transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, at INTEGER NOT NULL, entry TEXT NOT NULL);
+             CREATE TABLE queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
+             CREATE TABLE questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+             INSERT INTO bots(id, name, created_at, session) VALUES ('a', 'a', 1, 'sess');
+             INSERT INTO transcript(bot, at, entry) VALUES ('a', 5, '{\"type\":\"prompt\",\"nonce\":\"n\",\"text\":\"hi\"}');
+             INSERT INTO queue VALUES (3, 'a', 'n2', 'later');
+             INSERT INTO questions VALUES ('a', 'q', '{}');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        let n = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT count(*) FROM conversations"), 1);
+        for table in CONVERSATION_TABLES {
+            let sql = format!("SELECT count(*) FROM {table} WHERE conversation = 'a'");
+            assert_eq!(n(&sql), 1, "{table}");
+        }
+        assert_eq!(
+            n(
+                "SELECT count(*) FROM conversations WHERE session = 'sess' AND touched_at = 5 AND title = 'hi'"
+            ),
+            1
+        );
+        assert_eq!(n("PRAGMA user_version"), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_database_of_version_1_is_not_moved_when_its_copy_cannot_be_written() {
+        let dir = std::env::temp_dir().join(format!("appd-store-copy2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("app.db.before-2.part")).unwrap();
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT); PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        drop(db);
+        assert!(Store::open(&dir.join("app.db")).is_err());
+        assert!(!dir.join("app.db.before-2").exists());
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        assert!(!has_table(&db, "conversations").unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

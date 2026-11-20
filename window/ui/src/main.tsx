@@ -5,6 +5,7 @@ import { Pair } from "./Devices.tsx";
 import type { Bot, Project } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
+import { Conversations } from "./Conversations.tsx";
 import { Mail } from "./Mail.tsx";
 import { FilePane, Pane } from "./Pane.tsx";
 import { SurfaceView, Surfaces } from "./Surfaces.tsx";
@@ -71,7 +72,7 @@ function App() {
   const [connection, setConnection] = useState(0);
   const [dragged, setDragged] = useState<string>();
   const [palette, setPalette] = useState(false);
-  const [jump, setJump] = useState<{ seq: number }>();
+  const [jump, setJump] = useState<{ seq: number; conversation: string }>();
   const [find, setFind] = useState(false);
   // "Set up later" on the first screen, which the page remembers; and what the first bot's box starts with.
   const [later, setLater] = useState(() => localStorage.getItem(LATER) === "1");
@@ -383,23 +384,30 @@ function App() {
               </p>
             )}
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
-            {view.tab === "chat" && <Chat
-                key={`${bot.id}-${connection}`}
-                bot={bot}
-                jump={jump}
-                find={find}
-                // Bots' files open in the window's pane only, not on other devices.
-                showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
-                // An installed agent chooses its own model.
-                // With no way to reach a model there is the sign-in instead; an installed agent needs none.
-                model={bot.agent || needed ? undefined : <Model key={bot.id} bot={bot} bots={bots} />}
-                signIn={needed && !bot.agent ? () => { setSetupLater(false); setView(undefined); } : undefined}
-                start={first?.bot === bot.id ? first.message : ""}
-                used={() => {
-                  setJump(undefined);
-                  setFind(false);
-                }}
-              />}
+            {view.tab === "chat" && (
+              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation}>
+                {(conversation, show) => <Chat
+                  key={`${bot.id}-${conversation}-${connection}`}
+                  bot={bot}
+                  conversation={conversation}
+                  onFork={show}
+                  jump={jump}
+                  find={find}
+                  // Bots' files open in the window's pane only, not on other devices.
+                  showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
+                  // An installed agent chooses its own model.
+                  // With no way to reach a model there is the sign-in instead; an installed agent needs none.
+                  model={bot.agent || needed ? undefined : <Model key={bot.id} bot={bot} bots={bots} />}
+                  signIn={needed && !bot.agent ? () => { setSetupLater(false); setView(undefined); } : undefined}
+                  start={first?.bot === bot.id ? first.message : ""}
+                  started={() => setFirst(undefined)}
+                  used={() => {
+                    setJump(undefined);
+                    setFind(false);
+                  }}
+                />}
+              </Conversations>
+            )}
             {view.tab === "routines" && <Routines key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "connectors" && <Connectors key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "memory" && (
@@ -436,9 +444,9 @@ function App() {
         <Palette
           choices={choices}
           bots={bots}
-          found={(id, seq) => {
+          found={(id, conversation, seq) => {
             openBot(id);
-            setJump({ seq });
+            setJump({ seq, conversation });
           }}
           close={() => setPalette(false)}
         />

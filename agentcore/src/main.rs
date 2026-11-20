@@ -188,6 +188,15 @@ impl Engine {
         }
     }
 
+    /// An `open` or `start` failed: the engine has no conversation open now, not the one it had,
+    /// which a prompt for the one asked for would go into. A turn that runs keeps its own.
+    fn opening_failed(&mut self, id: String, error: String) {
+        if self.running.is_none() {
+            self.session = None;
+        }
+        self.respond(id, Err(error));
+    }
+
     fn handle(&mut self, id: String, op: Op) {
         // What a `reply`, a `browser_result`, a `desktop_result` or an `apple_result` may answer: a
         // message, or a browser, desktop or Apple app request.
@@ -210,7 +219,7 @@ impl Engine {
                     });
                     self.session = Some(session);
                 }
-                Err(e) => self.respond(id, Err(e)),
+                Err(e) => self.opening_failed(id, e),
             },
             Op::Open { session, .. } => {
                 let opened = self.idle().and_then(|()| {
@@ -235,7 +244,7 @@ impl Engine {
                         }
                         self.session = Some(session);
                     }
-                    Err(e) => self.respond(id, Err(e)),
+                    Err(e) => self.opening_failed(id, e),
                 }
             }
             Op::Prompt { nonce, text } => match self.begin_turn() {

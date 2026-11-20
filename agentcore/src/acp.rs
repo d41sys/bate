@@ -59,6 +59,8 @@ struct Bridge {
     turn: bool,
     /// The agent replays an old conversation: its updates are history, not a turn.
     loading: bool,
+    /// A `session/new` or `session/load` is asked and not answered: the session is neither.
+    opening: bool,
     can_load: bool,
     takes_http: bool,
     /// How to sign in, as the agent says it.
@@ -187,7 +189,11 @@ impl Bridge {
         match op {
             Op::Start { .. } if self.turn => respond(id, Err("a turn is running".into())),
             Op::Open { .. } if self.turn => respond(id, Err("a turn is running".into())),
+            Op::Start { .. } | Op::Open { .. } if self.opening => {
+                respond(id, Err("a conversation is being opened".into()))
+            }
             Op::Start { .. } => {
+                self.opening = true;
                 let params = json!({"cwd": cwd, "mcpServers": self.servers()});
                 self.request(
                     "session/new",
@@ -200,6 +206,7 @@ impl Bridge {
             }
             Op::Open { session, .. } if self.can_load => {
                 self.loading = true;
+                self.opening = true;
                 let params =
                     json!({"sessionId": session, "cwd": cwd, "mcpServers": self.servers()});
                 let asked = Asked::Session {
@@ -208,13 +215,17 @@ impl Bridge {
                 };
                 self.request("session/load", params, asked);
             }
-            Op::Open { .. } => respond(
-                id,
-                Err("this agent cannot reopen an earlier conversation".into()),
-            ),
+            Op::Open { .. } => {
+                self.session = None;
+                respond(
+                    id,
+                    Err("this agent cannot reopen an earlier conversation".into()),
+                )
+            }
             Op::Prompt { nonce, text } => {
                 let ready = match (&self.session, self.turn) {
                     (_, true) => Err("the engine is busy with a turn".to_owned()),
+                    _ if self.opening => Err("a conversation is being opened".to_owned()),
                     (None, _) => Err("no conversation is open: send start first".to_owned()),
                     (Some(session), false) => Ok(session.clone()),
                 };
@@ -379,6 +390,7 @@ impl Bridge {
             }
             Asked::Session { op, loaded } => {
                 self.loading = false;
+                self.opening = false;
                 let session = match (result, loaded) {
                     (Ok(_), Some(session)) => Ok(session),
                     (Ok(result), None) => result["sessionId"]
@@ -400,7 +412,11 @@ impl Bridge {
                         });
                         self.session = Some(session);
                     }
-                    Err(e) => respond(op, Err(e)),
+                    Err(e) => {
+                        // Neither the old conversation nor the new one is open now.
+                        self.session = None;
+                        respond(op, Err(e))
+                    }
                 }
             }
             Asked::Prompt if self.aborted => self.end_turn(TurnEnd::Aborted, None),
@@ -608,6 +624,7 @@ fn start(program: &str, args: &[String]) -> io::Result<(Child, Bridge, mpsc::Rec
         session: None,
         turn: false,
         loading: false,
+        opening: false,
         can_load: false,
         takes_http: false,
         sign_in: String::new(),
