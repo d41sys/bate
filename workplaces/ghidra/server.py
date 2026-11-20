@@ -293,7 +293,8 @@ def read_surface(uri, part):
             return CODE, {"language": "text", "lines": [f"No binary is analysed yet: add one with add_binary, or copy it into {INBOX}"]}
         if shown["function"] is None:
             return CODE, {"language": "text", "lines": ["Choose a function in the tree of functions."]}
-        return CODE, {"language": "c", "lines": decompiled(name, shown["function"]).splitlines()}
+        return CODE, {"language": "c", "lines": decompiled(name, shown["function"]).splitlines(),
+                      "actions": [{"tool": "comment_shown", "label": "Comment", "input": True}]}
     if uri == STRINGS:
         rows = [(s["address"], [s["address"], s["value"]]) for s in read_of("strings", name)] if name else []
         return TABLE, table(["Address", "String"], rows, part)
@@ -341,6 +342,8 @@ TOOLS = [
          {**BINARY, "filter": {**S, "description": "Only names that contain this text."}, "skip": {"type": "integer", "minimum": 0}}),
     tool("show_binary", "Shows binary `target` in the person's surfaces (a surface's select action).", SURFACE),
     tool("show_function", "Shows the function at `target` in the person's code view (a surface's select action).", SURFACE),
+    tool("comment_shown", "Writes the person's comment `text` on the function their code view shows (the code view's "
+         "action); an empty text removes it.", {**SURFACE, "text": S}),
 ]
 
 
@@ -373,7 +376,7 @@ def call(name, args):
         shown["binary"], shown["function"] = args["target"], None
         changed()
         return said(f"showing {args['target']}")
-    name_of = binary_of(args) if name != "show_function" else viewed()
+    name_of = viewed() if name in ("show_function", "comment_shown") else binary_of(args)
     if name == "list_functions":
         return listed([f"{f['address']}  {f['name']}  {f['size']}" for f in read_of("functions", name_of)], args, "functions")
     if name == "list_strings":
@@ -393,6 +396,12 @@ def call(name, args):
         return said(f"{done['was']} at {done['address']} is now {done['name']}")
     if name == "comment":
         done = ghidra.ask("comment", program=name_of, function=args["function"], address=args.get("address"), text=args["text"])
+        changed(True)
+        return said(f"commented on {done['function']} at {done['address']}")
+    if name == "comment_shown":
+        if name_of is None or shown["function"] is None:
+            raise Failed("no function is shown: choose one in the tree of functions")
+        done = ghidra.ask("comment", program=name_of, function=shown["function"], address=None, text=args.get("text") or "")
         changed(True)
         return said(f"commented on {done['function']} at {done['address']}")
     if name == "show_function":

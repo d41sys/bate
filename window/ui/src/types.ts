@@ -145,7 +145,8 @@ export type SurfacePart = {
   /** The tools the person's choosing and opening call, and the named actions on offer. */
   select?: string;
   open?: string;
-  actions: { tool: string; label: string }[];
+  /** `input`: the action takes words the person writes. */
+  actions: { tool: string; label: string; input?: boolean }[];
 } & (
   | { kind: "table"; columns: string[]; rows: { id: string; cells: string[] }[] }
   | { kind: "tree"; nodes: { id: string; label: string; depth: number }[] }

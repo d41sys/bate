@@ -2788,8 +2788,9 @@ impl Core {
             _ => {
                 let uri = str_field(f, "uri")?.to_owned();
                 let tool = str_field(f, "tool")?.to_owned();
-                let target = f.get("target").and_then(Value::as_str).map(str::to_owned);
-                Box::new(move |link| link.act(&uri, &tool, target.as_deref()))
+                let word = |key: &str| f.get(key).and_then(Value::as_str).map(str::to_owned);
+                let (target, text) = (word("target"), word("text"));
+                Box::new(move |link| link.act(&uri, &tool, target.as_deref(), text.as_deref()))
             }
         };
         // A program that failed to start is not tried again by every look at its surfaces: each

@@ -8787,6 +8787,24 @@ fn the_ghidra_workplace_analyses_binaries_for_bots_and_surfaces_and_keeps_the_an
         "{text}"
     );
 
+    // The person's comment, written in the code view, is there when a bot next reads the function.
+    assert_eq!(
+        read(&mut w, code)["actions"],
+        json!([{"tool": "comment_shown", "label": "Comment", "input": true}])
+    );
+    let done = w.ok(
+        "act_surface",
+        json!({"projectId": id, "uri": code, "tool": "comment_shown", "text": "the person: checks argv"}),
+    );
+    assert_eq!(done["ok"], true, "{done}");
+    other.wait_for(|f| f["type"] == "surface_changed" && f["uri"] == code);
+    assert!(lines(&mut w).contains("/* the person: checks argv */"));
+    let (_, text) = tool("decompile", json!({"function": "parse_args"}));
+    assert!(
+        text.contains("// plate comment at 100001100: the person: checks argv"),
+        "{text}"
+    );
+
     // While a binary is analysed Ghidra is busy; one it cannot read fails, in words.
     fs::write(real.join("slow"), "SLOW file").unwrap();
     fs::write(real.join("bad"), "BAD! file").unwrap();
@@ -8867,7 +8885,7 @@ fn the_ghidra_workplace_analyses_binaries_for_bots_and_surfaces_and_keeps_the_an
             json!({"function": "parse_args", "binary": "tool"})
         )
         .1
-        .contains("reads -v")
+        .contains("the person: checks argv")
     );
 }
 
