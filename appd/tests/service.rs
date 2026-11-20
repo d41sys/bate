@@ -54,9 +54,9 @@ while IFS= read -r line; do
             prefs) defaults write "$path" k v >/dev/null 2>&1 && r=ok || r=refused ;;
             env) [ -n "$(printenv "$path")" ] && r=ok || r=refused ;;
             work) [ "$BATE_WORK_DIR" = "$path" ] && r=ok || r=refused ;;
-            fetch) curl -sf -m 5 -o /dev/null "$path" && r=ok || r=refused ;;
-            tunnel) curl -sf -m 5 -p -o /dev/null "$path" && r=ok || r=refused ;;
-            direct) curl -sf -m 5 --noproxy '*' -o /dev/null "$path" && r=ok || r=refused ;;
+            fetch) d=$(curl -sSf -m 5 -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe fetch: $r $d" >&2 ;;
+            tunnel) d=$(curl -sSf -m 5 -p -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe tunnel: $r $d" >&2 ;;
+            direct) d=$(curl -sSf -m 5 --noproxy '*' -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe direct: $r $d" >&2 ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -2331,6 +2331,15 @@ fn probe(w: &mut Window, bot: &str, nonce: &str, what: &str) -> String {
     said["entry"]["delta"].as_str().unwrap().to_owned()
 }
 
+/// What the engine's network probes wrote to the service log: why one was refused (#162).
+fn probes(home: &Path) -> String {
+    // The log is written by another thread.
+    std::thread::sleep(Duration::from_millis(500));
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap_or_default();
+    let said: Vec<&str> = log.lines().filter(|l| l.contains("probe ")).collect();
+    said.join("\n")
+}
+
 #[test]
 fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() {
     let home = home("folder-limit");
@@ -2525,8 +2534,18 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     let listed = w.ok("list_bots", json!({}))["bots"][0]["network"].clone();
     assert_eq!(listed, json!([format!("127.0.0.1:{a}")]));
     // An allowed host passes, as a plain request and as a tunnel.
-    assert_eq!(probe(&mut w, &bot, "n4", &format!("fetch {url_a}")), "ok");
-    assert_eq!(probe(&mut w, &bot, "n5", &format!("tunnel {url_a}")), "ok");
+    assert_eq!(
+        probe(&mut w, &bot, "n4", &format!("fetch {url_a}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
+    assert_eq!(
+        probe(&mut w, &bot, "n5", &format!("tunnel {url_a}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
     // Another is refused by the proxy, and never reached.
     assert_eq!(
         probe(&mut w, &bot, "n6", &format!("fetch {url_b}")),
@@ -2571,7 +2590,12 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     wider["hosts"] = json!([format!(" 127.0.0.1:{b} ")]);
     let stored = w.ok("set_project", json!({"project": wider}))["project"].clone();
     assert_eq!(stored["hosts"], json!([format!("127.0.0.1:{b}")]));
-    assert_eq!(probe(&mut w, &bot, "n11", &format!("fetch {url_b}")), "ok");
+    assert_eq!(
+        probe(&mut w, &bot, "n11", &format!("fetch {url_b}")),
+        "ok",
+        "{}",
+        probes(&home)
+    );
     assert_eq!(hits(), 3);
     let id = w.send(
         "set_project",
