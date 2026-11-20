@@ -1209,7 +1209,7 @@ fn rewind_removes_the_prompt_and_what_followed_from_history() {
 }
 
 #[test]
-fn a_fork_keeps_the_whole_history_and_notes_where_the_bot_goes_on() {
+fn a_fork_goes_on_in_a_new_conversation_and_leaves_the_old_one_whole() {
     let home = home("fork");
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
@@ -1218,29 +1218,390 @@ fn a_fork_keeps_the_whole_history_and_notes_where_the_bot_goes_on() {
         w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
         w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
     }
-    w.send("rewind", json!({"bot": bot, "entry": "n2", "fork": true}));
-    // Told as one more entry: nothing in the chat is taken away.
-    let noted = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "fork");
-    assert_eq!(noted["entry"]["nonce"], "n2");
+    let old = w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+    let forked =
+        w.ok("rewind", json!({"bot": bot, "entry": "n2", "fork": true}))["conversation"].clone();
+    assert!(forked.is_string() && forked != old, "{forked} {old}");
 
-    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
-    let entries: Vec<&Value> = history
+    let prompts = |w: &mut Window, conversation: &Value| -> (Vec<Value>, usize) {
+        let history = w.ok(
+            "open_bot",
+            json!({"bot": bot, "conversation": conversation}),
+        )["history"]
+            .clone();
+        let entries: Vec<Value> = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["entry"].clone())
+            .collect();
+        let ends = entries.iter().filter(|e| e["type"] == "turn_end").count();
+        let prompts = entries
+            .iter()
+            .filter(|e| e["type"] == "prompt")
+            .map(|e| e["nonce"].clone())
+            .collect();
+        (prompts, ends)
+    };
+    // Nothing in the old conversation is taken away.
+    assert_eq!(prompts(&mut w, &old), (vec![json!("n1"), json!("n2")], 2));
+    assert_eq!(prompts(&mut w, &forked), (vec![json!("n1")], 1));
+
+    // The fork is the conversation the bot goes on in.
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["conversation"],
+        forked
+    );
+    let listed = w.ok("list_conversations", json!({"bot": bot}));
+    assert_eq!(listed["conversations"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["current"], forked);
+}
+
+/// Waits for the end of the turn that was answered last, in any conversation.
+fn turn_ended(w: &mut Window) {
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+}
+
+fn conversations(w: &mut Window, bot: &str) -> Vec<Value> {
+    let listed = w.ok("list_conversations", json!({"bot": bot}));
+    listed["conversations"].as_array().unwrap().clone()
+}
+
+#[test]
+fn a_bot_has_many_conversations_titled_after_the_first_reply_and_found_again() {
+    let home = home("conversations");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // A bot starts with one, empty and without a title.
+    let listed = conversations(&mut w, &bot);
+    assert_eq!((listed.len(), &listed[0]["title"]), (1, &json!("")));
+    let first = listed[0]["id"].clone();
+
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "Plan the  garden\nin spring"}),
+    );
+    turn_ended(&mut w);
+    eventually("the title", || {
+        conversations(&mut w, &bot)[0]["title"] == "Plan the garden"
+    });
+
+    // A new conversation is the one a prompt that names none goes to.
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    assert_ne!(second, first);
+    assert_eq!(
+        w.ok("list_conversations", json!({"bot": bot}))["current"],
+        second
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "Mend the fence"}),
+    );
+    turn_ended(&mut w);
+    let history = |w: &mut Window, conversation: &Value| -> Vec<Value> {
+        let opened = w.ok(
+            "open_bot",
+            json!({"bot": bot, "conversation": conversation}),
+        );
+        let entries = opened["history"].as_array().unwrap();
+        entries
+            .iter()
+            .filter(|e| e["entry"]["type"] == "prompt")
+            .map(|e| e["entry"]["nonce"].clone())
+            .collect()
+    };
+    assert_eq!(history(&mut w, &first), [json!("n1")]);
+    assert_eq!(history(&mut w, &second), [json!("n2")]);
+
+    // Naming the first one switches the engine back to it, and makes it the current one.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n3", "conversation": first, "text": "more"}),
+    );
+    turn_ended(&mut w);
+    assert_eq!(history(&mut w, &first), [json!("n1"), json!("n3")]);
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["conversation"],
+        first,
+        "a request that names none acts on the one last used"
+    );
+
+    // Another bot's conversation, or none, is refused.
+    let other = w.create_bot();
+    for conversation in [json!("nope"), first.clone()] {
+        let id = w.send(
+            "open_bot",
+            json!({"bot": other, "conversation": conversation}),
+        );
+        let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(refused["code"], "no_such_conversation", "{refused}");
+    }
+}
+
+#[test]
+fn a_conversation_is_pinned_archived_and_renamed_without_freezing_its_title() {
+    let home = home("conversations-keep");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    let ids = |w: &mut Window| -> Vec<Value> {
+        conversations(w, &bot)
+            .iter()
+            .map(|c| c["id"].clone())
+            .collect()
+    };
+    assert_eq!(ids(&mut w), [second.clone(), first.clone()], "newest first");
+
+    // Pinned ones stay on top.
+    let changed = w.send(
+        "set_conversation",
+        json!({"bot": bot, "conversation": first, "pinned": true}),
+    );
+    w.wait_for(|f| f["type"] == "conversations_changed" && f["bot"] == bot.as_str());
+    w.wait_for(|f| f["type"] == "response" && f["id"] == changed.as_str());
+    assert_eq!(ids(&mut w), [first.clone(), second.clone()]);
+    assert_eq!(conversations(&mut w, &bot)[0]["pinned"], true);
+
+    // An archived one is not the current one; a prompt to it brings it back.
+    w.ok(
+        "set_conversation",
+        json!({"bot": bot, "conversation": second, "archived": true}),
+    );
+    let listed = w.ok("list_conversations", json!({"bot": bot}));
+    assert_eq!(listed["current"], first);
+    assert_eq!(listed["conversations"][1]["archived"], true);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "conversation": second, "text": "Water the beans"}),
+    );
+    turn_ended(&mut w);
+    let listed = w.ok("list_conversations", json!({"bot": bot}));
+    assert_eq!(listed["current"], second);
+
+    // A name is kept; the title that follows the first reply does not replace it.
+    let third = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    w.ok(
+        "set_conversation",
+        json!({"bot": bot, "conversation": third, "name": "  Mine "}),
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "conversation": third, "text": "Sow the peas"}),
+    );
+    turn_ended(&mut w);
+    eventually("the title", || {
+        let c = conversations(&mut w, &bot);
+        let c = c.iter().find(|c| c["id"] == third).unwrap();
+        c["title"] == "Sow the peas" && c["name"] == "Mine"
+    });
+    for (fields, why) in [
+        (
+            json!({"name": "x".repeat(81)}),
+            "a name above 80 characters",
+        ),
+        (json!({"pinned": "yes"}), "a flag that is no boolean"),
+    ] {
+        let mut fields = fields;
+        fields["bot"] = json!(bot);
+        fields["conversation"] = third.clone();
+        let id = w.send("set_conversation", fields);
+        let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(refused["code"], "bad_request", "{why}: {refused}");
+    }
+}
+
+#[test]
+fn each_conversation_has_its_own_queue_and_the_busy_bot_goes_on_in_the_next_one() {
+    let home = home("conversations-queue");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_start");
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+
+    // The bot works in the first one: a prompt for the second waits there.
+    let sent = w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "conversation": second, "text": "after"}),
+    );
+    assert_eq!(sent, json!({"queued": true}));
+    let queue = |w: &mut Window, conversation: &Value| -> Vec<Value> {
+        w.ok(
+            "list_queue",
+            json!({"bot": bot, "conversation": conversation}),
+        )["queue"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(queue(&mut w, &first), Vec::<Value>::new());
+    assert_eq!(queue(&mut w, &second)[0]["nonce"], "n2");
+    let busy: Vec<Value> = conversations(&mut w, &bot)
+        .iter()
+        .map(|c| c["busy"].clone())
+        .collect();
+    assert_eq!(busy, [json!(false), json!(true)], "only the first works");
+    // A request that moves the engine into another conversation mid-turn is refused.
+    let id = w.send("compact", json!({"bot": bot, "conversation": second}));
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "busy", "{refused}");
+
+    // When the turn ends, the queued prompt goes by itself, into its own conversation.
+    w.ok("abort", json!({"bot": bot}));
+    w.wait_for(|f| {
+        f["type"] == "transcript"
+            && f["conversation"] == second
+            && f["entry"]["type"] == "prompt"
+            && f["entry"]["nonce"] == "n2"
+    });
+    assert_eq!(queue(&mut w, &second), Vec::<Value>::new());
+    assert_eq!(prompts_received(&home, &bot, "n2"), 1);
+}
+
+#[test]
+fn search_hits_say_when_and_where_and_can_stay_in_one_conversation() {
+    let home = home("conversations-search");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "the quarterly numbers"}),
+    );
+    turn_ended(&mut w);
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "more quarterly words"}),
+    );
+    turn_ended(&mut w);
+
+    let hits = w.ok("search", json!({"text": "quarterly"}))["hits"].clone();
+    let found: Vec<(&Value, &Value)> = hits
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| &e["entry"])
+        .map(|h| (&h["bot"], &h["conversation"]))
         .collect();
-    let prompts: Vec<&Value> = entries
-        .iter()
-        .filter(|e| e["type"] == "prompt")
-        .map(|e| &e["nonce"])
-        .collect();
-    assert_eq!(prompts, ["n1", "n2"]);
     assert_eq!(
-        entries.iter().filter(|e| e["type"] == "turn_end").count(),
-        2
+        found,
+        [(&json!(bot), &second), (&json!(bot), &first)],
+        "{hits}"
     );
-    assert_eq!(entries.last().unwrap()["type"], "fork");
+    assert!(hits[0]["atMs"].as_i64().unwrap() >= hits[1]["atMs"].as_i64().unwrap());
+    assert!(hits[1]["atMs"].as_i64().unwrap() > 0, "{hits}");
+
+    let hits = w.ok(
+        "search",
+        json!({"text": "quarterly", "bot": bot, "conversation": first}),
+    )["hits"]
+        .clone();
+    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
+    assert_eq!(hits[0]["conversation"], first);
+}
+
+#[test]
+fn a_database_at_version_1_moves_to_conversations_and_every_row_is_found_after() {
+    let home = home("conversations-move");
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    // The tables of version 1 that hold a bot's conversation, as that version wrote them.
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, project TEXT NOT NULL, lead TEXT REFERENCES bots(id) ON DELETE SET NULL);
+         CREATE TABLE bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT, project TEXT REFERENCES projects(id) ON DELETE SET NULL);
+         CREATE TABLE transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, at INTEGER NOT NULL, entry TEXT NOT NULL);
+         CREATE INDEX transcript_bot ON transcript(bot, seq);
+         CREATE TABLE ledger(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
+         CREATE TABLE queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
+         CREATE TABLE questions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+         INSERT INTO bots(id, name, created_at, session) VALUES ('b1', 'Ada', 1, 'sess-1'), ('b2', 'Bo', 2, NULL);
+         INSERT INTO transcript(bot, at, entry) VALUES
+           ('b1', 1000, '{\"type\":\"prompt\",\"text\":\"Plan the garden\",\"nonce\":\"n1\"}'),
+           ('b1', 1001, '{\"type\":\"text\",\"delta\":\"ok\"}'),
+           ('b1', 1002, '{\"type\":\"turn_end\",\"reason\":\"done\"}'),
+           ('b2', 2000, '{\"type\":\"prompt\",\"text\":\"Other\",\"nonce\":\"m1\"}');
+         INSERT INTO ledger VALUES ('b1', 'n1', 'sent', 1000);
+         INSERT INTO queue VALUES (7, 'b1', 'n2', 'later');
+         INSERT INTO questions VALUES ('b1', 'q1', '{\"type\":\"question\",\"question\":\"q1\",\"title\":\"Write file?\",\"options\":[\"Approve\",\"Deny\"]}');
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(db);
+
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let opened = w.ok("open_bot", json!({"bot": "b1"}));
+    let texts: Vec<&Value> = opened["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["entry"]["type"])
+        .collect();
+    assert_eq!(texts, ["prompt", "text", "turn_end"]);
+    assert_eq!(opened["history"][0]["entry"]["text"], "Plan the garden");
+    // A question never outlives a start of the service: as before the move.
+    assert_eq!(opened["questions"], json!([]));
+    assert_eq!(opened["queue"][0]["text"], "later");
+
+    // Each bot has its transcript as its first conversation, titled, as last used when it was.
+    let first = conversations(&mut w, "b1");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["id"], opened["conversation"]);
+    assert_eq!(first[0]["title"], "Plan the garden");
+    assert_eq!(first[0]["touchedAt"], 1002);
+    let second = conversations(&mut w, "b2");
+    assert_eq!((second.len(), &second[0]["title"]), (1, &json!("Other")));
+
+    // The bot goes on in it, and its engine session came with it.
+    w.ok(
+        "prompt",
+        json!({"bot": "b1", "nonce": "n3", "text": "go on"}),
+    );
+    turn_ended(&mut w);
+    assert_eq!(conversations(&mut w, "b1").len(), 1);
+    drop(w);
+    service.kill();
+
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    let one = |sql: &str| -> String {
+        db.query_row(sql, [], |r| r.get::<_, rusqlite::types::Value>(0))
+            .map(|v| format!("{v:?}"))
+            .unwrap()
+    };
+    assert_eq!(one("PRAGMA user_version"), "Integer(2)");
+    assert_eq!(
+        one("SELECT session FROM conversations WHERE bot = 'b1'"),
+        "Text(\"sess-1\")"
+    );
+    assert_eq!(one("SELECT count(*) FROM queue"), "Integer(1)");
+    assert_eq!(
+        one("SELECT count(*) FROM pragma_foreign_key_check"),
+        "Integer(0)"
+    );
+
+    // The database as it was is kept: its version, and no conversation in it.
+    let kept = rusqlite::Connection::open(home.join("app.db.before-2")).unwrap();
+    let (version, rows, has): (i64, i64, i64) = kept
+        .query_row(
+            "SELECT (SELECT user_version FROM pragma_user_version), (SELECT count(*) FROM transcript), (SELECT count(*) FROM sqlite_master WHERE name = 'conversations')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((version, rows, has), (1, 4, 0));
+    assert_eq!(
+        fs::metadata(home.join("app.db.before-2"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -9264,6 +9625,10 @@ fn a_database_from_before_foreign_keys_is_moved_once_and_all_of_it_is_found_afte
         assert_eq!(seen, [(&b2, &p1), (&b1, &p1), (&b3, &p2)]);
         let opened = w.ok("open_bot", json!({"bot": "b1"}));
         assert_eq!(opened["history"][0]["entry"]["text"], "hi");
+        // Its transcript is the bot's first conversation, titled from its first prompt.
+        let listed = w.ok("list_conversations", json!({"bot": "b1"}));
+        assert_eq!(listed["conversations"][0]["id"], opened["conversation"]);
+        assert_eq!(listed["conversations"][0]["title"], "hi");
         assert_eq!(
             w.ok("list_mail", json!({"bot": "b1"}))["mail"][0]["text"],
             "hello"
@@ -9281,7 +9646,7 @@ fn a_database_from_before_foreign_keys_is_moved_once_and_all_of_it_is_found_afte
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     let broken: i64 = db
         .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
