@@ -42,7 +42,11 @@ export function Room({ project, bots }: { project: { id: string; name: string };
           Message{" "}
           <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} />
         </label>
-        <p className="note">Start with @name to write to one bot ({members.map((b) => `@${b.name}`).join(", ")}). Without a name it goes to the project's lead. A bot that is busy gets it when it is free.</p>
+        <p className="note">
+          {members.length
+            ? `Start with @name to write to one bot (${members.map((b) => `@${b.name}`).join(", ")}). Without a name it goes to the project's lead. A bot that is busy gets it when it is free.`
+            : "No bot is in this project yet. Add some on its Bots page."}
+        </p>
         <button disabled={!text.trim()}>Send</button>
       </form>
       {error && <p className="error" role="alert">{error}</p>}

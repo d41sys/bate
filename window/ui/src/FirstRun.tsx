@@ -7,7 +7,7 @@ import { DISMISSED, needsProvider, type Provider } from "./firstRun.ts";
  * Settings, where ChatGPT and the model server are. `reload` changes when the user may have
  * been to Settings, so the screen goes once a provider is saved.
  */
-export function FirstRun({ hasBots, reload, onSettings }: { hasBots: boolean; reload: string; onSettings: () => void }) {
+export function FirstRun({ reload, onSettings }: { reload: string; onSettings: () => void }) {
   const [needed, setNeeded] = useState(false);
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISSED) === "1");
   useEffect(() => {
@@ -24,10 +24,10 @@ export function FirstRun({ hasBots, reload, onSettings }: { hasBots: boolean; re
     <section className="first-run" aria-label="First run">
       <h2>Welcome to Bate</h2>
       <p>
-        A bot needs a model to answer. Open a bot's <b>Settings</b> and either sign in under <b>ChatGPT</b> (your plan; the
+        A bot needs a model to answer. Open <b>Settings</b>, at the foot of the sidebar, and either sign in under <b>ChatGPT</b> (your plan; the
         sign-in happens in your browser) or give a <b>Model server</b> (a URL such as <code>http://127.0.0.1:1234/v1</code>).
       </p>
-      {hasBots ? <button onClick={onSettings}>Open Settings</button> : <p>Create a bot on the left first.</p>}{" "}
+      <button onClick={onSettings}>Open Settings</button>{" "}
       <button
         onClick={() => {
           localStorage.setItem(DISMISSED, "1");

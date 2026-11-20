@@ -85,7 +85,7 @@ The person's actions are tool calls. Name them in the content: `"select"` (a too
 
 ## Installing, switching on, removing
 
-- **Install** (Projects tab, Workplaces; or `install_workplace`): Bate copies the folder as it copies a skill: into a staging folder first, no links or special files, at most 2000 files and folders, 200 MiB and 12 folders deep, then fetches its downloads there. A malformed manifest or a program that is missing is refused with the reason. A workplace of the same name is replaced, unless a project has it on.
+- **Install** (Workplaces in the sidebar; or `install_workplace`): Bate copies the folder as it copies a skill: into a staging folder first, no links or special files, at most 2000 files and folders, 200 MiB and 12 folders deep, then fetches its downloads there. A malformed manifest or a program that is missing is refused with the reason. A workplace of the same name is replaced, unless a project has it on.
 - **Switch on** (in the project; or `workplace` in `set_project`): the window shows what the workplace needs and asks first. A project has a workplace *or* a connector of its own, not both. The workplace's skills are offered to every bot of the project, from the workplace's own folder (nothing is copied into the bots' folders). Its roles are added through "Add bots from role files", whose paths the list shows.
 - **Change on disk:** Bate keeps a SHA-256 fingerprint of the installed files. When they differ (checked when the program starts and whenever the list is shown), the workplace is switched off in every project: the program stops, the project says why, and the bots go on without its tools and skills. After you have looked at the files, **Approve** records them as they are and the program starts again.
 - **Switch off:** choose no workplace in the project. The program stops, and each bot loses its tools and skills at its next turn.
@@ -95,7 +95,7 @@ A workplace that cannot be used (its manifest no longer parses, its program does
 
 ## The catalog
 
-Bate's own list of workplaces is the file `catalog/workplaces.json` in this repository. In the window (Projects tab, Workplaces, Catalog) a person asks for it, reads the entries and installs one; nothing is contacted before that, and no server of the project is involved: the list is read from GitHub's raw files and the archives from wherever the entries say (GitHub releases, for Bate's own). A workplace that is not in the list is installed from a folder, as above.
+Bate's own list of workplaces is the file `catalog/workplaces.json` in this repository. In the window (Workplaces in the sidebar, Catalog) a person asks for it, reads the entries and installs one; nothing is contacted before that, and no server of the project is involved: the list is read from GitHub's raw files and the archives from wherever the entries say (GitHub releases, for Bate's own). A workplace that is not in the list is installed from a folder, as above.
 
 ```json
 {
