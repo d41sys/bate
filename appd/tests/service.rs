@@ -27,9 +27,14 @@ use serde_json::{Value, json};
 /// operation adds a line to `starts.log`.
 /// A prompt `work` starts a turn that runs until `abort`. Each `steer` is logged to `steers.log` and
 /// answered; unless its text has `late` in it, the engine then takes it into the turn (`steered`).
+/// A session named `slow-…` or `slowgone-…` is opened (or refused) only once the file `go` is
+/// there (`let_open`), or after 10 s, and the file `holding` says the engine has got that far
+/// (`engine_held`): what a test does "while the engine opens it" does not depend on how fast
+/// the machine is.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
 echo '{"type":"ready","protocol":1}'
+held() { : > holding; n=0; while [ ! -e go ] && [ "$n" -lt 200 ]; do sleep 0.05; n=$((n + 1)); done; }
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
   ok="{\"type\":\"response\",\"id\":\"$id\"}"
@@ -40,8 +45,8 @@ while IFS= read -r line; do
       echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"
       echo "{\"type\":\"session\",\"session\":\"s$(wc -l < starts.log | tr -d ' ')\"}" ;;
     *'"type":"open"'*'"session":"gone-'*) echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
-    *'"type":"open"'*'"session":"slowgone-'*) sleep 0.5; echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
-    *'"type":"open"'*'"session":"slow-'*) sleep 0.5; echo "$ok" ;;
+    *'"type":"open"'*'"session":"slowgone-'*) held; echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot open that conversation\"}" ;;
+    *'"type":"open"'*'"session":"slow-'*) held; echo "$ok" ;;
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
@@ -1684,6 +1689,20 @@ fn set_session(home: &Path, conversation: &Value, session: &str) {
     .unwrap();
 }
 
+/// Waits until the fake engine was asked to open a `slow-…` or `slowgone-…` session, which it
+/// holds until `let_open`.
+fn engine_held(home: &Path, bot: &str) {
+    let mark = home.join("bots").join(bot).join("holding");
+    eventually("the engine to be opening the slow session", || {
+        mark.exists()
+    });
+}
+
+/// Lets the fake engine go on with the session it holds.
+fn let_open(home: &Path, bot: &str) {
+    fs::write(home.join("bots").join(bot).join("go"), "").unwrap();
+}
+
 fn reply_to(w: &mut Window, id: &str) -> Value {
     w.wait_for(|f| f["type"] == "response" && f["id"] == id)
 }
@@ -1727,9 +1746,11 @@ fn a_rewind_waiting_for_its_conversation_is_not_overtaken_by_a_move_into_another
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     let compact = w.send("compact", json!({"bot": bot, "conversation": first}));
     let refused = reply_to(&mut w, &compact);
     assert_eq!(refused["code"], "busy", "{refused}");
+    let_open(&home, &bot);
     assert_eq!(reply_to(&mut w, &rewind)["success"], true);
 
     // The rewind cut the fork, and nothing of the first conversation.
@@ -1752,12 +1773,14 @@ fn a_prompt_during_a_switch_waits_in_its_queue_and_runs_in_its_own_conversation(
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     // The engine is still opening the fork when this comes, for the first conversation.
     let sent = w.ok(
         "prompt",
         json!({"bot": bot, "nonce": "n9", "conversation": first, "text": "hi"}),
     );
     assert_eq!(sent, json!({"queued": true}));
+    let_open(&home, &bot);
     eventually("the queued prompt to run in the first conversation", || {
         let entries = entries_of(&mut w, &bot, &first);
         prompts_in(&entries) == ["n1", "n2", "n9"]
@@ -1782,9 +1805,11 @@ fn a_second_move_while_a_session_is_refused_does_not_change_the_other_session() 
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     let into_first = w.send("compact", json!({"bot": bot, "conversation": first}));
     let refused = reply_to(&mut w, &into_first);
     assert_eq!(refused["code"], "busy", "{refused}");
+    let_open(&home, &bot);
     // The first request goes on in a new session of the fork, once the old one is refused.
     assert_eq!(reply_to(&mut w, &into_fork)["success"], true);
     eventually("the fork's new session", || {
@@ -1804,7 +1829,11 @@ fn an_abort_sent_while_a_prompt_waits_for_its_conversation_stops_that_prompt() {
         "prompt",
         json!({"bot": bot, "nonce": "n9", "conversation": fork, "text": "work"}),
     );
-    w.ok("abort", json!({"bot": bot}));
+    engine_held(&home, &bot);
+    // The stop is answered once the engine is: the next request's answer says it was taken up.
+    w.send("abort", json!({"bot": bot}));
+    w.ok("list_bots", json!({}));
+    let_open(&home, &bot);
     eventually("the turn to end, after it began", || {
         let entries = entries_of(&mut w, &bot, &fork);
         let at = entries
@@ -1839,8 +1868,10 @@ fn a_chat_message_during_a_switch_is_told_the_bot_is_busy() {
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     telegram.say(7, "hello");
     assert!(telegram.heard(7, 2).contains("busy"));
+    let_open(&home, &bot);
     assert_eq!(reply_to(&mut w, &rewind)["success"], true);
 }
 
@@ -1860,11 +1891,13 @@ fn a_webhook_during_a_switch_is_told_the_bot_is_busy() {
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     let head = "content-length: 0\r\n";
     assert_eq!(
         http(routine["hookUrl"].as_str().unwrap(), "POST", None, head, ""),
         409
     );
+    let_open(&home, &bot);
     assert_eq!(reply_to(&mut w, &rewind)["success"], true);
 }
 
@@ -1878,9 +1911,11 @@ fn a_project_change_during_a_switch_stops_the_engine_once_the_switch_is_answered
         "rewind",
         json!({"bot": bot, "conversation": fork, "entry": "n1", "fork": false}),
     );
+    engine_held(&home, &bot);
     let site = self::home("settling-project-site");
     let project = json!({"name": "Site", "folder": site.canonicalize().unwrap(), "bots": [bot]});
     w.ok("set_project", json!({"project": project}));
+    let_open(&home, &bot);
     // The engine was not stopped under the rewind: it is answered, and the engine goes after.
     assert_eq!(reply_to(&mut w, &rewind)["success"], true);
     eventually("the engine to stop", || {
@@ -1907,11 +1942,13 @@ fn a_refused_start_says_when_a_prompt_still_waits() {
         "prompt",
         json!({"bot": bot, "nonce": "n9", "conversation": first, "text": "hi"}),
     );
+    engine_held(&home, &bot);
     let queued = w.ok(
         "prompt",
         json!({"bot": bot, "nonce": "n10", "conversation": first, "text": "hi"}),
     );
     assert_eq!(queued, json!({"queued": true}));
+    let_open(&home, &bot);
     let refused = reply_to(&mut w, &held);
     assert_eq!(refused["code"], "engine_error", "{refused}");
     assert!(
