@@ -9018,3 +9018,261 @@ fn a_zip_download_is_unpacked_and_may_hold_more_files_than_the_workplace_itself(
     assert_eq!(listed[0]["changed"], false, "{listed}");
     assert_eq!(listed[0]["error"], Value::Null, "{listed}");
 }
+
+/// The tables of the version before foreign keys: a project's bots and lead are inside its
+/// JSON, and nothing ties a row to its bot.
+const OLD_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT);
+CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, at INTEGER NOT NULL, entry TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
+CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
+CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
+CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY, hosts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY, command TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
+CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
+CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
+CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
+CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
+CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY, steps INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
+CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
+CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS room(seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, author TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS room_project ON room(project, seq);
+CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
+";
+
+/// Every row of every table, as text, to tell whether anything changed.
+fn dump(db: &rusqlite::Connection) -> Vec<String> {
+    let mut stmt = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .unwrap();
+    let tables: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut rows = Vec::new();
+    for table in tables {
+        let mut stmt = db
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let columns = stmt.column_count();
+        let mut found = stmt.query([]).unwrap();
+        while let Some(row) = found.next().unwrap() {
+            let cells: Vec<String> = (0..columns)
+                .map(|i| format!("{:?}", row.get::<_, rusqlite::types::Value>(i).unwrap()))
+                .collect();
+            rows.push(format!("{table}: {}", cells.join(", ")));
+        }
+    }
+    rows
+}
+
+/// How many cells of `app.db` hold exactly `id`, in any column of any table.
+fn cells_holding(db: &rusqlite::Connection, id: &str) -> i64 {
+    let mut stmt = db
+        .prepare("SELECT m.name, c.name FROM sqlite_master m, pragma_table_info(m.name) c WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'")
+        .unwrap();
+    let columns: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    columns
+        .iter()
+        .map(|(table, column)| {
+            let sql = format!("SELECT count(*) FROM {table} WHERE \"{column}\" = ?1");
+            db.query_row(&sql, [id], |r| r.get::<_, i64>(0)).unwrap()
+        })
+        .sum()
+}
+
+#[test]
+fn a_database_from_before_foreign_keys_is_moved_once_and_all_of_it_is_found_after() {
+    let home = home("fk-move");
+    let folder = home.join("site");
+    fs::create_dir_all(&folder).unwrap();
+    // p1 lists a bot that is gone; p2 lists a bot p1 has, and a lead that is not its own.
+    let p1 = json!({"id": "p1", "name": "Site", "folder": folder, "bots": ["b2", "b1", "ghost"],
+        "lead": "b2", "instructions": "", "hosts": []});
+    let p2 = json!({"id": "p2", "name": "Other", "folder": folder, "bots": ["b1", "b3"],
+        "lead": "b1", "instructions": "", "hosts": []});
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute_batch(OLD_SCHEMA).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO bots(id, name, created_at) VALUES ('b1', 'Ada', 1), ('b2', 'Bo', 2), ('b3', 'Cy', 3);
+         INSERT INTO projects VALUES ('p1', '{p1}'), ('p2', '{p2}');
+         INSERT INTO transcript(bot, at, entry) VALUES
+           ('b1', 1, '{{\"type\":\"prompt\",\"text\":\"hi\",\"nonce\":\"n1\"}}'), ('ghost', 1, '{{}}');
+         INSERT INTO ledger VALUES ('b1', 'n1', 'sent', 1), ('ghost', 'n9', 'sent', 1);
+         INSERT INTO models VALUES ('b2', 'm', NULL);
+         INSERT INTO grants VALUES ('b1', '\"connector\"', 'notes__x', 5), ('ghost', '\"connector\"', 'a', 5);
+         INSERT INTO profiles(bot, instructions, position) VALUES ('b2', 'be kind', 0), ('b1', '', 1);
+         INSERT INTO mail(from_bot, to_bot, text, state, at) VALUES
+           ('b1', 'b2', 'hello', 'answered', 1), ('b1', 'ghost', 'lost', 'waiting', 2);
+         INSERT INTO room(project, author, to_bot, text, at) VALUES ('p1', '', 'b1', 'room hi', 1);"
+    ))
+    .unwrap();
+    drop(db);
+
+    let found = |home: &Path| {
+        let mut service = Service::start(home);
+        let mut w = Window::connect(home);
+        let projects = w.ok("list_projects", json!({}))["projects"].clone();
+        assert_eq!(projects[0]["id"], "p1");
+        assert_eq!(projects[0]["name"], "Site");
+        assert_eq!(projects[0]["folder"], json!(folder));
+        assert_eq!(projects[0]["bots"], json!(["b1", "b2"]));
+        assert_eq!(projects[0]["lead"], "b2");
+        assert_eq!(projects[1]["bots"], json!(["b3"]));
+        assert_eq!(projects[1]["lead"], Value::Null);
+        let bots = w.ok("list_bots", json!({}))["bots"].clone();
+        let seen: Vec<(&Value, &Value)> = bots
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| (&b["id"], &b["project"]["id"]))
+            .collect();
+        let (b1, b2, b3) = (json!("b1"), json!("b2"), json!("b3"));
+        let (p1, p2) = (json!("p1"), json!("p2"));
+        assert_eq!(seen, [(&b2, &p1), (&b1, &p1), (&b3, &p2)]);
+        let opened = w.ok("open_bot", json!({"bot": "b1"}));
+        assert_eq!(opened["history"][0]["entry"]["text"], "hi");
+        assert_eq!(
+            w.ok("list_mail", json!({"bot": "b1"}))["mail"][0]["text"],
+            "hello"
+        );
+        assert_eq!(
+            w.ok("list_room", json!({"projectId": "p1"}))["room"][0]["text"],
+            "room hi"
+        );
+        drop(w);
+        service.kill();
+    };
+
+    found(&home);
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+    let broken: i64 = db
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+    // What pointed at a bot that does not exist is gone; the rest is there.
+    assert_eq!(cells_holding(&db, "ghost"), 0);
+    let (rows, mail): (i64, i64) = db
+        .query_row(
+            "SELECT (SELECT count(*) FROM transcript) + (SELECT count(*) FROM grants) + (SELECT count(*) FROM ledger), (SELECT count(*) FROM mail)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((rows, mail), (3, 1));
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+    assert!(
+        log.contains("rows of transcript pointed at a bot that does not exist"),
+        "{log}"
+    );
+    assert!(log.contains("bot ghost left out of project p1"), "{log}");
+    assert!(log.contains("bot b1 left out of project p2"), "{log}");
+    let moved = dump(&db);
+    drop(db);
+
+    // The database as it was is kept, private, in its old shape, and named in the log.
+    let kept = home.join("app.db.before-1");
+    assert_eq!(
+        fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!home.join("app.db.before-1.part").exists());
+    assert!(log.contains("app.db.before-1: kept as it was"), "{log}");
+    let before = rusqlite::Connection::open(&kept).unwrap();
+    let listed: String = before
+        .query_row("SELECT project FROM projects WHERE id = 'p1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&listed).unwrap()["bots"],
+        json!(["b2", "b1", "ghost"])
+    );
+    let version: i64 = before
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 0);
+    let ghosts: i64 = before
+        .query_row(
+            "SELECT count(*) FROM transcript WHERE bot = 'ghost'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghosts, 1, "the copy keeps what the move dropped");
+    drop(before);
+    let copy = fs::read(&kept).unwrap();
+
+    // A second start finds the same and changes nothing, the copy included.
+    found(&home);
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    assert_eq!(dump(&db), moved);
+    assert_eq!(fs::read(&kept).unwrap(), copy);
+}
+
+#[test]
+fn deleting_a_bot_or_a_project_leaves_no_row_that_points_at_it() {
+    let home = home("fk-delete");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let project = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [a, b], "lead": a}}),
+    )["project"]
+        .clone();
+    let pid = project["id"].as_str().unwrap().to_owned();
+    w.ok("prompt", json!({"bot": a, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    w.ok("set_disk_access", json!({"bot": a, "wholeDisk": false}));
+    // The lead answers into the room: wait for it, so no line comes after the project is gone.
+    w.ok("send_room", json!({"projectId": pid, "text": "hello"}));
+    eventually("the lead's reply", || {
+        w.ok("list_room", json!({"projectId": pid}))["room"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 2
+    });
+
+    // The bot goes with its rows, its place in the project, and its lead.
+    w.ok("delete_bot", json!({"bot": a}));
+    let listed = w.ok("list_projects", json!({}))["projects"].clone();
+    assert_eq!(listed[0]["bots"], json!([b]));
+    assert_eq!(listed[0]["lead"], Value::Null);
+    // The project goes with its room; its bot stays, in no project.
+    w.ok("delete_project", json!({"projectId": pid}));
+    let bots = w.ok("list_bots", json!({}))["bots"].clone();
+    assert_eq!(bots[0]["id"], json!(b));
+    assert_eq!(bots[0]["project"], Value::Null);
+    drop(w);
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    assert_eq!(cells_holding(&db, &a), 0);
+    assert_eq!(cells_holding(&db, &pid), 0);
+}

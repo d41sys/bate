@@ -257,12 +257,7 @@ fn link_work_bot(store: &Store, bot: &str) {
         if fs::symlink_metadata(&link).is_ok() {
             fs::remove_file(&link)?;
         }
-        if let Some(project) = store
-            .projects()
-            .map_err(io::Error::other)?
-            .into_iter()
-            .find(|p| p.bots.iter().any(|b| b == bot))
-        {
+        if let Some(project) = store.project_of(bot).map_err(io::Error::other)? {
             std::os::unix::fs::symlink(project.folder, link)?;
         }
         Ok(())
@@ -1941,10 +1936,7 @@ impl Core {
                     );
                 }
                 let project = self.project_of(&bot).map_err(internal)?;
-                if let Some(mut project) = project.clone() {
-                    project.bots.retain(|b| *b != bot);
-                    self.store.put_project(&project).map_err(internal)?;
-                }
+                // The database clears its place in the project, and the project's lead if it was.
                 self.store.delete_bot(&bot).map_err(internal)?;
                 for kind in channels::KINDS {
                     self.stop_channel(&(bot.clone(), kind));
@@ -2624,8 +2616,7 @@ impl Core {
 
     /// The project `bot` is in.
     fn project_of(&self, bot: &str) -> rusqlite::Result<Option<Project>> {
-        let mut projects = self.store.projects()?.into_iter();
-        Ok(projects.find(|p| p.bots.iter().any(|b| b == bot)))
+        self.store.project_of(bot)
     }
 
     /// What holds a limited process of `owner` (`bot:<id>`, `project:<id>`) to its hosts: the

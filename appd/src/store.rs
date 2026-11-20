@@ -131,41 +131,48 @@ impl Ledger {
     }
 }
 
+/// Every relation is a foreign key: the rows of a bot go with it (`ON DELETE CASCADE`), and a
+/// bot's project and a project's lead are cleared when what they point at is deleted.
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT);
-CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, at INTEGER NOT NULL, entry TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT, project TEXT REFERENCES projects(id) ON DELETE SET NULL);
+CREATE INDEX IF NOT EXISTS bots_project ON bots(project);
+CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, at INTEGER NOT NULL, entry TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS transcript_bot ON transcript(bot, seq);
-CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
-CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
-CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
-CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY, whole_disk INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY, hosts TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY, command TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
-CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
-CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
-CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL, routine TEXT NOT NULL, run TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
+CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(bot, nonce));
+CREATE TABLE IF NOT EXISTS questions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(bot, question));
+CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, whole_disk INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, hosts TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, command TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
+CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
+CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
-CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
-CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL, lead TEXT REFERENCES bots(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
-CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
-CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY, model TEXT NOT NULL, effort TEXT);
-CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY, steps INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
+CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
+CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
-CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
-CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
+CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
+CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, to_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS room(seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, author TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS room_project ON room(project, seq);
 CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
+CREATE INDEX IF NOT EXISTS mail_from ON mail(from_bot);
 ";
 
-/// Every table that holds rows of a bot, in its `bot` column.
-const BOT_TABLES: [&str; 19] = [
+/// What `PRAGMA user_version` holds once relations are foreign keys; 0 before.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Every table that holds rows of a bot, in its `bot` column, besides `bots` and `mail`.
+const BOT_TABLES: [&str; 18] = [
     "transcript",
     "ledger",
     "queue",
@@ -184,8 +191,192 @@ const BOT_TABLES: [&str; 19] = [
     "step_limits",
     "channels",
     "chats",
-    "bots",
 ];
+
+/// An error of the kind the database gives for a row it refuses.
+fn refused(why: &str) -> rusqlite::Error {
+    let code = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT);
+    rusqlite::Error::SqliteFailure(code, Some(why.to_owned()))
+}
+
+/// Whether `conn` holds a database from before relations were foreign keys.
+fn is_old(conn: &Connection) -> Result<bool> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(version == 0 && has_table(conn, "bots")?)
+}
+
+/// The move cannot be undone, and an older version cannot read its result: before it, keeps one
+/// copy of the database next to it, `<file>.before-1`, readable by its owner only. A copy that is
+/// already there is kept (a move that failed is tried again from the same database). Without
+/// the copy there is no move.
+fn back_up(conn: &Connection, path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !is_old(conn)? {
+        return Ok(());
+    }
+    let file = path.file_name().expect("a database file").to_string_lossy();
+    let (copy, part) = (
+        path.with_file_name(format!("{file}.before-1")),
+        path.with_file_name(format!("{file}.before-1.part")),
+    );
+    if copy.exists() {
+        return Ok(());
+    }
+    let failed = |e: String| rusqlite::Error::ToSqlConversionFailure(e.into());
+    let _ = std::fs::remove_file(&part);
+    // `VACUUM INTO` writes into an empty file, so it can be made private first. Under another
+    // name until whole: a half-written copy is not kept.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&part)
+        .map_err(|e| failed(format!("{}: {e}", part.display())))?;
+    let target = part
+        .to_str()
+        .ok_or_else(|| failed("the path is not text".into()))?;
+    let copied = conn
+        .execute("VACUUM INTO ?1", [target])
+        .map(drop)
+        .and_then(|()| {
+            std::fs::rename(&part, &copy).map_err(|e| failed(format!("{}: {e}", copy.display())))
+        });
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    log!(
+        "{}: kept as it was before the move to foreign keys",
+        copy.display()
+    );
+    Ok(())
+}
+
+/// Creates the tables, and first moves an `app.db` written before the relations were foreign
+/// keys, once, in one transaction. SQLite cannot add a foreign key to a table, so each table
+/// that gets one is rebuilt, with foreign keys off as its documentation describes. A row that
+/// points at a bot that does not exist is dropped, and logged.
+fn migrate(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let tx = conn.unchecked_transaction()?;
+    let old = is_old(&tx)?;
+    // The tables to rebuild: an older database may lack some that a still older one never made.
+    let mut moved = Vec::new();
+    for table in BOT_TABLES.into_iter().chain(["mail", "projects", "bots"]) {
+        if old && has_table(&tx, table)? {
+            tx.execute(&format!("ALTER TABLE {table} RENAME TO {table}_old"), [])?;
+            moved.push(table);
+        }
+    }
+    if old {
+        // The indexes went with their tables; the new ones take their names.
+        for index in ["transcript_bot", "routine_runs_of", "mail_to"] {
+            tx.execute(&format!("DROP INDEX IF EXISTS {index}"), [])?;
+        }
+    }
+    tx.execute_batch(SCHEMA)?;
+    if old {
+        copy_old(&tx, "bots", "1")?;
+        let known = "IN (SELECT id FROM bots)";
+        for table in BOT_TABLES {
+            copy_old(&tx, table, &format!("bot {known}"))?;
+        }
+        copy_old(&tx, "mail", &format!("from_bot {known} AND to_bot {known}"))?;
+        copy_old_projects(&tx)?;
+        for table in moved {
+            // A table's last number is not given again.
+            tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])?;
+            tx.execute(
+                "UPDATE sqlite_sequence SET name = ?1 WHERE name = ?1 || '_old'",
+                [table],
+            )?;
+            tx.execute(&format!("DROP TABLE {table}_old"), [])?;
+        }
+        let broken: i64 =
+            tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })?;
+        if broken > 0 {
+            return Err(refused("the moved rows break a foreign key"));
+        }
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()
+}
+
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+        .exists([name])
+}
+
+/// Copies the rows of `{table}_old` that satisfy `keep` into `table`, in the columns both have.
+fn copy_old(tx: &Connection, table: &str, keep: &str) -> Result<()> {
+    if !has_table(tx, &format!("{table}_old"))? {
+        return Ok(());
+    }
+    let columns: String = tx.query_row(
+        &format!(
+            "SELECT group_concat('\"' || n.name || '\"') FROM pragma_table_info('{table}') n \
+             JOIN pragma_table_info('{table}_old') o ON o.name = n.name"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        &format!("INSERT INTO {table}({columns}) SELECT {columns} FROM {table}_old WHERE {keep}"),
+        [],
+    )?;
+    let dropped: i64 = tx.query_row(
+        &format!("SELECT (SELECT count(*) FROM {table}_old) - (SELECT count(*) FROM {table})"),
+        [],
+        |r| r.get(0),
+    )?;
+    if dropped > 0 {
+        log!("app.db: {dropped} rows of {table} pointed at a bot that does not exist; dropped");
+    }
+    Ok(())
+}
+
+/// Moves the projects: the bots and the lead, which were inside each one's JSON, become the
+/// bots' `project` and the project's `lead`. A bot that is gone, or already in another project,
+/// is left out; a lead that is not one of the project's bots is left out.
+fn copy_old_projects(tx: &Connection) -> Result<()> {
+    if !has_table(tx, "projects_old")? {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare("SELECT id, project FROM projects_old ORDER BY id")?;
+    let old: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_>>()?;
+    for (id, text) in old {
+        let mut project: Value = parse(text)?;
+        let mut take = |key: &str| project.as_object_mut().and_then(|o| o.remove(key));
+        let bots: Vec<String> = take("bots")
+            .and_then(|b| serde_json::from_value(b).ok())
+            .unwrap_or_default();
+        let lead = take("lead").and_then(|l| l.as_str().map(str::to_owned));
+        tx.execute(
+            "INSERT INTO projects(id, project) VALUES (?1, ?2)",
+            params![id, json(&project)],
+        )?;
+        for bot in bots {
+            let put = tx.execute(
+                "UPDATE bots SET project = ?1 WHERE id = ?2 AND project IS NULL",
+                [&id, &bot],
+            )?;
+            if put == 0 {
+                log!(
+                    "app.db: bot {bot} left out of project {id}: it is gone or in another project"
+                );
+            }
+        }
+        tx.execute(
+            "UPDATE projects SET lead = ?2 WHERE id = ?1 AND ?2 IN (SELECT id FROM bots WHERE project = ?1)",
+            params![id, lead],
+        )?;
+    }
+    Ok(())
+}
 
 /// Past runs kept per routine.
 const MAX_RUNS: u32 = 50;
@@ -350,7 +541,10 @@ impl Store {
         conn.pragma_update(None, "synchronous", "FULL")?;
         // A blanked secret must not stay in the file as freed bytes.
         conn.pragma_update(None, "secure_delete", true)?;
-        conn.execute_batch(SCHEMA)?;
+        back_up(&conn, path)?;
+        migrate(&conn)?;
+        // Off in SQLite unless asked, for each connection.
+        conn.pragma_update(None, "foreign_keys", true)?;
         // Groups are gone (ADR 0002): a project is how bots work together.
         conn.execute("DROP TABLE IF EXISTS groups", [])?;
         conn.execute(
@@ -631,8 +825,10 @@ impl Store {
         tx.commit()
     }
 
-    /// Forgets the bot and everything stored for it, its secrets in the Keychain too.
-    pub fn delete_bot(&mut self, bot: &str) -> Result<()> {
+    /// Forgets the bot and everything stored for it, its secrets in the Keychain too. The
+    /// database empties the tables of the bot and clears its place in a project, in this one
+    /// statement.
+    pub fn delete_bot(&self, bot: &str) -> Result<()> {
         for (table, column, account) in [
             (
                 "channels",
@@ -651,13 +847,9 @@ impl Store {
                 kc(keychain::delete(&account(bot, &name)))?;
             }
         }
-        let tx = self.0.transaction()?;
-        for table in BOT_TABLES {
-            let column = if table == "bots" { "id" } else { "bot" };
-            tx.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [bot])?;
-        }
-        tx.execute("DELETE FROM mail WHERE from_bot = ?1 OR to_bot = ?1", [bot])?;
-        tx.commit()
+        self.0
+            .execute("DELETE FROM bots WHERE id = ?1", [bot])
+            .map(drop)
     }
 
     pub fn bot(&self, id: &str) -> Result<Option<BotRow>> {
@@ -1188,21 +1380,73 @@ impl Store {
             .map(drop)
     }
 
+    /// A project as stored: the bots and the lead come from the `bots` and `lead` columns.
+    fn project_row(&self, r: &rusqlite::Row) -> Result<Project> {
+        let mut project: Project = parse(r.get(0)?)?;
+        project.lead = r.get(1)?;
+        project.bots = self
+            .0
+            .prepare_cached("SELECT id FROM bots WHERE project = ?1 ORDER BY id")?
+            .query_map([r.get::<_, String>(2)?], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        Ok(project)
+    }
+
     pub fn projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self
             .0
-            .prepare_cached("SELECT project FROM projects ORDER BY id")?;
-        stmt.query_map([], |r| parse(r.get(0)?))?.collect()
+            .prepare_cached("SELECT project, lead, id FROM projects ORDER BY id")?;
+        stmt.query_map([], |r| self.project_row(r))?.collect()
     }
 
+    /// The project `bot` is in.
+    pub fn project_of(&self, bot: &str) -> Result<Option<Project>> {
+        self.0
+            .prepare_cached(
+                "SELECT p.project, p.lead, p.id FROM bots b JOIN projects p ON p.id = b.project \
+                 WHERE b.id = ?1",
+            )?
+            .query_row([bot], |r| self.project_row(r))
+            .optional()
+    }
+
+    /// Creates or replaces by `project.id`, which must be set. The database refuses a bot that
+    /// does not exist, one that is in another project, and a lead that is not one of the bots.
     pub fn put_project(&self, project: &Project) -> Result<()> {
         let id = project.id.as_deref().expect("stored projects have an id");
-        self.0
-            .execute(
-                "INSERT OR REPLACE INTO projects(id, project) VALUES (?1, ?2)",
-                params![id, json(project)],
-            )
-            .map(drop)
+        let members = json(&project.bots);
+        let stored = Project {
+            bots: Vec::new(),
+            lead: None,
+            ..project.clone()
+        };
+        let tx = self.0.unchecked_transaction()?;
+        // Not `INSERT OR REPLACE`: replacing deletes the row, which clears its bots' place.
+        tx.execute(
+            "INSERT INTO projects(id, project, lead) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(id) DO UPDATE SET project = ?2, lead = ?3",
+            params![id, json(&stored), project.lead],
+        )?;
+        tx.execute(
+            "UPDATE bots SET project = NULL \
+             WHERE project = ?1 AND id NOT IN (SELECT value FROM json_each(?2))",
+            [id, &members],
+        )?;
+        let placed = tx.execute(
+            "UPDATE bots SET project = ?1 WHERE id IN (SELECT value FROM json_each(?2)) \
+             AND (project IS NULL OR project = ?1)",
+            [id, &members],
+        )?;
+        let lead_in = project
+            .lead
+            .as_ref()
+            .is_none_or(|l| project.bots.contains(l));
+        if placed != project.bots.len() || !lead_in {
+            return Err(refused(
+                "a bot is in at most one project, and the lead is one of its bots",
+            ));
+        }
+        tx.commit()
     }
 
     pub fn workplaces(&self) -> Result<Vec<Workplace>> {
@@ -1248,12 +1492,12 @@ impl Store {
         tx.commit()
     }
 
+    /// Deletes the project and its room; its bots stay, in no project.
     pub fn delete_project(&self, id: &str) -> Result<()> {
-        self.0
-            .execute("DELETE FROM room WHERE project = ?1", [id])?;
-        self.0
-            .execute("DELETE FROM projects WHERE id = ?1", [id])
-            .map(drop)
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute("DELETE FROM room WHERE project = ?1", [id])?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+        tx.commit()
     }
 
     /// Adds a line to the project's room; its number.
@@ -1415,6 +1659,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("appd-store-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("app.db")).unwrap();
+        store.create_bot("b1", "Ada", 1).unwrap();
         let run = |at_ms, outcome| RoutineRun {
             at_ms,
             outcome,
@@ -1441,6 +1686,155 @@ mod tests {
             store.runs("b1", "other").unwrap(),
             [run(1, RunOutcome::Sent)]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn project(id: &str, bots: &[&str], lead: Option<&str>) -> Project {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "bots": bots, "lead": lead,
+        }))
+        .unwrap()
+    }
+
+    fn count(store: &Store, table: &str, column: &str, id: &str) -> i64 {
+        let sql = format!("SELECT count(*) FROM {table} WHERE {column} = ?1");
+        store.0.query_row(&sql, [id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn the_database_refuses_a_bot_in_two_projects_and_a_bot_or_lead_that_is_not_a_bot() {
+        let dir = std::env::temp_dir().join(format!("appd-store-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        for id in ["a", "b"] {
+            store.create_bot(id, id, 1).unwrap();
+        }
+        store
+            .put_project(&project("p1", &["a", "b"], Some("a")))
+            .unwrap();
+        let kept = store.projects().unwrap();
+        assert_eq!(
+            (&kept[0].bots, &kept[0].lead),
+            (&vec!["a".into(), "b".into()], &Some("a".into()))
+        );
+        assert_eq!(
+            store.project_of("b").unwrap().unwrap().id.as_deref(),
+            Some("p1")
+        );
+
+        // A bot of another project, one that is not a bot, a lead that is not one of the bots.
+        assert!(store.put_project(&project("p2", &["b"], None)).is_err());
+        assert!(store.put_project(&project("p2", &["ghost"], None)).is_err());
+        assert!(
+            store
+                .put_project(&project("p2", &["a"], Some("ghost")))
+                .is_err()
+        );
+        assert!(
+            store
+                .put_project(&project("p1", &["a"], Some("b")))
+                .is_err()
+        );
+        assert_eq!(
+            store.projects().unwrap(),
+            kept,
+            "a refused change leaves nothing behind"
+        );
+
+        // The tables themselves refuse too, whatever the code does.
+        let db = &store.0;
+        assert!(
+            db.execute("UPDATE bots SET project = 'none' WHERE id = 'a'", [])
+                .is_err()
+        );
+        assert!(
+            db.execute("UPDATE projects SET lead = 'ghost'", [])
+                .is_err()
+        );
+        assert!(
+            db.execute("INSERT INTO ledger VALUES ('ghost', 'n', 'sent', 1)", [])
+                .is_err()
+        );
+        assert!(db.execute("INSERT INTO mail(from_bot, to_bot, text, state, at) VALUES ('a', 'ghost', '', 'waiting', 1)", []).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_bot_or_a_project_leaves_no_row_that_points_at_it() {
+        let dir = std::env::temp_dir().join(format!("appd-store-delete-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        for id in ["a", "b"] {
+            store.create_bot(id, id, 1).unwrap();
+            store
+                .append(id, 1, &serde_json::json!({"type": "prompt"}))
+                .unwrap();
+            store.set_ledger(id, "n", Ledger::Sent, 1).unwrap();
+            store.set_model(id, "m", None).unwrap();
+            store
+                .put_grant(
+                    id,
+                    &Grant {
+                        kind: Kind::Connector,
+                        target: "t".into(),
+                        at_ms: 1,
+                    },
+                )
+                .unwrap();
+        }
+        store.put_mail("a", "b", "hi", "waiting", 1).unwrap();
+        store.put_mail("b", "a", "re", "waiting", 1).unwrap();
+        store
+            .put_project(&project("p1", &["a", "b"], Some("a")))
+            .unwrap();
+        store.put_room("p1", "a", "", "hello", 1).unwrap();
+
+        store.delete_bot("a").unwrap();
+        for table in BOT_TABLES {
+            assert_eq!(count(&store, table, "bot", "a"), 0, "{table}");
+        }
+        assert_eq!(
+            count(&store, "transcript", "bot", "b"),
+            1,
+            "b keeps its own"
+        );
+        assert_eq!(count(&store, "bots", "id", "a"), 0);
+        for column in ["from_bot", "to_bot"] {
+            assert_eq!(count(&store, "mail", column, "a"), 0);
+            assert_eq!(
+                count(&store, "mail", column, "b"),
+                0,
+                "a message of a is gone for b too"
+            );
+        }
+        let kept = store.projects().unwrap();
+        assert_eq!((&kept[0].bots, &kept[0].lead), (&vec!["b".into()], &None));
+
+        store.delete_project("p1").unwrap();
+        assert_eq!(count(&store, "projects", "id", "p1"), 0);
+        assert_eq!(count(&store, "room", "project", "p1"), 0);
+        assert_eq!(count(&store, "bots", "project", "p1"), 0);
+        assert_eq!(store.bot("b").unwrap().unwrap().id, "b");
+        assert_eq!(store.project_of("b").unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_database_is_not_moved_when_its_copy_cannot_be_written() {
+        let dir = std::env::temp_dir().join(format!("appd-store-copy-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("app.db.before-1.part")).unwrap();
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        db.execute_batch("CREATE TABLE bots(id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, session TEXT);")
+            .unwrap();
+        drop(db);
+        assert!(Store::open(&dir.join("app.db")).is_err());
+        assert!(!dir.join("app.db.before-1").exists());
+        let db = Connection::open(dir.join("app.db")).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        assert!(!has_table(&db, "bots_old").unwrap() && !has_table(&db, "projects").unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
