@@ -242,3 +242,12 @@ export function aim(part: Extract<Part, { kind: "tool" }>): string {
   if (pattern) return path ? `${pattern} in ${path}` : pattern;
   return first(path, a.title, a.action) ?? part.tool;
 }
+
+/** The files that the calls of a run changed (`write`, `edit`, an installed agent's changes that worked), each once. */
+export function changedFiles(parts: Part[]): string[] {
+  const files = new Set<string>();
+  for (const part of parts) {
+    if (part.kind === "tool" && !part.isError && part.output !== undefined && ["write", "edit", "change"].includes(say(part.tool)[0])) files.add(aim(part));
+  }
+  return [...files];
+}

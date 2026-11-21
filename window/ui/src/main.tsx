@@ -6,6 +6,7 @@ import { Pair } from "./Devices.tsx";
 import type { Bot, Project } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
+import { Changes } from "./Changes.tsx";
 import { Conversations } from "./Conversations.tsx";
 import { Mail } from "./Mail.tsx";
 import { FilePane, Pane } from "./Pane.tsx";
@@ -104,7 +105,7 @@ function App() {
   const [later, setLater] = useState(() => localStorage.getItem(LATER) === "1");
   const [first, setFirst] = useState<{ bot: string; message: string }>();
   // A file a bot shows, or a surface of a project's program, in the pane beside the conversation.
-  const [shown, setShown] = useState<{ bot: string; path: string } | { projectId: string; uri: string; name: string }>();
+  const [shown, setShown] = useState<{ bot: string; path: string } | { projectId: string; uri: string; name: string } | { changes: { bot: string; conversation: string } }>();
   // What the shell says of starting the service with the app (macOS may want an approval).
   const [note, setNote] = useState<string | null>(null);
   // Bots whose turn ended while their chat was not in front of the person (`endsUnseen`).
@@ -122,6 +123,7 @@ function App() {
     return () => clearInterval(timer);
   }, [state]);
 
+  const changesBot = shown && "changes" in shown ? bots.find((b) => b.id === shown.changes.bot) : undefined;
   // The service tells a window of the surface it shows, and of the list of its project's.
   const watched = shown && "uri" in shown ? shown : undefined;
   const surfaceProject = watched?.projectId ?? (view?.page === "project" ? view.id : undefined);
@@ -481,7 +483,7 @@ function App() {
             <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
-              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation ?? view.conversation} slot={conversationSlot}>
+              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation ?? view.conversation} slot={conversationSlot} showChanges={inShell ? (conversation) => setShown({ changes: { bot: bot.id, conversation } }) : undefined}>
                 {(conversation, show, offerCompact) => <Chat
                   key={`${bot.id}-${conversation}-${connection}`}
                   bot={bot}
@@ -492,6 +494,8 @@ function App() {
                   find={find}
                   // Bots' files open in the window's pane only, not on other devices.
                   showFile={inShell ? (path) => setShown({ bot: bot.id, path }) : undefined}
+                  // So does the diff of what the bot changed.
+                  showChanges={inShell ? () => setShown({ changes: { bot: bot.id, conversation } }) : undefined}
                   // An installed agent chooses its own model.
                   // With no way to reach a model there is the sign-in instead; an installed agent needs none.
                   model={bot.agent || needed ? undefined : <Model key={bot.id} bot={bot} bots={bots} />}
@@ -535,6 +539,11 @@ function App() {
       {shown && "uri" in shown && (
         <Pane label="Surface" title={shown.name} close={() => setShown(undefined)}>
           <SurfaceView key={`${shown.projectId}-${shown.uri}`} projectId={shown.projectId} uri={shown.uri} />
+        </Pane>
+      )}
+      {shown && "changes" in shown && changesBot && (
+        <Pane label="Changes" title={`Changes · ${changesBot.name}`} close={() => setShown(undefined)}>
+          <Changes key={`${changesBot.id}-${shown.changes.conversation}`} bot={changesBot} conversation={shown.changes.conversation} />
         </Pane>
       )}
       {palette && (

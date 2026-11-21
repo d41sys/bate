@@ -3300,6 +3300,9 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("29", "preview_agent"),
         ("30", "install_agent"),
         ("31", "remove_agent"),
+        // The files of a bot's folder, and what Git or the kept copies say of them, are for the window on this Mac.
+        ("32", "list_changes"),
+        ("33", "read_change"),
     ] {
         send(
             &device,
@@ -14624,4 +14627,185 @@ fn an_adapter_needs_a_node_that_is_there_and_new_enough() {
         Value::Null
     );
     w.ok("install_agent", install);
+}
+
+/// Runs `git` in `dir` with no configuration of the user's, as a test's own repository.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn read_change(w: &mut Window, bot: &str, path: &str) -> Value {
+    w.ok("read_change", json!({"bot": bot, "path": path}))
+}
+
+#[test]
+fn changes_in_a_git_folder_are_its_uncommitted_files_and_only_the_folders_own_are_read() {
+    let home = home("changes-git");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let site = self::home("changes-git-site");
+    fs::write(home.join("outside.txt"), "top secret words").unwrap();
+    fs::write(site.join("kept.txt"), "one\ntwo\n").unwrap();
+    fs::write(site.join("gone.txt"), "bye\n").unwrap();
+    fs::write(site.join(".gitignore"), "skip.log\n").unwrap();
+    git(&site, &["init", "-q"]);
+    git(&site, &["add", "."]);
+    git(&site, &["commit", "-q", "-m", "first"]);
+    // A change, a removal, a new file, a binary one, an ignored one, a hidden one and a link to a file outside.
+    fs::write(site.join("kept.txt"), "one\n2\n").unwrap();
+    fs::remove_file(site.join("gone.txt")).unwrap();
+    fs::write(site.join("new.txt"), "fresh\n").unwrap();
+    fs::write(site.join("binary.bin"), [0u8, 1, 2]).unwrap();
+    fs::write(site.join("skip.log"), "ignored").unwrap();
+    fs::write(site.join(".hidden"), "x").unwrap();
+    std::os::unix::fs::symlink(home.join("outside.txt"), site.join("link.txt")).unwrap();
+    let folder = site.canonicalize().unwrap();
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "folder": folder, "bots": [bot]}}),
+    );
+
+    let listed = w.ok("list_changes", json!({"bot": bot}));
+    assert_eq!(listed["source"], "git", "{listed}");
+    assert_eq!(
+        listed["files"],
+        json!([
+            {"path": "binary.bin", "status": "added"},
+            {"path": "gone.txt", "status": "deleted"},
+            {"path": "kept.txt", "status": "modified"},
+            {"path": "link.txt", "status": "added"},
+            {"path": "new.txt", "status": "added"},
+        ])
+    );
+    assert_eq!(listed["more"], false);
+
+    let kept = read_change(&mut w, &bot, "kept.txt");
+    assert_eq!(kept["kind"], "text");
+    assert!(
+        kept["diff"].as_str().unwrap().contains("-two\n+2\n"),
+        "{kept}"
+    );
+    let gone = read_change(&mut w, &bot, "gone.txt");
+    assert!(gone["diff"].as_str().unwrap().contains("-bye\n"), "{gone}");
+    let new = read_change(&mut w, &bot, "new.txt");
+    assert_eq!(new["diff"], "@@ -0,0 +1,1 @@\n+fresh\n");
+    assert_eq!(read_change(&mut w, &bot, "binary.bin")["kind"], "binary");
+    // A link is not followed: what it names is not read.
+    let link = read_change(&mut w, &bot, "link.txt");
+    assert_eq!(link["kind"], "none", "{link}");
+    assert!(!link.to_string().contains("secret"), "{link}");
+
+    // A path outside the folder, a hidden one and one that climbs out are refused.
+    for path in [
+        "../outside.txt",
+        "/etc/hosts",
+        ".git/config",
+        ".hidden",
+        "x/../kept.txt",
+        "",
+    ] {
+        let args = json!({"bot": bot, "path": path});
+        assert_eq!(
+            refused(&mut w, "read_change", args),
+            "bad_request",
+            "{path}"
+        );
+    }
+
+    // A repository that names a filter is not asked anything: the filter would run a program
+    // that the bot may have written.
+    let marker = home.join("ran");
+    let mut config = fs::read_to_string(site.join(".git/config")).unwrap();
+    config += &format!("[filter \"x\"]\n\tclean = touch {}\n", marker.display());
+    fs::write(site.join(".git/config"), config).unwrap();
+    fs::write(site.join(".gitattributes"), "* filter=x\n").unwrap();
+    assert_eq!(
+        refused(&mut w, "list_changes", json!({"bot": bot})),
+        "git_refused"
+    );
+    let args = json!({"bot": bot, "path": "kept.txt"});
+    assert_eq!(refused(&mut w, "read_change", args), "git_refused");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn changes_in_a_plain_folder_are_what_the_bots_own_write_and_edit_replaced() {
+    let home = home("changes-copies");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    let (edited, made) = (dir.join("a.txt"), dir.join("sub-b.txt"));
+    let outside = home.canonicalize().unwrap().join("elsewhere.txt");
+    fs::write(&edited, "old line").unwrap();
+    fs::write(&outside, "theirs").unwrap();
+    change(&mut w, &bot, "n1", &edited, "new line");
+    change(&mut w, &bot, "n2", &made, "fresh");
+    change(&mut w, &bot, "n3", &outside, "mine");
+    let conversation = w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+
+    // The files the bot changed in its folder; the one outside it is not listed.
+    let want = json!([
+        {"path": "a.txt", "status": "modified"},
+        {"path": "sub-b.txt", "status": "added"},
+    ]);
+    let listed = w.ok(
+        "list_changes",
+        json!({"bot": bot, "conversation": conversation}),
+    );
+    assert_eq!(
+        (&listed["source"], &listed["files"]),
+        (&json!("copies"), &want),
+        "{listed}"
+    );
+    let other = w.ok(
+        "list_changes",
+        json!({"bot": bot, "conversation": "no-such"}),
+    );
+    assert_eq!(other["files"], json!([]));
+
+    let shown = read_change(&mut w, &bot, "a.txt");
+    let diff = shown["diff"].as_str().unwrap();
+    assert!(
+        diff.contains("-old line") && diff.contains("+new line"),
+        "{shown}"
+    );
+    let made = read_change(&mut w, &bot, "sub-b.txt");
+    assert_eq!(made["diff"], "@@ -0,0 +1,1 @@\n+fresh\n");
+    // Gone now: every line of the earlier file is removed. Put back as it was: nothing to show.
+    fs::remove_file(&edited).unwrap();
+    let gone = read_change(&mut w, &bot, "a.txt");
+    assert_eq!(gone["diff"], "@@ -1,1 +0,0 @@\n-old line\n");
+    fs::write(&edited, "old line").unwrap();
+    assert_eq!(read_change(&mut w, &bot, "a.txt")["kind"], "none");
+
+    // The file outside the folder, one that is hidden, and one the bot never changed.
+    for path in [
+        "../elsewhere.txt",
+        outside.to_str().unwrap(),
+        ".agentcore/x",
+    ] {
+        let args = json!({"bot": bot, "path": path});
+        assert_eq!(
+            refused(&mut w, "read_change", args),
+            "bad_request",
+            "{path}"
+        );
+    }
+    let args = json!({"bot": bot, "path": "never.txt"});
+    assert_eq!(refused(&mut w, "read_change", args), "no_such_change");
 }

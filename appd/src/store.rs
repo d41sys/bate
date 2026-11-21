@@ -2378,6 +2378,41 @@ impl Store {
         .collect()
     }
 
+    /// The files `bot`'s own `write` and `edit` changed (in `conversation`, when given), each
+    /// once, by path: `true` when the first change made the file.
+    pub fn changed_files(
+        &self,
+        bot: &str,
+        conversation: Option<&str>,
+    ) -> Result<Vec<(String, bool)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT path, earlier IS NULL FROM file_copies WHERE n IN (SELECT MIN(n) FROM file_copies \
+             WHERE bot = ?1 AND who = 'bot' AND (?2 IS NULL OR conversation = ?2) GROUP BY path) \
+             ORDER BY path",
+        )?;
+        stmt.query_map(params![bot, conversation], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
+    /// What the file `path` was before the first change of `bot`'s own `write` or `edit` (in
+    /// `conversation`, when given): `Some(None)` when that change made it, `None` when no
+    /// change is kept.
+    pub fn first_copy(
+        &self,
+        bot: &str,
+        conversation: Option<&str>,
+        path: &str,
+    ) -> Result<Option<Option<Vec<u8>>>> {
+        self.0
+            .query_row(
+                "SELECT earlier FROM file_copies WHERE bot = ?1 AND who = 'bot' AND path = ?3 \
+                 AND (?2 IS NULL OR conversation = ?2) ORDER BY n LIMIT 1",
+                params![bot, conversation, path],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// The newest version (one with content) of each file whose path starts with `dir/`, newest first.
     pub fn latest_under(&self, dir: &str) -> Result<Vec<(String, Version)>> {
         let mut stmt = self.0.prepare_cached(
