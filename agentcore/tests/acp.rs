@@ -284,6 +284,7 @@ fn the_agents_permission_request_is_a_question_the_service_decides() {
             call: "t1".into(),
             output: output.into(),
             is_error: !approved,
+            undo: None,
         };
         assert_eq!(events[0], tool_end, "{events:?}");
         assert_eq!(events.len(), if approved { 3 } else { 2 }, "{events:?}");
@@ -320,6 +321,7 @@ fn abort_cancels_the_agents_turn_and_what_it_asked() {
         call: "t1".into(),
         output: "the turn ended before this call did".into(),
         is_error: true,
+        undo: None,
     };
     assert_eq!(bridge.rest(), [unfinished, end(TurnEnd::Aborted, None)]);
     assert!(

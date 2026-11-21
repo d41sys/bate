@@ -247,6 +247,7 @@ impl Engine {
                                 call,
                                 output,
                                 is_error: true,
+                                undo: None,
                             });
                         }
                         self.session = Some(session);

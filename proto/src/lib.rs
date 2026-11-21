@@ -19,6 +19,7 @@ pub mod projects;
 pub mod routines;
 pub mod signer;
 pub mod skills;
+pub mod undo;
 
 /// Engine protocol version this build speaks; an engine announces it in `ready`.
 pub const PROTOCOL: u32 = 1;
@@ -189,6 +190,21 @@ pub enum Event {
         call: String,
         output: String,
         is_error: bool,
+        /// The id of the copy a `write` or `edit` kept (`Kept`), which the window's Undo names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo: Option<String>,
+    },
+    /// The file a `write` or `edit` has just changed, as it was before, kept by the service
+    /// under `id` (`undo::MAX_FILE` at most; not for a file that was longer, a link or one that
+    /// is not text). Sent before the call's `tool_end`; not part of the transcript.
+    Kept {
+        id: String,
+        /// Full path of the file, with no link in the folders above it.
+        path: String,
+        /// Its text before; `null`: there was no file.
+        earlier: Option<String>,
+        /// `undo::digest` of the file as the change left it.
+        after: String,
     },
     /// The engine waits until the service sends `answer` for `question`.
     Question {

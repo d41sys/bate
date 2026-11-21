@@ -28,12 +28,12 @@ use crate::chatgpt;
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::proxy::{self, Upstream};
-use crate::store::{Conversation, Ledger, Queued, Store};
+use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
     apple, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
 };
-use crate::{limit, memory, paths, roles, schedule, skills, store, update};
+use crate::{limit, memory, paths, roles, schedule, skills, store, undo, update};
 
 pub enum Msg {
     ClientConnected {
@@ -1714,13 +1714,13 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_memory" => {
-                let (place, _) = self.notes_of(f)?;
+                let (place, ..) = self.notes_of(f)?;
                 Ok(Some(
                     json!({"notes": memory::list(&place).map_err(|e| ("internal", e.to_string()))?}),
                 ))
             }
             "read_memory" | "write_memory" | "delete_memory" => {
-                let (place, changed) = self.notes_of(f)?;
+                let (place, changed, owner) = self.notes_of(f)?;
                 let name = str_field(f, "name")?;
                 memory::check_name(name).map_err(bad)?;
                 let failed = |e: io::Error| ("internal", e.to_string());
@@ -1738,11 +1738,13 @@ impl Core {
                                 memory::MAX_NOTE
                             )));
                         }
-                        memory::write(&place, name, text).map_err(failed)?;
+                        self.keep_note(owner, &place, name)?;
+                        memory::write(&place, name, text.as_bytes()).map_err(failed)?;
                         self.broadcast(&changed);
                         Ok(Some(json!({})))
                     }
                     _ => {
+                        self.keep_note(owner, &place, name)?;
                         if !memory::delete(&place, name).map_err(failed)? {
                             return Err(missing());
                         }
@@ -1751,6 +1753,34 @@ impl Core {
                     }
                 }
             }
+            "list_memory_versions" | "restore_memory_version" => {
+                let (place, changed, owner) = self.notes_of(f)?;
+                let name = str_field(f, "name")?;
+                memory::check_name(name).map_err(bad)?;
+                if command == "list_memory_versions" {
+                    let versions = self.store.versions(&place.path(name)).map_err(internal)?;
+                    return Ok(Some(json!({"versions": versions})));
+                }
+                // The version must be one of this note's: an id of another file is no version of it.
+                let version = self
+                    .store
+                    .kept(str_field(f, "version")?)
+                    .map_err(internal)?;
+                let bytes = version
+                    .filter(|k| k.path == place.path(name))
+                    .and_then(|k| k.earlier)
+                    .ok_or(("no_such_change", "that version is not kept".to_owned()))?;
+                self.keep_note(owner, &place, name)?;
+                memory::write(&place, name, &bytes).map_err(|e| ("internal", e.to_string()))?;
+                self.broadcast(&changed);
+                Ok(Some(json!({})))
+            }
+            "list_deleted_memory" => {
+                let (place, ..) = self.notes_of(f)?;
+                let notes = memory::deleted(&place, &self.store).map_err(|e| ("internal", e))?;
+                Ok(Some(json!({"notes": notes})))
+            }
+            "undo_change" => self.undo_change(f),
             "set_network" => {
                 let bot = self.bot_of(f)?;
                 let hosts = match f.get("hosts") {
@@ -2588,16 +2618,41 @@ impl Core {
         self.store
             .set_ledger(bot, &nonce, Ledger::Sending, now_ms())
             .map_err(internal)?;
+        // What the user put back since the last turn goes before the prompt, once; the
+        // transcript keeps the prompt as the user wrote it.
+        let told = self.store.untold(bot).unwrap_or_else(|e| {
+            log!("bot {bot}: undone changes not read: {e}");
+            Vec::new()
+        });
+        let notice: String = told
+            .iter()
+            .map(|(_, path, created)| match created {
+                true => format!("[Bate] The user undid your change that created {path}: the file is removed.\n"),
+                false => format!("[Bate] The user undid your change to {path}: it has its earlier content again.\n"),
+            })
+            .collect();
         let op = Op::Prompt {
             nonce: nonce.clone(),
-            text: prompt.text.clone(),
+            text: if notice.is_empty() {
+                prompt.text.clone()
+            } else {
+                format!("{notice}\n{}", prompt.text)
+            },
         };
         let sent = self
             .focus(bot, &conversation)
             .and_then(|()| self.send_op(bot, op, waiter(prompt)));
-        if sent.is_err() {
+        match &sent {
             // The engine never started, so it cannot have the prompt.
-            let _ = self.store.forget_ledger(bot, &nonce);
+            Err(_) => {
+                let _ = self.store.forget_ledger(bot, &nonce);
+            }
+            Ok(()) => {
+                let ids: Vec<String> = told.into_iter().map(|(id, ..)| id).collect();
+                if let Err(e) = self.store.set_told(&ids) {
+                    log!("bot {bot}: undone changes not marked as told: {e}");
+                }
+            }
         }
         sent
     }
@@ -3440,11 +3495,60 @@ impl Core {
 
     /// Where a memory command works: the notes of the project `projectId` if given, else the
     /// bot's own. Also the frame that tells the windows of a change there.
-    fn notes_of(&self, f: &Value) -> Result<(memory::Place, Value), Refusal> {
+    /// `undo_change`: puts back what a bot's `write` or `edit` replaced (see "Undo" in PROTOCOL.md).
+    fn undo_change(&mut self, f: &Value) -> Reply {
+        let bot = self.bot_of(f)?;
+        let id = str_field(f, "change")?;
+        let force = f.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let kept = self.store.kept(id).map_err(internal)?;
+        let Some(kept) = kept.filter(|k| k.who == "bot" && k.bot.as_deref() == Some(bot.as_str()))
+        else {
+            return Err(("no_such_change", "that change is no longer kept".into()));
+        };
+        if kept.undone {
+            return Err(bad("that change was undone already"));
+        }
+        // The folders the bot may change; a link in them is looked through now, and never again.
+        let roots: Vec<PathBuf> = [paths::bot_dir(&bot), PathBuf::from(self.work_folder(&bot))]
+            .iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        let whole = self.store.whole_disk(&bot).map_err(internal)?;
+        match undo::undo(&self.store, &bot, &kept, &roots, whole, force) {
+            Ok(()) => {}
+            Err(undo::Failure::Changed) => {
+                return Err((
+                    "changed",
+                    format!("{} is no longer as the bot left it", kept.path),
+                ));
+            }
+            Err(undo::Failure::Other(e)) => return Err(("internal", e)),
+        }
+        self.store.set_undone(id, now_ms()).map_err(internal)?;
+        self.record(
+            &bot,
+            &kept.conversation,
+            json!({"type": "undone", "undo": id}),
+        );
+        // It may be a note.
+        self.broadcast(&json!({"type": "memory_changed", "bot": bot}));
+        if let Ok(Some(Project {
+            id: Some(project), ..
+        })) = self.project_of(&bot)
+        {
+            self.broadcast(&json!({"type": "memory_changed", "projectId": project}));
+        }
+        Ok(Some(json!({})))
+    }
+
+    /// The notes a request is about, the event that says they changed, and whose copies of
+    /// their earlier versions the user's changes leave.
+    fn notes_of<'a>(&self, f: &'a Value) -> Result<(memory::Place, Value, Owner<'a>), Refusal> {
         if f.get("projectId").is_none() {
             let bot = self.bot_of(f)?;
             let changed = json!({"type": "memory_changed", "bot": bot});
-            return Ok((memory::Place::bot(&bot), changed));
+            let owner = Owner::Bot(str_field(f, "bot")?);
+            return Ok((memory::Place::bot(&bot), changed, owner));
         }
         let id = str_field(f, "projectId")?;
         let projects = self.store.projects().map_err(internal)?;
@@ -3452,7 +3556,29 @@ impl Core {
             return Err(("no_such_project", "no such project".into()));
         };
         let changed = json!({"type": "memory_changed", "projectId": id});
-        Ok((memory::Place::project(&project.folder), changed))
+        Ok((
+            memory::Place::project(&project.folder),
+            changed,
+            Owner::Project(id),
+        ))
+    }
+
+    /// Keeps the note as it is, before the user's change replaces or removes it.
+    fn keep_note(&self, owner: Owner, place: &memory::Place, name: &str) -> Result<(), Refusal> {
+        let bytes = memory::current(place, name).map_err(|e| ("internal", e.to_string()))?;
+        let Some(bytes) = bytes else { return Ok(()) };
+        let copy = Kept {
+            id: sys::random_hex(8),
+            conversation: String::new(),
+            path: place.path(name),
+            earlier: Some(bytes),
+            after: None,
+            who: "user",
+            at: now_ms(),
+            bot: None,
+            undone: false,
+        };
+        self.store.keep(owner, &copy).map_err(internal)
     }
 
     /// Whether a path in the bot's own folder must be full because relative paths start in a
@@ -4916,6 +5042,40 @@ impl Core {
         if let Event::Browser { request, action } = &ev {
             // Not for the transcript either: the tool call is there.
             return self.on_browser(bot, request.clone(), action);
+        }
+        if let Event::Kept {
+            id,
+            path,
+            earlier,
+            after,
+        } = &ev
+        {
+            // Not for the transcript: the `undo` of the call's `tool_end` names it.
+            let conversation = self
+                .engines
+                .get(bot)
+                .map_or_else(String::new, |r| r.conversation.clone());
+            let copy = Kept {
+                id: id.clone(),
+                conversation,
+                path: path.clone(),
+                earlier: earlier.clone().map(String::into_bytes),
+                after: Some(after.clone()),
+                who: "bot",
+                at: now_ms(),
+                bot: None,
+                undone: false,
+            };
+            let too_long = copy
+                .earlier
+                .as_ref()
+                .is_some_and(|e| e.len() as u64 > proto::undo::MAX_FILE);
+            if too_long {
+                log!("bot {bot}: a copy over the bound was not kept");
+            } else if let Err(e) = self.store.keep(Owner::Bot(bot), &copy) {
+                log!("bot {bot}: copy not kept: {e}");
+            }
+            return;
         }
         if let Event::Desktop { request, action } = &ev {
             return self.on_desktop(bot, request.clone(), action);

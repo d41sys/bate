@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { inShell, listen, request, startDictation } from "./service.ts";
+import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
 import { add, aim, build, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
@@ -470,6 +470,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                   read={canRead ? read : undefined}
                   stopReading={stopReading}
                   open={showFile}
+                  bot={bot.id}
                   edit={(item) => {
                     setEditing(item.nonce);
                     setText(item.text);
@@ -611,13 +612,15 @@ type Actions = {
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
   open?: (path: string) => void;
+  /** The bot's id: what Undo names. */
+  bot: string;
   /** Whether this reply is being read aloud; `read` is missing where the page can't speak. */
   reading: boolean;
   read?: (id: number, text: string) => void;
   stopReading: () => void;
 };
 
-function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -635,7 +638,7 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "run":
-      return <Run parts={item.parts} live={working} />;
+      return <Run parts={item.parts} live={working} bot={bot} />;
     case "plan":
       return (
         <ul className="plan">
@@ -680,7 +683,7 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
 }
 
 /** Calls and thinking that follow each other: one line saying what happened, which opens to a row for each call. */
-function Run({ parts, live }: { parts: Part[]; live: boolean }) {
+function Run({ parts, live, bot }: { parts: Part[]; live: boolean; bot: string }) {
   const { text, running, failed } = describe(parts, live);
   return (
     <details className="run">
@@ -703,11 +706,40 @@ function Run({ parts, live }: { parts: Part[]; live: boolean }) {
                 <pre>{JSON.stringify(part.args, null, 2)}</pre>
                 {part.output !== undefined && <pre>{part.output}</pre>}
               </details>
+              {inShell && <Undo part={part} bot={bot} />}
             </li>
           ),
         )}
       </ul>
     </details>
+  );
+}
+
+/**
+ * What a write or edit that kept the earlier file offers at the end of its line: Undo, then "Undone". A file that is no
+ * longer as the change left it is not overwritten: the line says so and offers "Undo anyway".
+ */
+function Undo({ part, bot }: { part: Extract<Part, { kind: "tool" }>; bot: string }) {
+  const [state, setState] = useState<{ busy?: boolean; error?: string; changed?: boolean }>({});
+  if (!part.undo || part.isError) return null;
+  if (part.undone) return <span className="undo"><small className="note" role="status">Undone</small></span>;
+  const run = (force: boolean) => {
+    setState({ busy: true });
+    request("undo_change", { bot, change: part.undo, force }).then(
+      () => setState({}),
+      (e: Failure) => setState(e.code === "changed" ? { changed: true } : { error: e.message }),
+    );
+  };
+  return (
+    <span className="undo">
+      {state.changed && <small className="error" role="alert">No longer as the bot left it.</small>}
+      {state.error && <small className="error" role="alert">{state.error}</small>}
+      {state.changed ? (
+        <button className="small danger" disabled={state.busy} onClick={() => run(true)}>Undo anyway</button>
+      ) : (
+        <button className="small" disabled={state.busy} onClick={() => run(false)}>Undo</button>
+      )}
+    </span>
   );
 }
 

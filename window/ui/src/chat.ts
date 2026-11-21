@@ -6,7 +6,9 @@ export type Entry =
   | { type: "turn_start"; nonce: string }
   | { type: "text" | "thinking"; delta: string }
   | { type: "tool_start"; call: string; tool: string; args: unknown }
-  | { type: "tool_end"; call: string; output: string; isError: boolean }
+  | { type: "tool_end"; call: string; output: string; isError: boolean; undo?: string }
+  // The person undid the change the call `undo` names (`undo_change`).
+  | { type: "undone"; undo: string }
   | ({ type: "question" } & Question)
   | { type: "retry"; attempt: number; of: number; waitMs: number; error: string }
   | { type: "turn_end"; reason: string; error?: string }
@@ -22,7 +24,8 @@ export type Item = { id: number } & (
   | { kind: "user"; text: string; nonce: string; past?: boolean }
   | { kind: "reply"; text: string }
   | { kind: "thinking"; text: string }
-  | { kind: "tool"; call: string; tool: string; args: unknown; output?: string; isError?: boolean }
+  // `undo`: the id of the copy a write or edit kept, which Undo names; `undone`: the person used it.
+  | { kind: "tool"; call: string; tool: string; args: unknown; output?: string; isError?: boolean; undo?: string; undone?: boolean }
   | { kind: "ended"; reason: string; error?: string }
   // A message the user put into the running turn; the bot saw it at this point.
   | { kind: "steered"; text: string }
@@ -75,7 +78,17 @@ function put(items: Item[], { seq: id, entry }: Row) {
       for (let i = items.length - 1; i >= 0; i--) {
         const item = items[i];
         if (item.kind === "tool" && item.call === entry.call) {
-          items[i] = { ...item, output: entry.output, isError: entry.isError };
+          items[i] = { ...item, output: entry.output, isError: entry.isError, ...(entry.undo ? { undo: entry.undo } : {}) };
+          break;
+        }
+      }
+      break;
+    }
+    case "undone": {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if (item.kind === "tool" && item.undo === entry.undo) {
+          items[i] = { ...item, undone: true };
           break;
         }
       }

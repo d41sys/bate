@@ -83,6 +83,10 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .mail .rows { margin-bottom: 0; }
 .mail .rows li:last-child { border-bottom: 0; }
 .empty { margin: auto; text-align: center; color: var(--fg-muted); }
+/* The notes that are gone, under the list of notes: closed until looked for. */
+.deleted { margin-top: var(--space-3); }
+.deleted > summary { padding: var(--space-1) 0; color: var(--fg-muted); font-size: var(--size-small); }
+.deleted > summary:hover { color: var(--fg); }
 
 /* ---- Rows of a list, actions side by side, a card ---- */
 .rows { list-style: none; padding: 0; margin: var(--space-2) 0; }
@@ -326,6 +330,11 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .run code { background: none; padding: 0; }
 .run pre { max-height: calc(var(--leading) * 8); overflow: auto; }
 .run .thought p { margin: 0; white-space: pre-wrap; }
+/* At the end of the row of a write or edit that kept the earlier file: Undo, or why it did not and Undo anyway; then "Undone". It wraps under the name when the row is narrow. */
+.run:has(.undo) { align-self: stretch; }
+.run li:has(> .undo) { display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: var(--space-3); }
+.run li > details { flex: 1 1 calc(var(--popover-w) / 3); min-width: 0; }
+.run .undo { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
 /* The mark under the last message while the bot works, and its small cousin on its row in the sidebar. */
 .dots { display: inline-flex; gap: 3px; margin-right: var(--space-1); }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: beat var(--beat) var(--ease) infinite; }
@@ -481,3 +490,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .menu.more { position: relative; }
   .menu.more .popover { left: auto; right: 0; width: max-content; }
 }
+
+/* The earlier versions of a note: set in under it with the rule the folded calls use. */
+.versions { flex: 1 0 calc(100% - var(--space-2)); box-sizing: border-box; margin: 0 0 var(--space-1) var(--space-2); padding-left: var(--space-3); border-left: 1px solid var(--border-strong); }
+.versions > small { display: block; color: var(--fg-muted); }
+.versions > .rows { margin: 0; }

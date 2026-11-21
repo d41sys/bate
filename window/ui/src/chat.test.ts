@@ -35,6 +35,23 @@ test("a transcript becomes the chat the user reads", () => {
   ]);
 });
 
+test("a write that kept the earlier file offers Undo, and an undone entry marks only its own call", () => {
+  const entries: Entry[] = [
+    { type: "tool_start", call: "c1", tool: "write", args: { path: "a.txt" } },
+    { type: "tool_end", call: "c1", output: "wrote", isError: false, undo: "k1" },
+    { type: "tool_start", call: "c2", tool: "write", args: { path: "b.txt" } },
+    { type: "tool_end", call: "c2", output: "wrote", isError: false, undo: "k2" },
+    { type: "tool_start", call: "c3", tool: "write", args: { path: "big.txt" } },
+    { type: "tool_end", call: "c3", output: "wrote", isError: false },
+    { type: "undone", undo: "k2" },
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  const calls = build(rows).flatMap((i) => (i.kind === "tool" ? [[i.undo, i.undone]] : []));
+  // The same live, one entry at a time, and after a reload that brings every entry at once.
+  assert.deepEqual(rows.reduce(add, []), build(rows));
+  assert.deepEqual(calls, [["k1", undefined], ["k2", true], [undefined, undefined]]);
+});
+
 test("a fork keeps what came after, for reading only", () => {
   const entries: Entry[] = [
     { type: "prompt", nonce: "n1", text: "one" },

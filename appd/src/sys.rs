@@ -234,6 +234,26 @@ impl Dir {
         self.file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
     }
 
+    /// Makes the file `name` here with `bytes` and `mode` (0600 without one): a new file that
+    /// takes the name's place whole, so a link under that name is replaced, not followed.
+    pub fn put(&self, name: &str, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
+        // Not made from `name`, which may be as long as a name can be.
+        let tmp = format!(".bate-{}", random_hex(8));
+        let written = self
+            .create(&tmp)
+            .and_then(|mut file| {
+                if let Some(mode) = mode {
+                    file.set_permissions(fs::Permissions::from_mode(mode))?;
+                }
+                io::Write::write_all(&mut file, bytes)
+            })
+            .and_then(|()| self.rename(&tmp, name));
+        if written.is_err() {
+            let _ = self.remove(&tmp);
+        }
+        written
+    }
+
     /// Gives `from` the name `to`, both here, in place of whatever had it (a link is replaced,
     /// not followed).
     pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {

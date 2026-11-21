@@ -5,6 +5,11 @@ import { RowMenu } from "./RowMenu.tsx";
 import { dayTime } from "./times.ts";
 
 type Note = { name: string; bytes: number; modifiedMs: number; first: string };
+/** An earlier version of a note: when it was replaced or deleted, its size, and who replaced or deleted it. */
+type Version = { id: string; atMs: number; bytes: number; by: "bot" | "user" };
+/** A note that is gone, with its newest earlier version's id. */
+type Deleted = { name: string; bytes: number; atMs: number; by: "bot" | "user"; id: string };
+const WHO = { bot: "the bot", user: "you" };
 const NONE: Editor = { open: null, name: "", text: "", saved: "" };
 
 /** Whose notes: a bot's own, or those of a project, which all its bots share. */
@@ -18,6 +23,10 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
   // The note just saved.
   const [saved, setSaved] = useState("");
   const [deleting, setDeleting] = useState("");
+  // The note whose earlier versions are shown under its row, and a count that makes them load again.
+  const [history, setHistory] = useState("");
+  const [deleted, setDeleted] = useState<Deleted[]>([]);
+  const [tick, setTick] = useState(0);
   // `at`: the note it came from, "" for the new one, "*" for the list.
   const [error, setError] = useState<{ at: string; text: string }>();
   const dirty = unsaved(editor);
@@ -37,6 +46,11 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
       .then(
         () => setError(undefined),
         (e: Error) => setError({ at: "*", text: e.message }),
+      )
+      .then(() => request<{ notes: Deleted[] }>("list_deleted_memory", target))
+      .then(
+        (d) => (setDeleted(d.notes), setTick((t) => t + 1)),
+        () => {},
       );
   useEffect(() => {
     void load();
@@ -90,6 +104,17 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
       return setError({ at: n, text: (e as Error).message });
     }
     if (n === editor.open) put(NONE);
+    void load();
+  };
+
+  // Puts back an earlier version of a note, or a note that was deleted (its newest version). What is open is read again.
+  const restore = async (n: string, version: string) => {
+    try {
+      await request("restore_memory_version", { ...target, name: n, version });
+    } catch (e) {
+      return setError({ at: n, text: (e as Error).message });
+    }
+    if (n === editor.open) void read(n);
     void load();
   };
 
@@ -168,16 +193,87 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
                       <button className="small" disabled={dirty} aria-expanded={isOpen} aria-label={`${isOpen ? "Close" : "Open"} ${n.name}`} onClick={() => (isOpen ? put(NONE) : void read(n.name))}>
                         {isOpen ? "Close" : "Open"}
                       </button>
-                      <RowMenu label={n.name} items={[{ label: "Delete", danger: true, run: () => setDeleting(n.name) }]} />
+                      <RowMenu
+                        label={n.name}
+                        items={[
+                          { label: history === n.name ? "Hide history" : "History", run: () => setHistory(history === n.name ? "" : n.name) },
+                          { label: "Delete", danger: true, run: () => setDeleting(n.name) },
+                        ]}
+                      />
                     </>
                   )}
                 </div>
                 {isOpen ? form : errorAt(n.name)}
+                {history === n.name && <Versions target={target} name={n.name} tick={tick} disabled={dirty} restore={restore} />}
               </li>
             );
           })}
         </ul>
       )}
+      {deleted.length > 0 && (
+        <details className="deleted">
+          <summary>Deleted notes ({deleted.length})</summary>
+          <ul className="rows">
+            {deleted.map((n) => (
+              <li key={n.name}>
+                <div className="what">
+                  <strong>{n.name}</strong>
+                  <small>{size(n.bytes)} · last changed by {WHO[n.by]}, {dayTime(n.atMs)}</small>
+                </div>
+                <div className="actions">
+                  <button className="small" disabled={dirty} aria-label={`Restore ${n.name}`} onClick={() => void restore(n.name, n.id)}>Restore</button>
+                  <RowMenu label={n.name} items={[{ label: history === n.name ? "Hide history" : "History", run: () => setHistory(history === n.name ? "" : n.name) }]} />
+                </div>
+                {errorAt(n.name)}
+                {history === n.name && <Versions target={target} name={n.name} tick={tick} disabled={dirty} restore={restore} />}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </section>
+  );
+}
+
+/** The earlier versions of one note, newest first, each with Restore. A deleted note has them too. */
+function Versions({ target, name, tick, disabled, restore }: {
+  target: { bot: string } | { projectId: string };
+  name: string;
+  tick: number;
+  disabled: boolean;
+  restore: (name: string, version: string) => Promise<void>;
+}) {
+  const [list, setList] = useState<Version[]>();
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let gone = false;
+    request<{ versions: Version[] }>("list_memory_versions", { ...target, name }).then(
+      (d) => gone || (setList(d.versions), setError("")),
+      (e: Error) => gone || setError(e.message),
+    );
+    return () => {
+      gone = true;
+    };
+  }, [name, tick]);
+  if (error) return <p className="error" role="alert">{error}</p>;
+  if (!list) return <p className="note">Loading versions…</p>;
+  if (list.length === 0) return <p className="note">No earlier versions yet. One is kept each time this note is replaced or deleted.</p>;
+  return (
+    <div className="versions">
+      <small>Earlier versions</small>
+      <ul className="rows" aria-label={`Earlier versions of ${name}`}>
+        {list.map((v) => (
+          <li key={v.id}>
+            <div className="what">
+              <span>{dayTime(v.atMs)}</span>
+              <small>{size(v.bytes)} · changed by {WHO[v.by]}</small>
+            </div>
+            <div className="actions">
+              <button className="small" disabled={disabled} aria-label={`Restore the version of ${name} from ${dayTime(v.atMs)}`} onClick={() => void restore(name, v.id)}>Restore</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

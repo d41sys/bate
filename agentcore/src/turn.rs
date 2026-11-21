@@ -406,10 +406,22 @@ impl Turn {
             Ok(out) => (out, false),
             Err(out) => (out, true),
         };
+        // The copy goes before the result, which names it.
+        let undo = lock(&self.control.kept).take().and_then(|k| {
+            let id = crate::session::new_id().ok()?;
+            self.out.send(&Event::Kept {
+                id: id.clone(),
+                path: k.path,
+                earlier: k.earlier,
+                after: k.after,
+            });
+            Some(id)
+        });
         self.out.send(&Event::ToolEnd {
             call: id,
             output: output.clone(),
             is_error,
+            undo,
         });
         json!({"role": "tool", "tool_call_id": call.id, "content": output})
     }
@@ -491,6 +503,7 @@ impl Turn {
                         call: id.into(),
                         output: String::new(),
                         is_error: failed,
+                        undo: None,
                     });
                 }
                 d => on(d),

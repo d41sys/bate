@@ -25,6 +25,15 @@ pub struct Control {
     group: Mutex<Option<i32>>,
     /// The question the turn waits on, so `answer` can refuse any other.
     pub question: Mutex<Option<String>>,
+    /// What the last `write` or `edit` that changed a file kept of it; the turn takes it.
+    pub kept: Mutex<Option<Kept>>,
+}
+
+/// A file as a `write` or `edit` found it, and a hash of what they left (`Event::Kept`).
+pub struct Kept {
+    pub path: String,
+    pub earlier: Option<String>,
+    pub after: String,
 }
 
 impl Control {
@@ -158,10 +167,12 @@ pub fn run(
         "write" => {
             let p = path("path")?;
             let content = text("content")?;
+            let before = earlier(&p);
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent).map_err(at(parent))?;
             }
             fs::write(&p, content).map_err(at(&p))?;
+            keep(control, &p, before, content);
             Ok(format!("wrote {} bytes to {}", content.len(), p.display()))
         }
         "edit" => {
@@ -170,11 +181,14 @@ pub fn run(
             if old.is_empty() {
                 return Err("`old` is empty".into());
             }
+            let before = earlier(&p);
             let content = fs::read_to_string(&p).map_err(at(&p))?;
             match content.matches(old).count() {
                 0 => Err(format!("the text to replace is not in {}", p.display())),
                 1 => {
-                    fs::write(&p, content.replacen(old, new, 1)).map_err(at(&p))?;
+                    let changed = content.replacen(old, new, 1);
+                    fs::write(&p, &changed).map_err(at(&p))?;
+                    keep(control, &p, before, &changed);
                     Ok(format!("edited {}", p.display()))
                 }
                 n => Err(format!(
@@ -209,6 +223,31 @@ pub fn run(
         }
         _ => Err(format!("there is no tool `{tool}`")),
     }
+}
+
+/// The text of the file at `p` before a change, to keep: `Some(None)` when there is no file,
+/// `None` when it is not kept (over `MAX_FILE`, not text, a link, not a plain file).
+fn earlier(p: &Path) -> Option<Option<String>> {
+    match fs::symlink_metadata(p) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(None),
+        Ok(m) if m.is_file() && m.len() <= proto::undo::MAX_FILE => {
+            fs::read_to_string(p).ok().map(Some)
+        }
+        _ => None,
+    }
+}
+
+/// Notes what a change to `p` left (`after`), for the turn to send with the earlier text. The
+/// path is the file's real one, so that nothing above it can be a link later.
+fn keep(control: &Control, p: &Path, earlier: Option<Option<String>>, after: &str) {
+    *lock(&control.kept) = earlier.and_then(|earlier| {
+        let path = p.parent()?.canonicalize().ok()?.join(p.file_name()?);
+        Some(Kept {
+            path: path.to_str()?.to_owned(),
+            earlier,
+            after: proto::undo::digest(after.as_bytes()),
+        })
+    });
 }
 
 fn at(p: &Path) -> impl Fn(io::Error) -> String + '_ {
@@ -327,6 +366,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read_to_string(d.join("f.txt")).unwrap(), "1 two two");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Runs `write` or `edit` and gives what the call kept of the file.
+    fn kept(name: &str, args: Value, dir: &Path) -> Option<Kept> {
+        let control = Control::default();
+        run(name, args.as_object().unwrap(), dir, &control).unwrap();
+        lock(&control.kept).take()
+    }
+
+    #[test]
+    fn write_and_edit_keep_the_text_they_replace_and_a_hash_of_what_they_leave() {
+        let d = dir("kept").canonicalize().unwrap();
+        // A new file: there was none before, and the folders it needed are made.
+        let made = kept("write", json!({"path": "sub/a.txt", "content": "one"}), &d).unwrap();
+        assert_eq!(made.earlier, None);
+        assert_eq!(made.path, d.join("sub/a.txt").to_str().unwrap());
+        assert_eq!(made.after, proto::undo::digest(b"one"));
+        let over = kept("write", json!({"path": "sub/a.txt", "content": "two"}), &d).unwrap();
+        assert_eq!(over.earlier.as_deref(), Some("one"));
+        let edit = json!({"path": "sub/a.txt", "old": "two", "new": "three"});
+        let edited = kept("edit", edit, &d).unwrap();
+        assert_eq!(edited.earlier.as_deref(), Some("two"));
+        assert_eq!(edited.after, proto::undo::digest(b"three"));
+        // A failed edit changes nothing and keeps nothing.
+        let failed = json!({"path": "sub/a.txt", "old": "nope", "new": "x"});
+        let control = Control::default();
+        assert!(run("edit", failed.as_object().unwrap(), &d, &control).is_err());
+        assert!(lock(&control.kept).is_none());
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_file_over_the_bound_a_link_and_binary_data_are_changed_without_a_copy() {
+        let d = dir("not-kept").canonicalize().unwrap();
+        let big = "x".repeat(proto::undo::MAX_FILE as usize + 1);
+        fs::write(d.join("big.txt"), &big).unwrap();
+        let args = json!({"path": "big.txt", "content": "small"});
+        assert!(kept("write", args, &d).is_none());
+        assert_eq!(fs::read_to_string(d.join("big.txt")).unwrap(), "small");
+        let exactly = "y".repeat(proto::undo::MAX_FILE as usize);
+        fs::write(d.join("edge.txt"), &exactly).unwrap();
+        let args = json!({"path": "edge.txt", "content": "z"});
+        assert_eq!(kept("write", args, &d).unwrap().earlier, Some(exactly));
+        // A link: the change goes through it, and what it points at is not the link's own text.
+        fs::write(d.join("target.txt"), "t").unwrap();
+        std::os::unix::fs::symlink(d.join("target.txt"), d.join("link.txt")).unwrap();
+        let args = json!({"path": "link.txt", "content": "u"});
+        assert!(kept("write", args, &d).is_none());
+        assert_eq!(fs::read_to_string(d.join("target.txt")).unwrap(), "u");
+        fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let args = json!({"path": "bin", "content": "text"});
+        assert!(kept("write", args, &d).is_none());
         fs::remove_dir_all(&d).unwrap();
     }
 
