@@ -4458,6 +4458,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-user-notifications",
  "proto",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]

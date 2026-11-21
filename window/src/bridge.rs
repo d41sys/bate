@@ -2,9 +2,10 @@
 //! page sends a line and receives the next one; it never sees the socket. When the service
 //! goes away the bridge connects again, and the service's new `hello` tells the page.
 
+use serde_json::{Value, json};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,8 @@ use std::time::Duration;
 const MAX_LINE: usize = proto::MAX_EVENT_FRAME;
 /// How long to wait before trying the socket again.
 const RETRY: Duration = Duration::from_millis(500);
+/// How long `ask` waits for the service to say something.
+const ASK_LIMIT: Duration = Duration::from_secs(10);
 
 pub struct Bridge {
     /// The connection lines are sent on; `None` while there is none.
@@ -110,6 +113,59 @@ impl Bridge {
     }
 }
 
+/// For work of the shell's own, with no page behind it (the answer a notification's button gives):
+/// says `hello` on a connection of its own, sends `requests` (each a `type` and its fields) and
+/// returns each one's response frame, in order. Gives up after `ASK_LIMIT` of silence.
+pub fn ask(socket: &Path, requests: &[Value]) -> Result<Vec<Value>, String> {
+    let stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let failed = |e: io::Error| e.to_string();
+    stream.set_read_timeout(Some(ASK_LIMIT)).map_err(failed)?;
+    stream.set_write_timeout(Some(ASK_LIMIT)).map_err(failed)?;
+    // Id 0 is the `hello`; the requests are 1, 2, ...
+    let mut lines = vec![json!({"id": 0, "type": "hello", "protocol": 1})];
+    for (n, request) in requests.iter().enumerate() {
+        let mut request = request.clone();
+        request["id"] = json!(n + 1);
+        lines.push(request);
+    }
+    let mut out = String::new();
+    for line in &lines {
+        out.push_str(&line.to_string());
+        out.push('\n');
+    }
+    (&stream).write_all(out.as_bytes()).map_err(failed)?;
+
+    let mut replies: Vec<Option<Value>> = vec![None; lines.len()];
+    let mut reader = BufReader::new(&stream);
+    let mut line = Vec::new();
+    while replies.iter().any(Option::is_none) {
+        line.clear();
+        let read = (&mut reader)
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut line)
+            .map_err(failed)?;
+        if read == 0 || line.last() != Some(&b'\n') {
+            return Err("the service closed the connection".into());
+        }
+        // Events and anything else that is not a reply to these are skipped.
+        let Ok(frame) = serde_json::from_slice::<Value>(&line) else {
+            continue;
+        };
+        if frame["type"] == "response"
+            && let Some(slot) = frame["id"]
+                .as_u64()
+                .and_then(|n| replies.get_mut(n as usize))
+        {
+            *slot = Some(frame);
+        }
+    }
+    let mut replies = replies.into_iter().flatten();
+    if replies.next().is_none_or(|hello| hello["success"] != true) {
+        return Err("the service did not take hello".into());
+    }
+    Ok(replies.collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +221,58 @@ mod tests {
         thread::sleep(RETRY * 3);
         assert!(listener.accept().is_err(), "it connected again");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ask_says_hello_sends_its_requests_and_returns_each_reply_in_order() {
+        let dir = std::env::temp_dir().join(format!("bate-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        let listener = listen(&socket);
+        let service = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"{\"type\":\"hello\"}\n").unwrap();
+            let mut seen = Vec::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for _ in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                seen.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+            // An event between, and the replies out of order: ids match them.
+            for id in [2, 0, 1] {
+                stream.write_all(b"{\"type\":\"bots_changed\"}\n").unwrap();
+                let reply =
+                    json!({"type": "response", "id": id, "success": true, "data": {"n": id}});
+                stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+            }
+            seen
+        });
+        let replies = ask(
+            &socket,
+            &[
+                json!({"type": "answer", "question": "q1"}),
+                json!({"type": "list_attention"}),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            replies
+                .iter()
+                .map(|r| r["data"]["n"].clone())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let seen = service.join().unwrap();
+        assert_eq!(seen[0], json!({"id": 0, "type": "hello", "protocol": 1}));
+        assert_eq!(
+            seen[1],
+            json!({"id": 1, "type": "answer", "question": "q1"})
+        );
+        assert_eq!(seen[2], json!({"id": 2, "type": "list_attention"}));
+
+        // No service: an error, not a hang.
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ask(&socket, &[]).is_err());
     }
 }

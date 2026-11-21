@@ -60,9 +60,6 @@ export type RowState = "waiting" | "paused" | "working" | "unread" | "idle";
 /** The one state a row shows, the most urgent first: waiting for the person, paused, working, unread, idle. */
 export const rowState = (bot: Bot, unread: boolean): RowState => (bot.waiting ? "waiting" : bot.paused ? "paused" : bot.busy ? "working" : unread ? "unread" : "idle");
 
-/** How many bots wait for the person: the Dock's badge. */
-export const waitingCount = (bots: Bot[]) => bots.filter((b) => b.waiting).length;
-
 /**
  * Unread: a turn of the bot ended (not stopped by the person) while its chat was not in front of them.
  * It stays so until they look at that chat. Kept by the window, so a new window starts with none.

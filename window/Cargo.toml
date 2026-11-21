@@ -10,16 +10,17 @@ path = "src/main.rs"
 [dependencies]
 proto = { path = "../proto" }
 tauri = { version = "2", features = ["tray-icon"] }
+serde_json = "1"
 
 # Starts the system's Dictation (the Edit menu's item) for the mic button.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow"] }
 
 # Notifications for a bot that needs the person, with the system's own leave and click: the
 # notification plugin of Tauri has neither on a Mac. The same family as the crates above, and
 # already in the lock file (MIT or Apache-2.0 or Zlib).
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSBundle", "NSError", "NSObject", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSBundle", "NSError", "NSObject", "NSSet", "NSString", "NSURL"] }
 objc2-user-notifications = "0.3"
 
 [build-dependencies]

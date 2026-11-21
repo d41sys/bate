@@ -71,8 +71,9 @@ export const serviceNote = () => invoke("service_note") as Promise<string | null
 /** The Dock icon's badge: how many bots wait for the person; 0 clears it (the shell's). */
 export const setBadge = (count: number) => invoke("set_badge", { count }) as Promise<void>;
 
-/** A system notification that `bot` waits; clicking it opens that bot in this window. `id` is the question's, so a second window's copy replaces it (the shell's). */
-export const notifyWaiting = (bot: string, id: string, title: string, body: string) => invoke("notify_waiting", { bot, id, title, body }) as Promise<void>;
+/** A system notification that `bot` waits; clicking it opens that bot in this window. `id` is the question's, in `conversation`, so a second window's copy replaces it; with `actions` it has the buttons "Allow once" and "Deny", which answer that question from the shell, window or none (the shell's). */
+export const notifyWaiting = (bot: string, conversation: string, id: string, title: string, body: string, actions: boolean) =>
+  invoke("notify_waiting", { bot, conversation, id, title, body, actions }) as Promise<void>;
 
 /** The system's panel for a folder or a file: the path chosen, or null when the person cancels (the shell's; not on another device). */
 export const pickPath = (folder: boolean) => invoke("pick_path", { folder }) as Promise<string | null>;

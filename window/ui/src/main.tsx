@@ -19,10 +19,13 @@ import { Workplaces } from "./Workplaces.tsx";
 import { Channels } from "./Channels.tsx";
 import { Room } from "./Room.tsx";
 import { Attention } from "./Attention.tsx";
+import { changesAttention, needsCount, type AttentionItem } from "./attention.ts";
+import type { Question } from "./chat.ts";
+import { noticeFor } from "./notice.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings, type SettingsSection } from "./AppSettings.tsx";
-import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab, waitingCount } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab } from "./nav.ts";
 import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { LATER } from "./firstRun.ts";
@@ -147,10 +150,11 @@ function App() {
         const front = document.hasFocus() ? now.current.looking : undefined;
         if (endsUnseen(frame, front)) setUnread((u) => (u.includes(frame.bot!) ? u : [...u, frame.bot!]));
         // The service sends a question's card live only; what history holds is not announced.
-        const entry = frame.entry as { type: string; question?: string; title?: string };
+        const entry = frame.entry as { type: string } & Question;
         if (inShell && entry.type === "question" && frame.bot !== front) {
           const name = now.current.bots.find((b) => b.id === frame.bot)?.name ?? "A bot";
-          notifyWaiting(frame.bot!, entry.question ?? "", `${name} needs you`, entry.title ?? "").catch(() => {});
+          const notice = noticeFor(name, entry);
+          notifyWaiting(frame.bot!, String(frame.conversation), entry.question, notice.title, notice.body, notice.actions).catch(() => {});
         }
       } else if (frame.type === "bots_changed") {
         load();
@@ -241,8 +245,22 @@ function App() {
       removeEventListener("bate-menu", onMenu);
     };
   }, []);
-  // The Dock icon counts the bots that wait for the person.
-  const waiting = waitingCount(bots);
+  // The conversations that need the person, from the list the Activity screen shows: the Dock icon's count and the sidebar's.
+  const [waiting, setWaiting] = useState(0);
+  useEffect(() => {
+    let gone = false;
+    let latest = 0;
+    const load = () => {
+      const mine = ++latest;
+      request<{ items: AttentionItem[] }>("list_attention").then((d) => mine === latest && !gone && setWaiting(needsCount(d.items)), () => {});
+    };
+    load();
+    const stop = listen((frame) => changesAttention(frame) && load());
+    return () => {
+      gone = true;
+      stop();
+    };
+  }, [connection]);
   useEffect(() => {
     if (inShell) setBadge(waiting).catch(() => {});
   }, [waiting, connection]);
