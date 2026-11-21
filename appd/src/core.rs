@@ -33,8 +33,7 @@ use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
     adapters, apple, botfile, browser, catalog, changes, desktop, egress, oauth, project_server,
-    surfaces,
-    workplaces,
+    surfaces, workplaces,
 };
 use crate::{
     limit, login_path, memory, paths, precheck, roles, schedule, skills, store, undo, update,
