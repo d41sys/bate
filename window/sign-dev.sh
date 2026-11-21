@@ -1,10 +1,9 @@
 #!/bin/sh
 # Signs the programs under target/{debug,release} (appd, agentcore, bate) with the self-made
 # certificate "Bate Dev" (window/dev-identity.sh makes it the first time, #21), so the
-# Keychain's access list for Bate's items stays valid across rebuilds: a build signed ad hoc,
-# or not at all, is a new program to the Keychain, and macOS asks again after every build.
-# Run it after each `cargo build`. The first signed appd to read an item macOS asks about
-# once: choose Always Allow.
+# access list of Bate's items in its keychain file stays valid across rebuilds: a build signed
+# ad hoc, or not at all, is a new program to macOS, which asks again after every build.
+# Run it after each `cargo build`.
 set -eu
 cd "$(dirname "$0")/.."
 cert="Bate Dev"

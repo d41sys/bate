@@ -9,7 +9,7 @@
 use core_foundation::array::CFArrayGetValueAtIndex;
 use core_foundation::base::TCFType;
 use core_foundation::data::CFData;
-use core_foundation::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
+use core_foundation::dictionary::{CFDictionary, CFDictionaryGetValue, CFDictionaryRef};
 use core_foundation::string::CFStringRef;
 use security_framework::certificate::SecCertificate;
 use security_framework::os::macos::code_signing::{
@@ -28,6 +28,7 @@ unsafe extern "C" {
         information: *mut CFDictionaryRef,
     ) -> i32;
     static kSecCodeInfoCertificates: CFStringRef;
+    static kSecCodeInfoTeamIdentifier: CFStringRef;
 }
 
 /// `kSecCSSigningInformation`: the flag that makes the certificates part of the answer.
@@ -54,20 +55,10 @@ pub fn own_requirement() -> Option<&'static str> {
                 sha1.to_string_lossy()
             ));
         }
-        let me = SecCode::for_self(Flags::NONE).ok()?;
-        let mut info: CFDictionaryRef = std::ptr::null();
-        // SAFETY: a code object and a valid out-pointer; the docs allow a running code object
-        // where a static one is named.
-        let status = unsafe {
-            SecCodeCopySigningInformation(me.as_CFTypeRef(), SIGNING_INFORMATION, &mut info)
-        };
-        if status != 0 || info.is_null() {
-            return None;
-        }
-        // SAFETY: `info` is a dictionary we own (a "copy"), so the wrapper releases it; its
-        // certificate list, when present, is an array of certificates, the leaf first.
+        let info = own_info()?;
+        // SAFETY: the certificate list, when present, is an array of certificates, the leaf
+        // first.
         let der = unsafe {
-            let info = core_foundation::dictionary::CFDictionary::<*const c_void, *const c_void>::wrap_under_create_rule(info);
             let list =
                 CFDictionaryGetValue(info.as_concrete_TypeRef(), kSecCodeInfoCertificates.cast());
             if list.is_null() {
@@ -79,6 +70,36 @@ pub fn own_requirement() -> Option<&'static str> {
         Some(requirement(&der))
     });
     OWN.as_deref()
+}
+
+/// What macOS reads from this program's signature; `None` when it has none to read.
+fn own_info() -> Option<CFDictionary<*const c_void, *const c_void>> {
+    let me = SecCode::for_self(Flags::NONE).ok()?;
+    let mut info: CFDictionaryRef = std::ptr::null();
+    // SAFETY: a code object and a valid out-pointer; the docs allow a running code object
+    // where a static one is named.
+    let status =
+        unsafe { SecCodeCopySigningInformation(me.as_CFTypeRef(), SIGNING_INFORMATION, &mut info) };
+    if status != 0 || info.is_null() {
+        return None;
+    }
+    // SAFETY: `info` is a dictionary we own (a "copy"), so the wrapper releases it.
+    Some(unsafe { CFDictionary::wrap_under_create_rule(info) })
+}
+
+/// Whether this program's signature names a team, as a Developer ID one does and an ad-hoc or
+/// self-made one does not. The login keychain knows a program without one only by its code hash.
+pub fn has_team() -> bool {
+    own_info().is_some_and(|info| {
+        // SAFETY: a dictionary we hold and a constant key; the value is only tested for presence.
+        let team = unsafe {
+            CFDictionaryGetValue(
+                info.as_concrete_TypeRef(),
+                kSecCodeInfoTeamIdentifier.cast(),
+            )
+        };
+        !team.is_null()
+    })
 }
 
 /// The audit token of the process on the other end of `stream`: it names that process alone,
