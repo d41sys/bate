@@ -267,7 +267,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 18] = [
+const BOT_TABLES: [&str; 19] = [
     "ledger",
     "access",
     "network",
