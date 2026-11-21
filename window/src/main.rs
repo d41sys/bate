@@ -82,11 +82,19 @@ fn set_badge(window: WebviewWindow, count: u32) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// A notification that `bot` waits for the person's answer to `id`; a click on it opens that
-/// bot in a window. See `notify`.
+/// A notification that `bot` waits for the person's answer to `id`, a question of `conversation`;
+/// a click on it opens that bot in a window, and with `actions` it has the buttons that answer.
+/// See `notify`.
 #[tauri::command]
-fn notify_waiting(bot: String, id: String, title: String, body: String) -> Result<(), String> {
-    notify::waiting(&bot, &id, &title, &body)
+fn notify_waiting(
+    bot: String,
+    conversation: String,
+    id: String,
+    title: String,
+    body: String,
+    actions: bool,
+) -> Result<(), String> {
+    notify::waiting(&bot, &conversation, &id, &title, &body, actions)
 }
 
 /// Starts the system's Dictation in the box that has focus, as the Edit menu's Start

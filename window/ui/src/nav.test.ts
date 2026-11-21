@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab, waitingCount } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab } from "./nav.ts";
 import type { Bot, Project } from "./types.ts";
 
 const bot = (id: string, project?: string) => ({ id, project: project ? { id: project, name: project } : undefined }) as Bot;
@@ -72,10 +72,6 @@ test("a row shows the most urgent of its states", () => {
   assert.equal(state({ busy: true }, true), "working");
   assert.equal(state({}, true), "unread");
   assert.equal(state({}), "idle");
-});
-
-test("the Dock counts the bots that wait for the person", () => {
-  assert.equal(waitingCount([{ waiting: true }, { waiting: false }, { waiting: true }] as Bot[]), 2);
 });
 
 test("a turn that ends in another chat, or while the window is not looked at, is unread", () => {

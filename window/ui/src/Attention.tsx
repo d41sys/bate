@@ -2,12 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { Avatar } from "./Avatar.tsx";
 import { QuestionCard } from "./Question.tsx";
-import { ago, answered, grouped, said, type AttentionItem } from "./attention.ts";
+import { ago, answered, changesAttention, grouped, said, type AttentionItem } from "./attention.ts";
 import type { Question } from "./chat.ts";
 import type { Bot } from "./types.ts";
-
-/** Frames after which the list may differ. */
-const CHANGES = ["bots_changed", "conversations_changed", "question_closed"];
 
 /**
  * Every conversation that is not idle, one card each, in groups: what needs the person, what works, what
@@ -32,10 +29,7 @@ export function Attention({ bots, open }: { bots: Bot[]; open: (bot: string, con
       );
     };
     load();
-    const stop = listen((frame) => {
-      const entry = frame.entry as { type?: string } | undefined;
-      if (CHANGES.includes(frame.type) || (frame.type === "transcript" && (entry?.type === "turn_end" || entry?.type === "question"))) load();
-    });
+    const stop = listen((frame) => changesAttention(frame) && load());
     const tick = setInterval(() => setNow(Date.now()), 30_000);
     return () => {
       gone = true;

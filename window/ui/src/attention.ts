@@ -30,6 +30,15 @@ export const SECTIONS: { id: Section; title: string }[] = [
 /** The one group a conversation is in, the most urgent first: a question, a turn that runs, how the last turn ended. None when it is idle. */
 export const sectionOf = (i: AttentionItem): Section | undefined => (i.questions.length > 0 ? "needs" : i.busy ? "working" : i.ended === "done" ? "done" : i.ended ? "failed" : undefined);
 
+/** How many conversations need the person: the Dock's count, and the size of "Needs you" on the Activity screen. */
+export const needsCount = (items: AttentionItem[]) => items.filter((i) => sectionOf(i) === "needs").length;
+
+/** Whether `frame` may change the list (`list_attention`): ask again after it. */
+export function changesAttention(frame: { type: string; entry?: unknown }): boolean {
+  const entry = frame.entry as { type?: string } | undefined;
+  return ["bots_changed", "conversations_changed", "question_closed"].includes(frame.type) || (frame.type === "transcript" && (entry?.type === "turn_end" || entry?.type === "question"));
+}
+
 /** The groups that have a card, in order, each with its newest first. */
 export function grouped(items: AttentionItem[]): { id: Section; title: string; items: AttentionItem[] }[] {
   const newest = [...items].sort((a, b) => b.atMs - a.atMs);

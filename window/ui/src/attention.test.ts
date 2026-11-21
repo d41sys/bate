@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ago, answered, grouped, said, sectionOf, type AttentionItem } from "./attention.ts";
+import { ago, answered, changesAttention, grouped, needsCount, said, sectionOf, type AttentionItem } from "./attention.ts";
 
 const item = (over: Partial<AttentionItem>): AttentionItem => ({
   bot: "b", conversation: "c", title: "Title", atMs: 0, busy: false, questions: [], line: "", ended: null, error: null, ...over,
@@ -60,4 +60,26 @@ test("how long ago is short", () => {
   assert.equal(ago(now - 3 * 3_600_000, now), "3 h ago");
   assert.equal(ago(now - 86_400_000, now), "1 day ago");
   assert.equal(ago(now - 4 * 86_400_000, now), "4 days ago");
+});
+
+test("the Dock counts the conversations in Needs you, and a bot with two of them counts twice", () => {
+  const items = [
+    item({ conversation: "a", questions: [question] }),
+    item({ conversation: "b", questions: [question], busy: true }),
+    item({ conversation: "c", busy: true }),
+    item({ conversation: "d", ended: "done" }),
+  ];
+  assert.equal(needsCount(items), 2);
+  assert.equal(needsCount(grouped(items).flatMap((g) => g.items)), 2);
+  assert.equal(needsCount(answered(items, "a", "q1")), 1);
+  assert.equal(needsCount([]), 0);
+});
+
+test("the list is read again after the frames that can change it, and after no other", () => {
+  assert.equal(changesAttention({ type: "question_closed" }), true);
+  assert.equal(changesAttention({ type: "bots_changed" }), true);
+  assert.equal(changesAttention({ type: "transcript", entry: { type: "question" } }), true);
+  assert.equal(changesAttention({ type: "transcript", entry: { type: "turn_end" } }), true);
+  assert.equal(changesAttention({ type: "transcript", entry: { type: "text" } }), false);
+  assert.equal(changesAttention({ type: "queue_changed" }), false);
 });

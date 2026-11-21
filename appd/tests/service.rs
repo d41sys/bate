@@ -514,6 +514,84 @@ fn an_open_question_survives_a_reconnect_and_the_answer_reaches_the_engine() {
     assert_eq!(reply["code"], "no_such_question");
 }
 
+/// The line a notification's button sends: the question of one conversation, with a plain choice.
+fn button(bot: &str, conversation: &Value, choice: &str) -> Value {
+    json!({"bot": bot, "conversation": conversation, "question": "q1", "choice": choice})
+}
+
+#[test]
+fn a_notification_button_answers_its_own_question_once_and_leaves_every_other_open() {
+    let home = home("buttons");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    // Two bots ask a question with the same id: the answer is for the one named.
+    let (first, second) = (w.create_bot(), w.create_bot());
+    for bot in [&first, &second] {
+        w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "ask"}));
+    }
+    eventually("both questions to be open", || {
+        [&first, &second]
+            .iter()
+            .all(|b| w.ok("open_bot", json!({"bot": b}))["questions"][0]["question"] == "q1")
+    });
+    let conversation =
+        |w: &mut Window, bot: &str| w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+    let (of_first, of_second) = (conversation(&mut w, &first), conversation(&mut w, &second));
+    assert_eq!(attention(&mut w).len(), 2);
+
+    // A button's answer reaches that bot's engine and closes that question only.
+    w.ok("answer", button(&first, &of_first, "Approve"));
+    w.wait_for(|f| {
+        f["type"] == "transcript"
+            && f["bot"] == first.as_str()
+            && f["entry"]["delta"] == "chose Approve"
+    });
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": first}))["questions"],
+        json!([])
+    );
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": second}))["questions"][0]["question"],
+        "q1"
+    );
+
+    // The Activity list, which the Dock count follows, still holds the other one as waiting.
+    eventually("the list to hold one question", || {
+        attention(&mut w)
+            .iter()
+            .filter(|i| !i["questions"].as_array().unwrap().is_empty())
+            .count()
+            == 1
+    });
+
+    // A second press, or one that names the wrong conversation, changes nothing.
+    for (bot, conversation) in [(&first, &of_first), (&second, &of_first)] {
+        let late = w.send("answer", button(bot, conversation, "Deny"));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == late.as_str());
+        assert_eq!(reply["success"], false, "{bot}");
+    }
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": second}))["questions"][0]["question"],
+        "q1"
+    );
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": first}))["questions"],
+        json!([])
+    );
+
+    // Deny is answered the same way.
+    w.ok("answer", button(&second, &of_second, "Deny"));
+    w.wait_for(|f| {
+        f["type"] == "transcript"
+            && f["bot"] == second.as_str()
+            && f["entry"]["delta"] == "chose Deny"
+    });
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": second}))["questions"],
+        json!([])
+    );
+}
+
 #[test]
 fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
     let home = home("routines");
