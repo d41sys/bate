@@ -1,18 +1,9 @@
 import { useEffect, useState } from "react";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
-import { dayTime } from "./times.ts";
+import { dayTime, EVERY, when } from "./times.ts";
 import { listen, request } from "./service.ts";
 import type { Frequency, Routine, RoutineRun } from "./types.ts";
-
-const EVERY: Record<Frequency, string> = {
-  minutes: "minutes",
-  hourly: "hours",
-  daily: "days",
-  weekly: "weeks",
-  monthly: "months",
-  yearly: "years",
-};
 
 const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped" };
 
@@ -20,7 +11,6 @@ const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "
 const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
 const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat });
 
-const when = (r: Routine) => (r.schedule ? `Every ${r.schedule.interval === 1 ? EVERY[r.schedule.frequency].replace(/s$/, "") : `${r.schedule.interval} ${EVERY[r.schedule.frequency]}`} from ${r.schedule.time}` : "Not on a schedule");
 /** How a run ended: a quiet badge when it went well, a plain one when the person should look. */
 const Outcome = ({ run }: { run: RoutineRun }) => <span className={run.outcome === "sent" ? "badge quiet" : "badge"}>{OUTCOME[run.outcome]}</span>;
 

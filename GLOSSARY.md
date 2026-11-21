@@ -55,6 +55,10 @@ _Avoid_: backup, snapshot, revision
 **Skill**:
 A folder of instructions that a bot reads when a task calls for it.
 
+**Bot file**:
+One file that holds a bot's instructions, skills, routines, notes and connectors, to give to someone or to move to another Mac.
+_Avoid_: backup, archive, template
+
 **Routine**:
 A prompt that a bot runs on a schedule or when something triggers it.
 _Avoid_: job, automation, cron

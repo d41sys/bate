@@ -1,3 +1,18 @@
+import type { Frequency, Routine } from "./types.ts";
+
+/** The unit of each frequency, in the plural. */
+export const EVERY: Record<Frequency, string> = {
+  minutes: "minutes",
+  hourly: "hours",
+  daily: "days",
+  weekly: "weeks",
+  monthly: "months",
+  yearly: "years",
+};
+
+/** When a routine runs, in words. */
+export const when = (r: Pick<Routine, "schedule">) => (r.schedule ? `Every ${r.schedule.interval === 1 ? EVERY[r.schedule.frequency].replace(/s$/, "") : `${r.schedule.interval} ${EVERY[r.schedule.frequency]}`} from ${r.schedule.time}` : "Not on a schedule");
+
 const DAY = 86_400_000;
 const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 const midnight = (ms: number) => new Date(new Date(ms).setHours(0, 0, 0, 0)).getTime();

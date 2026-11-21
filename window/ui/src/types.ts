@@ -131,6 +131,17 @@ export type Skill = { name: string; description: string };
 /** What `preview_skill` says of a skill folder: the skill and how much an install would copy. */
 export type SkillPreview = { skill: Skill; entries: number; bytes: number };
 
+/** What `preview_bot_file` says a bot file holds. `sha256` is given back to `import_bot`. */
+export type BotFilePreview = {
+  name: string;
+  instructionsLength: number;
+  skills: { name: string; description: string; files: number; runsScripts: boolean }[];
+  routines: { name: string; schedule: Routine["schedule"] | null; webhook: boolean; chat: boolean }[];
+  notes: number;
+  connectors: { name: string; address: string }[];
+  sha256: string;
+};
+
 /** A prompt the service holds until the bot is free. */
 export type QueuedPrompt = { nonce: string; text: string };
 

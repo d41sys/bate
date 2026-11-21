@@ -21,6 +21,9 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const looks = () => ({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color, stepLimit: bot.stepLimit });
   const [look, setLook] = useState(looks);
   const [deleting, setDeleting] = useState(false);
+  const [withNotes, setWithNotes] = useState(false);
+  const [exported, setExported] = useState<{ path: string; check: { name: string; command: string }[] }>();
+  useEffect(() => setExported(undefined), [bot.id]);
   // Saved here or elsewhere: show what the service has.
   useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
   const [hosts, setHosts] = useState((bot.network ?? []).join("\n"));
@@ -214,6 +217,35 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           {found.missing.length > 0 && <p className="note">Bate looks again each time these settings are opened.</p>}
         </Group>
       )}
+      <Group title="Export">
+        <Setting id="bot-export-notes" inline title="With notes" hint="Its memory notes go in the file too.">
+          <input type="checkbox" role="switch" checked={withNotes} onChange={(e) => setWithNotes(e.target.checked)} />
+        </Setting>
+        <Setting
+          title="Export bot"
+          hint="One file to import as a new bot. No sign-ins, keys or chats."
+          saved={saved("export")}
+          error={error("export")}
+        >
+          <button type="button" onClick={() => run("export", request<NonNullable<typeof exported>>("export_bot", { bot: bot.id, notes: withNotes }).then(setExported))}>Export bot</button>
+        </Setting>
+        {exported && <p className="note" role="status">Saved to <code>{exported.path}</code></p>}
+        {exported && exported.check.length > 0 && (
+          <>
+            <p className="note">Before you share it, check these commands for keys:</p>
+            <ul className="rows">
+              {exported.check.map((c) => (
+                <li key={c.name}>
+                  <div className="what">
+                    <strong>{c.name}</strong>
+                    <code>{c.command}</code>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </Group>
       <Group title="Delete">
         <Setting title="Delete this bot" hint="Its folder moves to the Trash.">
           <button type="button" className="danger" onClick={() => setDeleting(true)}>Delete this bot…</button>

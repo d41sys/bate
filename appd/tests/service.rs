@@ -2691,6 +2691,9 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("17", "watch_surfaces"),
         // It changes files on this Mac, maybe outside the bot's folder.
         ("21", "undo_change"),
+        // So are the files a bot is made from.
+        ("22", "preview_bot_file"),
+        ("23", "import_bot"),
     ] {
         send(
             &device,
@@ -11267,4 +11270,394 @@ fn every_replace_or_delete_of_a_note_leaves_a_version_a_deleted_note_comes_back_
         .query_row("SELECT count(*) FROM file_copies", [], |r| r.get(0))
         .unwrap();
     assert_eq!(left, 0);
+}
+
+/// The new bots' folders in the home: what a refused import must not add to.
+fn bot_folders(home: &Path) -> usize {
+    fs::read_dir(home.join("bots")).map_or(0, |d| d.count())
+}
+
+#[test]
+fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private() {
+    let home = home("bot-file");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "set_bot",
+        json!({"bot": bot, "instructions": "Be brief.", "avatar": "🌼", "color": "#d6a01e"}),
+    );
+    // A skill with a script in a folder, a routine with a webhook, a connector with keys in its
+    // address and headers, notes: and what is private to the bot.
+    let source = home.join("picked/pdf");
+    fs::create_dir_all(source.join("scripts")).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nHow to.\n",
+    )
+    .unwrap();
+    fs::write(source.join("scripts/fill.sh"), "#!/bin/sh\necho fill\n").unwrap();
+    fs::set_permissions(
+        source.join("scripts/fill.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(source.join("scripts/readme.txt"), "Plain.\n").unwrap();
+    w.ok("install_skill", json!({"bot": bot, "path": source}));
+    let schedule = json!({"frequency": "daily", "time": "09:00", "timezone": "UTC"});
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Brief", "prompt": "Summarise.", "enabled": true,
+            "schedule": schedule, "webhook": true}}),
+    )["routine"]
+        .clone();
+    let hook_token = routine["hookToken"].as_str().unwrap().to_owned();
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": {"name": "docs", "enabled": true,
+            "transport": {"type": "http", "url": "https://docs.example.com/mcp?key=URL-SECRET",
+                "headers": {"Authorization": "Bearer HEADER-SECRET"}}}}),
+    );
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": {"name": "local", "enabled": true,
+            "transport": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"],
+                "env": {"TOKEN": "ENV-SECRET"}}}}),
+    );
+    // A program with no arguments, and no key to check.
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": {"name": "plain", "enabled": true,
+            "transport": {"type": "stdio", "command": "my-server"}}}),
+    );
+    w.ok(
+        "write_memory",
+        json!({"bot": bot, "name": "user.md", "text": "Likes tea."}),
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "CHAT-SECRET"}),
+    );
+    turn_ended(&mut w);
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "run", "level": "always"}),
+    );
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "INSERT INTO grants(bot, kind, target, at) VALUES (?1, 'run', 'GRANT-SECRET', 1)",
+        [&bot],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO channels(bot, kind, token) VALUES (?1, 'telegram', 'CHANNEL-SECRET')",
+        [&bot],
+    )
+    .unwrap();
+    drop(db);
+
+    let exported = |w: &mut Window, notes: bool| {
+        let data = w.ok("export_bot", json!({"bot": bot, "notes": notes}));
+        let path = data["path"].as_str().unwrap().to_owned();
+        assert!(
+            path.starts_with(home.join("exports").to_str().unwrap()) && path.ends_with(".batebot"),
+            "{path}"
+        );
+        (path, data["check"].clone())
+    };
+    let (without, _) = exported(&mut w, false);
+    let (with, check) = exported(&mut w, true);
+    // Only the command that went in with arguments is named, as written to the file.
+    assert_eq!(check, json!([{"name": "local", "command": "npx -y pkg"}]));
+    let bytes = fs::read(&with).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    for private in [
+        "CHAT-SECRET",
+        "GRANT-SECRET",
+        "CHANNEL-SECRET",
+        "HEADER-SECRET",
+        "ENV-SECRET",
+        "URL-SECRET",
+        hook_token.as_str(),
+    ] {
+        assert!(!text.contains(private), "{private} is in the file");
+    }
+    assert!(text.contains("Likes tea.") && text.contains("echo fill"));
+    assert!(!fs::read_to_string(&without).unwrap().contains("Likes tea."));
+    assert_eq!(fs::metadata(&with).unwrap().permissions().mode() & 0o077, 0);
+
+    // Looked at first: what it holds, and nothing is made.
+    let folders = bot_folders(&home);
+    let preview = w.ok("preview_bot_file", json!({"path": with}));
+    assert_eq!(bot_folders(&home), folders);
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(preview["name"], "Ada");
+    assert_eq!(preview["instructionsLength"], 9);
+    assert_eq!(preview["notes"], 1);
+    assert_eq!(preview["skills"][0]["name"], "pdf-forms");
+    assert_eq!(preview["skills"][0]["runsScripts"], true);
+    assert_eq!(preview["routines"][0]["name"], "Brief");
+    assert_eq!(preview["routines"][0]["schedule"]["time"], "09:00");
+    assert_eq!(
+        preview["connectors"],
+        json!([
+            {"name": "docs", "address": "https://docs.example.com/mcp"},
+            {"name": "local", "address": "npx -y pkg"},
+            {"name": "plain", "address": "my-server"},
+        ])
+    );
+
+    let made = w.ok(
+        "import_bot",
+        json!({"path": with, "sha256": preview["sha256"]}),
+    )["bot"]
+        .clone();
+    let new = made["id"].as_str().unwrap().to_owned();
+    assert_ne!(new, bot);
+    // The name was taken.
+    assert_eq!(made["name"], "Ada 2");
+    assert_eq!(
+        (
+            made["instructions"].clone(),
+            made["avatar"].clone(),
+            made["color"].clone()
+        ),
+        (json!("Be brief."), json!("🌼"), json!("#d6a01e"))
+    );
+    // The folder limit is on.
+    assert_eq!(
+        (made["wholeDisk"].clone(), made["network"].clone()),
+        (json!(false), Value::Null)
+    );
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": new}))["skills"],
+        json!([{"name": "pdf-forms", "description": "Fill in PDF forms."}])
+    );
+    let skill = home.join("bots").join(&new).join("skills/pdf-forms");
+    assert_eq!(
+        fs::read_to_string(skill.join("scripts/fill.sh")).unwrap(),
+        "#!/bin/sh\necho fill\n"
+    );
+    // A runnable file stays runnable, a plain one plain, and nothing is writable by others.
+    let mode = |p: &str| fs::metadata(skill.join(p)).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode("scripts/fill.sh"), 0o755);
+    assert_eq!(mode("scripts/readme.txt") & 0o111, 0);
+    assert_eq!(mode("SKILL.md") & 0o111, 0);
+    // Off, with its own webhook token.
+    let routines = w.ok("list_routines", json!({"bot": new}))["routines"].clone();
+    assert_eq!(routines.as_array().unwrap().len(), 1);
+    let (r, old) = (&routines[0], &routine);
+    assert_eq!(
+        (&r["name"], &r["prompt"], &r["enabled"], &r["schedule"]),
+        (
+            &old["name"],
+            &old["prompt"],
+            &json!(false),
+            &old["schedule"]
+        )
+    );
+    assert_eq!(r["nextRunMs"], Value::Null);
+    assert_eq!(r["lastRun"], Value::Null);
+    assert_ne!(r["hookToken"].as_str().unwrap(), hook_token);
+    // To look at: off, with no keys.
+    let connectors = w.ok("list_connectors", json!({"bot": new}))["connectors"].clone();
+    assert_eq!(
+        connectors,
+        json!([
+            {"name": "docs", "enabled": false,
+                "transport": {"type": "http", "url": "https://docs.example.com/mcp", "headers": {}}},
+            {"name": "local", "enabled": false,
+                "transport": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {}}},
+            {"name": "plain", "enabled": false,
+                "transport": {"type": "stdio", "command": "my-server", "args": [], "env": {}}},
+        ])
+    );
+    assert_eq!(
+        w.ok("read_memory", json!({"bot": new, "name": "user.md"}))["text"],
+        "Likes tea."
+    );
+    // The same permissions as any new bot, none of the old bot's answers, and no chat.
+    let fresh = w.create_bot();
+    let permissions = |w: &mut Window, bot: &str| w.ok("get_permissions", json!({"bot": bot}));
+    assert_eq!(permissions(&mut w, &new), permissions(&mut w, &fresh));
+    assert_eq!(permissions(&mut w, &new)["grants"], json!([]));
+    assert!(
+        !fs::read_to_string(home.join("bots").join(&new).join("memory/user.md"))
+            .unwrap()
+            .contains("CHAT")
+    );
+    let opened = w.ok("open_bot", json!({"bot": new}));
+    assert_eq!(opened["history"], json!([]));
+
+    // Without notes, none come in.
+    let without = w.ok("preview_bot_file", json!({"path": without}));
+    assert_eq!(without["notes"], 0);
+}
+
+#[test]
+fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported() {
+    let home = home("bot-file-bad");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let source = home.join("picked/pdf");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nHow to.\n",
+    )
+    .unwrap();
+    w.ok("install_skill", json!({"bot": bot, "path": source}));
+    let path = w.ok("export_bot", json!({"bot": bot}))["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let good: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(good["format"], "bate-bot");
+    assert_eq!(good["version"], 1);
+
+    let write = |name: &str, file: &Value| {
+        let p = home.join(name);
+        fs::write(&p, file.to_string()).unwrap();
+        p
+    };
+    let skill_file = |path: &str| json!({"path": path, "text": "x"});
+    let mut cases: Vec<(&str, Value, &str)> = Vec::new();
+    let mut case = |name, edit: &dyn Fn(&mut Value), why| {
+        let mut file = good.clone();
+        edit(&mut file);
+        cases.push((name, file, why));
+    };
+    case(
+        "name",
+        &|f| f["skills"][0]["name"] = json!("Bad Name"),
+        "a-z",
+    );
+    case(
+        "leaves",
+        &|f| {
+            f["skills"][0]["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(skill_file("../x"))
+        },
+        "not a path inside",
+    );
+    case(
+        "root",
+        &|f| {
+            f["skills"][0]["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(skill_file("/etc/x"))
+        },
+        "not a path inside",
+    );
+    case(
+        "note",
+        &|f| f["notes"] = json!([{"name": "big.md", "text": "x".repeat(65 * 1024)}]),
+        "larger than",
+    );
+    case(
+        "note-path",
+        &|f| f["notes"] = json!([{"name": "../up.md", "text": "x"}]),
+        "`name` must be a file name",
+    );
+    case(
+        "instructions",
+        &|f| f["instructions"] = json!("x".repeat(8001)),
+        "at most 8000",
+    );
+    case("newer", &|f| f["version"] = json!(2), "version 2");
+    case(
+        "kind",
+        &|f| f["format"] = json!("other"),
+        "not a Bate bot file",
+    );
+    case(
+        "grants",
+        &|f| f["grants"] = json!([{"kind": "run", "target": "ls"}]),
+        "not valid",
+    );
+    case(
+        "routine",
+        &|f| f["routines"] = json!([{"name": "r", "prompt": "p", "schedule": {"frequency": "daily", "time": "25:00"}}]),
+        "the routine",
+    );
+    case(
+        "headers",
+        &|f| f["connectors"] = json!([{"name": "c", "address": {"type": "http", "url": "https://x.example", "headers": {"a": "b"}}}]),
+        "not valid",
+    );
+    case(
+        "scheme",
+        &|f| {
+            f["connectors"] =
+                json!([{"name": "c", "address": {"type": "http", "url": "ftp://x.example"}}])
+        },
+        "http://",
+    );
+
+    let folders = bot_folders(&home);
+    for (name, file, why) in &cases {
+        let p = write(name, file);
+        for command in ["preview_bot_file", "import_bot"] {
+            let id = w.send(command, json!({"path": p, "sha256": "0".repeat(64)}));
+            let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+            assert_eq!(
+                reply["code"], "invalid_bot_file",
+                "{name} {command}: {reply}"
+            );
+            let error = reply["error"].as_str().unwrap();
+            assert!(error.contains(why), "{name} {command}: {error}");
+        }
+    }
+    // Not a Bate file, over the size, a link.
+    let junk = home.join("junk");
+    fs::write(&junk, "not json").unwrap();
+    let huge = home.join("huge");
+    fs::write(&huge, vec![b' '; (16 << 20) + 1]).unwrap();
+    let link = home.join("link.batebot");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    for (p, why) in [
+        (&junk, "not a Bate"),
+        (&huge, "at most 16 MiB"),
+        (&link, "link"),
+    ] {
+        let id = w.send("preview_bot_file", json!({"path": p}));
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert!(reply["error"].as_str().unwrap().contains(why), "{reply}");
+    }
+    assert_eq!(bot_folders(&home), folders);
+    assert_eq!(
+        w.ok("list_bots", json!({}))["bots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The file changes between the look and the import: what was shown is not what is made.
+    let shown = w.ok("preview_bot_file", json!({"path": path}))["sha256"].clone();
+    let mut changed = good.clone();
+    changed["instructions"] = json!("Do something else.");
+    fs::write(&path, changed.to_string()).unwrap();
+    assert_eq!(
+        refused(&mut w, "import_bot", json!({"path": path, "sha256": shown})),
+        "bot_file_changed"
+    );
+    assert_eq!(
+        refused(&mut w, "import_bot", json!({"path": path})),
+        "bad_request"
+    );
+    assert_eq!(bot_folders(&home), folders);
+    let again = w.ok("preview_bot_file", json!({"path": path}))["sha256"].clone();
+    let made = w.ok("import_bot", json!({"path": path, "sha256": again}));
+    assert_eq!(made["bot"]["instructions"], "Do something else.");
 }

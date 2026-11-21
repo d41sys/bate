@@ -4,6 +4,7 @@
 
 mod apple;
 mod attach;
+mod botfile;
 mod browser;
 mod catalog;
 mod channels;
