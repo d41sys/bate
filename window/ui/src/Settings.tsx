@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { agentChoice, OTHER, OWN, type Agent } from "./agents.ts";
 import { Confirm } from "./Confirm.tsx";
 import { Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
 import { listen, request } from "./service.ts";
@@ -24,7 +25,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
   const [hosts, setHosts] = useState((bot.network ?? []).join("\n"));
   useEffect(() => setHosts((bot.network ?? []).join("\n")), [bot.id, (bot.network ?? []).join("\n")]);
-  const [agent, setAgent] = useState((bot.agent ?? []).join(" "));
+  const savedAgent = (bot.agent ?? []).join(" ");
+  const [agent, setAgent] = useState(savedAgent);
+  // The user chose Other… and has not saved a command yet; `undefined` until the service has said what is installed.
+  const [other, setOther] = useState(false);
+  const [found, setFound] = useState<{ agents: Agent[]; looked: string[] }>();
+  useEffect(() => {
+    setAgent(savedAgent);
+    setOther(false);
+  }, [bot.id, savedAgent]);
+  useEffect(() => {
+    request<{ agents: Agent[]; looked: string[] }>("list_agents").then(setFound, () => setFound({ agents: [], looked: [] }));
+  }, []);
   const saves = useSaves();
   const { run, edit, saved, error } = saves;
 
@@ -38,6 +50,8 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   }, [bot.id]);
 
   const words = agent.trim().split(/\s+/).filter(Boolean);
+  const choice = other ? OTHER : agentChoice(bot.agent, found?.agents ?? []);
+  const chosen = found?.agents.find((a) => a.label === choice);
   const change = (next: Partial<typeof look>) => (edit("look"), setLook({ ...look, ...next }));
 
   return (
@@ -138,14 +152,44 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           </Setting>
         </Group>
       )}
-      <Group title="Engine">
-        <form onSubmit={(e) => { e.preventDefault(); run("agent", request("set_agent", { bot: bot.id, command: words.length ? words : null })); }}>
-          <Setting id="bot-agent" title="Installed agent" hint="Empty: Bate's own." error={error("agent")} saved={saved("agent")}>
-            <input id="bot-agent" aria-describedby="bot-agent-hint" placeholder="opencode acp" value={agent} onChange={(e) => (edit("agent"), setAgent(e.target.value))} />
-            <button>Save</button>
+      {found && (
+        <Group title="Engine">
+          <Setting
+            id="bot-engine"
+            title="Engine"
+            hint={
+              chosen
+                ? <code>{chosen.path}</code>
+                : found.agents.length === 0
+                  ? `An installed agent is listed here when its program is found: ${found.looked.join(", ")}.`
+                  : undefined
+            }
+            error={choice === OTHER ? undefined : error("agent")}
+            saved={choice !== OTHER && saved("agent")}
+          >
+            <select
+              value={choice}
+              onChange={(e) => {
+                edit("agent");
+                setOther(e.target.value === OTHER);
+                if (e.target.value !== OTHER) run("agent", request("set_agent", { bot: bot.id, command: found.agents.find((a) => a.label === e.target.value)?.command ?? null }));
+              }}
+            >
+              <option value={OWN}>Bate's own engine</option>
+              {found.agents.map((a) => <option key={a.label} value={a.label}>{a.label}</option>)}
+              <option value={OTHER}>Other…</option>
+            </select>
           </Setting>
-        </form>
-      </Group>
+          {choice === OTHER && (
+            <form onSubmit={(e) => { e.preventDefault(); run("agent", request("set_agent", { bot: bot.id, command: words.length ? words : null })); }}>
+              <Setting id="bot-agent" title="Command" hint="The program, then its arguments. It uses its own login, model and tools." error={error("agent")} saved={saved("agent")}>
+                <input id="bot-agent" aria-describedby="bot-agent-hint" placeholder="opencode acp" value={agent} onChange={(e) => (edit("agent"), setAgent(e.target.value))} />
+                <button>Save</button>
+              </Setting>
+            </form>
+          )}
+        </Group>
+      )}
       <Group title="Delete">
         <Setting title="Delete this bot" hint="Its folder moves to the Trash.">
           <button type="button" className="danger" onClick={() => setDeleting(true)}>Delete this bot…</button>

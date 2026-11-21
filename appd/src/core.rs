@@ -343,6 +343,15 @@ fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
 /// Thinking efforts a model server takes (`reasoning_effort`).
 const EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
 
+/// The installed agents the window offers for `set_agent`: label and command. The window
+/// shows those whose program (the first word) is on the service's `PATH`.
+const KNOWN_AGENTS: [(&str, &[&str]); 4] = [
+    ("Claude Code", &["claude-code-acp"]),
+    ("Codex", &["codex-acp"]),
+    ("opencode", &["opencode", "acp"]),
+    ("Gemini CLI", &["gemini", "--experimental-acp"]),
+];
+
 /// A model's name and thinking effort as `set_model` takes them.
 fn check_model(model: &str, effort: Option<&str>) -> Result<(), String> {
     if model.trim() != model || model.len() > 200 || model.chars().any(char::is_control) {
@@ -1855,6 +1864,17 @@ impl Core {
                     self.broadcast(&json!({"type": "bots_changed"}));
                 }
                 Ok(Some(json!({})))
+            }
+            "list_agents" => {
+                let found: Vec<Value> = KNOWN_AGENTS
+                    .iter()
+                    .filter_map(|(label, command)| {
+                        let path = project_server::on_path(command[0])?;
+                        Some(json!({"label": label, "command": command, "path": path}))
+                    })
+                    .collect();
+                let looked: Vec<&str> = KNOWN_AGENTS.iter().map(|(_, c)| c[0]).collect();
+                Ok(Some(json!({"agents": found, "looked": looked})))
             }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;

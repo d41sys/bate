@@ -4945,6 +4945,39 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
 }
 
 #[test]
+fn the_window_is_told_which_known_agents_are_installed_right_now() {
+    let home = home("agents");
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("PATH", &bin);
+    });
+    let mut w = Window::connect(&home);
+    let none = w.ok("list_agents", json!({}));
+    assert_eq!(none["agents"], json!([]));
+    // What the window says it looked for.
+    assert_eq!(
+        none["looked"],
+        json!(["claude-code-acp", "codex-acp", "opencode", "gemini"])
+    );
+
+    // A program of that name on the PATH is found when asked, without a restart; one that is
+    // not a known agent is not listed.
+    for name in ["opencode", "some-other-tool"] {
+        fs::write(bin.join(name), "#!/bin/sh\n").unwrap();
+    }
+    assert_eq!(
+        w.ok("list_agents", json!({}))["agents"],
+        json!([{
+            "label": "opencode",
+            "command": ["opencode", "acp"],
+            "path": bin.join("opencode"),
+        }])
+    );
+}
+
+#[test]
 fn a_bot_runs_on_an_installed_agent_once_it_has_the_whole_disk() {
     let home = home("agent");
     let _service = Service::start(&home);
