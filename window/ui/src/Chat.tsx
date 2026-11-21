@@ -487,6 +487,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           <p>{q.title}</p>
           {q.target && <pre>{q.target}</pre>}
           {q.folder && <p className="note">In <code>{q.folder}</code></p>}
+          {q.askedBy?.length ? <p className="note">Asked for by {q.askedBy.join(", who was asked by ")}</p> : null}
           <div className="actions">
             {q.options.map((choice) => (
               <button
