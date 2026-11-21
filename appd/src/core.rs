@@ -236,6 +236,14 @@ fn updates_off() -> Refusal {
     )
 }
 
+/// What a request is told that would start a turn of a paused bot.
+fn refuse_paused() -> Refusal {
+    (
+        "paused",
+        "the bot is paused; resume it to give it work".into(),
+    )
+}
+
 /// `(code, message)` of a refused request.
 type Refusal = (&'static str, String);
 /// `Ok(None)`: the reply comes later, when the engine answers.
@@ -1338,6 +1346,9 @@ impl Core {
                         if waiting.iter().any(|q| q.nonce == nonce) {
                             return Ok(Some(json!({"duplicate": true, "queued": true})));
                         }
+                        if self.is_paused(&bot) {
+                            return Err(refuse_paused());
+                        }
                         if !waiting.is_empty() || !self.free(&bot) {
                             if waiting.len() >= QUEUE_MAX {
                                 return Err((
@@ -1428,6 +1439,9 @@ impl Core {
                             .into(),
                     ));
                 }
+                if self.is_paused(&bot) {
+                    return Err(refuse_paused());
+                }
                 if !self
                     .engines
                     .get(&bot)
@@ -1449,6 +1463,24 @@ impl Core {
                     r.steered.push(text.into());
                 }
                 Ok(None)
+            }
+            "set_paused" => {
+                let paused = f
+                    .get("paused")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| bad("`paused` must be true or false"))?;
+                let bots = match f.get("bot") {
+                    None | Some(Value::Null) => {
+                        let all = self.store.bots().map_err(internal)?;
+                        all.into_iter().map(|b| b.id).collect()
+                    }
+                    Some(_) => vec![self.bot_of(f)?],
+                };
+                for bot in &bots {
+                    self.set_paused(bot, paused)?;
+                }
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
             }
             "abort" | "set_model" | "rewind" | "compact" => {
                 let bot = self.bot_of(f)?;
@@ -1845,6 +1877,9 @@ impl Core {
                     Some(_) => Some(str_field(f, "to")?),
                 };
                 let (to, text) = self.room_target(&project, named, str_field(f, "text")?)?;
+                if self.is_paused(&to) {
+                    return Err(refuse_paused());
+                }
                 let queued = self.store.queue(&to).map_err(internal)?;
                 if queued.len() >= QUEUE_MAX {
                     return Err((
@@ -2855,6 +2890,7 @@ impl Core {
                 .unwrap_or(STEP_LIMIT)
         );
         row["webSearch"] = json!(self.store.web_search(bot).unwrap_or(true));
+        row["paused"] = json!(self.is_paused(bot));
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
         if let Ok(Some((model, effort))) = self.store.model(bot) {
@@ -4281,6 +4317,26 @@ impl Core {
         !self.occupied(bot) && self.engines.get(bot).is_none_or(|r| r.compacting == 0)
     }
 
+    /// Whether `bot` is paused. Unreadable counts as paused: no turn starts on a guess.
+    fn is_paused(&self, bot: &str) -> bool {
+        self.store.paused(bot).unwrap_or(true)
+    }
+
+    /// Pauses or resumes `bot`. Pausing stops the turn that runs, as `abort` does; resuming
+    /// sends what waited.
+    fn set_paused(&mut self, bot: &str, paused: bool) -> Result<(), Refusal> {
+        if self.is_paused(bot) == paused {
+            return Ok(());
+        }
+        self.store.set_paused(bot, paused).map_err(internal)?;
+        if !paused {
+            self.drain_queue(bot);
+        } else if self.occupied(bot) {
+            self.send_op(bot, Op::Abort, Waiter::Quiet)?;
+        }
+        Ok(())
+    }
+
     /// A project change that waited for a turn, a switch or a rewind is done once the engine
     /// is not occupied: no turn ends after a switch or a rewind to do it.
     fn restart_if_unoccupied(&mut self, bot: &str) {
@@ -4318,7 +4374,7 @@ impl Core {
     /// Sends the bot's first queued prompt if the bot is free; the next one goes when its
     /// turn ends.
     fn drain_queue(&mut self, bot: &str) {
-        while self.free(bot) {
+        while !self.is_paused(bot) && self.free(bot) {
             let first = match self.store.queue(bot) {
                 Ok(queue) => queue.into_iter().next(),
                 Err(e) => return log!("bot {bot}: queue not read: {e}"),
@@ -4504,6 +4560,9 @@ impl Core {
         if from == to {
             return Err("a bot cannot message itself".into());
         }
+        if self.is_paused(from) {
+            return Err("you are paused, so your message was not sent".into());
+        }
         let (peers, _) = self.peers_of(from).map_err(|e| e.to_string())?;
         let Some(peer) = peers.iter().find(|p| p.id == to) else {
             return Err("that bot is not in your project".into());
@@ -4516,7 +4575,8 @@ impl Core {
         let queued = self.store.queue(to).map_err(|e| e.to_string())?;
         let parent = self.working_mail(from);
         // In order: behind its user's prompts and the messages already waiting.
-        if !self.free(to) || !queued.is_empty() || !waiting.is_empty() {
+        let paused = self.is_paused(to);
+        if paused || !self.free(to) || !queued.is_empty() || !waiting.is_empty() {
             if waiting.len() >= MAIL_MAX {
                 return Err(format!(
                     "{MAIL_MAX} messages already wait for it; try again later"
@@ -4527,7 +4587,8 @@ impl Core {
                 .map_err(|e| e.to_string())?;
             self.broadcast(&json!({"type": "mail_changed"}));
             return Ok(Some(format!(
-                "{name} is busy, so your message waits in its inbox. Its answer will come to you as a new message once it is done; do not wait for it."
+                "{name} is {}, so your message waits in its inbox. Its answer will come to you as a new message once it is done; do not wait for it.",
+                if paused { "paused" } else { "busy" }
             )));
         }
         let seq = self
@@ -4694,8 +4755,23 @@ impl Core {
         if text.trim().is_empty() {
             return self.say(bot, kind, chat, "Only text is read here.");
         }
+        // `/run <routine>`: the lines after the first go along as data.
+        let (first, data) = text.split_once('\n').unwrap_or((text, ""));
+        let run = first
+            .strip_prefix("/run")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+        // A paused bot takes no prompt; `/run` is let through to record that its routine was skipped.
+        let paused = self.is_paused(bot);
+        if paused && run.is_none() {
+            return self.say(
+                bot,
+                kind,
+                chat,
+                "The bot is paused. Write again when it is resumed.",
+            );
+        }
         // One at a time, as for a webhook: whoever wrote should hear it now.
-        if !self.free(bot) {
+        if !paused && !self.free(bot) {
             return self.say(
                 bot,
                 kind,
@@ -4703,12 +4779,7 @@ impl Core {
                 "The bot is busy. Write again when it is done.",
             );
         }
-        // `/run <routine>`: the lines after the first go along as data.
-        let (first, data) = text.split_once('\n').unwrap_or((text, ""));
-        let run = first.strip_prefix("/run");
-        if let Some(name) =
-            run.filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        {
+        if let Some(name) = run {
             return self.run_from_chat(bot, kind, chat, name.trim(), data);
         }
         let prompt = Outgoing {
@@ -6121,6 +6192,10 @@ impl Core {
                 return (500, "the service could not read its routines".into());
             }
         };
+        if self.is_paused(&bot) {
+            self.skip_run(&bot, r, "paused");
+            return (409, "the bot is paused".into());
+        }
         // One at a time: a prompt the engine has not answered yet, or a turn that runs, would
         // have it refuse this one, and whoever called should hear that now.
         if !self.free(&bot) {
@@ -6170,6 +6245,7 @@ impl Core {
                 Err(_) => RunOutcome::Failed,
             },
             error: sent.clone().err(),
+            reason: None,
         });
         self.record_run(bot, &r, false);
         sent
@@ -6192,6 +6268,15 @@ impl Core {
             return self.say(bot, kind, chat, &told);
         };
         let r = allowed.swap_remove(at);
+        if self.is_paused(bot) {
+            self.skip_run(bot, r, "paused");
+            return self.say(
+                bot,
+                kind,
+                chat,
+                "The bot is paused, so the routine was skipped.",
+            );
+        }
         let caller = Caller::Chat {
             kind,
             chat: chat.to_owned(),
@@ -6245,8 +6330,12 @@ impl Core {
                     }
                 };
             let (newest, next) = slots.catch_up(due, now);
+            let mut reason = None;
             let outcome = if now - newest > CATCH_UP_MS {
                 (RunOutcome::Missed, None)
+            } else if self.is_paused(&bot) {
+                reason = Some("paused".to_owned());
+                (RunOutcome::Skipped, None)
             } else {
                 let nonce = format!("routine-{id}-{newest}");
                 match self.store.ledger(&bot, &nonce) {
@@ -6275,6 +6364,7 @@ impl Core {
                 at_ms: now,
                 outcome: outcome.0,
                 error: outcome.1,
+                reason,
             });
             r.next_run_ms = next;
             self.record_run(&bot, &r, false);
@@ -6312,6 +6402,7 @@ impl Core {
             at_ms: now_ms(),
             outcome,
             error: Some(error),
+            reason: None,
         });
         // shortcut: the refusal is taken to belong to the newest run; give runs an id if a
         // refusal can ever arrive after the routine's next slot (5 minutes at the least).
@@ -6326,6 +6417,17 @@ impl Core {
             log!("bot {bot}: routine {id} not stored: {e}");
         }
         self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
+    }
+
+    /// Records that a run that something started was not run, and why.
+    fn skip_run(&mut self, bot: &str, mut routine: Routine, reason: &str) {
+        routine.last_run = Some(RoutineRun {
+            at_ms: now_ms(),
+            outcome: RunOutcome::Skipped,
+            error: None,
+            reason: Some(reason.to_owned()),
+        });
+        self.record_run(bot, &routine, false);
     }
 }
 

@@ -10,6 +10,10 @@ A personal bot app for the Mac: a host where a person and bots work on projects 
 A named assistant with its own instructions, memory, permissions and conversations. It is in no project or in one.
 _Avoid_: agent, assistant
 
+**Paused**:
+A bot the person stopped until they resume it: its turn is stopped, its routines skip, other bots' messages wait, and it takes no prompt from the person.
+_Avoid_: disabled, muted, stopped
+
 **Conversation**:
 One exchange between the person and a bot: the prompts, the replies and what the bot did, in order. A bot has many.
 _Avoid_: chat, thread, session

@@ -5,14 +5,15 @@ import { dayTime, EVERY, when } from "./times.ts";
 import { listen, request } from "./service.ts";
 import type { Frequency, Routine, RoutineRun } from "./types.ts";
 
-const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped" };
+const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped", skipped: "Skipped" };
+const REASON: Record<string, string> = { paused: "The bot was paused." };
 
 /** The fields of the dialog; a routine with no schedule starts only from its web address or a chat. */
 const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
 const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat });
 
 /** How a run ended: a quiet badge when it went well, a plain one when the person should look. */
-const Outcome = ({ run }: { run: RoutineRun }) => <span className={run.outcome === "sent" ? "badge quiet" : "badge"}>{OUTCOME[run.outcome]}</span>;
+const Outcome = ({ run }: { run: RoutineRun }) => <span className={run.outcome === "sent" || run.outcome === "skipped" ? "badge quiet" : "badge"}>{OUTCOME[run.outcome]}</span>;
 
 function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
   const [open, setOpen] = useState(false);
@@ -42,6 +43,7 @@ function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
             <li key={`${x.atMs}-${i}`}>
               <span>{dayTime(x.atMs)}</span>
               {x.error && <small className="error">{x.error}</small>}
+              {x.reason && <small>{REASON[x.reason] ?? x.reason}</small>}
               <Outcome run={x} />
             </li>
           ))}
@@ -108,6 +110,7 @@ export function Routines({ bot }: { bot: string }) {
                     {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}`}
                   </small>
                   {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}
+                  {r.lastRun?.reason && <small>{REASON[r.lastRun.reason] ?? r.lastRun.reason}</small>}
                   {r.chat && <small>From a paired chat: write /run {r.name}</small>}
                   {r.hookUrl && <small>Web address: <code>{r.hookUrl}</code></small>}
                 </div>

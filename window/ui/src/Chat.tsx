@@ -373,7 +373,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   /** `steer`: into the turn that runs; otherwise a prompt, which the service queues while the bot is busy. */
   const send = async (steer = false) => {
     // The text stays until the service has it.
-    if (!message || uploading || signIn || (bot.busy && editing) || inFlight.current) return;
+    if (!message || uploading || signIn || bot.paused || (bot.busy && editing) || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
     try {
@@ -487,6 +487,12 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           {bot.name} has no model to answer with yet. <button type="button" onClick={signIn}>Sign in</button>
         </p>
       )}
+      {bot.paused && (
+        <p className="banner actions" role="status">
+          {bot.name} is paused.
+          <button type="button" className="small" onClick={() => run(request("set_paused", { bot: bot.id, paused: false }))}>Resume</button>
+        </p>
+      )}
       {compacted && <p className="note" role="status">Done: the bot keeps the last four messages as they are and a summary of anything older. The chat here is unchanged.</p>}
       {(files.length > 0 || editing) && (
         <ul className="attached">
@@ -547,7 +553,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           ref={box}
           rows={1}
           aria-label="Message"
-          placeholder={bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
+          placeholder={bot.paused ? "Resume the bot to send a message" : bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -572,7 +578,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             </svg>
           </button>
         ) : (
-          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn}>↑</button>
+          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn || bot.paused}>↑</button>
         )}
       </form>
     </section>
