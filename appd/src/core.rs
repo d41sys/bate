@@ -33,7 +33,7 @@ use crate::sys::{self, log, now_ms};
 use crate::{
     apple, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
 };
-use crate::{limit, memory, paths, roles, schedule, skills, store, undo, update};
+use crate::{limit, login_path, memory, paths, roles, schedule, skills, store, undo, update};
 
 pub enum Msg {
     ClientConnected {
@@ -343,13 +343,37 @@ fn trash(from: &std::path::Path, name: &str) -> io::Result<()> {
 /// Thinking efforts a model server takes (`reasoning_effort`).
 const EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
 
-/// The installed agents the window offers for `set_agent`: label and command. The window
-/// shows those whose program (the first word) is on the service's `PATH`.
-const KNOWN_AGENTS: [(&str, &[&str]); 4] = [
-    ("Claude Code", &["claude-code-acp"]),
-    ("Codex", &["codex-acp"]),
-    ("opencode", &["opencode", "acp"]),
-    ("Gemini CLI", &["gemini", "--experimental-acp"]),
+/// An installed agent the window offers for `set_agent`. `commands`: how it is started; the
+/// first whose program is on the agent `PATH` is the one listed (the program is the first word).
+/// `install`: the one command that gets it, where there is one.
+struct KnownAgent {
+    label: &'static str,
+    commands: &'static [&'static [&'static str]],
+    install: Option<&'static str>,
+}
+
+const KNOWN_AGENTS: [KnownAgent; 4] = [
+    KnownAgent {
+        label: "Claude Code",
+        // The adapter's newer program name first.
+        commands: &[&["claude-agent-acp"], &["claude-code-acp"]],
+        install: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
+    },
+    KnownAgent {
+        label: "Codex",
+        commands: &[&["codex-acp"]],
+        install: Some("npm install -g @agentclientprotocol/codex-acp"),
+    },
+    KnownAgent {
+        label: "opencode",
+        commands: &[&["opencode", "acp"]],
+        install: None,
+    },
+    KnownAgent {
+        label: "Gemini CLI",
+        commands: &[&["gemini", "--experimental-acp"]],
+        install: None,
+    },
 ];
 
 /// A model's name and thinking effort as `set_model` takes them.
@@ -1884,6 +1908,10 @@ impl Core {
                     self.store
                         .set_agent(&bot, command.as_deref())
                         .map_err(internal)?;
+                    if command.is_some() {
+                        // So that the engine's start does not wait for the shell.
+                        thread::spawn(|| _ = login_path::get());
+                    }
                     // The conversation is the other engine's: this one could not reopen it.
                     for c in self.store.conversations(&bot).map_err(internal)? {
                         self.store.clear_session(&c.id).map_err(internal)?;
@@ -1896,15 +1924,25 @@ impl Core {
                 Ok(Some(json!({})))
             }
             "list_agents" => {
-                let found: Vec<Value> = KNOWN_AGENTS
-                    .iter()
-                    .filter_map(|(label, command)| {
-                        let path = project_server::on_path(command[0])?;
-                        Some(json!({"label": label, "command": command, "path": path}))
-                    })
-                    .collect();
-                let looked: Vec<&str> = KNOWN_AGENTS.iter().map(|(_, c)| c[0]).collect();
-                Ok(Some(json!({"agents": found, "looked": looked})))
+                // The first look reads the login shell's `PATH`, which can wait: not on this thread.
+                self.reply_later(client, id, "list_agents", || {
+                    let path = login_path::get();
+                    let (mut agents, mut missing) = (Vec::new(), Vec::new());
+                    for known in KNOWN_AGENTS {
+                        let found = known.commands.iter().find_map(|command| {
+                            Some((command, project_server::on_path_in(path, command[0])?))
+                        });
+                        match found {
+                            Some((command, at)) => agents.push(
+                                json!({"label": known.label, "command": command, "path": at}),
+                            ),
+                            None => missing
+                                .push(json!({"label": known.label, "install": known.install})),
+                        }
+                    }
+                    Ok(json!({"agents": agents, "missing": missing}))
+                });
+                Ok(None)
             }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;
@@ -2816,7 +2854,7 @@ impl Core {
         if agent.is_some() && !whole_disk {
             return Err((
                 "engine_failed",
-                "an installed agent keeps its login outside the bot's folder: give this bot the whole disk to run it"
+                "an installed agent, its program and its login lie outside the folder this bot may read: give it the whole disk to run it"
                     .into(),
             ));
         }
@@ -2849,9 +2887,13 @@ impl Core {
             egress.as_ref(),
         )
         .map(|mut command| {
-            // The engine program's other half: it runs the agent and translates.
+            // The engine program's other half: it runs the agent and translates. The agent may be
+            // a script that needs `node`, which only the user's login shell has on its `PATH`.
             if let Some(agent) = &agent {
-                command.arg("acp").args(agent);
+                command
+                    .arg("acp")
+                    .args(agent)
+                    .env("PATH", login_path::get());
             }
             command
         })

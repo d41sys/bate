@@ -37,6 +37,7 @@ use serde_json::{Value, json};
 /// the machine is.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
+printf '%s\n' "$PATH" >> path.log
 echo '{"type":"ready","protocol":1}'
 held() { : > holding; n=0; while [ ! -e go ] && [ "$n" -lt 200 ]; do sleep 0.05; n=$((n + 1)); done; }
 while IFS= read -r line; do
@@ -203,6 +204,7 @@ fn home(name: &str) -> Home {
     let engine = home.join("fake-engine");
     fs::write(&engine, FAKE_ENGINE).unwrap();
     fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    fake_shell(&home, "exit 1");
     Home(home)
 }
 
@@ -219,7 +221,8 @@ impl Service {
     fn start_with(home: &Path, engine: impl FnOnce(&mut Command)) -> Service {
         let mut appd = Command::new(env!("CARGO_BIN_EXE_appd"));
         // A keychain file of the test's own: never the login keychain. A test may override it.
-        appd.env("APPD_KEYCHAIN", home.join("keychain"));
+        appd.env("APPD_KEYCHAIN", home.join("keychain"))
+            .env("SHELL", home.join("fake-shell"));
         engine(&mut appd);
         let child = appd
             .env("APPD_HOME", home)
@@ -4961,11 +4964,39 @@ fn a_connector_that_signs_in_is_reached_through_the_service_which_adds_the_token
     assert_eq!(signed_in(&mut w), false);
 }
 
+/// A program that plays the user's login shell: `body` is its script. `Service::start_with` points
+/// `SHELL` at it, so that no test runs the real user's shell.
+fn fake_shell(home: &Path, body: &str) {
+    let path = home.join("fake-shell");
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A login shell that has `path` as its `PATH`, among what rc files print.
+fn shell_with_path(home: &Path, path: &str) {
+    fake_shell(
+        home,
+        &format!(
+            "echo welcome; printf 'bate-path-begin:decoy'; echo; printf 'bate-path-begin:%s:bate-path-end' '{path}'; echo bye"
+        ),
+    );
+}
+
+/// An empty program called `name` in `dir`.
+fn program(dir: &Path, name: &str) -> PathBuf {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    fs::write(&path, "#!/bin/sh\n").unwrap();
+    path
+}
+
 #[test]
-fn the_window_is_told_which_known_agents_are_installed_right_now() {
+fn the_window_is_told_which_known_agents_are_installed_and_how_to_get_the_others() {
     let home = home("agents");
-    let bin = home.join("bin");
+    let (bin, tools) = (home.join("bin"), home.join("tools"));
     fs::create_dir_all(&bin).unwrap();
+    // The user's shell has `tools` and the service's own folder, which must stay in front.
+    shell_with_path(&home, &format!("{}:{}", tools.display(), bin.display()));
     let _service = Service::start_with(&home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"))
             .env("PATH", &bin);
@@ -4973,25 +5004,138 @@ fn the_window_is_told_which_known_agents_are_installed_right_now() {
     let mut w = Window::connect(&home);
     let none = w.ok("list_agents", json!({}));
     assert_eq!(none["agents"], json!([]));
-    // What the window says it looked for.
+    // What is not installed, and the one command that gets it, where there is one.
     assert_eq!(
-        none["looked"],
-        json!(["claude-code-acp", "codex-acp", "opencode", "gemini"])
+        none["missing"],
+        json!([
+            {"label": "Claude Code", "install": "npm install -g @agentclientprotocol/claude-agent-acp"},
+            {"label": "Codex", "install": "npm install -g @agentclientprotocol/codex-acp"},
+            {"label": "opencode", "install": null},
+            {"label": "Gemini CLI", "install": null},
+        ])
     );
 
-    // A program of that name on the PATH is found when asked, without a restart; one that is
-    // not a known agent is not listed.
-    for name in ["opencode", "some-other-tool"] {
-        fs::write(bin.join(name), "#!/bin/sh\n").unwrap();
-    }
+    // A program on the service's PATH or only on the shell's is found when asked, without a
+    // restart; one that is not a known agent is not listed.
+    program(&bin, "opencode");
+    program(&tools, "opencode");
+    program(&bin, "some-other-tool");
+    program(&tools, "codex-acp");
+    program(&tools, "claude-code-acp");
+    let listed = w.ok("list_agents", json!({}));
     assert_eq!(
-        w.ok("list_agents", json!({}))["agents"],
-        json!([{
-            "label": "opencode",
-            "command": ["opencode", "acp"],
-            "path": bin.join("opencode"),
-        }])
+        listed["agents"],
+        json!([
+            {"label": "Claude Code", "command": ["claude-code-acp"], "path": tools.join("claude-code-acp")},
+            {"label": "Codex", "command": ["codex-acp"], "path": tools.join("codex-acp")},
+            {"label": "opencode", "command": ["opencode", "acp"], "path": bin.join("opencode")},
+        ])
     );
+    assert_eq!(
+        listed["missing"],
+        json!([{"label": "Gemini CLI", "install": null}])
+    );
+
+    // Both names of the Claude Code adapter are one entry, the newer name first.
+    program(&bin, "claude-agent-acp");
+    let agents = w.ok("list_agents", json!({}))["agents"].clone();
+    assert_eq!(agents.as_array().unwrap().len(), 3);
+    assert_eq!(
+        agents[0],
+        json!({"label": "Claude Code", "command": ["claude-agent-acp"], "path": bin.join("claude-agent-acp")})
+    );
+}
+
+#[test]
+fn a_shell_that_fails_leaves_the_service_with_its_own_path() {
+    for (i, script) in [
+        "exit 3",
+        "echo only noise",
+        "printf 'bate-path-begin::bate-path-end'",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let home = home(&format!("shell-fails-{i}"));
+        let bin = home.join("bin");
+        program(&bin, "opencode");
+        fake_shell(&home, script);
+        let _service = Service::start_with(&home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("PATH", &bin);
+        });
+        let mut w = Window::connect(&home);
+        let listed = w.ok("list_agents", json!({}));
+        assert_eq!(listed["agents"].as_array().unwrap().len(), 1, "{script}");
+        let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+        assert!(log.contains("login shell PATH not read"), "{script}: {log}");
+    }
+}
+
+#[test]
+fn a_shell_that_hangs_is_given_up_on_and_the_service_answers_meanwhile() {
+    let home = home("shell-hangs");
+    let bin = home.join("bin");
+    program(&bin, "opencode");
+    fake_shell(&home, "sleep 600");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("PATH", format!("{}:/bin", bin.display()));
+    });
+    let mut w = Window::connect(&home);
+    let asked = w.send("list_agents", json!({}));
+    // The shell is being waited for; other requests are not.
+    w.ok("list_bots", json!({}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == asked.as_str());
+    assert_eq!(
+        reply["data"]["agents"].as_array().unwrap().len(),
+        1,
+        "{reply}"
+    );
+    let log = fs::read_to_string(home.join("logs/appd.log")).unwrap();
+    assert!(
+        log.contains("login shell PATH not read (no answer"),
+        "{log}"
+    );
+}
+
+#[test]
+fn an_installed_agent_starts_with_the_shells_path_and_the_own_engine_keeps_the_services() {
+    let home = home("agent-path");
+    let (bin, tools) = (home.join("bin"), home.join("tools"));
+    fs::create_dir_all(&tools).unwrap();
+    shell_with_path(&home, &format!("{}:/usr/bin", tools.display()));
+    let own = format!("{}:/usr/bin:/bin", bin.display());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("PATH", &own);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let paths = || {
+        let log = fs::read_to_string(home.join("bots").join(&bot).join("path.log")).unwrap();
+        log.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let turn = |w: &mut Window, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    };
+
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    w.ok(
+        "set_agent",
+        json!({"bot": bot, "command": ["opencode", "acp"]}),
+    );
+    turn(&mut w, "n1");
+    let combined = format!("{own}:{}", tools.display());
+    assert_eq!(paths(), [combined.as_str()]);
+
+    w.ok("set_agent", json!({"bot": bot, "command": null}));
+    eventually("the agent's engine to stop", || {
+        w.ok("list_bots", json!({}))["bots"][0]["running"] == false
+    });
+    turn(&mut w, "n2");
+    assert_eq!(paths(), [combined, own]);
 }
 
 #[test]
@@ -5047,7 +5191,10 @@ fn a_bot_runs_on_an_installed_agent_once_it_has_the_whole_disk() {
         json!({"bot": bot, "nonce": "n2", "text": "hi"}),
     );
     assert_eq!(code, "engine_failed");
-    assert!(why.contains("whole disk"), "{why}");
+    assert!(
+        why.contains("whole disk") && why.contains("program"),
+        "{why}"
+    );
     assert_eq!(started_with().len(), 1);
 
     w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
