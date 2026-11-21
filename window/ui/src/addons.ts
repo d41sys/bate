@@ -1,4 +1,4 @@
-import type { Connector } from "./types.ts";
+import type { Connector, ConnectorListed } from "./types.ts";
 
 /** Who made an add-on, as far as Bate can say, shown before it is installed. */
 export const madeBy = {
@@ -7,6 +7,8 @@ export const madeBy = {
   file: "A file you chose on this Mac. Bate cannot tell who made it.",
   typed: "You, here. Bate cannot tell who runs the server or the program.",
   copy: (bot: string) => `${bot}'s copy. Bate cannot tell who made it.`,
+  connectorList: "Bate's list of connectors, a file in Bate's own repository on GitHub (d41sys/bate). An entry is a pointer, not a recommendation: Bate has not checked the server or the program it names.",
+  skillList: "Bate's list of skills, a file in Bate's own repository on GitHub (d41sys/bate). Each entry pins the exact archive by its hash, but is not a recommendation: Bate has not checked what the skill says.",
 };
 
 /** Who the file of an add-on says made it: shown as the claim it is, never as a fact. Nothing when there is none. */
@@ -83,6 +85,13 @@ export function connectorOf(f: ConnectorForm): Connector {
         : { type: "stdio", command: f.command.trim(), args: f.args.split("\n").filter(Boolean) },
     oauth: f.type === "http" && f.oauth,
   };
+}
+
+/** The form a connector of the list fills in: its address or program, and nothing of the person's own. A line is left to type in what `fill` names. */
+export function formOf(e: ConnectorListed): ConnectorForm {
+  const t = e.transport;
+  if (t.type === "http") return { name: e.name, type: "http", url: t.url, command: "", args: "", oauth: !!e.oauth };
+  return { name: e.name, type: "stdio", url: "", command: t.command, args: (t.args ?? []).join("\n") + (e.fill?.length ? "\n" : ""), oauth: false };
 }
 
 /** Every word of `query` is in one of the texts, in any case; no query matches all. */

@@ -1,5 +1,6 @@
 import { type ComponentProps, useEffect, useState } from "react";
-import { byLine, each, madeBy, matches } from "./addons.ts";
+import { byLine, each, madeBy } from "./addons.ts";
+import { Catalog } from "./Catalog.tsx";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
@@ -78,19 +79,8 @@ export function Workplaces({ projects }: { projects: Project[] }) {
     });
   };
 
-  // From the catalog, read only when asked: reading it contacts GitHub.
-  const [catalog, setCatalog] = useState<CatalogEntry[]>();
-  const [query, setQuery] = useState("");
-  const [reading, setReading] = useState(false);
-  const loadCatalog = () => {
-    setReading(true);
-    return run(request<{ catalog: CatalogEntry[] }>("list_catalog").then((d) => setCatalog(d.catalog))).finally(() => setReading(false));
-  };
-  // What is installed changed (here or elsewhere): the entries say which are installed or have an update.
+  // What is installed changed (here or elsewhere): the catalog says which entries are installed or have an update.
   const installed = workplaces.map((w) => `${w.name} ${w.version} ${w.archive}`).join();
-  useEffect(() => {
-    if (catalog) void loadCatalog();
-  }, [installed]);
   const fromCatalog = async (entry: CatalogEntry) => {
     const preview = await request<CatalogPreview>("preview_catalog", { name: entry.name }).catch((e: Error) => (setError(e.message), undefined));
     if (!preview) return;
@@ -186,35 +176,13 @@ export function Workplaces({ projects }: { projects: Project[] }) {
       </ul>
       {inShell && (
         <>
-          <div className="head">
-            <h2>Catalog</h2>
-            <button className="small" disabled={reading} onClick={() => void loadCatalog()}>{catalog ? "Reload the catalog" : "Show the catalog"}</button>
-          </div>
-          {!catalog && <p className="note">A list in Bate's repository on GitHub. Reading it contacts GitHub, so it waits until you ask.</p>}
-          {catalog?.length === 0 && <p className="note">The catalog is empty.</p>}
-          {catalog && catalog.length > 0 && (
-            <div className="find">
-              <input type="search" aria-label="Search the catalog" placeholder="Search the catalog" value={query} onChange={(e) => setQuery(e.target.value)} />
-            </div>
-          )}
-          <ul className="rows">
-            {catalog?.filter((e) => matches(query, e.name, e.description)).map((e) => (
-              <li key={e.name}>
-                <div className="what">
-                  <strong>{e.name}</strong>
-                  <small>{e.version} · {sizeText(e.size)}{e.installedVersion ? ` · Installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>
-                  <small>{e.description}</small>
-                  {e.author && <small>{byLine(e.author)}</small>}
-                </div>
-                {(!e.installedVersion || e.update) && (
-                  <div className="actions">
-                    <button className="small" onClick={() => void fromCatalog(e)}>{e.installedVersion ? `Update to ${e.version}…` : "Install…"}</button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-          {catalog && query && !catalog.some((e) => matches(query, e.name, e.description)) && <p className="note">Nothing in the catalog matches.</p>}
+          <Catalog<CatalogEntry>
+            kind="workplaces"
+            stamp={installed}
+            lines={(e) => <small>{e.version} · {sizeText(e.size)}{e.installedVersion ? ` · Installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>}
+            action={(e) => (!e.installedVersion || e.update ? { label: e.installedVersion ? `Update to ${e.version}…` : "Install…", run: () => void fromCatalog(e) } : undefined)}
+            report={setError}
+          />
           <div className="head">
             <h2>From a folder</h2>
             <Choose folder set={(path) => void fromFolder(path)} fail={setError} />

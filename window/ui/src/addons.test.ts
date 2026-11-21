@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byLine, connectorOf, connectorState, connectorSummary, each, matches, onFor, placed } from "./addons.ts";
+import { byLine, connectorOf, connectorState, connectorSummary, each, formOf, matches, onFor, placed } from "./addons.ts";
 import type { Connector } from "./types.ts";
 
 test("a skill three bots have is one row, with the bots that have it", () => {
@@ -66,4 +66,15 @@ test("a search needs every word, in any case, and no words match all", () => {
   assert.equal(matches("GHIDRA reverse", "ghidra", "Reverse engineering"), true);
   assert.equal(matches("ghidra web", "ghidra", "Reverse engineering"), false);
   assert.equal(matches("  ", "x"), true);
+});
+
+test("a connector of the list fills in the form with its address or program, and no value of the person's", () => {
+  const entry = { name: "board", description: "d", home: "https://a.b/docs" };
+  const web = formOf({ ...entry, transport: { type: "http", url: "https://a.b/mcp" }, oauth: true });
+  assert.deepEqual(connectorOf(web), { name: "board", enabled: true, transport: { type: "http", url: "https://a.b/mcp" }, oauth: true });
+  const program = formOf({ ...entry, transport: { type: "stdio", command: "npx", args: ["-y", "pkg"] }, fill: ["A folder"] });
+  assert.deepEqual(connectorOf(program), { name: "board", enabled: true, transport: { type: "stdio", command: "npx", args: ["-y", "pkg"] }, oauth: false });
+  // A line is left open to type what the entry says to fill in.
+  assert.equal(program.args, "-y\npkg\n");
+  assert.equal(formOf({ ...entry, transport: { type: "stdio", command: "uvx", args: ["pkg"] } }).args, "pkg");
 });
