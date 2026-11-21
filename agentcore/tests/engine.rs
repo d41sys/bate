@@ -828,7 +828,9 @@ fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
         "{last}"
     );
 
-    let mut small = Engine::start(&workdir("overflow-small"), &model);
+    // Kept in a variable: a folder made in the call is removed as soon as the call returns.
+    let small_dir = workdir("overflow-small");
+    let mut small = Engine::start(&small_dir, &model);
     small.open_new();
     small.prompt_as("n1", "Q1");
     let events = small.until(is_turn_end);
