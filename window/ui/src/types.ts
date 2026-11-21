@@ -130,6 +130,9 @@ export type Role = {
 
 export type Skill = { name: string; description: string };
 
+/** A skill as `list_skills` gives it: whether it is on for that bot (off: installed, but the model is not told of it). */
+export type InstalledSkill = Skill & { enabled: boolean };
+
 /** What `preview_skill` says of a skill folder: the skill and how much an install would copy. */
 export type SkillPreview = { skill: Skill; entries: number; bytes: number };
 

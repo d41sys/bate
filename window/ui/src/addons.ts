@@ -43,12 +43,17 @@ export function connectorState(c: Connector, agent = false): { text: string; pro
   return { text: "On, no problem reported", problem: false };
 }
 
-/** The one line of a connector's row: on for how many of the bots that have it (and how many of those need a look). */
-export function connectorSummary(copies: Connector[], bots: number): { text: string; problems: number } {
+/** The one line of a row: on for how many of the bots that have it. */
+export function onFor(copies: { enabled: boolean }[], bots: number): string {
   const on = copies.filter((c) => c.enabled).length;
   const plural = copies.length === 1 ? "bot" : "bots";
   const some = copies.length < bots ? " that have it" : "";
-  return { text: `On for ${on} of ${copies.length} ${plural}${some}`, problems: copies.filter((c) => connectorState(c).problem).length };
+  return `On for ${on} of ${copies.length} ${plural}${some}`;
+}
+
+/** The one line of a connector's row: on for how many of the bots that have it (and how many of those need a look). */
+export function connectorSummary(copies: Connector[], bots: number): { text: string; problems: number } {
+  return { text: onFor(copies, bots), problems: copies.filter((c) => connectorState(c).problem).length };
 }
 
 /** What a connector may do, one line each, as shown before it is added. */

@@ -286,6 +286,7 @@ impl Bridge {
             Op::SetModel { .. }
             | Op::Peers { .. }
             | Op::SkillFolders { .. }
+            | Op::SkillsOff { .. }
             | Op::Instructions { .. }
             | Op::StepLimit { .. }
             | Op::WebSearch { .. } => respond(id, Ok(())),

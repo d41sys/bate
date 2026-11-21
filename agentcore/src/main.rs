@@ -72,6 +72,8 @@ struct Engine {
     peers: (Vec<proto::projects::Peer>, bool),
     /// Folders whose `skills/` are offered beside the bot's own; set by the service.
     skill_folders: Vec<PathBuf>,
+    /// Names of the bot's own skills that are off; set by the service.
+    skills_off: Vec<String>,
     /// From the user, through the service; first in the system prompt.
     instructions: String,
     /// Tool rounds a turn may take; set by the service.
@@ -148,6 +150,7 @@ fn main() {
         connectors: Vec::new(),
         peers: (Vec::new(), false),
         skill_folders: Vec::new(),
+        skills_off: Vec::new(),
         instructions: String::new(),
         steps: proto::STEP_LIMIT,
         web_search: true,
@@ -357,6 +360,10 @@ impl Engine {
                 self.skill_folders = folders;
                 self.respond(id, Ok(()));
             }
+            Op::SkillsOff { names } => {
+                self.skills_off = names;
+                self.respond(id, Ok(()));
+            }
             Op::Instructions { text } => {
                 self.instructions = text;
                 self.respond(id, Ok(()));
@@ -505,6 +512,7 @@ impl Engine {
             peers: self.peers.0.clone(),
             leads: self.peers.1,
             skill_folders: self.skill_folders.clone(),
+            skills_off: self.skills_off.clone(),
             instructions: self.instructions.clone(),
             steps: self.steps,
             web_search: self.web_search,

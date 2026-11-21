@@ -166,6 +166,7 @@ while IFS= read -r line; do
       echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
+    *'"type":"skills_off"'*) printf '%s\n' "$line" >> skills_off.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"web_search"'*) printf '%s\n' "$line" >> web_search.log; echo "$ok" ;;
@@ -1210,6 +1211,79 @@ fn connectors_reach_the_engine_when_it_starts_and_when_they_change() {
         "{:?}",
         sent()
     );
+}
+
+#[test]
+fn a_skill_switched_off_is_left_out_by_the_engine_survives_a_restart_and_is_forgotten_when_removed()
+{
+    let home = home("skills-off");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    let source = home.join("picked/pdf-forms");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nHow to.\n",
+    )
+    .unwrap();
+    for b in [&bot, &other] {
+        w.ok("install_skill", json!({"bot": b, "path": &source}));
+    }
+    let enabled = |w: &mut Window, bot: &str| {
+        w.ok("list_skills", json!({"bot": bot}))["skills"][0]["enabled"].clone()
+    };
+    let set = |w: &mut Window, enabled: bool| {
+        w.ok(
+            "set_skill_enabled",
+            json!({"bot": bot, "name": "pdf-forms", "enabled": enabled}),
+        )
+    };
+    let engine_is_told = |names: &'static str| {
+        let (home, bot) = (&home, &bot);
+        move || last_logged(home, bot, "skills_off.log").ends_with(&format!(r#""names":{names}}}"#))
+    };
+    // A skill that is not there cannot be switched.
+    let id = w.send(
+        "set_skill_enabled",
+        json!({"bot": bot, "name": "nope", "enabled": false}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "no_such_skill");
+
+    // With nothing off the engine is told nothing at its start; switching tells it.
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
+    set(&mut w, false);
+    eventually(
+        "the engine told the skill is off",
+        engine_is_told(r#"["pdf-forms"]"#),
+    );
+    assert_eq!(enabled(&mut w, &bot), json!(false));
+    assert_eq!(enabled(&mut w, &other), json!(true));
+    set(&mut w, true);
+    eventually("the engine told it is on again", engine_is_told("[]"));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
+
+    // Off again; after a restart the list shows it and a new engine is given it at its start.
+    set(&mut w, false);
+    eventually("the engine told again", engine_is_told(r#"["pdf-forms"]"#));
+    fs::remove_file(home.join("bots").join(&bot).join("skills_off.log")).unwrap();
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(enabled(&mut w, &bot), json!(false));
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    eventually("the new engine told", engine_is_told(r#"["pdf-forms"]"#));
+
+    // Removing the skill forgets that it was off.
+    w.ok("delete_skill", json!({"bot": bot, "name": "pdf-forms"}));
+    eventually("the engine told it is forgotten", engine_is_told("[]"));
+    // Installing a skill puts it on, also in place of one that is off.
+    w.ok("install_skill", json!({"bot": bot, "path": &source}));
+    set(&mut w, false);
+    w.ok("install_skill", json!({"bot": bot, "path": &source}));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
 }
 
 #[test]
@@ -4190,12 +4264,14 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
     );
     assert_eq!(listed(&mut w, &bot), json!([]));
     assert_eq!(install(&mut w, &source), expected);
-    assert_eq!(listed(&mut w, &bot), json!([expected]));
+    // The list adds whether the skill is on.
+    let on = json!({"name": "pdf-forms", "description": "Fill in PDF forms.", "enabled": true});
+    assert_eq!(listed(&mut w, &bot), json!([on]));
     // A skill one bot has goes to another by name, with no path.
     let from = json!({"bot": other, "fromBot": bot, "name": "pdf-forms"});
     assert_eq!(w.ok("preview_skill", from.clone())["skill"], expected);
     assert_eq!(w.ok("install_skill", from)["skill"], expected);
-    assert_eq!(listed(&mut w, &other), json!([expected]));
+    assert_eq!(listed(&mut w, &other), json!([on]));
     w.ok("delete_skill", json!({"bot": other, "name": "pdf-forms"}));
     assert_eq!(listed(&mut w, &other), json!([]));
     let script = skills.join("pdf-forms/scripts/fill.sh");
@@ -11407,6 +11483,11 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     .unwrap();
     drop(db);
 
+    // A skill that is off goes in the file all the same, and comes in on.
+    w.ok(
+        "set_skill_enabled",
+        json!({"bot": bot, "name": "pdf-forms", "enabled": false}),
+    );
     let exported = |w: &mut Window, notes: bool| {
         let data = w.ok("export_bot", json!({"bot": bot, "notes": notes}));
         let path = data["path"].as_str().unwrap().to_owned();
@@ -11488,7 +11569,7 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     );
     assert_eq!(
         w.ok("list_skills", json!({"bot": new}))["skills"],
-        json!([{"name": "pdf-forms", "description": "Fill in PDF forms."}])
+        json!([{"name": "pdf-forms", "description": "Fill in PDF forms.", "enabled": true}])
     );
     let skill = home.join("bots").join(&new).join("skills/pdf-forms");
     assert_eq!(

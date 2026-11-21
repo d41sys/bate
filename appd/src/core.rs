@@ -1741,15 +1741,45 @@ impl Core {
             }
             "list_skills" => {
                 let bot = self.bot_of(f)?;
-                Ok(Some(
-                    json!({"skills": skills::list(&bot).map_err(|e| ("internal", e.to_string()))?}),
-                ))
+                let off = self.store.skills_off(&bot).map_err(internal)?;
+                let listed = skills::list(&bot).map_err(|e| ("internal", e.to_string()))?;
+                let listed: Vec<Value> = listed
+                    .iter()
+                    .map(|s| {
+                        let mut shown = json!(s);
+                        shown["enabled"] = json!(!off.contains(&s.name));
+                        shown
+                    })
+                    .collect();
+                Ok(Some(json!({"skills": listed})))
+            }
+            "set_skill_enabled" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                let enabled = f
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| bad("`enabled` must be true or false"))?;
+                proto::skills::check_name(name).map_err(bad)?;
+                let listed = skills::list(&bot).map_err(|e| ("internal", e.to_string()))?;
+                if !listed.iter().any(|s| s.name == name) {
+                    return Err(("no_such_skill", format!("no skill `{name}`")));
+                }
+                self.store
+                    .set_skill_off(&bot, name, !enabled)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
+                Ok(Some(json!({})))
             }
             "install_skill" => {
                 let bot = self.bot_of(f)?;
                 let skill = skills::install(&bot, &self.skill_source(f)?)
                     .map_err(|e| ("invalid_skill", e))?;
-                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+                // Installing a skill puts it on, also in place of one that was off.
+                self.store
+                    .set_skill_off(&bot, &skill.name, false)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
                 Ok(Some(json!({"skill": skill})))
             }
             "preview_skill" => {
@@ -1766,7 +1796,10 @@ impl Core {
                 if !skills::delete(&bot, name).map_err(|e| ("internal", e.to_string()))? {
                     return Err(("no_such_skill", format!("no skill `{name}`")));
                 }
-                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+                self.store
+                    .set_skill_off(&bot, name, false)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
                 Ok(Some(json!({})))
             }
             "list_memory" => {
@@ -2898,6 +2931,7 @@ impl Core {
             .filter(|folder| folder.is_dir());
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let skill_folders = self.skill_folders_of(bot).map_err(internal)?;
+        let skills_off = self.store.skills_off(bot).map_err(internal)?;
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
@@ -3066,6 +3100,9 @@ impl Core {
                 },
                 Waiter::Quiet,
             )?;
+        }
+        if !skills_off.is_empty() {
+            self.send_op(bot, Op::SkillsOff { names: skills_off }, Waiter::Quiet)?;
         }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
@@ -4847,6 +4884,22 @@ impl Core {
     }
 
     /// After a change to the list: a running engine gets it now, any other when it starts.
+    /// The bot's skills changed: its running engine gets the names that are off, the windows a
+    /// reason to read the list again.
+    fn skills_changed(&mut self, bot: &str) {
+        if self.engines.contains_key(bot) {
+            let sent = self
+                .store
+                .skills_off(bot)
+                .map_err(internal)
+                .and_then(|names| self.send_op(bot, Op::SkillsOff { names }, Waiter::Quiet));
+            if let Err((_, e)) = sent {
+                log!("bot {bot}: skills off not sent: {e}");
+            }
+        }
+        self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+    }
+
     fn connectors_changed(&mut self, bot: &str) {
         if self.engines.contains_key(bot) {
             let sent = self

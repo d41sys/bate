@@ -81,6 +81,8 @@ pub enum Op {
     Instructions { text: String },
     /// Folders, beside the bot's own, whose `skills/` the model is told about: the whole list each time, empty for none.
     SkillFolders { folders: Vec<PathBuf> },
+    /// Skills of the bot's own `skills/` that are switched off, by name: the model is not told about them. The whole list each time, empty for none.
+    SkillsOff { names: Vec<String> },
     /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
     StepLimit { steps: u32 },
     /// Whether the model provider's own web search tool is offered, where it has one; on until told otherwise.
