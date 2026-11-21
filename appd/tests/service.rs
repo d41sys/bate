@@ -11177,6 +11177,12 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
             "transport": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"],
                 "env": {"TOKEN": "ENV-SECRET"}}}}),
     );
+    // A program with no arguments, and no key to check.
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": {"name": "plain", "enabled": true,
+            "transport": {"type": "stdio", "command": "my-server"}}}),
+    );
     w.ok(
         "write_memory",
         json!({"bot": bot, "name": "user.md", "text": "Likes tea."}),
@@ -11204,18 +11210,18 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     drop(db);
 
     let exported = |w: &mut Window, notes: bool| {
-        let path = w.ok("export_bot", json!({"bot": bot, "notes": notes}))["path"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let data = w.ok("export_bot", json!({"bot": bot, "notes": notes}));
+        let path = data["path"].as_str().unwrap().to_owned();
         assert!(
             path.starts_with(home.join("exports").to_str().unwrap()) && path.ends_with(".batebot"),
             "{path}"
         );
-        path
+        (path, data["check"].clone())
     };
-    let without = exported(&mut w, false);
-    let with = exported(&mut w, true);
+    let (without, _) = exported(&mut w, false);
+    let (with, check) = exported(&mut w, true);
+    // Only the command that went in with arguments is named, as written to the file.
+    assert_eq!(check, json!([{"name": "local", "command": "npx -y pkg"}]));
     let bytes = fs::read(&with).unwrap();
     let text = String::from_utf8(bytes).unwrap();
     for private in [
@@ -11256,6 +11262,7 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
         json!([
             {"name": "docs", "address": "https://docs.example.com/mcp"},
             {"name": "local", "address": "npx -y pkg"},
+            {"name": "plain", "address": "my-server"},
         ])
     );
 
@@ -11320,6 +11327,8 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
                 "transport": {"type": "http", "url": "https://docs.example.com/mcp", "headers": {}}},
             {"name": "local", "enabled": false,
                 "transport": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {}}},
+            {"name": "plain", "enabled": false,
+                "transport": {"type": "stdio", "command": "my-server", "args": [], "env": {}}},
         ])
     );
     assert_eq!(

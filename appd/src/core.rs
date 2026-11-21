@@ -2046,9 +2046,12 @@ impl Core {
             "export_bot" => {
                 let bot = self.bot_of(f)?;
                 let notes = f.get("notes").and_then(Value::as_bool).unwrap_or(false);
-                let path = botfile::export(&self.store, &bot, notes, now_ms())
+                let (path, check) = botfile::export(&self.store, &bot, notes, now_ms())
                     .map_err(|e| ("export_failed", e))?;
-                Ok(Some(json!({"path": path})))
+                let check: Vec<Value> = (check.into_iter())
+                    .map(|(name, command)| json!({"name": name, "command": command}))
+                    .collect();
+                Ok(Some(json!({"path": path, "check": check})))
             }
             "preview_bot_file" => {
                 let path = std::path::Path::new(str_field(f, "path")?);

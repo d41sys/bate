@@ -22,8 +22,8 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [look, setLook] = useState(looks);
   const [deleting, setDeleting] = useState(false);
   const [withNotes, setWithNotes] = useState(false);
-  const [exported, setExported] = useState("");
-  useEffect(() => setExported(""), [bot.id]);
+  const [exported, setExported] = useState<{ path: string; check: { name: string; command: string }[] }>();
+  useEffect(() => setExported(undefined), [bot.id]);
   // Saved here or elsewhere: show what the service has.
   useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
   const [hosts, setHosts] = useState((bot.network ?? []).join("\n"));
@@ -223,13 +223,28 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         </Setting>
         <Setting
           title="Export bot"
-          hint="One file to import as a new bot. No sign-ins, keys or chats. Connector commands go as written: check them."
+          hint="One file to import as a new bot. No sign-ins, keys or chats."
           saved={saved("export")}
           error={error("export")}
         >
-          <button type="button" onClick={() => run("export", request<{ path: string }>("export_bot", { bot: bot.id, notes: withNotes }).then((d) => setExported(d.path)))}>Export bot</button>
+          <button type="button" onClick={() => run("export", request<NonNullable<typeof exported>>("export_bot", { bot: bot.id, notes: withNotes }).then(setExported))}>Export bot</button>
         </Setting>
-        {exported && <p className="note" role="status">Saved to <code>{exported}</code></p>}
+        {exported && <p className="note" role="status">Saved to <code>{exported.path}</code></p>}
+        {exported && exported.check.length > 0 && (
+          <>
+            <p className="note">Before you share it, check these commands for keys:</p>
+            <ul className="rows">
+              {exported.check.map((c) => (
+                <li key={c.name}>
+                  <div className="what">
+                    <strong>{c.name}</strong>
+                    <code>{c.command}</code>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </Group>
       <Group title="Delete">
         <Setting title="Delete this bot" hint="Its folder moves to the Trash.">

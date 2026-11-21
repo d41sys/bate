@@ -172,9 +172,15 @@ fn plain_url(url: &str) -> String {
     }
 }
 
-/// Writes the bot's file to `exports/` in the service's home and gives its path. What the
-/// import would refuse is refused here too.
-pub fn export(store: &Store, bot: &str, notes: bool, now: u64) -> Result<String, String> {
+/// Writes the bot's file to `exports/` in the service's home and gives its path, and the
+/// connectors whose command went in with arguments (name and the command line as written),
+/// where a key could be. What the import would refuse is refused here too.
+pub fn export(
+    store: &Store,
+    bot: &str,
+    notes: bool,
+    now: u64,
+) -> Result<(String, Vec<(String, String)>), String> {
     let row = store.bot(bot).map_err(err)?.ok_or("no such bot")?;
     let profile = store.profile(bot).map_err(err)?;
     let file = BotFile {
@@ -209,6 +215,10 @@ pub fn export(store: &Store, bot: &str, notes: bool, now: u64) -> Result<String,
             })
             .collect(),
     };
+    let to_check: Vec<(String, String)> = (file.connectors.iter())
+        .filter(|c| matches!(&c.address, Address::Stdio { args, .. } if !args.is_empty()))
+        .map(|c| (c.name.clone(), c.address.text()))
+        .collect();
     let bytes = serde_json::to_vec_pretty(&file).map_err(err)?;
     // As the importing side reads it, so a file made here can always be imported.
     let value: Value = serde_json::from_slice(&bytes).map_err(err)?;
@@ -226,7 +236,7 @@ pub fn export(store: &Store, bot: &str, notes: bool, now: u64) -> Result<String,
         .open(&path)
         .and_then(|mut f| std::io::Write::write_all(&mut f, &bytes));
     written.map_err(|e| format!("the file was not written: {e}"))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok((path.to_string_lossy().into_owned(), to_check))
 }
 
 fn too_big() -> String {
