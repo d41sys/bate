@@ -1,6 +1,9 @@
 /** An installed agent the service found: what `list_agents` answers. */
 export type Agent = { label: string; command: string[]; path: string };
 
+/** What `list_agents` answers: the installed agents, and the known ones that are not, each with the command that gets it (`null`: none). */
+export type Found = { agents: Agent[]; missing: { label: string; install: string | null }[] };
+
 /** The select's value for Bate's own engine, and for a command that is none of the listed agents. */
 export const OWN = "";
 export const OTHER = "other";

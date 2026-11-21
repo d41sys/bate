@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { agentChoice, OTHER, OWN, type Agent } from "./agents.ts";
+import { agentChoice, OTHER, OWN, type Agent, type Found } from "./agents.ts";
 import { Confirm } from "./Confirm.tsx";
-import { Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
+import { CodeBlock, Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
 import { inShell, listen, request } from "./service.ts";
 import { hostLines, hostsHint } from "./network.ts";
 import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
@@ -29,13 +29,13 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const [agent, setAgent] = useState(savedAgent);
   // The user chose Other… and has not saved a command yet; `undefined` until the service has said what is installed.
   const [other, setOther] = useState(false);
-  const [found, setFound] = useState<{ agents: Agent[]; looked: string[] }>();
+  const [found, setFound] = useState<Found>();
   useEffect(() => {
     setAgent(savedAgent);
     setOther(false);
   }, [bot.id, savedAgent]);
   useEffect(() => {
-    request<{ agents: Agent[]; looked: string[] }>("list_agents").then(setFound, () => setFound({ agents: [], looked: [] }));
+    request<Found>("list_agents").then(setFound, () => setFound({ agents: [], missing: [] }));
   }, []);
   const saves = useSaves();
   const { run, edit, saved, error } = saves;
@@ -181,13 +181,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           <Setting
             id="bot-engine"
             title="Engine"
-            hint={
-              chosen
-                ? <code>{chosen.path}</code>
-                : found.agents.length === 0
-                  ? `An installed agent is listed here when its program is found: ${found.looked.join(", ")}.`
-                  : undefined
-            }
+            hint={chosen ? <code>{chosen.path}</code> : undefined}
             error={choice === OTHER ? undefined : error("agent")}
             saved={choice !== OTHER && saved("agent")}
           >
@@ -212,6 +206,12 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
               </Setting>
             </form>
           )}
+          {found.missing.map((m) => (
+            <Setting key={m.label} title={`${m.label} (not installed)`} wide={!!m.install}>
+              {m.install && <CodeBlock key={m.install} text={m.install} label={`the install command for ${m.label}`} />}
+            </Setting>
+          ))}
+          {found.missing.length > 0 && <p className="note">Bate looks again each time these settings are opened.</p>}
         </Group>
       )}
       <Group title="Delete">

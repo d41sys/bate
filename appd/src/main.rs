@@ -21,6 +21,7 @@ mod launch;
 mod limit;
 mod log;
 mod login_item;
+mod login_path;
 mod memory;
 mod oauth;
 mod paths;

@@ -85,8 +85,12 @@ fn resolve(command: &str, work: &std::path::Path) -> io::Result<PathBuf> {
 
 /// The file called `name` in the first folder of the service's `PATH` that has one.
 pub fn on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
+    on_path_in(&std::env::var_os("PATH").unwrap_or_default(), name)
+}
+
+/// The file called `name` in the first folder of `path` that has one.
+pub fn on_path_in(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
         .map(|dir| dir.join(name))
         .find(|p| p.is_file())
 }
