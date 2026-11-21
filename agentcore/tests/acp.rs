@@ -2,7 +2,7 @@
 //! here is a shell script that speaks enough ACP for these tests.
 
 use proto::permissions::Kind;
-use proto::{Engine, Event, Op, TurnEnd};
+use proto::{Engine, Event, Op, Tokens, TurnEnd};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::process::Command;
 /// sent goes to `agent.log` in its folder. Prompts: `use a tool` asks for permission (request
 /// id 900) and goes on when answered (when the request is called off, it ends its turn as if
 /// done, leaving the call unfinished); `make a plan` sends a plan and then an emptied one;
-/// `hang` works until cancelled; `stop early` runs out of tokens; `die` exits; anything else
+/// `hang` works until cancelled; `stop early` runs out of tokens; `count tokens` says what it used; `die` exits; anything else
 /// is answered with a thought and two pieces of text.
 /// With a file `signed-out` in the folder, no conversation is opened; with `no-load`, none is
 /// reopened; with `slow-load`, reopening takes a while.
@@ -54,6 +54,7 @@ while IFS= read -r line; do
           result "$id" '{"stopReason":"end_turn"}' ;;
         *'hang'*) chunk agent_message_chunk "working" ;;
         *'stop early'*) result "$id" '{"stopReason":"max_tokens"}' ;;
+        *'count tokens'*) result "$id" '{"stopReason":"end_turn","usage":{"inputTokens":100,"outputTokens":20,"cachedReadTokens":40}}' ;;
         *'die'*) chunk agent_message_chunk "oh"; exit 3 ;;
         *)
           say '{"jsonrpc":"2.0","id":901,"method":"fs/read_text_file","params":{"sessionId":"s1","path":"/etc/hosts"}}'
@@ -83,6 +84,8 @@ struct Bridge {
     engine: Engine,
     dir: PathBuf,
     sent: u32,
+    /// The `usage` events `rest` took out of the turns, in order.
+    usage: Vec<Event>,
 }
 
 impl Bridge {
@@ -105,6 +108,7 @@ impl Bridge {
             engine: Engine::run(command).unwrap(),
             dir,
             sent: 0,
+            usage: Vec::new(),
         };
         assert_eq!(
             bridge.next(),
@@ -156,7 +160,10 @@ impl Bridge {
     fn rest(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         loop {
-            events.push(self.next());
+            match self.next() {
+                usage @ Event::Usage { .. } => self.usage.push(usage),
+                event => events.push(event),
+            }
             if matches!(events.last(), Some(Event::TurnEnd { .. })) {
                 return events;
             }
@@ -179,6 +186,33 @@ fn end(reason: TurnEnd, error: Option<&str>) -> Event {
         reason,
         error: error.map(str::to_owned),
     }
+}
+
+#[test]
+fn what_the_agent_says_it_used_is_reported_and_its_silence_is_said_so() {
+    let mut bridge = Bridge::start("usage");
+    bridge.prompt("count tokens");
+    bridge.rest();
+    bridge.turn("hello");
+    bridge.rest();
+    let used = Tokens {
+        input: 100,
+        cached: 40,
+        output: 20,
+    };
+    assert_eq!(
+        bridge.usage,
+        [
+            Event::Usage {
+                reported: true,
+                tokens: used
+            },
+            Event::Usage {
+                reported: false,
+                tokens: Tokens::default()
+            }
+        ]
+    );
 }
 
 #[test]

@@ -3,6 +3,7 @@
 //! sign-in may call. The server, the key and which of the two come from the service, for
 //! each call.
 
+use proto::Tokens;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -245,6 +246,8 @@ pub struct Reply {
     pub calls: Vec<Call>,
     /// The turn was aborted mid-stream; `text` holds what arrived, `calls` is empty.
     pub aborted: bool,
+    /// What the server said the request used; `None` when it said nothing.
+    pub usage: Option<Tokens>,
 }
 
 #[derive(Default)]
@@ -261,8 +264,15 @@ struct Body<'a> {
     messages: Messages<'a>,
     tools: &'a Value,
     stream: bool,
+    /// Without this a chat stream carries no `usage`.
+    stream_options: StreamOptions,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// The system message, the conversation, then `last`, without copying any of it.
@@ -404,6 +414,9 @@ impl Provider {
                     messages: Messages(&system, ask.messages, ask.last),
                     tools: ask.tools,
                     stream: true,
+                    stream_options: StreamOptions {
+                        include_usage: true,
+                    },
                     reasoning_effort: ask.effort,
                 };
                 let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
@@ -524,6 +537,26 @@ fn searched(action: &Value) -> &str {
         .unwrap_or("")
 }
 
+/// What the `usage` object of a reply says was used, under the names `input` and `output` for
+/// the counts; `None` when it names neither (no `usage`, or `null`).
+fn tokens(usage: &Value, input: &str, output: &str) -> Option<Tokens> {
+    let (i, o) = (usage[input].as_u64(), usage[output].as_u64());
+    if i.is_none() && o.is_none() {
+        return None;
+    }
+    // `prompt_tokens_details` of the chat form, `input_tokens_details` of the Responses form.
+    let details = if usage["prompt_tokens_details"].is_object() {
+        &usage["prompt_tokens_details"]
+    } else {
+        &usage["input_tokens_details"]
+    };
+    Some(Tokens {
+        input: i.unwrap_or(0),
+        cached: details["cached_tokens"].as_u64().unwrap_or(0),
+        output: o.unwrap_or(0),
+    })
+}
+
 /// Reads a Responses stream to its `response.completed`.
 fn responses(
     lines: &Lines,
@@ -575,7 +608,10 @@ fn responses(
                     failed: item["status"] == "failed",
                 });
             }
-            "response.completed" => return Ok(reply),
+            "response.completed" => {
+                reply.usage = tokens(&event["response"]["usage"], "input_tokens", "output_tokens");
+                return Ok(reply);
+            }
             kind @ ("response.failed" | "response.incomplete" | "error") => {
                 // Where the reason is depends on the event.
                 let error = [&event["response"]["error"], &event["error"], &event]
@@ -629,6 +665,9 @@ fn chat(
             serde_json::from_str(data).map_err(|e| format!("the model sent bad data: {e}"))?;
         // Some servers end the body after the last chunk, with no `[DONE]` line.
         finished |= !chunk["choices"][0]["finish_reason"].is_null();
+        // The last chunk before `[DONE]` has it and no choice; some servers repeat it with each
+        // chunk, adding up as they go, so the newest is the whole.
+        reply.usage = tokens(&chunk["usage"], "prompt_tokens", "completion_tokens").or(reply.usage);
         if let Some(error) = chunk.get("error") {
             return Err(format!(
                 "the model server failed: {}",
@@ -688,4 +727,85 @@ fn chat(
         }
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream that has these lines and then ends.
+    fn stream(lines: &[&str]) -> Lines {
+        let (tx, rx) = mpsc::channel();
+        for line in lines {
+            tx.send(Ok((*line).to_owned())).unwrap();
+        }
+        rx
+    }
+
+    fn read_chat(lines: &[&str]) -> Reply {
+        let idle = Duration::from_secs(5);
+        chat(&stream(lines), &AtomicBool::new(false), idle, |_| {})
+            .unwrap_or_else(|e| panic!("{}", e.why))
+    }
+
+    fn read_responses(lines: &[&str]) -> Reply {
+        let idle = Duration::from_secs(5);
+        responses(&stream(lines), &AtomicBool::new(false), idle, |_| {})
+            .unwrap_or_else(|e| panic!("{}", e.why))
+    }
+
+    #[test]
+    fn a_chat_stream_counts_the_last_usage_it_carries_and_none_when_it_carries_none() {
+        let reply = read_chat(&[
+            r#"data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}}"#,
+            "data: [DONE]",
+        ]);
+        let want = Tokens {
+            input: 100,
+            cached: 40,
+            output: 20,
+        };
+        assert_eq!((reply.text.as_str(), reply.usage), ("hi", Some(want)));
+
+        // A server that adds up as it goes, or has no cache figure.
+        let reply = read_chat(&[
+            r#"data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":10,"completion_tokens":1}}"#,
+            r#"data: {"choices":[{"delta":{"content":"b"}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            "data: [DONE]",
+        ]);
+        assert_eq!(
+            reply.usage,
+            Some(Tokens {
+                input: 10,
+                cached: 0,
+                output: 2
+            })
+        );
+
+        let reply = read_chat(&[
+            r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+        ]);
+        assert_eq!(reply.usage, None);
+    }
+
+    #[test]
+    fn a_responses_stream_counts_the_usage_of_its_completed_event() {
+        let reply = read_responses(&[
+            r#"data: {"type":"response.output_text.delta","delta":"hi"}"#,
+            r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":7,"input_tokens_details":{"cached_tokens":10}}}}"#,
+        ]);
+        assert_eq!(
+            reply.usage,
+            Some(Tokens {
+                input: 50,
+                cached: 10,
+                output: 7
+            })
+        );
+        let reply = read_responses(&[r#"data: {"type":"response.completed","response":{}}"#]);
+        assert_eq!(reply.usage, None);
+    }
 }

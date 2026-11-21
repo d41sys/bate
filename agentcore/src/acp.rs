@@ -7,7 +7,7 @@
 use crate::tools::OUTPUT_CAP;
 use proto::connectors::{Connector, Transport};
 use proto::permissions::{APPROVE, DENY, Kind};
-use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, PROTOCOL, Request, TurnEnd};
+use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, PROTOCOL, Request, Tokens, TurnEnd};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::io::Read;
@@ -91,6 +91,19 @@ fn out(event: &Event) {
         }
         std::process::exit(1);
     }
+}
+
+/// What an agent's answer to a prompt says it used (`usage`, which ACP lets an agent leave out).
+fn usage(usage: &Value) -> Option<Tokens> {
+    let (input, output) = (
+        usage["inputTokens"].as_u64(),
+        usage["outputTokens"].as_u64(),
+    );
+    (input.is_some() || output.is_some()).then(|| Tokens {
+        input: input.unwrap_or(0),
+        cached: usage["cachedReadTokens"].as_u64().unwrap_or(0),
+        output: output.unwrap_or(0),
+    })
 }
 
 fn respond(id: String, result: Result<(), String>) {
@@ -372,6 +385,16 @@ impl Bridge {
     }
 
     fn answered(&mut self, asked: Asked, result: Result<&Value, String>) -> Result<(), String> {
+        // An agent that names no count has nothing counted; the service says so.
+        if matches!(asked, Asked::Prompt)
+            && let Ok(done) = &result
+        {
+            let tokens = usage(&done["usage"]);
+            out(&Event::Usage {
+                reported: tokens.is_some(),
+                tokens: tokens.unwrap_or_default(),
+            });
+        }
         match asked {
             Asked::Initialize => {
                 let result = result.map_err(|e| format!("the agent refused to start: {e}"))?;

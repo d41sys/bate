@@ -339,6 +339,7 @@ impl Turn {
                 text,
                 mut calls,
                 aborted,
+                ..
             } = reply;
             for call in calls.iter_mut().filter(|c| c.id.is_empty()) {
                 // Some local servers send no id; each call in the conversation still needs its own,
@@ -461,6 +462,7 @@ impl Turn {
                 text,
                 mut calls,
                 aborted,
+                ..
             } = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;
             if aborted {
                 return Err("Aborted by the user".into());
@@ -493,7 +495,8 @@ impl Turn {
         mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
         let abort = self.control.aborted_flag();
-        self.provider
+        let reply = self
+            .provider
             .stream(url, key, api, ask, abort, |d| match d {
                 Delta::Retry { .. } => self.out.send(&event(d)),
                 // The provider ran it: shown like a tool call of ours, done at once.
@@ -513,7 +516,15 @@ impl Turn {
                     });
                 }
                 d => on(d),
-            })
+            })?;
+        // A call given up on has no `usage` to wait for.
+        if !reply.aborted {
+            self.out.send(&Event::Usage {
+                reported: reply.usage.is_some(),
+                tokens: reply.usage.unwrap_or_default(),
+            });
+        }
+        Ok(reply)
     }
 
     fn tools(&self, mcp: &Servers, depth: usize) -> Value {

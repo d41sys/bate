@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DE
 CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
 CREATE TABLE IF NOT EXISTS conversation_grants(conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(conversation, kind, target));
+CREATE TABLE IF NOT EXISTS usage(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, day TEXT NOT NULL, conversation TEXT NOT NULL, input INTEGER NOT NULL DEFAULT 0, cached INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0, unreported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bot, day, conversation));
+CREATE TABLE IF NOT EXISTS token_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, day INTEGER, month INTEGER, everything INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS blocked_tools(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, tool TEXT NOT NULL, PRIMARY KEY(bot, tool));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, routine TEXT NOT NULL, run TEXT NOT NULL);
@@ -267,7 +269,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 19] = [
+const BOT_TABLES: [&str; 21] = [
     "ledger",
     "access",
     "network",
@@ -287,6 +289,8 @@ const BOT_TABLES: [&str; 19] = [
     "paused",
     "channels",
     "chats",
+    "usage",
+    "token_limits",
 ];
 
 /// The tables that hold rows of a conversation, in their `conversation` column. A database of
@@ -640,6 +644,15 @@ fn snippet(text: &str, needle: &str) -> Option<String> {
     Some(shown.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// What a bot may use, in tokens; a missing number is no limit. `everything`: the person's own
+/// work is stopped too, not only unattended work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenLimit {
+    pub day: Option<u64>,
+    pub month: Option<u64>,
+    pub everything: bool,
+}
+
 fn json<T: Serialize>(v: &T) -> String {
     serde_json::to_string(v).expect("serializable")
 }
@@ -946,6 +959,89 @@ impl Store {
             false => "DELETE FROM paused WHERE bot = ?1",
         };
         self.0.execute(sql, [bot]).map(drop)
+    }
+
+    /// Adds one answered model request to what `bot` used on `day` (`YYYY-MM-DD`, local) in
+    /// `conversation`. A request the server reported nothing for adds to `unreported`.
+    pub fn add_usage(
+        &self,
+        bot: &str,
+        day: &str,
+        conversation: &str,
+        reported: bool,
+        used: proto::Tokens,
+    ) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO usage(bot, day, conversation, input, cached, output, unreported) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(bot, day, conversation) DO UPDATE SET input = input + ?4, \
+                 cached = cached + ?5, output = output + ?6, unreported = unreported + ?7",
+                params![
+                    bot,
+                    day,
+                    conversation,
+                    used.input,
+                    used.cached,
+                    used.output,
+                    u64::from(!reported)
+                ],
+            )
+            .map(drop)
+    }
+
+    /// What `bot` used from `first` to `last` (days, inclusive), and how many requests of those
+    /// days the server reported nothing for. Without `conversation`, in all conversations.
+    pub fn usage(
+        &self,
+        bot: &str,
+        first: &str,
+        last: &str,
+        conversation: Option<&str>,
+    ) -> Result<(proto::Tokens, u64)> {
+        self.0.query_row(
+            "SELECT COALESCE(SUM(input), 0), COALESCE(SUM(cached), 0), COALESCE(SUM(output), 0), \
+             COALESCE(SUM(unreported), 0) FROM usage \
+             WHERE bot = ?1 AND day >= ?2 AND day <= ?3 AND (?4 IS NULL OR conversation = ?4)",
+            params![bot, first, last, conversation],
+            |r| {
+                let used = proto::Tokens {
+                    input: r.get(0)?,
+                    cached: r.get(1)?,
+                    output: r.get(2)?,
+                };
+                Ok((used, r.get(3)?))
+            },
+        )
+    }
+
+    /// The token limit of `bot`; none unless set.
+    pub fn token_limit(&self, bot: &str) -> Result<TokenLimit> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT day, month, everything FROM token_limits WHERE bot = ?1",
+                [bot],
+                |r| {
+                    Ok(TokenLimit {
+                        day: r.get(0)?,
+                        month: r.get(1)?,
+                        everything: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_token_limit(&self, bot: &str, limit: &TokenLimit) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO token_limits(bot, day, month, everything) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(bot) DO UPDATE SET day = ?2, month = ?3, everything = ?4",
+                params![bot, limit.day, limit.month, limit.everything],
+            )
+            .map(drop)
     }
 
     /// The model server URL and optional API key configured in the service.
@@ -2531,6 +2627,7 @@ mod tests {
             reason: None,
             detail: None,
             by: None,
+            tokens: None,
         };
         for at in 1..=MAX_RUNS as u64 + 5 {
             store
@@ -2644,6 +2741,19 @@ mod tests {
             store.set_ledger(id, "n", Ledger::Sent, 1).unwrap();
             store.set_model(id, "m", None).unwrap();
             store.set_blocked(id, "web__x", true).unwrap();
+            let used = proto::Tokens {
+                input: 1,
+                cached: 0,
+                output: 1,
+            };
+            store
+                .add_usage(id, "2026-01-01", &conversation[id], true, used)
+                .unwrap();
+            let limit = TokenLimit {
+                day: Some(1),
+                ..TokenLimit::default()
+            };
+            store.set_token_limit(id, &limit).unwrap();
             store
                 .put_conversation_grant(
                     &conversation[id],

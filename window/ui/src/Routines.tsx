@@ -3,6 +3,7 @@ import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { dayTime, EVERY, when } from "./times.ts";
 import { heldText, skipWhy } from "./routines.ts";
+import { tokenCount } from "./usage.ts";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
 import type { Frequency, Routine, RoutineRun } from "./types.ts";
 
@@ -116,6 +117,7 @@ export function Routines({ bot }: { bot: string }) {
                   </small>
                   {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}
                   {r.lastRun && skipWhy(r.lastRun) && <small>{skipWhy(r.lastRun)}</small>}
+                  {r.lastRun?.tokens && <small>Used {tokenCount(r.lastRun.tokens)}</small>}
                   {r.lastRun?.reason === "signed_out" && r.lastRun.detail && <button className="small" onClick={() => void run(request<{ url: string }>("sign_in_connector", { bot, name: r.lastRun!.detail }).then((d) => openInBrowser(d.url)))}>Sign in to {r.lastRun.detail}</button>}
                   {r.precheck && <small>Checks first: <code>{r.precheck}</code></small>}
                   {r.chat && <small>From a paired chat: write /run {r.name}</small>}

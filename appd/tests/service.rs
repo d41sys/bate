@@ -1110,6 +1110,370 @@ fn the_engine_of_a_bot_with_a_network_limit_still_reaches_its_model() {
     assert_eq!(request["model"], "m1");
 }
 
+/// A model server for the token tests. Every request is served on a thread of its own, so any
+/// number are answered. A prompt with `PLANNING` in it gets a call of the `plan` tool (it asks
+/// nothing) and then "Working."; any reply after a tool result, and any other prompt, is "Hello.".
+/// Each reply says it used 100 input tokens (40 of them cached) and 20 output tokens, unless
+/// `reports` is false.
+struct UsageModel {
+    url: String,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl UsageModel {
+    fn requests(&self) -> usize {
+        self.bodies.lock().unwrap().len()
+    }
+}
+
+fn usage_model(reports: bool) -> UsageModel {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let (mut stream, seen) = (stream.unwrap(), seen.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+                seen.lock().unwrap().push(body);
+                let planning = last["role"] == "user"
+                    && last["content"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("PLANNING"));
+                let delta = |d: Value| json!({"choices": [{"index": 0, "delta": d}]});
+                let mut chunks = if planning {
+                    let steps = json!({"steps": [{"step": "Look", "status": "done"}]});
+                    vec![
+                        delta(json!({"content": "Working."})),
+                        delta(
+                            json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                            "function": {"name": "plan", "arguments": steps.to_string()}}]}),
+                        ),
+                    ]
+                } else {
+                    vec![delta(json!({"content": "Hello."}))]
+                };
+                if reports {
+                    chunks.push(json!({"choices": [], "usage": {"prompt_tokens": 100,
+                        "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 40}}}));
+                }
+                let mut reply = String::from(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                );
+                for chunk in chunks {
+                    reply += &format!("data: {chunk}\n\n");
+                }
+                reply += "data: [DONE]\n\n";
+                let _ = stream.write_all(reply.as_bytes());
+            });
+        }
+    });
+    UsageModel { url, bodies }
+}
+
+fn start_with_usage_model(home: &Path, model: &UsageModel) -> Service {
+    Service::start_with(home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env_remove("BATE_MODEL_API_KEY")
+            .env("BATE_MODEL_BASE_URL", &model.url);
+    })
+}
+
+fn tally(input: u64, cached: u64, output: u64, unreported: u64) -> Value {
+    json!({"input": input, "cached": cached, "output": output, "unreported": unreported})
+}
+
+/// A webhook routine with no schedule; gives its id and URL.
+fn webhook_routine(w: &mut Window, bot: &str, prompt: &str) -> (String, String) {
+    let routine = json!({"name": "Brief", "prompt": prompt, "enabled": true, "webhook": true});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+    (
+        routine["id"].as_str().unwrap().to_owned(),
+        routine["hookUrl"].as_str().unwrap().to_owned(),
+    )
+}
+
+fn post(url: &str) -> u16 {
+    http(url, "POST", None, "content-length: 0\r\n", "")
+}
+
+#[test]
+fn tokens_add_up_per_bot_conversation_routine_run_and_day_and_survive_a_restart() {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("tokens-count");
+    let mut service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    let none = w.ok("get_usage", json!({"bot": bot}));
+    assert_eq!(none["today"], tally(0, 0, 0, 0));
+    assert_eq!(
+        none["limit"],
+        json!({"day": null, "month": null, "stops": "unattended"})
+    );
+
+    // Two turns in one conversation, one in another.
+    let first = w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+    for n in ["n1", "n2"] {
+        w.ok("prompt", json!({"bot": bot, "nonce": n, "text": "hi"}));
+    }
+    turns_ended(&mut w, &bot, "done", 2);
+    w.ok("new_conversation", json!({"bot": bot}));
+    let second = w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+    assert_ne!(first, second);
+    w.ok("prompt", json!({"bot": bot, "nonce": "n3", "text": "hi"}));
+    turns_ended(&mut w, &bot, "done", 1);
+    let used = w.ok("get_usage", json!({"bot": bot, "conversation": first}));
+    assert_eq!(used["conversation"], tally(200, 80, 40, 0), "{used}");
+    let used = w.ok("get_usage", json!({"bot": bot, "conversation": second}));
+    assert_eq!(used["conversation"], tally(100, 40, 20, 0), "{used}");
+
+    // A routine's run has its own count, and it adds to the bot's.
+    let (id, url) = webhook_routine(&mut w, &bot, "say hi");
+    assert_eq!(post(&url), 202);
+    turns_ended(&mut w, &bot, "done", 2);
+    eventually("the run's count", || {
+        let runs = runs_of(&mut w, &bot, &id);
+        runs[0]["tokens"] == json!({"input": 100, "cached": 40, "output": 20})
+    });
+    let used = w.ok("get_usage", json!({"bot": bot}));
+    assert_eq!(used["today"], tally(400, 160, 80, 0), "{used}");
+    assert_eq!(used["month"], tally(400, 160, 80, 0), "{used}");
+
+    // Another day counts for neither today nor this month; the same count is there after a restart.
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "INSERT INTO usage (bot, day, conversation, input, cached, output, unreported)
+         VALUES (?1, '2000-01-01', ?2, 5000, 0, 5000, 0)",
+        rusqlite::params![bot, first.as_str().unwrap()],
+    )
+    .unwrap();
+    drop(db);
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    eventually("the stored count", || {
+        let used = w.ok("get_usage", json!({"bot": bot}));
+        used["today"] == tally(400, 160, 80, 0) && used["month"] == tally(400, 160, 80, 0)
+    });
+    let used = w.ok("get_usage", json!({"bot": bot, "conversation": first}));
+    assert_eq!(used["conversation"], tally(5200, 80, 5040, 0), "{used}");
+    assert_eq!(
+        runs_of(&mut w, &bot, &id)[0]["tokens"],
+        json!({"input": 100, "cached": 40, "output": 20})
+    );
+}
+
+#[test]
+fn a_token_limit_skips_a_routine_but_not_the_persons_prompt_and_everything_stops_both() {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("tokens-limit");
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    let (id, url) = webhook_routine(&mut w, &bot, "say hi");
+
+    for bad in [
+        json!({"day": 0}),
+        json!({"day": "x"}),
+        json!({"month": 1.5}),
+        json!({"stops": "all"}),
+    ] {
+        let mut fields = bad.clone();
+        fields["bot"] = json!(bot);
+        assert_eq!(
+            refusal(&mut w, "set_token_limit", fields),
+            "bad_request",
+            "{bad}"
+        );
+    }
+    w.ok("set_token_limit", json!({"bot": bot, "day": 100}));
+    let limit = w.ok("get_usage", json!({"bot": bot}))["limit"].clone();
+    assert_eq!(
+        limit,
+        json!({"day": 100, "month": null, "stops": "unattended"})
+    );
+
+    // The first turn uses 120 tokens, which is over the limit; the person's next prompt still runs.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    turns_ended(&mut w, &bot, "done", 1);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "hi again"}),
+    );
+    turns_ended(&mut w, &bot, "done", 2);
+    assert_eq!(model.requests(), 2);
+
+    // The routine is skipped with the reason, and no request is made for it.
+    assert_eq!(post(&url), 409);
+    let runs = runs_of(&mut w, &bot, &id);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(
+        (&runs[0]["outcome"], &runs[0]["reason"]),
+        (&json!("skipped"), &json!("limit"))
+    );
+    let why = runs[0]["detail"].as_str().unwrap();
+    assert!(why.contains("limit of 100 tokens for today"), "{why}");
+    assert_eq!(routine_row(&mut w, &bot, &id)["lastRun"]["reason"], "limit");
+    assert_eq!(model.requests(), 2);
+
+    // With `everything`, the person's prompt ends with the reason, and is kept.
+    w.ok(
+        "set_token_limit",
+        json!({"bot": bot, "stops": "everything"}),
+    );
+    assert_eq!(
+        w.ok("get_usage", json!({"bot": bot}))["limit"]["day"],
+        100,
+        "a partial update keeps the rest"
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n3", "text": "stopped"}),
+    );
+    turns_ended(&mut w, &bot, "limit", 1);
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let entries: Vec<&Value> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["entry"])
+        .collect();
+    let end = entries.last().unwrap();
+    let error = end["error"].as_str().unwrap();
+    assert!(error.contains("limit of 100 tokens for today"), "{end}");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["type"] == "prompt" && e["text"] == "stopped"),
+        "the prompt stays in the conversation"
+    );
+    assert_eq!(model.requests(), 2);
+
+    // Without a limit everything runs again.
+    w.ok("set_token_limit", json!({"bot": bot, "day": null}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n4", "text": "free"}));
+    turns_ended(&mut w, &bot, "done", 3);
+    assert_eq!(post(&url), 202);
+    turns_ended(&mut w, &bot, "done", 4);
+}
+
+#[test]
+fn a_turn_that_crosses_the_limit_ends_with_the_reason_and_keeps_what_it_wrote() {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("tokens-cross");
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok(
+        "set_token_limit",
+        json!({"bot": bot, "day": 100, "stops": "everything"}),
+    );
+
+    // The first request is allowed; the plan is made; the second is refused.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &bot, "limit", 1);
+    assert_eq!(model.requests(), 1);
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let entries: Vec<&Value> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["entry"])
+        .collect();
+    let kinds: Vec<&str> = entries
+        .iter()
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "session",
+            "prompt",
+            "turn_start",
+            "text",
+            "tool_start",
+            "tool_end",
+            "turn_end"
+        ],
+        "{entries:?}"
+    );
+    assert_eq!(entries[3]["delta"], "Working.");
+    assert_eq!(entries[6]["reason"], "limit");
+    let error = entries[6]["error"].as_str().unwrap();
+    assert!(error.contains("limit of 100 tokens for today"), "{error}");
+
+    // A routine that crosses it in the same way is recorded as stopped, with its tokens.
+    let other = w.create_bot();
+    w.ok("set_model", json!({"bot": other, "model": "m1"}));
+    w.ok("set_token_limit", json!({"bot": other, "day": 100}));
+    let (id, url) = webhook_routine(&mut w, &other, "PLANNING the day");
+    assert_eq!(post(&url), 202);
+    eventually("the stopped run", || {
+        let runs = runs_of(&mut w, &other, &id);
+        runs.len() == 1 && runs[0]["outcome"] == "limit"
+    });
+    eventually("the run's tokens", || {
+        runs_of(&mut w, &other, &id)[0]["tokens"]
+            == json!({"input": 100, "cached": 40, "output": 20})
+    });
+    let run = runs_of(&mut w, &other, &id)[0].clone();
+    assert!(
+        run["error"]
+            .as_str()
+            .unwrap()
+            .contains("limit of 100 tokens"),
+        "{run}"
+    );
+    assert_eq!(model.requests(), 2);
+}
+
+#[test]
+fn a_model_server_that_reports_no_usage_counts_nothing_says_so_and_is_not_limited() {
+    build_engine();
+    let model = usage_model(false);
+    let home = home("tokens-unreported");
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    turns_ended(&mut w, &bot, "done", 1);
+    let used = w.ok("get_usage", json!({"bot": bot}));
+    assert_eq!(used["today"], tally(0, 0, 0, 1), "{used}");
+    assert_eq!(used["month"], tally(0, 0, 0, 1), "{used}");
+
+    // Nothing was counted, so a limit of one token is never reached.
+    w.ok("set_token_limit", json!({"bot": bot, "day": 1}));
+    let (_, url) = webhook_routine(&mut w, &bot, "say hi");
+    assert_eq!(post(&url), 202);
+    turns_ended(&mut w, &bot, "done", 2);
+}
+
 #[test]
 fn the_saved_model_server_and_its_key_reach_the_real_engine_before_the_environments() {
     build_engine();
@@ -3303,6 +3667,8 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         // The files of a bot's folder, and what Git or the kept copies say of them, are for the window on this Mac.
         ("32", "list_changes"),
         ("33", "read_change"),
+        // A spend cap is set where it was made: not raised or cleared from the network.
+        ("34", "set_token_limit"),
     ] {
         send(
             &device,

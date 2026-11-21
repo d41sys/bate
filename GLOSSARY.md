@@ -14,6 +14,10 @@ _Avoid_: agent, assistant
 A bot the person stopped until they resume it: its turn is stopped, its routines skip, other bots' messages wait, and it takes no prompt from the person.
 _Avoid_: disabled, muted, stopped
 
+**Token limit**:
+What a bot may use per day and per month, in tokens. It stops unattended work (routines, other bots' messages, channels) or everything.
+_Avoid_: budget, quota, spend cap
+
 **Conversation**:
 One exchange between the person and a bot: the prompts, the replies and what the bot did, in order. A bot has many.
 _Avoid_: chat, thread, session

@@ -3,7 +3,7 @@
 use proto::connectors::{Connector, Transport};
 use proto::permissions::Kind;
 use proto::projects::Peer;
-use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, TurnEnd};
+use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, Tokens, TurnEnd};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -154,6 +154,8 @@ struct Engine {
     child: Child,
     input: Arc<Mutex<ChildStdin>>,
     events: Receiver<Event>,
+    /// The `usage` events, taken out of `events`: they follow each model request.
+    usage: Receiver<Event>,
     next_id: u32,
 }
 
@@ -195,6 +197,7 @@ impl Engine {
         let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let (tx, events) = mpsc::channel();
+        let (usage_tx, usage) = mpsc::channel();
         let loop_input = input.clone();
         let model_url = model.url.clone();
         thread::spawn(move || {
@@ -223,6 +226,10 @@ impl Engine {
                     let _ = proto::write_frame(&mut *loop_input.lock().unwrap(), &op, MAX_OP_FRAME);
                     continue;
                 }
+                if matches!(event, Event::Usage { .. }) {
+                    let _ = usage_tx.send(event);
+                    continue;
+                }
                 if tx.send(event).is_err() {
                     return;
                 }
@@ -232,6 +239,7 @@ impl Engine {
             child,
             input,
             events,
+            usage,
             next_id: 0,
         };
         assert_eq!(
@@ -379,6 +387,43 @@ fn workdir(name: &str) -> Dir {
 
 fn is_turn_end(e: &Event) -> bool {
     matches!(e, Event::TurnEnd { .. })
+}
+
+#[test]
+fn each_model_request_reports_what_the_server_said_it_used_and_a_silent_one_is_said_so() {
+    let dir = workdir("usage");
+    let said = json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20,
+        "prompt_tokens_details": {"cached_tokens": 40}}});
+    let model = Model::serve(vec![vec![text("One."), said], vec![text("Two.")]]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.exchange("n1", "first");
+    engine.exchange("n2", "second");
+    let used = Tokens {
+        input: 100,
+        cached: 40,
+        output: 20,
+    };
+    assert_eq!(
+        engine.usage.try_iter().collect::<Vec<_>>(),
+        [
+            Event::Usage {
+                reported: true,
+                tokens: used
+            },
+            Event::Usage {
+                reported: false,
+                tokens: Tokens::default()
+            }
+        ]
+    );
+    // A chat server sends `usage` only when asked.
+    assert!(
+        model
+            .requests()
+            .iter()
+            .all(|r| r["stream_options"] == json!({"include_usage": true}))
+    );
 }
 
 #[test]
