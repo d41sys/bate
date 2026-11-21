@@ -2494,6 +2494,8 @@ mod tests {
             outcome,
             error: None,
             reason: None,
+            detail: None,
+            by: None,
         };
         for at in 1..=MAX_RUNS as u64 + 5 {
             store
