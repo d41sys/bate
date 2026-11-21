@@ -30,10 +30,16 @@ test("hidden or direction-changing characters anywhere in what it shows leave ou
   assert.equal(noticeFor("Bo\u200Eb", ask()).actions, false);
 });
 
-test("a long target is cut by characters, and the notification says so; a short one is not", () => {
+test("a long target is cut by characters, the notification says so and has no buttons; a short one is whole", () => {
   const long = noticeFor("A", ask({ target: "x".repeat(500) }));
   assert.match(long.body, /^A: Run a command\?\nx{160}… \(cut: open Bate to read all of it\)$/);
-  assert.equal(noticeFor("A", ask({ target: "y".repeat(160) })).body.endsWith("y".repeat(160)), true);
+  assert.equal(long.actions, false);
+  const whole = noticeFor("A", ask({ target: "y".repeat(160) }));
+  assert.equal(whole.body.endsWith("y".repeat(160)), true);
+  assert.equal(whole.actions, true);
+  // What the notification cannot show as it is has no buttons either: more than one line, a long title.
+  assert.equal(noticeFor("A", ask({ target: "ls\nrm -rf x" })).actions, false);
+  assert.equal(noticeFor("A", ask({ title: "t".repeat(161) })).actions, false);
   // A character outside the basic plane is one character, never half of one.
   const emoji = noticeFor("A", ask({ target: "😀".repeat(161) }));
   assert.match(emoji.body, /\n(😀){160}… \(cut/);
