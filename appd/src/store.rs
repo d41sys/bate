@@ -1648,6 +1648,12 @@ impl Store {
             .map(drop)
     }
 
+    /// Whether any bot runs on an installed agent.
+    pub fn any_agent(&self) -> Result<bool> {
+        self.0
+            .query_row("SELECT EXISTS(SELECT 1 FROM agents)", [], |r| r.get(0))
+    }
+
     /// The installed agent the bot runs on, as a program and its arguments. None: Bate's own
     /// engine.
     pub fn agent(&self, bot: &str) -> Result<Option<Vec<String>>> {

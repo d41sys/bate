@@ -719,6 +719,11 @@ impl Core {
     }
 
     pub fn run(mut self, rx: Receiver<Msg>) {
+        // A bot on an installed agent needs the login shell's PATH when its engine starts:
+        // read it now, off this thread, so that start seldom waits for the shell.
+        if self.store.any_agent().unwrap_or(false) {
+            thread::spawn(|| _ = login_path::get());
+        }
         // A message a bot was working on when the service stopped has lost its turn: its
         // sender is told. Messages and prompts that were waiting go on now.
         for mail in self.store.mail_in("working", None).unwrap_or_default() {
