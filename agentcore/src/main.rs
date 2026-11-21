@@ -74,6 +74,8 @@ struct Engine {
     skill_folders: Vec<PathBuf>,
     /// Names of the bot's own skills that are off; set by the service.
     skills_off: Vec<String>,
+    /// Connector tools that are blocked, by the model's name; set by the service.
+    blocked_tools: Vec<String>,
     /// From the user, through the service; first in the system prompt.
     instructions: String,
     /// Tool rounds a turn may take; set by the service.
@@ -151,6 +153,7 @@ fn main() {
         peers: (Vec::new(), false),
         skill_folders: Vec::new(),
         skills_off: Vec::new(),
+        blocked_tools: Vec::new(),
         instructions: String::new(),
         steps: proto::STEP_LIMIT,
         web_search: true,
@@ -364,6 +367,10 @@ impl Engine {
                 self.skills_off = names;
                 self.respond(id, Ok(()));
             }
+            Op::BlockedTools { names } => {
+                self.blocked_tools = names;
+                self.respond(id, Ok(()));
+            }
             Op::Instructions { text } => {
                 self.instructions = text;
                 self.respond(id, Ok(()));
@@ -513,6 +520,7 @@ impl Engine {
             leads: self.peers.1,
             skill_folders: self.skill_folders.clone(),
             skills_off: self.skills_off.clone(),
+            blocked_tools: self.blocked_tools.clone(),
             instructions: self.instructions.clone(),
             steps: self.steps,
             web_search: self.web_search,

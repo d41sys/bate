@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { agentChoice, OTHER, OWN, type Agent, type Found } from "./agents.ts";
 import { Confirm } from "./Confirm.tsx";
 import { CodeBlock, Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
+import { Revealed } from "./Reveal.tsx";
 import { inShell, listen, request } from "./service.ts";
 import { hostLines, hostsHint } from "./network.ts";
 import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
@@ -122,11 +123,31 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         <Group title="Always allowed">
           {permissions.grants.length === 0 && <p className="note">Nothing yet. Choose Always on a question and it shows here.</p>}
           {permissions.grants.map((g) => (
-            <Setting key={`${g.kind} ${g.target}`} title={ACTIONS[g.kind]} hint={<code>{g.target}</code>}>
+            <Setting key={`${g.kind} ${g.target}`} title={ACTIONS[g.kind]} hint={<code><Revealed text={g.target} /></code>}>
               <button type="button" className="small" aria-label={`Remove: ${ACTIONS[g.kind]}, ${g.target}`} onClick={() => run("grants", request("delete_grant", { bot: bot.id, kind: g.kind, target: g.target }))}>Remove</button>
             </Setting>
           ))}
           <Problem text={error("grants")} />
+        </Group>
+      )}
+      {permissions && permissions.conversationGrants.length > 0 && (
+        <Group title="Allowed in one conversation">
+          {permissions.conversationGrants.map((g) => (
+            <Setting key={`${g.conversation} ${g.kind} ${g.target}`} title={ACTIONS[g.kind]} hint={<><code><Revealed text={g.target} /></code> in {g.title ? `“${g.title}”` : "a conversation with no title yet"}. It ends with that conversation.</>}>
+              <button type="button" className="small" aria-label={`Remove: ${ACTIONS[g.kind]}, ${g.target}, in one conversation`} onClick={() => run("grants", request("delete_grant", { bot: bot.id, kind: g.kind, target: g.target, conversation: g.conversation }))}>Remove</button>
+            </Setting>
+          ))}
+        </Group>
+      )}
+      {permissions && permissions.blocked.length > 0 && (
+        <Group title="Blocked tools">
+          {bot.agent && <p className="note">This bot runs on an installed agent, which uses its connectors itself: blocking does not reach it.</p>}
+          {permissions.blocked.map((tool) => (
+            <Setting key={tool} title="Use connectors" hint={<><code>{tool}</code>: not offered to the bot, and refused if called.</>}>
+              <button type="button" className="small" aria-label={`Unblock ${tool}`} onClick={() => run("blocked", request("block_tool", { bot: bot.id, tool, blocked: false }))}>Unblock</button>
+            </Setting>
+          ))}
+          <Problem text={error("blocked")} />
         </Group>
       )}
       <Group title="Files and network">

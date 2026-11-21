@@ -83,6 +83,8 @@ pub enum Op {
     SkillFolders { folders: Vec<PathBuf> },
     /// Skills of the bot's own `skills/` that are switched off, by name: the model is not told about them. The whole list each time, empty for none.
     SkillsOff { names: Vec<String> },
+    /// Connector tools the user blocked for this bot, by the model's name (`<connector>__<tool>`): left out of what the model is offered, and refused if called. The whole list each time, empty for none.
+    BlockedTools { names: Vec<String> },
     /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
     StepLimit { steps: u32 },
     /// Whether the model provider's own web search tool is offered, where it has one; on until told otherwise.
@@ -247,11 +249,12 @@ pub enum Event {
         tool: String,
         args: Map<String, Value>,
     },
-    /// The connector `name` has just been loaded (started or reached) and offers `tools` tools.
-    /// A connector that fails is reported on standard error instead. Not part of the transcript.
+    /// The connector `name` has just been loaded (started or reached) and has the tools `names`,
+    /// each as the model names it (`<connector>__<tool>`), blocked ones included. A connector that
+    /// fails is reported on standard error instead. Not part of the transcript.
     ConnectorLoaded {
         name: String,
-        tools: u32,
+        names: Vec<String>,
     },
     /// The engine asks the service for the endpoint and token before a model call.
     /// The engine waits until the service sends `token` for `request`.

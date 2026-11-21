@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use proto::connectors::{Connector, Transport};
-use proto::permissions::{ALWAYS, APPROVE, DENY, Grant, Kind, Level};
+use proto::permissions::{ALWAYS, APPROVE, CONVERSATION, DENY, Grant, Kind, Level};
 use proto::projects::{Peer, Project, ProjectConnector};
 use proto::routines::{Routine, RoutineRun, RunOutcome};
 use proto::{
@@ -512,8 +512,9 @@ enum Settles {
     Nothing,
     /// The prompt enters the transcript and the ledger entry becomes `sent`.
     Prompt(Outgoing),
-    /// The answered question is closed, and an "Always" answer is remembered as this grant.
-    Question(String, Option<(Kind, String)>),
+    /// The answered question is closed, and an "Always" answer is remembered as this grant; with
+    /// `true`, an "Allow in this conversation" answer, which is kept for that conversation only.
+    Question(String, Option<(Kind, String, bool)>),
     /// The transcript goes back to before the prompt with this nonce; or, for a fork (true),
     /// the bot goes on in a new conversation that is a copy up to that prompt.
     Rewind(String, bool),
@@ -1390,28 +1391,31 @@ impl Core {
                         format!("question `{question}` is not open"),
                     ));
                 };
-                // "Always" is the service's own choice: the engine gets "Approve", and exactly
-                // the action the question named is remembered once the engine has taken it. A
-                // question about work another bot asked for is answered once: it saves nothing.
+                // "Always" and "Conversation" are the service's own choices: the engine gets
+                // "Approve", and exactly the action the question named is remembered once the
+                // engine has taken it (for good, or for this conversation). A question about work
+                // another bot asked for is answered once: it saves nothing.
                 let peer = asked.get("askedBy").is_some();
-                let grant = if choice == ALWAYS && !peer {
+                let saves = choice == ALWAYS || choice == CONVERSATION;
+                let grant = if saves && !peer {
                     let action = serde_json::from_value::<Kind>(asked["kind"].clone())
                         .ok()
                         .zip(asked["target"].as_str());
-                    let (kind, target) =
-                        action.ok_or(bad("`Always` is only for a question about an action"))?;
+                    let (kind, target) = action.ok_or(bad(format!(
+                        "`{choice}` is only for a question about an action"
+                    )))?;
                     if kind.always_asks() {
                         return Err(bad(
                             "a send or change in an Apple app is asked about every time",
                         ));
                     }
-                    Some((kind, target.to_owned()))
+                    Some((kind, target.to_owned(), choice == CONVERSATION))
                 } else {
                     None
                 };
                 let op = Op::Answer {
                     question: question.into(),
-                    choice: if choice == ALWAYS { APPROVE } else { choice }.into(),
+                    choice: if saves { APPROVE } else { choice }.into(),
                 };
                 self.send_op(
                     &bot,
@@ -1694,7 +1698,7 @@ impl Core {
                 // Its Always answers were for that program.
                 if let Some(name) = project.connector_name() {
                     for bot in &project.bots {
-                        self.forget_connector_grants(bot, name);
+                        self.forget_connector_grants(bot, name, true);
                     }
                 }
                 self.projects_changed(&project.bots);
@@ -2195,9 +2199,24 @@ impl Core {
                 for kind in Kind::ALL {
                     levels.insert(kind, self.store.level(&bot, kind).map_err(internal)?);
                 }
-                Ok(Some(
-                    json!({"levels": levels, "grants": self.store.grants(&bot).map_err(internal)?}),
-                ))
+                let here: Vec<Value> = self
+                    .store
+                    .conversation_grants(&bot)
+                    .map_err(internal)?
+                    .into_iter()
+                    .map(|(conversation, title, g)| {
+                        let mut shown = json!(g);
+                        shown["conversation"] = json!(conversation);
+                        shown["title"] = json!(title);
+                        shown
+                    })
+                    .collect();
+                Ok(Some(json!({
+                    "levels": levels,
+                    "grants": self.store.grants(&bot).map_err(internal)?,
+                    "conversationGrants": here,
+                    "blocked": self.store.blocked_tools(&bot).map_err(internal)?,
+                })))
             }
             "set_permission" => {
                 let bot = self.bot_of(f)?;
@@ -2211,14 +2230,47 @@ impl Core {
                 self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
+            "block_tool" => {
+                let bot = self.bot_of(f)?;
+                let tool = str_field(f, "tool")?;
+                let blocked = field::<bool>(f, "blocked")?;
+                // Only a tool of a connector the bot has can be blocked; one that is gone can be unblocked.
+                if blocked {
+                    let own = self.store.connectors(&bot).map_err(internal)?;
+                    let project = self.project_of(&bot).map_err(internal)?;
+                    let project = project.as_ref().and_then(|p| p.connector_name());
+                    let known = tool
+                        .split_once("__")
+                        .filter(|(_, rest)| !rest.is_empty())
+                        .is_some_and(|(name, _)| {
+                            project == Some(name) || own.iter().any(|c| c.name == name)
+                        });
+                    if !known {
+                        return Err(bad(
+                            "`tool` must be `<connector>__<tool>`, of a connector the bot has",
+                        ));
+                    }
+                }
+                self.store
+                    .set_blocked(&bot, tool, blocked)
+                    .map_err(internal)?;
+                self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
+                self.connectors_changed(&bot);
+                Ok(Some(json!({})))
+            }
             "delete_grant" => {
                 let bot = self.bot_of(f)?;
                 let kind = field::<Kind>(f, "kind")?;
-                if !self
-                    .store
-                    .delete_grant(&bot, kind, str_field(f, "target")?)
-                    .map_err(internal)?
-                {
+                let target = str_field(f, "target")?;
+                // Given `conversation`, the grant is the one made for that conversation.
+                let gone = match f.get("conversation").and_then(Value::as_str) {
+                    Some(conversation) => {
+                        self.store
+                            .delete_conversation_grant(&bot, conversation, kind, target)
+                    }
+                    None => self.store.delete_grant(&bot, kind, target),
+                };
+                if !gone.map_err(internal)? {
                     return Err(("no_such_grant", "no such grant".into()));
                 }
                 self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
@@ -2665,14 +2717,24 @@ impl Core {
                     c.signed_in = Some(tokens.is_some());
                 }
                 let reports = self.connector_reports.get(&bot);
+                let blocked = self.store.blocked_tools(&bot).map_err(internal)?;
                 let connectors: Vec<Value> = connectors
                     .iter()
                     .map(|c| {
                         let mut shown = json!(c);
                         match reports.and_then(|m| m.get(&c.name)) {
                             Some(ConnectorReport::Failed(why)) => shown["error"] = json!(why),
-                            Some(ConnectorReport::Loaded(tools)) => shown["tools"] = json!(tools),
+                            Some(ConnectorReport::Loaded(names)) => {
+                                shown["tools"] = json!(names.len());
+                                shown["toolNames"] = json!(names);
+                            }
                             None => {}
+                        }
+                        let prefix = format!("{}__", c.name);
+                        let theirs: Vec<_> =
+                            blocked.iter().filter(|t| t.starts_with(&prefix)).collect();
+                        if !theirs.is_empty() {
+                            shown["blocked"] = json!(theirs);
                         }
                         shown
                     })
@@ -2726,7 +2788,7 @@ impl Core {
                 if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(&c.name);
                 }
-                self.forget_connector_grants(&bot, &c.name);
+                self.forget_connector_grants(&bot, &c.name, false);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({"connector": c})))
             }
@@ -2823,7 +2885,7 @@ impl Core {
                 if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(str_field(f, "name")?);
                 }
-                self.forget_connector_grants(&bot, str_field(f, "name")?);
+                self.forget_connector_grants(&bot, str_field(f, "name")?, true);
                 self.connectors_changed(&bot);
                 Ok(Some(json!({})))
             }
@@ -3119,6 +3181,7 @@ impl Core {
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let skill_folders = self.skill_folders_of(bot).map_err(internal)?;
         let skills_off = self.store.skills_off(bot).map_err(internal)?;
+        let blocked = self.store.blocked_tools(bot).map_err(internal)?;
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
@@ -3290,6 +3353,9 @@ impl Core {
         }
         if !skills_off.is_empty() {
             self.send_op(bot, Op::SkillsOff { names: skills_off }, Waiter::Quiet)?;
+        }
+        if !blocked.is_empty() {
+            self.send_op(bot, Op::BlockedTools { names: blocked }, Waiter::Quiet)?;
         }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
@@ -4169,7 +4235,8 @@ impl Core {
             .filter(|b| changed || shifted(b))
         {
             for name in &names {
-                self.forget_connector_grants(bot, name);
+                let gone = shifted(bot) || p.connector_name() != Some(name);
+                self.forget_connector_grants(bot, name, gone);
             }
         }
         if changed {
@@ -5137,7 +5204,9 @@ impl Core {
                 .map_err(internal)
                 .and_then(|connectors| {
                     self.send_op(bot, Op::Connectors { connectors }, Waiter::Connectors)
-                });
+                })
+                .and_then(|()| self.store.blocked_tools(bot).map_err(internal))
+                .and_then(|names| self.send_op(bot, Op::BlockedTools { names }, Waiter::Quiet));
             if let Err((_, e)) = sent {
                 log!("bot {bot}: connectors not sent: {e}");
             }
@@ -5349,14 +5418,14 @@ impl Core {
     }
 
     fn on_event(&mut self, bot: &str, mut ev: Event) {
-        if let Event::ConnectorLoaded { name, tools } = &ev {
+        if let Event::ConnectorLoaded { name, names } = &ev {
             // Not for the transcript. Only a connector the bot still has is kept.
             let known = self
                 .store
                 .connectors(bot)
                 .is_ok_and(|all| all.iter().any(|c| c.name == *name));
             if known {
-                self.report_connector(bot, name.clone(), ConnectorReport::Loaded(*tools));
+                self.report_connector(bot, name.clone(), ConnectorReport::Loaded(names.clone()));
             }
             return;
         }
@@ -5435,12 +5504,16 @@ impl Core {
                 return;
             }
             // A send or change shows its card every time: there is no `Always` for it. Nor is
-            // there for work another bot asked for: that is answered once.
+            // there for work another bot asked for: that is answered once. A routine's run
+            // is not in a conversation the person is in, so it has no grant for one either.
             let held = self.askers(bot).map_or(true, |askers| !askers.is_empty());
+            let routine = self.engines.get(bot).is_some_and(|r| r.routine.is_some());
             let choices: &[&str] = if kind.always_asks() || held {
                 &[APPROVE, DENY]
-            } else {
+            } else if routine {
                 &[APPROVE, ALWAYS, DENY]
+            } else {
+                &[APPROVE, CONVERSATION, ALWAYS, DENY]
             };
             *options = choices.iter().map(|c| c.to_string()).collect();
         }
@@ -5672,12 +5745,25 @@ impl Core {
     }
 
     /// A grant is for the server the user saw: a connector that is changed or removed loses
-    /// its grants, so another server under the same name asks again.
-    fn forget_connector_grants(&mut self, bot: &str, name: &str) {
+    /// its grants, so another server under the same name asks again. A tool the user blocked
+    /// stays blocked while the connector is only changed (switched off and on, or given another
+    /// address): it goes when the connector `gone`, so that a new one of that name starts clean.
+    fn forget_connector_grants(&mut self, bot: &str, name: &str, gone: bool) {
         match self.store.delete_connector_grants(bot, name) {
             Ok(0) => {}
             Ok(_) => self.broadcast(&json!({"type": "permissions_changed", "bot": bot})),
             Err(e) => log!("bot {bot}: grants of connector {name} not removed: {e}"),
+        }
+        if !gone {
+            return;
+        }
+        match self.store.delete_connector_blocked(bot, name) {
+            Ok(0) => {}
+            Ok(_) => {
+                self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
+                self.connectors_changed(bot);
+            }
+            Err(e) => log!("bot {bot}: blocked tools of connector {name} not removed: {e}"),
         }
     }
 
@@ -5721,9 +5807,16 @@ impl Core {
                 return None;
             }
         };
+        // A grant for one conversation holds in that conversation, for the person's own work in
+        // it: not for work another bot asked for, and not in a routine's run.
+        let conversation = self
+            .engines
+            .get(bot)
+            .filter(|r| askers.is_empty() && r.routine.is_none())
+            .map(|r| r.conversation.as_str());
         let mut choice = Some(APPROVE);
         for who in std::iter::once(bot).chain(askers.iter().map(String::as_str)) {
-            match self.decide_alone(who, kind, target) {
+            match self.decide_alone(who, kind, target, conversation) {
                 Some(DENY) => return Some(DENY),
                 Some(_) => {}
                 None => choice = None,
@@ -5732,16 +5825,28 @@ impl Core {
         choice
     }
 
-    /// What the permissions of the one bot `bot` say.
-    fn decide_alone(&self, bot: &str, kind: Kind, target: &str) -> Option<&'static str> {
+    /// What the permissions of the one bot `bot` say; `conversation` is the one whose grants count.
+    fn decide_alone(
+        &self,
+        bot: &str,
+        kind: Kind,
+        target: &str,
+        conversation: Option<&str>,
+    ) -> Option<&'static str> {
         let known = self.store.level(bot, kind).and_then(|level| {
+            let blocked = kind == Kind::Connector && self.store.is_blocked(bot, target)?;
             Ok(match level {
+                // A blocked tool is refused whatever the level and whatever was granted.
+                _ if blocked => Some(DENY),
                 Level::Never => Some(DENY),
                 // Whatever the level says, such an action is shown to the user every time.
                 _ if kind.always_asks() => None,
                 Level::Always => Some(APPROVE),
                 Level::Ask if self.store.has_grant(bot, kind, target)? => Some(APPROVE),
-                Level::Ask => None,
+                Level::Ask => match conversation {
+                    Some(c) if self.store.has_conversation_grant(c, kind, target)? => Some(APPROVE),
+                    _ => None,
+                },
             })
         });
         // A store that cannot be read must not allow anything: the user is asked.
@@ -5814,13 +5919,18 @@ impl Core {
                             }
                             Err(e) => log!("bot {bot}: question not closed: {e}"),
                         }
-                        if let Some((kind, target)) = grant {
+                        if let Some((kind, target, here)) = grant {
                             let grant = Grant {
                                 kind: *kind,
                                 target: target.clone(),
                                 at_ms: now_ms(),
                             };
-                            match self.store.put_grant(bot, &grant) {
+                            let put = if *here {
+                                self.store.put_conversation_grant(&conversation, &grant)
+                            } else {
+                                self.store.put_grant(bot, &grant)
+                            };
+                            match put {
                                 Ok(()) => self
                                     .broadcast(&json!({"type": "permissions_changed", "bot": bot})),
                                 Err(e) => log!("bot {bot}: grant not stored: {e}"),
@@ -6456,7 +6566,8 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
 
 /// What a bot's engine said of a connector (`Event::ConnectorLoaded`, or a line on standard error).
 enum ConnectorReport {
-    Loaded(u32),
+    /// The tools it has, by the model's name.
+    Loaded(Vec<String>),
     Failed(String),
 }
 

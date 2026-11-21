@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { type ConnectorForm, connectorMay, connectorOf, connectorState, connectorSummary, each, formOf, madeBy, placed } from "./addons.ts";
+import { type ConnectorForm, connectorMay, connectorOf, connectorState, connectorSummary, connectorTools, each, formOf, madeBy, placed } from "./addons.ts";
 import { Catalog } from "./Catalog.tsx";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
@@ -13,7 +13,7 @@ const blank: ConnectorForm = { name: "", type: "http", url: "", command: "", arg
 type Ask = { form: ConnectorForm; listed?: ConnectorListed } | { copy: Connector; from: string; has: string[] } | { remove: string; users: string[] };
 const address = (c: Connector) => (c.transport.type === "http" ? c.transport.url : [c.transport.command, ...(c.transport.args ?? [])].join(" "));
 /** What `set_connector` takes: the output-only fields are left out. */
-const sent = ({ error, tools, signedIn, ...c }: Connector) => c;
+const sent = ({ error, tools, toolNames, blocked, signedIn, ...c }: Connector) => c;
 
 /** The connectors of every bot in one list: is each on, does it work, who has it; add to more bots in one step. */
 export function Connectors({ bots }: { bots: Bot[] }) {
@@ -68,7 +68,9 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                 </summary>
                 <ul className="rows">
                   {r.users.map(({ bot, item }) => {
-                    const state = connectorState(item, !!bots.find((b) => b.id === bot)?.agent);
+                    const agent = !!bots.find((b) => b.id === bot)?.agent;
+                    const state = connectorState(item, agent);
+                    const tools = connectorTools(item);
                     return (
                       <li key={bot}>
                         <label>
@@ -82,6 +84,29 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                           ) : (
                             <button className="small" onClick={() => void signIn(bot, item.name)}>Sign in</button>
                           ))}
+                        {/* An installed agent runs the tools itself: they do not pass through Bate to be blocked. */}
+                        {!agent && tools.length > 0 && (
+                          <details>
+                            <summary>
+                              {tools.length} {tools.length === 1 ? "tool" : "tools"}
+                              {tools.some((t) => t.blocked) && ` · ${tools.filter((t) => t.blocked).length} blocked`}
+                            </summary>
+                            <ul className="rows">
+                              {tools.map((t) => (
+                                <li key={t.name}>
+                                  <div className="what">
+                                    <code>{t.own}</code>
+                                    <small>{t.blocked ? "Blocked: the bot is not offered it and cannot call it" : "Not blocked"}</small>
+                                  </div>
+                                  <label>
+                                    <input type="checkbox" role="switch" aria-label={`Block ${t.own} for ${botName(bot)}`} checked={t.blocked} onChange={(e) => void run(request("block_tool", { bot, tool: t.name, blocked: e.target.checked }))} />
+                                    Blocked
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
                       </li>
                     );
                   })}

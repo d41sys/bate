@@ -182,14 +182,18 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .starters .label { display: grid; gap: var(--space-1); min-width: 0; white-space: normal; }
 .question { overflow-wrap: anywhere; box-shadow: none; flex: none; position: sticky; bottom: 0; z-index: 1; }
 .question > p { margin: var(--space-2) 0 0; }
-.question > p:first-child { font-weight: var(--weight-strong); margin-top: 0; }
+/* The title and the command are all of what will run: they wrap as written and scroll inside the card when long. */
+.question > p:first-child { font-weight: var(--weight-strong); margin-top: 0; white-space: pre-wrap; max-height: calc(var(--leading) * 5); overflow: auto; }
 .question .note { font-size: var(--size-small); }
-/* A long command scrolls inside the card; all of it is there to read. */
+.question .warning { color: var(--warn); font-size: var(--size-small); }
 .question pre { max-height: calc(var(--leading) * 10); overflow: auto; }
+/* A character nobody can see, drawn as its code point so that it can be seen. */
+.hidden-char { font-family: var(--font-mono); font-size: var(--size-small); font-weight: var(--weight-strong); background: var(--warn-soft); color: var(--warn); border-radius: var(--radius-s); padding: 0 var(--space-1); white-space: nowrap; }
 /* Deny sits apart from the two that allow. */
 .question .actions { margin-top: var(--space-2); }
 .question .actions .danger { margin-left: auto; }
-.question button code { background: none; padding: 0; }
+.question .actions button { max-width: 100%; }
+.question button code { background: none; padding: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @media (hover: hover) {
   /* Deny is at the edge: its tip grows to the left. */
   .question .actions > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }

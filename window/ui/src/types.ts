@@ -61,6 +61,10 @@ export type Connector = {
   error?: string;
   /** How many tools the bot's engine got from the connector when it loaded it (output only); absent: not loaded in this run. */
   tools?: number;
+  /** Those tools by the model's name, `<connector>__<tool>`, blocked ones too (output only). */
+  toolNames?: string[];
+  /** The tools of this connector that are blocked for the bot (output only). */
+  blocked?: string[];
 };
 
 export const KINDS = ["read", "write", "run", "connector", "desktop", "apple_read", "apple_change"] as const;
@@ -69,6 +73,10 @@ export type Level = "always" | "ask" | "never";
 export type Permissions = {
   levels: Record<Kind, Level>;
   grants: { kind: Kind; target: string; atMs: number }[];
+  /** Answers "Allow in this conversation", each with the conversation it is for and that conversation's name. */
+  conversationGrants: { kind: Kind; target: string; atMs: number; conversation: string; title: string }[];
+  /** The connector tools blocked for the bot, `<connector>__<tool>`. */
+  blocked: string[];
 };
 
 export type Project = {
