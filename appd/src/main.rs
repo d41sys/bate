@@ -114,7 +114,7 @@ fn serve() -> io::Result<()> {
     let hook_port = hooks::start(tx.clone())
         .inspect_err(|e| log!("webhooks are off: {e}"))
         .ok();
-    let egress_port = egress::start(tx.clone())
+    let egress_port = egress::start(tx.clone(), None)
         .inspect_err(|e| log!("the network limit's proxy is off: {e}"))
         .ok();
     let lan = lan::Lan::start();
