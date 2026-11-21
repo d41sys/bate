@@ -175,6 +175,7 @@ Match replies by `id`, never by order. Codes: `hello_required`, `parse`, `unknow
 | `get_helper` | none | `{installed, path, connected, accessibility, screenRecording, fullDiskAccess}`: Bate Helper (see Desktop). The three permissions are `null` until the helper has connected. |
 | `open_helper_settings` | `pane` (`accessibility`, `screen_recording` or `full_disk_access`) | `{}`: opens that pane of System Settings, starting the helper first if it is not running, which is what makes macOS list it there. Not for devices on the network. Code `bad_request` for another pane |
 | `set_agent` | `bot`, `command` | `{}`; `command` is a list (program, then arguments) or `null`; see Installed agents |
+| `list_agents` | none | `{agents: [{label, command, path}], looked}`: the known agents whose program is on the service's `PATH` now (`path`: where it was found), and `looked`, the programs looked for; see Installed agents |
 | `get_permissions` | `bot` | `{levels: {read, write, run, connector, desktop, apple_read, apple_change}, grants:[Grant]}` |
 | `set_permission` | `bot`, `kind`, `level` | `{}`. `always` for `apple_change` is refused (`bad_request`): see Apple apps |
 | `delete_grant` | `bot`, `kind`, `target` | `{}`, or `no_such_grant` |
@@ -562,6 +563,17 @@ Messages' history is read by the helper app, not by a script: the app's scriptin
 ### Installed agents (ACP)
 
 A bot can run on an agent installed on this Mac that speaks the [Agent Client Protocol](https://agentclientprotocol.com) over its standard input and output, in place of Bate's own engine: `set_agent {bot, command: ["opencode", "acp"]}`. `null` goes back. The agent uses its own login, model and tools. A bare program name is looked up on the service's `PATH`.
+
+`list_agents` answers with the agents the window offers in its list. The service holds one table, and only the agents whose program (the first word of the command) is found on its `PATH` when asked are listed:
+
+| Label | Command |
+| --- | --- |
+| Claude Code | `claude-code-acp` |
+| Codex | `codex-acp` |
+| opencode | `opencode acp` |
+| Gemini CLI | `gemini --experimental-acp` |
+
+A bot whose command is exactly one of these (and installed) shows as that agent; any other command shows as Other, with the command. Choosing from the list is `set_agent` with the listed `command`.
 
 - `set_agent` stores the choice, forgets the bot's open conversation (the other engine could not reopen it; the transcript stays), and stops the bot's idle engine. `bots_changed` follows. During a turn it is refused with `busy`.
 - The agent's login is in the user's home, so such a bot runs only with `wholeDisk` true. Otherwise its engine does not start (`engine_failed`, saying so).

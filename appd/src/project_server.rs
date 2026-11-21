@@ -79,11 +79,16 @@ fn resolve(command: &str, work: &std::path::Path) -> io::Result<PathBuf> {
     if command.contains('/') {
         return Ok(work.join(command));
     }
+    on_path(command)
+        .ok_or_else(|| io::Error::other(format!("`{command}` is not on the service's PATH")))
+}
+
+/// The file called `name` in the first folder of the service's `PATH` that has one.
+pub fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
-        .map(|dir| dir.join(command))
+        .map(|dir| dir.join(name))
         .find(|p| p.is_file())
-        .ok_or_else(|| io::Error::other(format!("`{command}` is not on the service's PATH")))
 }
 
 /// Starts the program for project `id` for `work`, its folder. A workplace's program (`home`:
