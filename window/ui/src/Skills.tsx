@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { each, madeBy, placed } from "./addons.ts";
+import { byLine, each, madeBy, onFor, placed } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { usePerBot } from "./usePerBot.ts";
 import { inShell, request } from "./service.ts";
-import type { Bot, Skill, SkillPreview } from "./types.ts";
+import type { Bot, InstalledSkill, SkillPreview } from "./types.ts";
 import { sizeText } from "./workplaces.ts";
 
 /** Where a skill is copied from: a folder, or the same skill on a bot that has it. */
@@ -14,12 +14,15 @@ type Ask = { preview: SkillPreview; source: Source; maker: string } | { remove: 
 
 /** The skills of every bot in one list: what each is, who has it, and one install for as many bots as chosen. */
 export function Skills({ bots }: { bots: Bot[] }) {
-  const { lists, error: loadError } = usePerBot<Skill>(bots, "list_skills", "skills", "skills_changed");
+  const { lists, error: loadError } = usePerBot<InstalledSkill>(bots, "list_skills", "skills", "skills_changed");
   const rows = placed(lists);
   const [ask, setAsk] = useState<Ask>();
   const [error, setError] = useState("");
   const names = (ids: string[]) => ids.map((id) => bots.find((b) => b.id === id)?.name ?? id).join(", ");
   const has = (name: string) => rows.find((r) => r.name === name)?.users.map((u) => u.bot) ?? [];
+
+  const switchTo = (bot: string, name: string, enabled: boolean) =>
+    request("set_skill_enabled", { bot, name, enabled }).then(() => setError(""), (e: Error) => setError(e.message));
 
   const look = (source: Source, maker: string) =>
     request<SkillPreview>("preview_skill", source).then((preview) => (setAsk({ preview, source, maker }), setError("")), (e: Error) => setError(e.message));
@@ -37,7 +40,7 @@ export function Skills({ bots }: { bots: Bot[] }) {
             <div className="what">
               <strong>{r.name}</strong>
               <small>{r.users[0].item.description}</small>
-              <small>On: {names(r.users.map((u) => u.bot))}</small>
+              {r.users[0].item.author && <small>{byLine(r.users[0].item.author)}</small>}
             </div>
             <div className="actions">
               <RowMenu
@@ -48,6 +51,20 @@ export function Skills({ bots }: { bots: Bot[] }) {
                 ]}
               />
             </div>
+            <details>
+              <summary>{onFor(r.users.map((u) => u.item), bots.length)}</summary>
+              <ul className="rows">
+                {r.users.map(({ bot, item }) => (
+                  <li key={bot}>
+                    <label>
+                      <input type="checkbox" role="switch" checked={item.enabled} onChange={(e) => void switchTo(bot, r.name, e.target.checked)} />
+                      {names([bot])}
+                    </label>
+                    <small>{item.enabled ? "On" : "Off: the bot is not told of it"}</small>
+                  </li>
+                ))}
+              </ul>
+            </details>
           </li>
         ))}
       </ul>
@@ -58,6 +75,7 @@ export function Skills({ bots }: { bots: Bot[] }) {
           title={`Install ${ask.preview.skill.name}`}
           about={ask.preview.skill.description}
           maker={ask.maker}
+          author={ask.preview.skill.author}
           facts={[`${ask.preview.entries} ${ask.preview.entries === 1 ? "file or folder" : "files and folders"}, ${sizeText(ask.preview.bytes)}`, "Instructions in SKILL.md, and the files they refer to."]}
           may={[
             "It does nothing by itself: the bot reads it when a task fits, and may use the files in it.",

@@ -649,9 +649,9 @@ pub struct Core {
     workplaces_off: HashMap<String, String>,
     /// Bots whose project change takes effect after the turn now running.
     project_restarts: HashSet<String>,
-    /// What each bot's engine last said of a connector that failed to load, by bot and name;
-    /// cleared when the connector changes and when the bot's engine starts.
-    connector_errors: HashMap<String, HashMap<String, String>>,
+    /// What each bot's engine last said of a connector, by bot and name: that it loaded, or why it
+    /// did not. Cleared when the connector changes and when the bot's engine starts.
+    connector_reports: HashMap<String, HashMap<String, ConnectorReport>>,
     /// Engine request ids and engine generations.
     counter: u64,
     /// Earliest `nextRunMs` of any enabled routine; 0 forces a recheck.
@@ -745,7 +745,7 @@ impl Core {
             servers: HashMap::new(),
             workplaces_off: HashMap::new(),
             project_restarts: HashSet::new(),
-            connector_errors: HashMap::new(),
+            connector_reports: HashMap::new(),
             counter: 0,
             next_due: 0,
         }
@@ -833,11 +833,7 @@ impl Core {
                     .connectors(&bot)
                     .is_ok_and(|all| all.iter().any(|c| c.name == name));
                 if current && known {
-                    self.connector_errors
-                        .entry(bot.clone())
-                        .or_default()
-                        .insert(name, why);
-                    self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                    self.report_connector(&bot, name, ConnectorReport::Failed(why));
                 }
             }
             Msg::Surface {
@@ -1745,15 +1741,45 @@ impl Core {
             }
             "list_skills" => {
                 let bot = self.bot_of(f)?;
-                Ok(Some(
-                    json!({"skills": skills::list(&bot).map_err(|e| ("internal", e.to_string()))?}),
-                ))
+                let off = self.store.skills_off(&bot).map_err(internal)?;
+                let listed = skills::list(&bot).map_err(|e| ("internal", e.to_string()))?;
+                let listed: Vec<Value> = listed
+                    .iter()
+                    .map(|s| {
+                        let mut shown = json!(s);
+                        shown["enabled"] = json!(!off.contains(&s.name));
+                        shown
+                    })
+                    .collect();
+                Ok(Some(json!({"skills": listed})))
+            }
+            "set_skill_enabled" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                let enabled = f
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| bad("`enabled` must be true or false"))?;
+                proto::skills::check_name(name).map_err(bad)?;
+                let listed = skills::list(&bot).map_err(|e| ("internal", e.to_string()))?;
+                if !listed.iter().any(|s| s.name == name) {
+                    return Err(("no_such_skill", format!("no skill `{name}`")));
+                }
+                self.store
+                    .set_skill_off(&bot, name, !enabled)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
+                Ok(Some(json!({})))
             }
             "install_skill" => {
                 let bot = self.bot_of(f)?;
                 let skill = skills::install(&bot, &self.skill_source(f)?)
                     .map_err(|e| ("invalid_skill", e))?;
-                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+                // Installing a skill puts it on, also in place of one that was off.
+                self.store
+                    .set_skill_off(&bot, &skill.name, false)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
                 Ok(Some(json!({"skill": skill})))
             }
             "preview_skill" => {
@@ -1770,7 +1796,10 @@ impl Core {
                 if !skills::delete(&bot, name).map_err(|e| ("internal", e.to_string()))? {
                     return Err(("no_such_skill", format!("no skill `{name}`")));
                 }
-                self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+                self.store
+                    .set_skill_off(&bot, name, false)
+                    .map_err(internal)?;
+                self.skills_changed(&bot);
                 Ok(Some(json!({})))
             }
             "list_memory" => {
@@ -2449,13 +2478,15 @@ impl Core {
                     let tokens = self.store.tokens(&bot, &c.name).map_err(internal)?;
                     c.signed_in = Some(tokens.is_some());
                 }
-                let failed = self.connector_errors.get(&bot);
+                let reports = self.connector_reports.get(&bot);
                 let connectors: Vec<Value> = connectors
                     .iter()
                     .map(|c| {
                         let mut shown = json!(c);
-                        if let Some(why) = failed.and_then(|m| m.get(&c.name)) {
-                            shown["error"] = json!(why);
+                        match reports.and_then(|m| m.get(&c.name)) {
+                            Some(ConnectorReport::Failed(why)) => shown["error"] = json!(why),
+                            Some(ConnectorReport::Loaded(tools)) => shown["tools"] = json!(tools),
+                            None => {}
                         }
                         shown
                     })
@@ -2506,7 +2537,7 @@ impl Core {
                     self.store.delete_oauth(&bot, &c.name).map_err(internal)?;
                 }
                 self.store.put_connector(&bot, &c).map_err(internal)?;
-                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(&c.name);
                 }
                 self.forget_connector_grants(&bot, &c.name);
@@ -2603,7 +2634,7 @@ impl Core {
                 self.store
                     .delete_oauth(&bot, str_field(f, "name")?)
                     .map_err(internal)?;
-                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(str_field(f, "name")?);
                 }
                 self.forget_connector_grants(&bot, str_field(f, "name")?);
@@ -2900,6 +2931,7 @@ impl Core {
             .filter(|folder| folder.is_dir());
         // Read before spawning, so a store error never leaves an engine without `start`/`open`.
         let skill_folders = self.skill_folders_of(bot).map_err(internal)?;
+        let skills_off = self.store.skills_off(bot).map_err(internal)?;
         let connectors = self.engine_connectors(bot).map_err(internal)?;
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
@@ -2961,7 +2993,7 @@ impl Core {
         .map_err(failed)?;
         self.counter += 1;
         let generation = self.counter;
-        self.connector_errors.remove(bot);
+        self.connector_reports.remove(bot);
         let (name, failures) = (bot.to_owned(), self.tx.clone());
         // Engine diagnostics go through the service log, so they are rotated with it.
         // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),
@@ -3068,6 +3100,9 @@ impl Core {
                 },
                 Waiter::Quiet,
             )?;
+        }
+        if !skills_off.is_empty() {
+            self.send_op(bot, Op::SkillsOff { names: skills_off }, Waiter::Quiet)?;
         }
         self.send_op(bot, Op::Peers { peers, leads }, Waiter::Quiet)
     }
@@ -4849,6 +4884,22 @@ impl Core {
     }
 
     /// After a change to the list: a running engine gets it now, any other when it starts.
+    /// The bot's skills changed: its running engine gets the names that are off, the windows a
+    /// reason to read the list again.
+    fn skills_changed(&mut self, bot: &str) {
+        if self.engines.contains_key(bot) {
+            let sent = self
+                .store
+                .skills_off(bot)
+                .map_err(internal)
+                .and_then(|names| self.send_op(bot, Op::SkillsOff { names }, Waiter::Quiet));
+            if let Err((_, e)) = sent {
+                log!("bot {bot}: skills off not sent: {e}");
+            }
+        }
+        self.broadcast(&json!({"type": "skills_changed", "bot": bot}));
+    }
+
     fn connectors_changed(&mut self, bot: &str) {
         if self.engines.contains_key(bot) {
             let sent = self
@@ -5048,7 +5099,27 @@ impl Core {
         }
     }
 
+    /// Keeps what the engine said of connector `name` of `bot`, and tells the windows.
+    fn report_connector(&mut self, bot: &str, name: String, report: ConnectorReport) {
+        self.connector_reports
+            .entry(bot.to_owned())
+            .or_default()
+            .insert(name, report);
+        self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+    }
+
     fn on_event(&mut self, bot: &str, mut ev: Event) {
+        if let Event::ConnectorLoaded { name, tools } = &ev {
+            // Not for the transcript. Only a connector the bot still has is kept.
+            let known = self
+                .store
+                .connectors(bot)
+                .is_ok_and(|all| all.iter().any(|c| c.name == *name));
+            if known {
+                self.report_connector(bot, name.clone(), ConnectorReport::Loaded(*tools));
+            }
+            return;
+        }
         if let Event::Token { request } = &ev {
             // A ChatGPT sign-in comes before a model server.
             match self.store.chatgpt() {
@@ -6039,6 +6110,12 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
     if let Err(e) = r.input.send(id, op) {
         log!("bot {bot}: cannot write to the engine: {e}");
     }
+}
+
+/// What a bot's engine said of a connector (`Event::ConnectorLoaded`, or a line on standard error).
+enum ConnectorReport {
+    Loaded(u32),
+    Failed(String),
 }
 
 /// `connector <name>: <why>`: how the engine reports, on stderr, a connector it could not load.

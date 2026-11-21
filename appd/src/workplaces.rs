@@ -48,6 +48,9 @@ pub struct Manifest {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Who says they made it: a claim in the file, which nothing checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     pub program: Program,
     #[serde(default)]
     pub needs: Needs,
@@ -234,6 +237,9 @@ fn parse(text: &str) -> Result<Manifest, String> {
     line("version", &m.version, 40)?;
     if let Some(description) = &m.description {
         line("description", description, 500)?;
+    }
+    if let Some(author) = &m.author {
+        proto::skills::check_author(author)?;
     }
     let command = &m.program.command;
     line("program.command", command, LONGEST)?;

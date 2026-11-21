@@ -9,6 +9,9 @@ export const madeBy = {
   copy: (bot: string) => `${bot}'s copy. Bate cannot tell who made it.`,
 };
 
+/** Who the file of an add-on says made it: shown as the claim it is, never as a fact. Nothing when there is none. */
+export const byLine = (author?: string) => (author ? `By ${author} (not checked)` : undefined);
+
 /** One add-on and the bots that have it, each with its own copy's data. */
 export type Placed<T> = { name: string; users: { bot: string; item: T }[] };
 
@@ -33,20 +36,27 @@ export async function each(ids: string[], run: (id: string) => Promise<unknown>)
   return failed;
 }
 
-/** What a connector's line says: off, waiting for the sign-in, failed to load (and why), or no problem reported. */
-export function connectorState(c: Connector): { text: string; problem: boolean } {
+/** What a connector's line says: off, waiting for the sign-in, failed to load (and why), working (the engine loaded it), or no problem reported. An installed agent reports nothing, so it is never said to work. */
+export function connectorState(c: Connector, agent = false): { text: string; problem: boolean } {
   if (!c.enabled) return { text: "Off", problem: false };
   if (c.error) return { text: `Could not start: ${c.error}`, problem: true };
   if (c.oauth && !c.signedIn) return { text: "On, but not signed in", problem: true };
+  if (agent) return { text: "On; the agent does not report", problem: false };
+  if (c.tools !== undefined) return { text: `Working, ${c.tools} ${c.tools === 1 ? "tool" : "tools"}`, problem: false };
   return { text: "On, no problem reported", problem: false };
+}
+
+/** The one line of a row: on for how many of the bots that have it. */
+export function onFor(copies: { enabled: boolean }[], bots: number): string {
+  const on = copies.filter((c) => c.enabled).length;
+  const plural = copies.length === 1 ? "bot" : "bots";
+  const some = copies.length < bots ? " that have it" : "";
+  return `On for ${on} of ${copies.length} ${plural}${some}`;
 }
 
 /** The one line of a connector's row: on for how many of the bots that have it (and how many of those need a look). */
 export function connectorSummary(copies: Connector[], bots: number): { text: string; problems: number } {
-  const on = copies.filter((c) => c.enabled).length;
-  const plural = copies.length === 1 ? "bot" : "bots";
-  const some = copies.length < bots ? " that have it" : "";
-  return { text: `On for ${on} of ${copies.length} ${plural}${some}`, problems: copies.filter((c) => connectorState(c).problem).length };
+  return { text: onFor(copies, bots), problems: copies.filter((c) => connectorState(c).problem).length };
 }
 
 /** What a connector may do, one line each, as shown before it is added. */

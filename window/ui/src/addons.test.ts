@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { connectorOf, connectorState, connectorSummary, each, matches, placed } from "./addons.ts";
+import { byLine, connectorOf, connectorState, connectorSummary, each, matches, onFor, placed } from "./addons.ts";
 import type { Connector } from "./types.ts";
 
 test("a skill three bots have is one row, with the bots that have it", () => {
@@ -29,6 +29,10 @@ test("a connector's line says off, failed with why, or waiting for the sign-in",
   assert.deepEqual(connectorState({ ...c, error: "no such program" }), { text: "Could not start: no such program", problem: true });
   assert.equal(connectorState({ ...c, oauth: true, signedIn: false }).problem, true);
   assert.equal(connectorState(c).problem, false);
+  assert.equal(connectorState(c).text, "On, no problem reported");
+  assert.deepEqual(connectorState({ ...c, tools: 3 }), { text: "Working, 3 tools", problem: false });
+  assert.equal(connectorState({ ...c, tools: 1 }).text, "Working, 1 tool");
+  assert.equal(connectorState({ ...c, tools: 3 }, true).text.startsWith("Working"), false);
 });
 
 test("a connector's row says on for how many bots, and how many need a look", () => {
@@ -37,6 +41,18 @@ test("a connector's row says on for how many bots, and how many need a look", ()
   assert.deepEqual(connectorSummary(copies, 6), { text: "On for 5 of 6 bots", problems: 1 });
   assert.equal(connectorSummary(copies, 8).text, "On for 5 of 6 bots that have it");
   assert.equal(connectorSummary([c], 1).text, "On for 1 of 1 bot");
+});
+
+test("a skill's row says on for how many of the bots that have it", () => {
+  const on = { name: "pdf", description: "", enabled: true };
+  assert.equal(onFor([on, { ...on, enabled: false }], 2), "On for 1 of 2 bots");
+  assert.equal(onFor([{ ...on, enabled: false }, { ...on, enabled: false }], 3), "On for 0 of 2 bots that have it");
+});
+
+test("an author is shown as a claim, and nothing is shown without one", () => {
+  assert.equal(byLine("Ada L."), "By Ada L. (not checked)");
+  assert.equal(byLine(undefined), undefined);
+  assert.equal(byLine(""), undefined);
 });
 
 test("a program's arguments are one to a line, so none is split at a space", () => {

@@ -38,6 +38,8 @@ pub struct Turn {
     pub leads: bool,
     /// Folders whose `skills/` are offered beside the bot's own.
     pub skill_folders: Vec<PathBuf>,
+    /// Names of the bot's own skills that are off: not offered to the model.
+    pub skills_off: Vec<String>,
     /// What the user told this bot to be and do.
     pub instructions: String,
     /// Tool rounds a turn may take.
@@ -271,7 +273,12 @@ impl Turn {
         // Whether the conversation was already summarised for the model call that comes next.
         let mut shrunk = false;
         let system = self.system();
-        mcp.sync(&self.connectors, &self.dir, &self.control);
+        for (name, tools) in mcp.sync(&self.connectors, &self.dir, &self.control) {
+            self.out.send(&Event::ConnectorLoaded {
+                name,
+                tools: tools as u32,
+            });
+        }
         let tools = self.tools(mcp, 0);
         session
             .push(json!({"role": "user", "content": text}))
@@ -537,7 +544,7 @@ impl Turn {
             "You are a helpful assistant. Your working folder is {}. Use the tools to read, change and search files and to run commands there. To show the user a file you made there (a web page, a diagram, a picture), link it by its path in that folder, such as [chart](chart.html): the window opens it in a frame with no network.{own}{instructions}{}{}{}{project}",
             self.work.display(),
             self.peers_prompt(),
-            crate::skills::prompt(&self.dir, named, &self.skill_folders),
+            crate::skills::prompt(&self.dir, named, &self.skill_folders, &self.skills_off),
             crate::memory::prompt(&self.dir, named)
         )
     }

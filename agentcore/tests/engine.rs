@@ -999,6 +999,15 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
             if title == "Use fake: echo" && t == "fake__echo"),
         "{asked:?}"
     );
+    // The one that loaded is reported with its tool count; the broken and the disabled are not.
+    let loaded: Vec<_> = asked
+        .iter()
+        .filter_map(|e| match e {
+            Event::ConnectorLoaded { name, tools } => Some((name.as_str(), *tools)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(loaded, [("fake", 1)], "{asked:?}");
     let events = engine.until(is_turn_end);
     assert!(
         matches!(&events[0], Event::ToolEnd { output, is_error: false, .. } if output == "echoed"),
@@ -1019,7 +1028,13 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
     );
 
     engine.prompt_as("n2", "echo again");
-    answer(&mut engine, "Deny");
+    let asked = answer(&mut engine, "Deny");
+    // Already loaded: not reported again.
+    assert!(
+        !asked
+            .iter()
+            .any(|e| matches!(e, Event::ConnectorLoaded { .. }))
+    );
     let events = engine.until(is_turn_end);
     assert!(
         matches!(&events[0], Event::ToolEnd { is_error: true, .. }),

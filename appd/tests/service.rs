@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
-/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
+/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`; one that has the enabled
+/// connector `works` reports it loaded with 2 tools, or failed while the file `works-dies` is there. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
 /// `probe work <path>` says whether that is the folder the engine was told to work in.
@@ -159,9 +160,13 @@ while IFS= read -r line; do
     *'"type":"connectors"'*)
       printf '%s\n' "$line" >> connectors.log
       case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
+      case "$line" in *'"name":"works","enabled":true'*)
+        if [ -e works-dies ]; then echo "connector works: it stopped" >&2
+        else echo '{"type":"connector_loaded","name":"works","tools":2}'; fi ;; esac
       echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
+    *'"type":"skills_off"'*) printf '%s\n' "$line" >> skills_off.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"web_search"'*) printf '%s\n' "$line" >> web_search.log; echo "$ok" ;;
@@ -1209,6 +1214,142 @@ fn connectors_reach_the_engine_when_it_starts_and_when_they_change() {
 }
 
 #[test]
+fn the_author_of_a_skill_is_one_short_line_and_shows_in_the_preview_and_the_list() {
+    let home = home("skill-author");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = |name: &str, author: &str| {
+        let source = home.join("picked").join(name);
+        fs::create_dir_all(&source).unwrap();
+        let author = if author.is_empty() {
+            String::new()
+        } else {
+            format!("author: {author}\n")
+        };
+        fs::write(
+            source.join("SKILL.md"),
+            format!("---\nname: pdf-forms\ndescription: Fill in PDF forms.\n{author}---\nHow.\n"),
+        )
+        .unwrap();
+        source
+    };
+    let refused = |w: &mut Window, command: &str, path: &Path| {
+        let id = w.send(command, json!({"bot": bot, "path": path}));
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())
+    };
+    for (name, author) in [
+        ("long", "x".repeat(101)),
+        ("lines", "Ada\u{2028}Bo".to_owned()),
+    ] {
+        let source = folder(name, &author);
+        for command in ["preview_skill", "install_skill"] {
+            let reply = refused(&mut w, command, &source);
+            assert_eq!(reply["code"], "invalid_skill", "{name} {command}: {reply}");
+            assert!(
+                reply["error"].as_str().unwrap().contains("author"),
+                "{reply}"
+            );
+        }
+    }
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"],
+        json!([])
+    );
+
+    let signed = folder("signed", "Ada L.");
+    assert_eq!(
+        w.ok("preview_skill", json!({"path": &signed}))["skill"]["author"],
+        "Ada L."
+    );
+    w.ok("install_skill", json!({"bot": bot, "path": &signed}));
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"][0]["author"],
+        "Ada L."
+    );
+    // No author: none is said.
+    let plain = folder("plain", "");
+    assert!(
+        w.ok("preview_skill", json!({"path": &plain}))["skill"]
+            .get("author")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_skill_switched_off_is_left_out_by_the_engine_survives_a_restart_and_is_forgotten_when_removed()
+{
+    let home = home("skills-off");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    let source = home.join("picked/pdf-forms");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nHow to.\n",
+    )
+    .unwrap();
+    for b in [&bot, &other] {
+        w.ok("install_skill", json!({"bot": b, "path": &source}));
+    }
+    let enabled = |w: &mut Window, bot: &str| {
+        w.ok("list_skills", json!({"bot": bot}))["skills"][0]["enabled"].clone()
+    };
+    let set = |w: &mut Window, enabled: bool| {
+        w.ok(
+            "set_skill_enabled",
+            json!({"bot": bot, "name": "pdf-forms", "enabled": enabled}),
+        )
+    };
+    let engine_is_told = |names: &'static str| {
+        let (home, bot) = (&home, &bot);
+        move || last_logged(home, bot, "skills_off.log").ends_with(&format!(r#""names":{names}}}"#))
+    };
+    // A skill that is not there cannot be switched.
+    let id = w.send(
+        "set_skill_enabled",
+        json!({"bot": bot, "name": "nope", "enabled": false}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "no_such_skill");
+
+    // With nothing off the engine is told nothing at its start; switching tells it.
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
+    set(&mut w, false);
+    eventually(
+        "the engine told the skill is off",
+        engine_is_told(r#"["pdf-forms"]"#),
+    );
+    assert_eq!(enabled(&mut w, &bot), json!(false));
+    assert_eq!(enabled(&mut w, &other), json!(true));
+    set(&mut w, true);
+    eventually("the engine told it is on again", engine_is_told("[]"));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
+
+    // Off again; after a restart the list shows it and a new engine is given it at its start.
+    set(&mut w, false);
+    eventually("the engine told again", engine_is_told(r#"["pdf-forms"]"#));
+    fs::remove_file(home.join("bots").join(&bot).join("skills_off.log")).unwrap();
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(enabled(&mut w, &bot), json!(false));
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    eventually("the new engine told", engine_is_told(r#"["pdf-forms"]"#));
+
+    // Removing the skill forgets that it was off.
+    w.ok("delete_skill", json!({"bot": bot, "name": "pdf-forms"}));
+    eventually("the engine told it is forgotten", engine_is_told("[]"));
+    // Installing a skill puts it on, also in place of one that is off.
+    w.ok("install_skill", json!({"bot": bot, "path": &source}));
+    set(&mut w, false);
+    w.ok("install_skill", json!({"bot": bot, "path": &source}));
+    assert_eq!(enabled(&mut w, &bot), json!(true));
+}
+
+#[test]
 fn a_connector_the_engine_could_not_load_shows_why_until_it_changes() {
     let home = home("connector-error");
     let _service = Service::start(&home);
@@ -1232,6 +1373,53 @@ fn a_connector_the_engine_could_not_load_shows_why_until_it_changes() {
         json!({"bot": bot, "connector": broken(false)}),
     );
     assert!(shown(&mut w).get("error").is_none());
+}
+
+#[test]
+fn a_connector_the_engine_loaded_shows_working_for_that_bot_only_and_a_later_failure_replaces_it() {
+    let home = home("connector-works");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let connector = |name: &str| {
+        json!({"name": name, "enabled": true,
+            "transport": {"type": "stdio", "command": "nowhere", "args": [], "env": {}}})
+    };
+    for bot in [&a, &b] {
+        w.ok(
+            "set_connector",
+            json!({"bot": bot, "connector": connector("works")}),
+        );
+    }
+    let shown = |w: &mut Window, bot: &str| {
+        let list = w.ok("list_connectors", json!({"bot": bot}));
+        list["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "works")
+            .unwrap()
+            .clone()
+    };
+    // Only the engine of `a` starts, so only `a` has loaded it.
+    w.ok("set_model", json!({"bot": a, "model": "m1"}));
+    eventually("working", || shown(&mut w, &a)["tools"] == 2);
+    assert!(shown(&mut w, &a).get("error").is_none());
+    assert!(shown(&mut w, &b).get("tools").is_none());
+    // The engine now fails to load it again, with no change to the connector: the failure shows.
+    fs::write(home.join("bots").join(&a).join("works-dies"), "").unwrap();
+    w.ok(
+        "set_connector",
+        json!({"bot": a, "connector": connector("other")}),
+    );
+    eventually("the failure", || shown(&mut w, &a)["error"] == "it stopped");
+    assert!(shown(&mut w, &a).get("tools").is_none());
+    // A change to the connector forgets what was said of it.
+    let mut off = connector("works");
+    off["enabled"] = json!(false);
+    w.ok("set_connector", json!({"bot": a, "connector": off}));
+    let c = shown(&mut w, &a);
+    assert!(c.get("tools").is_none() && c.get("error").is_none(), "{c}");
 }
 
 #[test]
@@ -4139,12 +4327,14 @@ fn a_skill_folder_is_installed_for_one_bot_listed_and_removed() {
     );
     assert_eq!(listed(&mut w, &bot), json!([]));
     assert_eq!(install(&mut w, &source), expected);
-    assert_eq!(listed(&mut w, &bot), json!([expected]));
+    // The list adds whether the skill is on.
+    let on = json!({"name": "pdf-forms", "description": "Fill in PDF forms.", "enabled": true});
+    assert_eq!(listed(&mut w, &bot), json!([on]));
     // A skill one bot has goes to another by name, with no path.
     let from = json!({"bot": other, "fromBot": bot, "name": "pdf-forms"});
     assert_eq!(w.ok("preview_skill", from.clone())["skill"], expected);
     assert_eq!(w.ok("install_skill", from)["skill"], expected);
-    assert_eq!(listed(&mut w, &other), json!([expected]));
+    assert_eq!(listed(&mut w, &other), json!([on]));
     w.ok("delete_skill", json!({"bot": other, "name": "pdf-forms"}));
     assert_eq!(listed(&mut w, &other), json!([]));
     let script = skills.join("pdf-forms/scripts/fill.sh");
@@ -8665,6 +8855,21 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
             "no manifest",
             broken(&|c| fs::remove_file(c.join("workplace.json")).unwrap()),
         ),
+        (
+            "an author on two lines",
+            broken(&|c| manifest(c, "\"program\"", "\"author\": \"a\\nb\", \"program\"")),
+        ),
+        (
+            "an author too long",
+            broken(&|c| {
+                let long = "x".repeat(101);
+                manifest(
+                    c,
+                    "\"program\"",
+                    &format!("\"author\": \"{long}\", \"program\""),
+                )
+            }),
+        ),
     ];
     for (what, copy) in &cases {
         let refused = install_refused(&mut w, copy);
@@ -8705,7 +8910,13 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
     // Installed again, it is replaced: the new version shows.
     let newer = copied_workplace("wp-newer");
     let text = fs::read_to_string(newer.join("workplace.json")).unwrap();
-    fs::write(newer.join("workplace.json"), text.replace("1.0.0", "2.0.0")).unwrap();
+    let text = text
+        .replace("1.0.0", "2.0.0")
+        .replace("\"program\"", "\"author\": \"Ada L.\", \"program\"");
+    fs::write(newer.join("workplace.json"), text).unwrap();
+    // Shown before it is installed, and in the list after.
+    let preview = w.ok("preview_workplace", json!({"path": &newer.0}));
+    assert_eq!(preview["manifest"]["author"], "Ada L.");
     w.ok("install_workplace", json!({"path": &newer.0}));
     let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
     assert_eq!(
@@ -8715,6 +8926,7 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
         ),
         (1, json!("2.0.0"))
     );
+    assert_eq!(listed[0]["manifest"]["author"], "Ada L.");
 }
 
 #[test]
@@ -9974,13 +10186,27 @@ fn a_workplace_is_installed_from_the_catalog_pinned_and_updated_only_when_asked(
     let v1 = packed(&example_workplace(), "v1");
     let url1 = host.url("/counter-1.0.0.tar.gz");
     serve(&files, "/counter-1.0.0.tar.gz", &v1);
-    serve_catalog(&files, vec![catalog_entry("counter", "1.0.0", &url1, &v1)]);
+    let mut signed = catalog_entry("counter", "1.0.0", &url1, &v1);
+    signed["author"] = json!("Ada L.");
+    serve_catalog(&files, vec![signed.clone()]);
     let _service = catalog_service(&home, &host);
     let mut w = Window::connect(&home);
     let code = |w: &mut Window, command: &str, fields: Value| {
         let id = w.send(command, fields);
         w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
     };
+    // An author in the list is one short line, or the list is refused; a good one shows.
+    for bad in [json!("x".repeat(101)), json!("Ada\u{2028}Bo"), json!("")] {
+        let mut entry = signed.clone();
+        entry["author"] = bad;
+        serve_catalog(&files, vec![entry]);
+        assert_eq!(code(&mut w, "list_catalog", json!({})), "catalog_failed");
+    }
+    serve_catalog(&files, vec![signed]);
+    assert_eq!(
+        w.ok("list_catalog", json!({}))["catalog"][0]["author"],
+        "Ada L."
+    );
 
     // Listed, with nothing installed yet.
     let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
@@ -11356,6 +11582,11 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     .unwrap();
     drop(db);
 
+    // A skill that is off goes in the file all the same, and comes in on.
+    w.ok(
+        "set_skill_enabled",
+        json!({"bot": bot, "name": "pdf-forms", "enabled": false}),
+    );
     let exported = |w: &mut Window, notes: bool| {
         let data = w.ok("export_bot", json!({"bot": bot, "notes": notes}));
         let path = data["path"].as_str().unwrap().to_owned();
@@ -11437,7 +11668,7 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     );
     assert_eq!(
         w.ok("list_skills", json!({"bot": new}))["skills"],
-        json!([{"name": "pdf-forms", "description": "Fill in PDF forms."}])
+        json!([{"name": "pdf-forms", "description": "Fill in PDF forms.", "enabled": true}])
     );
     let skill = home.join("bots").join(&new).join("skills/pdf-forms");
     assert_eq!(
@@ -11574,6 +11805,20 @@ fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported()
         &|f| f["instructions"] = json!("x".repeat(8001)),
         "at most 8000",
     );
+    for (name, author) in [
+        ("author-lines", "Ada\u{2028}Bo".to_owned()),
+        ("author-long", "x".repeat(101)),
+    ] {
+        case(
+            name,
+            &|f| {
+                let text = f["skills"][0]["files"][0]["text"].as_str().unwrap();
+                let text = text.replace("\n---\nHow", &format!("\nauthor: {author}\n---\nHow"));
+                f["skills"][0]["files"][0]["text"] = json!(text);
+            },
+            "author",
+        );
+    }
     case("newer", &|f| f["version"] = json!(2), "version 2");
     case(
         "kind",
@@ -11642,6 +11887,19 @@ fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported()
             .len(),
         1
     );
+
+    // A valid author shows in the preview; a skill with none shows nothing.
+    assert!(
+        w.ok("preview_bot_file", json!({"path": path}))["skills"][0]
+            .get("author")
+            .is_none()
+    );
+    let mut signed = good.clone();
+    let text = signed["skills"][0]["files"][0]["text"].as_str().unwrap();
+    signed["skills"][0]["files"][0]["text"] =
+        json!(text.replace("\n---\nHow", "\nauthor: Ada L.\n---\nHow"));
+    let by = w.ok("preview_bot_file", json!({"path": write("by", &signed)}));
+    assert_eq!(by["skills"][0]["author"], "Ada L.");
 
     // The file changes between the look and the import: what was shown is not what is made.
     let shown = w.ok("preview_bot_file", json!({"path": path}))["sha256"].clone();

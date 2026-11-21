@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, connector TEXT NOT NULL, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS skills_off(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
@@ -258,7 +259,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 16] = [
+const BOT_TABLES: [&str; 17] = [
     "ledger",
     "access",
     "network",
@@ -269,6 +270,7 @@ const BOT_TABLES: [&str; 16] = [
     "routine_runs",
     "oauth",
     "connectors",
+    "skills_off",
     "profiles",
     "models",
     "step_limits",
@@ -2028,6 +2030,30 @@ impl Store {
                 [bot, name],
             )
             .map(drop)
+    }
+
+    /// The names of the bot's skills that are switched off, by name.
+    pub fn skills_off(&self, bot: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT name FROM skills_off WHERE bot = ?1 ORDER BY name")?;
+        stmt.query_map([bot], |r| r.get(0))?.collect()
+    }
+
+    /// Switches the skill `name` of `bot` off or on again.
+    pub fn set_skill_off(&self, bot: &str, name: &str, off: bool) -> Result<()> {
+        if off {
+            self.0.execute(
+                "INSERT OR IGNORE INTO skills_off(bot, name) VALUES (?1, ?2)",
+                [bot, name],
+            )?;
+        } else {
+            self.0.execute(
+                "DELETE FROM skills_off WHERE bot = ?1 AND name = ?2",
+                [bot, name],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn delete_connector(&self, bot: &str, name: &str) -> Result<bool> {

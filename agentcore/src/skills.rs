@@ -39,9 +39,11 @@ fn found(folder: &Path, named: &Path) -> Vec<(proto::skills::Skill, String)> {
 
 /// The part of the system prompt about skills; empty when the bot has none. `named`: the
 /// folder the skills are named under; empty when `folder` is where the tools work. `more`:
-/// other folders with a `skills/` (a workplace's), named by their full paths.
-pub fn prompt(folder: &Path, named: &Path, more: &[PathBuf]) -> String {
+/// other folders with a `skills/` (a workplace's), named by their full paths. `off`: names of
+/// the bot's own skills left out.
+pub fn prompt(folder: &Path, named: &Path, more: &[PathBuf], off: &[String]) -> String {
     let mut found = found(folder, named);
+    found.retain(|(skill, _)| !off.contains(&skill.name));
     for other in more {
         found.extend(self::found(other, other));
     }
@@ -77,7 +79,7 @@ mod tests {
     fn installed_skills_are_listed_by_name_with_where_to_read_them() {
         let folder = std::env::temp_dir().join(format!("agentcore-skills-{}", std::process::id()));
         let _ = fs::remove_dir_all(&folder);
-        let prompt = |folder: &Path| prompt(folder, Path::new(""), &[]);
+        let prompt = |folder: &Path| prompt(folder, Path::new(""), &[], &[]);
         assert_eq!(prompt(&folder), "");
         let skill = |name: &str, text: &str| {
             fs::create_dir_all(folder.join(DIR).join(name)).unwrap();
@@ -117,12 +119,19 @@ mod tests {
             "---\nname: w-skill\ndescription: For W.\n---\nDo W.",
         )
         .unwrap();
-        let text = super::prompt(&folder, Path::new(""), std::slice::from_ref(&other));
+        let text = super::prompt(&folder, Path::new(""), std::slice::from_ref(&other), &[]);
         assert!(
             text.ends_with(&format!(
                 "\n- b-skill (skills/b-skill/SKILL.md): For B.\n- w-skill ({}/skills/w-skill/SKILL.md): For W.",
                 other.display()
             )),
+            "{text}"
+        );
+        // A skill that is off is not listed.
+        let off = ["b-skill".to_owned()];
+        let text = super::prompt(&folder, Path::new(""), &[], &off);
+        assert!(
+            text.contains("a-skill") && !text.contains("b-skill"),
             "{text}"
         );
         fs::remove_dir_all(&folder).unwrap();

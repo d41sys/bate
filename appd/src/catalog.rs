@@ -25,6 +25,9 @@ const LARGEST: u64 = 200 << 20;
 pub struct Entry {
     pub name: String,
     pub description: String,
+    /// Who says they made it: a claim in the list, which nothing checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     pub version: String,
     pub url: String,
     pub size: u64,
@@ -50,6 +53,9 @@ fn parse(text: &str) -> Result<Vec<Entry>, String> {
         check_connector_name(&e.name).map_err(&at)?;
         workplaces::line("version", &e.version, 40).map_err(&at)?;
         workplaces::line("description", &e.description, 500).map_err(&at)?;
+        if let Some(author) = &e.author {
+            proto::skills::check_author(author).map_err(&at)?;
+        }
         workplaces::line("url", &e.url, 2000).map_err(&at)?;
         workplaces::host_of(&e.url).map_err(|_| at("`url` must be an https address".into()))?;
         if e.size == 0 || e.size > LARGEST {
@@ -201,6 +207,14 @@ mod tests {
         assert!(bad("\"size\":5", "\"size\":0"));
         assert!(bad(&sha, "ABC"));
         assert!(bad("\"d\"", "\"\""));
+        let author = |a: &str| entry().replace("\"d\"", &format!("\"d\",\"author\":{a}"));
+        assert_eq!(
+            parse(&author("\"Ada L.\"")).unwrap()[0].author.as_deref(),
+            Some("Ada L.")
+        );
+        for bad in ["\"\"", "\"a\\nb\"", &format!("\"{}\"", "x".repeat(101))] {
+            assert!(parse(&author(bad)).is_err(), "{bad}");
+        }
         assert!(parse(r#"{"workplaces":[{"name":"a"}]}"#).is_err());
         let twice = format!(r#"{{"workplaces":[{one},{one}]}}"#);
         assert!(parse(&twice).unwrap_err().contains("twice"));

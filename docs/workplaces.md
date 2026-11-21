@@ -33,6 +33,7 @@ my-workplace/
 | `name` | Required. The name of the workplace and of the connector its program is: 1 to 40 characters of `a-z`, `0-9`, `_` and `-`, without `__`. Its tools reach the bots as `<name>__<tool>`. |
 | `version` | Required. One line, at most 40 characters. Bate shows it and does not compare versions. |
 | `description` | Optional. One line, at most 500 characters. |
+| `author` | Optional. Who says they made it: one line, at most 100 characters. Bate shows it as "By … (not checked)": it is a claim in the file. |
 | `program.command` | Required. A path inside the workplace's folder (no leading `/`, no `..`), which must be there and be runnable, or a bare name such as `python3` that is looked up on the `PATH` Bate runs with. |
 | `program.args` | Optional list of arguments. A relative path in them starts in the workplace's folder. |
 | `needs.folders`, `needs.hosts`, `needs.commands` | Optional lists (at most 50 entries of one line, 200 characters each): the folders, network hosts and commands the workplace uses. The window shows them before a person switches the workplace on, and Bate stores them. Bate enforces the hosts: the program reaches no network host but those, and cannot widen them (see Network below). |
@@ -116,6 +117,7 @@ Bate's own list of workplaces is the file `catalog/workplaces.json` in this repo
 |---|---|
 | `name` | The workplace's `name` (rules as in `workplace.json`), different for each entry. |
 | `description` | One line, at most 500 characters. |
+| `author` | Optional. One line, at most 100 characters: a claim of the list, shown as not checked (the `author` of the `workplace.json` inside is shown too, when the archive is looked at). |
 | `version` | One line, at most 40 characters: the `version` of the `workplace.json` inside. |
 | `url` | `https://…` (or `http://127.0.0.1…`, to this Mac) of a `.tar.gz` of the workplace's folder: `workplace.json` and the rest at the top of the archive. At most 5 redirects are followed. |
 | `size`, `sha256` | The archive's size in bytes (1 to 200 MiB) and SHA-256 (64 lowercase hex digits). |

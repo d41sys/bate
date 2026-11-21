@@ -1,5 +1,5 @@
 import { type ComponentProps, useEffect, useState } from "react";
-import { each, madeBy, matches } from "./addons.ts";
+import { byLine, each, madeBy, matches } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
@@ -68,6 +68,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
       title: `Install ${m.name} ${m.version}`,
       about: m.description,
       maker: madeBy.folder,
+      author: m.author,
       facts: [`Program: ${[m.program.command, ...m.program.args].join(" ")}`, "Installing one with the name of one that is installed replaces it, unless a project has it on."],
       may: needsLines({ manifest: m }),
       agree,
@@ -99,6 +100,8 @@ export function Workplaces({ projects }: { projects: Project[] }) {
       title: updating ? `Update ${entry.name} to ${preview.entry.version}` : `Install ${entry.name} ${preview.entry.version}`,
       about: entry.description,
       maker: madeBy.catalog,
+      // The archive's own file is what installs; the list's claim stands in when that has none.
+      author: preview.manifest.author ?? preview.entry.author,
       facts: [`Archive of ${sizeText(entry.size)}, pinned by its hash`, ...(updating ? [`Installed now: ${updating}. What follows is only what it newly needs.`] : [])],
       may: newlyLines(preview.newly),
       agree: downloadText(preview),
@@ -141,6 +144,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
             <div className="what">
               <strong>{w.name}</strong>
               <small>{w.version}{w.manifest?.description ? ` · ${w.manifest.description}` : ""}</small>
+              {w.manifest?.author && <small>{byLine(w.manifest.author)}</small>}
               {w.error && <small className="error" role="alert">{w.error}</small>}
               {w.changed && !w.error && <small className="error" role="alert">Its files changed since they were approved, so it is off in every project until you approve it.</small>}
             </div>
@@ -200,6 +204,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
                   <strong>{e.name}</strong>
                   <small>{e.version} · {sizeText(e.size)}{e.installedVersion ? ` · Installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>
                   <small>{e.description}</small>
+                  {e.author && <small>{byLine(e.author)}</small>}
                 </div>
                 {(!e.installedVersion || e.update) && (
                   <div className="actions">
