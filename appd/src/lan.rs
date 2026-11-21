@@ -126,12 +126,20 @@ impl Lan {
             devices,
             ..State::default()
         })));
-        if dir().join("on").exists()
-            && let Err(e) = lan.set(true)
+        lan.resume();
+        lan
+    }
+
+    /// Serves if the user left it on and it is not serving: at start, and again when the
+    /// Keychain, which held back the certificate's key, has been answered.
+    pub fn resume(self: &Arc<Self>) {
+        let serving = lock(&self.0).on.is_some();
+        if !serving
+            && dir().join("on").exists()
+            && let Err(e) = self.set(true)
         {
             log!("the page for other devices is off: {e}");
         }
-        lan
     }
 
     /// What the window shows: whether it is on, where, the certificate, and the devices.
@@ -461,6 +469,8 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "act_surface",
     "watch_surfaces",
     "get_chatgpt",
+    "get_keychain",
+    "ask_keychain",
     "sign_in_chatgpt",
     "sign_out_chatgpt",
     "open_helper_settings",

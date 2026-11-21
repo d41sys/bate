@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Devices } from "./Devices.tsx";
 import { Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
 import { Helper } from "./Helper.tsx";
+import { KeychainNotice } from "./Keychain.tsx";
 import { Updates } from "./Updates.tsx";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
 
@@ -51,10 +52,11 @@ function ChatGpt() {
   const [signedIn, setSignedIn] = useState<boolean>();
   const { run, fail, error } = useSaves();
   useEffect(() => {
-    const load = () => request<{ signedIn: boolean }>("get_chatgpt").then((c) => setSignedIn(c.signedIn), (e: Error) => fail("load", e.message));
+    // `run`: a failure shows, and a read that works after it takes the failure away (macOS answered).
+    const load = () => void run("load", request<{ signedIn: boolean }>("get_chatgpt").then((c) => setSignedIn(c.signedIn)));
     load();
     return listen((frame) => {
-      if (frame.type !== "chatgpt_changed") return;
+      if (frame.type !== "chatgpt_changed" && frame.type !== "keychain_changed") return;
       if (typeof frame.error === "string") fail("chatgpt", frame.error);
       load();
     });
@@ -63,6 +65,7 @@ function ChatGpt() {
     <Group id="settings-chatgpt" title="ChatGPT">
       {signedIn === undefined && !error("load") && <p className="note">Loading…</p>}
       <Problem text={error("load")} />
+      <KeychainNotice />
       {signedIn === true && (
         <Setting title="Signed in" hint="Every bot runs on your ChatGPT plan, not on the model server.">
           <button onClick={() => run("chatgpt", request("sign_out_chatgpt"))}>Sign out</button>

@@ -642,8 +642,9 @@ fn channel_account(bot: &str, kind: &str) -> String {
 }
 
 fn kc<T>(r: keychain::Result<T>) -> Result<T> {
-    // No error variant fits better: this one only carries the message on.
-    r.map_err(|e| rusqlite::Error::ToSqlConversionFailure(format!("keychain: {e}").into()))
+    // No error variant fits better: this one only carries the keychain's error on, for
+    // `core::internal` to find.
+    r.map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
 }
 
 /// Keeps `secret` under `account` (an empty one forgets it), and gives what must go in its
@@ -656,6 +657,9 @@ fn kc<T>(r: keychain::Result<T>) -> Result<T> {
 fn keep(account: &str, secret: &str) -> Result<Option<String>> {
     match keychain::put(account, secret) {
         Ok(()) => Ok(None),
+        // Only a removal waits (see `keychain::put`): it is not done while it waits, else the
+        // item would stay and be read again as if it had never been signed out.
+        Err(e @ (keychain::Error::Waiting | keychain::Error::Refused)) => kc(Err(e)),
         Err(e) => {
             log!("{account} stays in app.db: the Keychain did not keep it: {e}");
             Ok(Some(secret.to_owned()).filter(|s| !s.is_empty()))
@@ -944,6 +948,13 @@ impl Store {
                 let token = secret(&channel_account(&bot, &kind), legacy)?;
                 Ok((bot, kind, token))
             })
+            .collect()
+    }
+
+    /// Every bot's channels, as `(bot, kind)`, without their tokens.
+    pub fn channel_keys(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.0.prepare_cached("SELECT bot, kind FROM channels")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect()
     }
 

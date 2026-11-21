@@ -1128,6 +1128,202 @@ fn a_renewed_chatgpt_sign_in_is_not_lost_when_the_keychain_refuses_it() {
     assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": true}));
 }
 
+/// A service whose Keychain asks (a debug build's `APPD_KEYCHAIN_ASK`) about each account whose
+/// file in `<home>/asks` is missing, as macOS does about a secret it has not been told to allow.
+/// Writing that file is the person saying yes, and `<account>.no` saying no.
+fn start_asking(home: &Path, extra: impl FnOnce(&mut Command)) -> Service {
+    fs::create_dir_all(home.join("asks")).unwrap();
+    Service::start_with(home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_KEYCHAIN_ASK", home.join("asks"));
+        extra(c);
+    })
+}
+
+fn say_yes(home: &Path, account: &str) {
+    fs::write(home.join("asks").join(account), "").unwrap();
+}
+
+fn forget_yes(home: &Path, account: &str) {
+    fs::remove_file(home.join("asks").join(account)).unwrap();
+}
+
+/// How many children asked about `account`.
+fn asked(home: &Path, account: &str) -> usize {
+    let note = home.join("asks").join(format!("{account}.started"));
+    fs::read_to_string(note).map_or(0, |t| t.lines().count())
+}
+
+/// A model server key kept while the account answers, then asked about by macOS.
+fn provider_key_that_asks(home: &Path, w: &mut Window) {
+    say_yes(home, "provider");
+    w.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:9/v1", "key": "sk-asked"}),
+    );
+    assert!(!db_holds(home, "sk-asked"), "the key is in app.db");
+    forget_yes(home, "provider");
+}
+
+#[test]
+fn a_secret_macos_would_ask_about_is_waited_for_in_a_child_while_the_service_goes_on() {
+    let home = home("keychain-asks");
+    let _service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    provider_key_that_asks(&home, &mut w);
+
+    // The read fails at once, not when the person has answered; others go on.
+    assert_eq!(
+        refused(&mut w, "get_provider", json!({})),
+        "keychain_waiting"
+    );
+    assert_eq!(w.ok("list_bots", json!({}))["bots"], json!([]));
+    eventually("the child to ask", || asked(&home, "provider") == 1);
+    // Asking again does not start another child.
+    assert_eq!(
+        refused(&mut w, "get_provider", json!({})),
+        "keychain_waiting"
+    );
+    assert_eq!(w.ok("get_keychain", json!({})), json!({"refused": false}));
+
+    say_yes(&home, "provider");
+    w.wait_for(|f| f["type"] == "keychain_changed");
+    // The key is as it was: not absent, not blank.
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], true);
+    assert_eq!(asked(&home, "provider"), 1);
+}
+
+#[test]
+fn a_refusal_is_remembered_and_asked_again_only_on_request() {
+    let home = home("keychain-refused");
+    let _service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    provider_key_that_asks(&home, &mut w);
+    assert_eq!(
+        refused(&mut w, "get_provider", json!({})),
+        "keychain_waiting"
+    );
+    eventually("the child to ask", || asked(&home, "provider") == 1);
+
+    fs::write(home.join("asks/provider.no"), "").unwrap();
+    w.wait_for(|f| f["type"] == "keychain_changed");
+    assert_eq!(w.ok("get_keychain", json!({})), json!({"refused": true}));
+    // No dialog loop: it stays refused, and no child is started for it.
+    for _ in 0..2 {
+        assert_eq!(
+            refused(&mut w, "get_provider", json!({})),
+            "keychain_refused"
+        );
+    }
+    assert_eq!(asked(&home, "provider"), 1);
+
+    fs::remove_file(home.join("asks/provider.no")).unwrap();
+    w.ok("ask_keychain", json!({}));
+    assert_eq!(w.ok("get_keychain", json!({})), json!({"refused": false}));
+    eventually("the child to ask again", || asked(&home, "provider") == 2);
+    say_yes(&home, "provider");
+    w.wait_for(|f| f["type"] == "keychain_changed");
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], true);
+}
+
+#[test]
+fn a_secret_macos_would_ask_about_is_kept_in_app_db_until_it_can_be_moved() {
+    let home = home("keychain-asks-write");
+    let service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    w.ok(
+        "set_provider",
+        json!({"url": "http://127.0.0.1:9/v1", "key": "sk-written"}),
+    );
+    // A write does not wait for the person: the key is in use from app.db, and asks nothing.
+    assert!(db_holds(&home, "sk-written"));
+    assert_eq!(w.ok("get_provider", json!({}))["hasKey"], true);
+    assert_eq!(asked(&home, "provider"), 0);
+
+    drop((w, service));
+    say_yes(&home, "provider");
+    let _service = start_asking(&home, |_| {});
+    assert_eq!(
+        Window::connect(&home).ok("get_provider", json!({}))["hasKey"],
+        true
+    );
+    assert!(!db_holds(&home, "sk-written"), "the key was not moved");
+}
+
+#[test]
+fn a_chatgpt_sign_in_macos_would_ask_about_is_neither_ended_nor_lost_while_it_waits() {
+    let openai = ChatGpt::start();
+    let home = home("keychain-asks-chatgpt");
+    let _service = start_asking(&home, |c| {
+        c.env("BATE_CHATGPT_AUTH", &openai.base)
+            .env("BATE_CHATGPT_API", format!("{}/v1", openai.base));
+    });
+    let mut w = Window::connect(&home);
+    for account in ["chatgpt.access", "chatgpt.refresh"] {
+        say_yes(&home, account);
+    }
+    sign_in_chatgpt(&mut w, &openai);
+    forget_yes(&home, "chatgpt.access");
+    forget_yes(&home, "chatgpt.refresh");
+
+    // Neither signing out nor looking is answered as if there were no sign-in.
+    for command in ["sign_out_chatgpt", "get_chatgpt"] {
+        assert_eq!(refused(&mut w, command, json!({})), "keychain_waiting");
+    }
+    assert!(openai.seen("POST /oauth/revoke").is_empty());
+    say_yes(&home, "chatgpt.refresh");
+    say_yes(&home, "chatgpt.access");
+    w.wait_for(|f| f["type"] == "keychain_changed");
+    assert_eq!(w.ok("get_chatgpt", json!({})), json!({"signedIn": true}));
+}
+
+#[test]
+fn a_keychain_file_that_cannot_be_unlocked_is_a_plain_error_and_asks_nobody() {
+    use security_framework::os::macos::keychain::CreateOptions;
+    let home = home("keychain-wrong-password");
+    // The service opens its file with a password of its own: this one has another (the home's path).
+    CreateOptions::new()
+        .password(&home.display().to_string())
+        .create(home.join("keychain"))
+        .unwrap();
+    let _service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    w.ok("set_provider", json!({"url": "http://127.0.0.1:9/v1"}));
+    assert_eq!(refused(&mut w, "get_provider", json!({})), "internal");
+    assert_eq!(w.ok("get_keychain", json!({})), json!({"refused": false}));
+    assert_eq!(asked(&home, "provider"), 0);
+}
+
+#[test]
+fn a_channel_whose_token_macos_would_ask_about_starts_once_the_person_has_answered() {
+    let (home, telegram) = (home("keychain-asks-channel"), Telegram::start());
+    let start = || {
+        start_asking(&home, |c| {
+            c.env("BATE_TELEGRAM_API", &telegram.base);
+        })
+    };
+    let service = start();
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let account = format!("channel:{bot}:telegram");
+    say_yes(&home, &account);
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "telegram", "token": Telegram::TOKEN}),
+    );
+    drop((w, service));
+
+    forget_yes(&home, &account);
+    let _service = start();
+    let mut w = Window::connect(&home);
+    eventually("the child to ask", || asked(&home, &account) == 1);
+    // The token is not read, so no reader is there to answer a stranger yet.
+    say_yes(&home, &account);
+    w.wait_for(|f| f["type"] == "keychain_changed");
+    telegram.say(7, "hello?");
+    assert!(telegram.heard(7, 1).contains("private"));
+}
+
 #[test]
 fn secrets_given_to_the_service_are_kept_in_the_keychain_and_never_in_app_db() {
     let (home, telegram) = (home("keychain-new"), Telegram::start());
