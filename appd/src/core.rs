@@ -27,6 +27,7 @@ use crate::channels::{self, Note};
 use crate::chatgpt;
 use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
+use crate::keychain;
 use crate::proxy::{self, Upstream};
 use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
@@ -76,6 +77,8 @@ pub enum Msg {
         listed: Result<Vec<(String, Option<usize>)>, String>,
     },
     ChatGpt(ChatGptNews),
+    /// A child that asked macOS about a secret has ended, with a yes or a no.
+    KeychainAsked,
     /// Time to read the update feed.
     UpdateDue,
     /// What came of reading the feed: a release staged, nothing new, or why not.
@@ -232,6 +235,16 @@ type Refusal = (&'static str, String);
 type Reply = Result<Option<Value>, Refusal>;
 
 fn internal(e: rusqlite::Error) -> Refusal {
+    // The keychain's answers (`store::kc` carries them) have codes of their own.
+    if let rusqlite::Error::ToSqlConversionFailure(inner) = &e
+        && let Some(k) = inner.downcast_ref::<keychain::Error>()
+    {
+        match k {
+            keychain::Error::Waiting => return ("keychain_waiting", k.to_string()),
+            keychain::Error::Refused => return ("keychain_refused", k.to_string()),
+            keychain::Error::Os(_) => {}
+        }
+    }
     log!("store: {e}");
     ("internal", e.to_string())
 }
@@ -700,17 +713,6 @@ impl Core {
             }
         }
         link_work(&store);
-        let mut readers = HashMap::new();
-        let stored = store.channels().unwrap_or_else(|e| {
-            log!("channels not read: {e}");
-            Vec::new()
-        });
-        for (bot, kind, token) in stored {
-            if let Some(kind) = channels::KINDS.into_iter().find(|k| *k == kind) {
-                let reader = channels::start(&bot, kind, &token, tx.clone());
-                readers.insert((bot, kind), reader);
-            }
-        }
         let update_key = update::public_key();
         if update_key.is_some() {
             let tx = tx.clone();
@@ -720,7 +722,7 @@ impl Core {
                 }
             });
         }
-        Core {
+        let mut core = Core {
             update_key,
             update: Updates::default(),
             installing: false,
@@ -729,7 +731,7 @@ impl Core {
             net_keys: HashMap::new(),
             browser_proxies: HashMap::new(),
             lan,
-            channels: readers,
+            channels: HashMap::new(),
             channel_errors: HashMap::new(),
             chat_codes: HashMap::new(),
             sign_ins: HashMap::new(),
@@ -748,6 +750,33 @@ impl Core {
             connector_reports: HashMap::new(),
             counter: 0,
             next_due: 0,
+        };
+        core.start_channels();
+        core
+    }
+
+    /// Starts the reader of every channel that has none. A token the Keychain does not give yet
+    /// is left: it is tried again when the person has answered macOS (`Msg::KeychainAsked`).
+    fn start_channels(&mut self) {
+        let keys = self.store.channel_keys().unwrap_or_else(|e| {
+            log!("channels not read: {e}");
+            Vec::new()
+        });
+        for (bot, kind) in keys {
+            let Some(kind) = channels::KINDS.into_iter().find(|k| *k == kind) else {
+                continue;
+            };
+            if self.channels.contains_key(&(bot.clone(), kind)) {
+                continue;
+            }
+            match self.store.channel(&bot, kind) {
+                Ok(Some(token)) => {
+                    let reader = channels::start(&bot, kind, &token, self.tx.clone());
+                    self.channels.insert((bot, kind), reader);
+                }
+                Ok(None) => {}
+                Err(e) => log!("bot {bot}: {kind} token not read: {e}"),
+            }
         }
     }
 
@@ -995,6 +1024,13 @@ impl Core {
                 }
             }
             Msg::ChatGpt(news) => self.on_chatgpt(news),
+            Msg::KeychainAsked => {
+                // What was not started for want of a secret is started now; a turn that failed
+                // for it is not replayed: the window sends it again.
+                self.start_channels();
+                self.lan.resume();
+                self.broadcast(&json!({"type": "keychain_changed"}));
+            }
             Msg::UpdateDue => self.start_check(),
             Msg::Update(result) => self.on_update(result),
             Msg::WorkplaceProgress { name, done, total } => self.broadcast(
@@ -2388,6 +2424,12 @@ impl Core {
                 self.update.install = true;
                 self.broadcast(&json!({"type": "update_changed"}));
                 Ok(Some(self.update_info()))
+            }
+            "get_keychain" => Ok(Some(json!({"refused": keychain::refused()}))),
+            "ask_keychain" => {
+                keychain::ask_again();
+                self.broadcast(&json!({"type": "keychain_changed"}));
+                Ok(Some(json!({})))
             }
             "get_chatgpt" => {
                 let saved = self.store.chatgpt().map_err(internal)?;
@@ -4861,11 +4903,16 @@ impl Core {
                 let still = self
                     .oauth_connector(&bot, &name)
                     .is_ok_and(|(_, url)| url == resource);
-                let had = self.store.tokens(&bot, &name).ok().flatten();
+                let read = self.store.tokens(&bot, &name);
+                // Not read is not signed out: a renewal replaced a refresh token that cannot be
+                // compared now, and is kept (in `app.db`) rather than lost.
+                let unread = read.is_err();
+                let had = read.ok().flatten();
                 // A renewal takes the place of the tokens it began with only: the user may
                 // have signed out, or in again, since.
-                let current =
-                    after.is_none_or(|after| had.as_ref().is_some_and(|had| had.access == after));
+                let current = after.is_none_or(|after| {
+                    unread || had.as_ref().is_some_and(|had| had.access == after)
+                });
                 if !still || !current {
                     return;
                 }
@@ -5031,7 +5078,10 @@ impl Core {
     }
 
     fn on_chatgpt(&mut self, news: ChatGptNews) {
-        let now = self.store.chatgpt().unwrap_or_else(|e| {
+        let read = self.store.chatgpt();
+        // Not read is not signed out: nothing below may act on it as if it were.
+        let unread = read.is_err();
+        let now = read.unwrap_or_else(|e| {
             log!("the ChatGPT sign-in cannot be read: {e}");
             None
         });
@@ -5043,7 +5093,7 @@ impl Core {
         match news {
             // Never over a sign-in: registration is news only while there is none.
             ChatGptNews::Registered(saved) => {
-                if now.is_none() {
+                if now.is_none() && !unread {
                     keep(self, &saved);
                 }
             }
@@ -5066,6 +5116,13 @@ impl Core {
                 // neither kept nor held against the sign-in there is now.
                 let now = now.filter(|n| n.signed_in() && n.refresh_token == used);
                 let answer: Result<chatgpt::Saved, String> = match (result, now) {
+                    // Each renewal replaces the refresh token: a new one is kept even when
+                    // the old can no longer be read to compare, else it would be lost.
+                    (Ok(new), None) if unread => {
+                        keep(self, &new);
+                        Ok(new)
+                    }
+                    (Err(failed), None) if unread => Err(failed.why),
                     (_, None) => Err("the ChatGPT sign-in changed: send it again".into()),
                     (Ok(new), Some(_)) => {
                         keep(self, &new);
@@ -5122,7 +5179,8 @@ impl Core {
         }
         if let Event::Token { request } = &ev {
             // A ChatGPT sign-in comes before a model server.
-            match self.store.chatgpt() {
+            // A sign-in that cannot be read is no sign-in to pass over: the bot is told why.
+            let unread = match self.store.chatgpt() {
                 Ok(Some(saved)) if saved.signed_in() => {
                     let ask = PlanAsk::Token {
                         bot: bot.to_owned(),
@@ -5130,10 +5188,11 @@ impl Core {
                     };
                     return self.ask_chatgpt(ask, saved);
                 }
-                Ok(_) => {}
-                Err(e) => log!("the ChatGPT sign-in cannot be read: {e}"),
-            }
+                Ok(_) => None,
+                Err(e) => Some(internal(e).1),
+            };
             let (url, key, error) = match self.provider() {
+                _ if unread.is_some() => (None, None, unread),
                 Ok((None, ..)) => (
                     None,
                     None,

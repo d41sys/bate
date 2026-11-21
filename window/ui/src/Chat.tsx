@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
 import { add, aim, build, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
@@ -502,6 +503,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         </div>
       ))}
       {error && <p className="error" role="alert">{error}</p>}
+      <KeychainNotice />
       {signIn && (
         <p className="banner" role="status">
           {bot.name} has no model to answer with yet. <button type="button" onClick={signIn}>Sign in</button>

@@ -55,6 +55,8 @@ const USAGE: &str = "usage:
   appd unregister   stop the service and remove its registration
   appd gate chatgpt [model]
                     sign in to ChatGPT in the browser, send one request, print the reply
+  appd keychain ask <account>
+                    read one secret with macOS's questions on; the service starts this itself
   appd update keygen
                     print a new key for signing releases (a private and a public half)
   appd update sign <archive> <version> [url]
@@ -66,6 +68,13 @@ fn main() -> ExitCode {
     let result = match (arg.as_deref(), what.as_deref()) {
         (None, _) => serve(),
         (Some("gate"), Some("chatgpt")) => gate::chatgpt(args.next()),
+        (Some("keychain"), Some("ask")) => match args.next() {
+            Some(account) => keychain::ask(&account).map_err(io::Error::other),
+            None => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        },
         (Some("update"), Some("keygen")) => update::keygen(),
         (Some("update"), Some("sign")) => update::sign(args.next(), args.next(), args.next()),
         (Some("launch"), _) => launch::start(),
@@ -101,13 +110,16 @@ fn serve() -> io::Result<()> {
     // Only the instance that holds the lock owns (and rotates) the log file.
     log::init(&paths::logs())?;
     skills::sweep();
+    let (tx, rx) = mpsc::channel();
+    // Before anything reads a secret: the service never waits for a question of macOS.
+    let ended = tx.clone();
+    keychain::serve(move || drop(ended.send(core::Msg::KeychainAsked)));
     let store = store::Store::open(&paths::db()).map_err(io::Error::other)?;
     let socket = paths::socket();
     // The lock is ours, so a socket file left here is stale.
     let _ = fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-    let (tx, rx) = mpsc::channel();
     let accept_tx = tx.clone();
     thread::spawn(move || clients::accept_loop(listener, accept_tx));
     // The connectors' programs must not outlive the service.
