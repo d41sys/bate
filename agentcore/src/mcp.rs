@@ -69,13 +69,13 @@ impl Drop for Link {
 impl Servers {
     /// Makes the running servers match `connectors`: stops those removed, changed or disabled, and
     /// starts the new enabled ones. A connector that fails is reported on stderr (the service log);
-    /// the ones that loaded are returned with their tool counts, for the service to be told.
+    /// the ones that loaded are returned with the model's names for their tools, for the service to be told.
     pub fn sync(
         &mut self,
         connectors: &[Connector],
         dir: &Path,
         control: &Control,
-    ) -> Vec<(String, usize)> {
+    ) -> Vec<(String, Vec<String>)> {
         // A server that has stopped is forgotten here, so it is started again below.
         self.0.retain_mut(|(known, server)| {
             connectors.contains(known) && server.as_mut().is_none_or(Server::alive)
@@ -117,7 +117,8 @@ impl Servers {
                     }
                     free
                 });
-                loaded.push((connector.name.clone(), server.tools.len()));
+                let names = server.tools.iter().map(|t| t.exposed.clone()).collect();
+                loaded.push((connector.name.clone(), names));
             }
             let server = server
                 .map_err(|e| eprintln!("connector {}: {e}", connector.name))
@@ -134,8 +135,11 @@ impl Servers {
             .flat_map(|(c, server)| server.tools.iter().map(move |t| (c, t)))
     }
 
-    pub fn definitions(&self) -> impl Iterator<Item = &Value> {
-        self.tools().map(|(_, t)| &t.definition)
+    /// What the model is offered: every tool but the `blocked` ones (by the model's name).
+    pub fn definitions<'a>(&'a self, blocked: &'a [String]) -> impl Iterator<Item = &'a Value> {
+        self.tools()
+            .filter(|(_, t)| !blocked.contains(&t.exposed))
+            .map(|(_, t)| &t.definition)
     }
 
     /// The approval question for `tool`, if it is one of ours.

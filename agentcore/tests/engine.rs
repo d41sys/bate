@@ -15,6 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Longer than any card used to show.
+macro_rules! long {
+    () => {
+        "a long text, which a person must be able to read to the end before saying yes: it goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on, to the very last word"
+    };
+}
+
 const WAIT: Duration = Duration::from_secs(10);
 
 /// Serves one scripted streaming reply per request, in order, and records each request body.
@@ -1003,11 +1010,15 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
     let loaded: Vec<_> = asked
         .iter()
         .filter_map(|e| match e {
-            Event::ConnectorLoaded { name, tools } => Some((name.as_str(), *tools)),
+            Event::ConnectorLoaded { name, names } => Some((name.as_str(), names.as_slice())),
             _ => None,
         })
         .collect();
-    assert_eq!(loaded, [("fake", 1)], "{asked:?}");
+    assert_eq!(
+        loaded,
+        [("fake", ["fake__echo".to_owned()].as_slice())],
+        "{asked:?}"
+    );
     let events = engine.until(is_turn_end);
     assert!(
         matches!(&events[0], Event::ToolEnd { output, is_error: false, .. } if output == "echoed"),
@@ -1055,6 +1066,48 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
     assert_eq!(engine.request(none), None);
     engine.exchange("n3", "bye");
     assert!(!tool_names(&model, 4).iter().any(|n| n.starts_with("fake")));
+}
+
+#[test]
+fn a_blocked_connector_tool_is_not_offered_and_a_call_to_it_is_refused_unasked() {
+    let dir = workdir("mcp-blocked");
+    let script = dir.join("fake-mcp");
+    fs::write(&script, FAKE_MCP).unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let model = Model::serve(vec![
+        vec![call("c1", "fake__echo", json!({"text": "hi"}))],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let names = vec!["fake__echo".to_owned()];
+    assert_eq!(
+        engine.request(Op::BlockedTools {
+            names: names.clone()
+        }),
+        None
+    );
+    let connectors = vec![connector("fake", stdio(&script))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+
+    engine.prompt_as("n1", "echo hi");
+    let events = engine.until(is_turn_end);
+    // Still reported, so the window can list it and unblock it.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ConnectorLoaded { names: n, .. } if *n == names)),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(is_question), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ToolEnd { is_error: true, .. })),
+        "{events:?}"
+    );
+    assert!(!tool_names(&model, 0).contains(&"fake__echo".to_owned()));
+    assert!(!dir.join("calls.log").exists());
 }
 
 /// Reads one HTTP request: its header block in lower case, and its JSON body.
@@ -1757,6 +1810,39 @@ fn sub_agents_nest_five_deep_and_no_deeper() {
 }
 
 #[test]
+fn the_card_for_a_message_to_another_bot_has_the_whole_message() {
+    let dir = workdir("message-long");
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "message_bot",
+            json!({"bot": "scout", "text": long!()}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let peers = vec![Peer {
+        id: "b2".into(),
+        name: "Scout".into(),
+        lead: false,
+    }];
+    assert_eq!(
+        engine.request(Op::Peers {
+            peers,
+            leads: false
+        }),
+        None
+    );
+    engine.prompt("ask around");
+    let events = engine.until(is_question);
+    let Some(Event::Question { title, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(title, concat!("Message Scout: ", long!()));
+}
+
+#[test]
 fn a_bot_messages_another_bot_after_asking_and_gets_its_reply_or_why_there_is_none() {
     let dir = workdir("message");
     let tell = |id: &str| {
@@ -2047,6 +2133,11 @@ fn each_new_browser_action_is_asked_about_as_the_browser_with_what_it_will_do() 
         (
             json!({"action": "wait", "seconds": 5}),
             "Browser: wait 5 seconds",
+        ),
+        // The card shows all of what is typed.
+        (
+            json!({"action": "type", "element": 2, "text": long!()}),
+            concat!("Browser: type into element 2: ", long!()),
         ),
     ];
     let mut replies: Vec<_> = actions

@@ -40,6 +40,8 @@ pub struct Turn {
     pub skill_folders: Vec<PathBuf>,
     /// Names of the bot's own skills that are off: not offered to the model.
     pub skills_off: Vec<String>,
+    /// Connector tools (by the model's name) that are blocked: not offered, and refused if called.
+    pub blocked_tools: Vec<String>,
     /// What the user told this bot to be and do.
     pub instructions: String,
     /// Tool rounds a turn may take.
@@ -110,10 +112,10 @@ const PLAN: &str = "plan";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
 /// and `message_bot` when there is a bot to message.
-fn tool_list(mcp: &Servers, depth: usize, peers: bool) -> Value {
+fn tool_list(mcp: &Servers, blocked: &[String], depth: usize, peers: bool) -> Value {
     let mut tools = tools::definitions();
     if let Value::Array(list) = &mut tools {
-        list.extend(mcp.definitions().cloned());
+        list.extend(mcp.definitions(blocked).cloned());
         list.push(json!({"type": "function", "function": {"name": BROWSER,
             "description": "Use your own web browser, which the user can watch. `open` a web address, `look` at the page, `click` or `type` into one of the numbered elements that every result lists, `scroll` up or down by one screen, `press` a key (optionally on an element), `select` an option of a dropdown element by its text, go `back` or `forward`, `reload` the page, or `wait` a few seconds for a slow page. Each result is the page as it is after the action: its title, address, text and elements. If the user takes the browser over, you wait until they hand it back.",
             "parameters": {"type": "object", "properties": {
@@ -273,11 +275,8 @@ impl Turn {
         // Whether the conversation was already summarised for the model call that comes next.
         let mut shrunk = false;
         let system = self.system();
-        for (name, tools) in mcp.sync(&self.connectors, &self.dir, &self.control) {
-            self.out.send(&Event::ConnectorLoaded {
-                name,
-                tools: tools as u32,
-            });
+        for (name, names) in mcp.sync(&self.connectors, &self.dir, &self.control) {
+            self.out.send(&Event::ConnectorLoaded { name, names });
         }
         let tools = self.tools(mcp, 0);
         session
@@ -518,7 +517,7 @@ impl Turn {
     }
 
     fn tools(&self, mcp: &Servers, depth: usize) -> Value {
-        tool_list(mcp, depth, !self.peers.is_empty())
+        tool_list(mcp, &self.blocked_tools, depth, !self.peers.is_empty())
     }
 
     fn system(&self) -> String {
@@ -598,12 +597,11 @@ impl Turn {
             _ => return Err("`text` must say what the message is.".into()),
         };
         // Another bot acts with its own permissions, so reaching it is asked about like a
-        // connector's tool: once for this bot, whatever the message.
-        let shown: String = text.chars().take(200).collect();
+        // connector's tool: once for this bot, whatever the message. The card says all of it.
         self.allowed(
             Kind::Connector,
             format!("bot:{}", peer.id),
-            format!("Message {}: {shown}", peer.name),
+            format!("Message {}: {text}", peer.name),
         )?;
         let id = self.wait_on("m");
         self.out.send(&Event::Message {
@@ -713,6 +711,10 @@ impl Turn {
         // Every action is asked about: the service decides from the bot's permissions, and
         // asks the user where they say so. What is asked about is what then runs.
         let connector = mcp.title(tool);
+        // Not offered to the model, so a call to it is the model's own doing: refused without asking.
+        if connector.is_some() && self.blocked_tools.iter().any(|b| b == tool) {
+            return Err("This tool is blocked: the user does not allow it.".into());
+        }
         let action = match &connector {
             Some(title) => Some((Kind::Connector, tool.to_owned(), title.clone())),
             None => tools::action(tool, args),
@@ -731,10 +733,11 @@ impl Turn {
     fn browse(&self, args: &Map<String, Value>) -> Result<String, String> {
         let arg = |key: &str| {
             args.get(key).map_or(String::new(), |v| match v {
-                Value::String(text) => text.chars().take(200).collect(),
+                Value::String(text) => text.clone(),
                 other => other.to_string(),
             })
         };
+        // What the card says is all of what the page will be given: nothing is cut.
         let title = match arg("action").as_str() {
             "open" => format!("Browser: open {}", arg("url")),
             "look" => "Browser: look at the page".to_owned(),

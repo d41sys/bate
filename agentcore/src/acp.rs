@@ -287,6 +287,8 @@ impl Bridge {
             | Op::Peers { .. }
             | Op::SkillFolders { .. }
             | Op::SkillsOff { .. }
+            // The agent runs the connectors' tools itself: they do not pass through Bate to be blocked.
+            | Op::BlockedTools { .. }
             | Op::Instructions { .. }
             | Op::StepLimit { .. }
             | Op::WebSearch { .. } => respond(id, Ok(())),

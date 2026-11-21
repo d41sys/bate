@@ -230,6 +230,8 @@ CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY REFERENCES bots(id) ON D
 CREATE TABLE IF NOT EXISTS agents(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, command TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS permissions(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, level TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS grants(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, kind, target));
+CREATE TABLE IF NOT EXISTS conversation_grants(conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, kind TEXT NOT NULL, target TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(conversation, kind, target));
+CREATE TABLE IF NOT EXISTS blocked_tools(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, tool TEXT NOT NULL, PRIMARY KEY(bot, tool));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
@@ -272,6 +274,7 @@ const BOT_TABLES: [&str; 18] = [
     "agents",
     "permissions",
     "grants",
+    "blocked_tools",
     "routines",
     "routine_runs",
     "oauth",
@@ -1887,13 +1890,122 @@ impl Store {
         )? > 0)
     }
 
-    /// Removes the grants for the tools of connector `name`; returns how many.
-    pub fn delete_connector_grants(&self, bot: &str, name: &str) -> Result<usize> {
+    /// Whether an "Allow in this conversation" answer in `conversation` covers exactly this action.
+    pub fn has_conversation_grant(
+        &self,
+        conversation: &str,
+        kind: Kind,
+        target: &str,
+    ) -> Result<bool> {
+        self.0
+            .prepare_cached(
+                "SELECT 1 FROM conversation_grants WHERE conversation = ?1 AND kind = ?2 AND target = ?3",
+            )?
+            .exists(params![conversation, json(&kind), target])
+    }
+
+    pub fn put_conversation_grant(&self, conversation: &str, grant: &Grant) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO conversation_grants(conversation, kind, target, at) VALUES (?1, ?2, ?3, ?4)",
+                params![conversation, json(&grant.kind), grant.target, grant.at_ms],
+            )
+            .map(drop)
+    }
+
+    /// The grants of all of a bot's conversations, oldest first, each with its conversation's id and
+    /// name (what the person called it, else its title).
+    pub fn conversation_grants(&self, bot: &str) -> Result<Vec<(String, String, Grant)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT c.id, COALESCE(NULLIF(c.name, ''), c.title), g.kind, g.target, g.at \
+             FROM conversation_grants g JOIN conversations c ON c.id = g.conversation \
+             WHERE c.bot = ?1 ORDER BY g.at, g.target",
+        )?;
+        stmt.query_map([bot], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                Grant {
+                    kind: parse(r.get(2)?)?,
+                    target: r.get(3)?,
+                    at_ms: r.get(4)?,
+                },
+            ))
+        })?
+        .collect()
+    }
+
+    /// Removes one conversation grant; whether there was one of the bot's.
+    pub fn delete_conversation_grant(
+        &self,
+        bot: &str,
+        conversation: &str,
+        kind: Kind,
+        target: &str,
+    ) -> Result<bool> {
+        Ok(self.0.execute(
+            "DELETE FROM conversation_grants WHERE conversation = ?1 AND kind = ?2 AND target = ?3 \
+             AND conversation IN (SELECT id FROM conversations WHERE bot = ?4)",
+            params![conversation, json(&kind), target, bot],
+        )? > 0)
+    }
+
+    /// Whether the bot's connector tool `tool` (`<connector>__<tool>`) is blocked.
+    pub fn is_blocked(&self, bot: &str, tool: &str) -> Result<bool> {
+        self.0
+            .prepare_cached("SELECT 1 FROM blocked_tools WHERE bot = ?1 AND tool = ?2")?
+            .exists(params![bot, tool])
+    }
+
+    /// The bot's blocked connector tools, by name.
+    pub fn blocked_tools(&self, bot: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT tool FROM blocked_tools WHERE bot = ?1 ORDER BY tool")?;
+        stmt.query_map([bot], |r| r.get(0))?.collect()
+    }
+
+    /// Blocks or unblocks a tool. Blocked wins over an "Always" grant, which is dropped here so
+    /// that unblocking asks again.
+    pub fn set_blocked(&self, bot: &str, tool: &str, blocked: bool) -> Result<()> {
+        if blocked {
+            self.0.execute(
+                "INSERT OR IGNORE INTO blocked_tools(bot, tool) VALUES (?1, ?2)",
+                params![bot, tool],
+            )?;
+            self.delete_grant(bot, Kind::Connector, tool)?;
+        } else {
+            self.0.execute(
+                "DELETE FROM blocked_tools WHERE bot = ?1 AND tool = ?2",
+                params![bot, tool],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Forgets the blocked tools of connector `name`; returns how many.
+    pub fn delete_connector_blocked(&self, bot: &str, name: &str) -> Result<usize> {
         let prefix = format!("{name}__");
         self.0.execute(
+            "DELETE FROM blocked_tools WHERE bot = ?1 AND substr(tool, 1, length(?2)) = ?2",
+            params![bot, prefix],
+        )
+    }
+
+    /// Removes the grants, for good and for one conversation, for the tools of connector `name`;
+    /// returns how many.
+    pub fn delete_connector_grants(&self, bot: &str, name: &str) -> Result<usize> {
+        let prefix = format!("{name}__");
+        let forever = self.0.execute(
             "DELETE FROM grants WHERE bot = ?1 AND kind = ?2 AND substr(target, 1, length(?3)) = ?3",
             params![bot, json(&Kind::Connector), prefix],
-        )
+        )?;
+        let here = self.0.execute(
+            "DELETE FROM conversation_grants WHERE kind = ?2 AND substr(target, 1, length(?3)) = ?3 \
+             AND conversation IN (SELECT id FROM conversations WHERE bot = ?1)",
+            params![bot, json(&Kind::Connector), prefix],
+        )?;
+        Ok(forever + here)
     }
 
     pub fn connectors(&self, bot: &str) -> Result<Vec<Connector>> {
@@ -2494,6 +2606,17 @@ mod tests {
             conversation.insert(id, c);
             store.set_ledger(id, "n", Ledger::Sent, 1).unwrap();
             store.set_model(id, "m", None).unwrap();
+            store.set_blocked(id, "web__x", true).unwrap();
+            store
+                .put_conversation_grant(
+                    &conversation[id],
+                    &Grant {
+                        kind: Kind::Run,
+                        target: "ls".into(),
+                        at_ms: 1,
+                    },
+                )
+                .unwrap();
             store
                 .put_grant(
                     id,
@@ -2517,7 +2640,11 @@ mod tests {
             assert_eq!(count(&store, table, "bot", "a"), 0, "{table}");
         }
         assert_eq!(count(&store, "conversations", "bot", "a"), 0);
-        for table in CONVERSATION_TABLES {
+        // Made after version 1, so not among the tables a version 1 database moves.
+        for table in CONVERSATION_TABLES
+            .into_iter()
+            .chain(["conversation_grants"])
+        {
             assert_eq!(
                 count(&store, table, "conversation", &conversation["a"]),
                 0,

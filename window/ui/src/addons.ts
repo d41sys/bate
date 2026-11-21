@@ -48,6 +48,13 @@ export function connectorState(c: Connector, agent = false): { text: string; pro
   return { text: "On, no problem reported", problem: false };
 }
 
+/** The tools of a connector for one bot, to switch to blocked: those its engine listed and those blocked (a blocked one may not be listed yet), each with its own name. */
+export function connectorTools(c: Connector): { name: string; own: string; blocked: boolean }[] {
+  const blocked = c.blocked ?? [];
+  const names = [...new Set([...(c.toolNames ?? []), ...blocked])].sort();
+  return names.map((name) => ({ name, own: name.slice(c.name.length + 2), blocked: blocked.includes(name) }));
+}
+
 /** The one line of a row: on for how many of the bots that have it. */
 export function onFor(copies: { enabled: boolean }[], bots: number): string {
   const on = copies.filter((c) => c.enabled).length;

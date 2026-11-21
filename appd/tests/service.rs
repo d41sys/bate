@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
 /// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`; one that has the enabled
-/// connector `works` reports it loaded with 2 tools, or failed while the file `works-dies` is there. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
+/// connector `works` reports it loaded with the tools `works__a` and `works__b`, or failed while the file `works-dies` is there. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
 /// `probe work <path>` says whether that is the folder the engine was told to work in.
@@ -36,8 +36,9 @@ use serde_json::{Value, json};
 /// there (`let_open`), or after 10 s, and the file `holding` says the engine has got that far
 /// (`engine_held`): what a test does "while the engine opens it" does not depend on how fast
 /// the machine is.
-/// What a bot's message (`[Message from the bot …]` or an answer, `[Answer from the bot …]`, and a first
-/// line) says after that line is run as if the user had typed it: `do run ls` asks about the action,
+/// Each `blocked_tools` operation is logged to `blocked.log`.
+/// What a bot's message (`[Message from the bot …]` or an answer, `[Answer from the bot …]`, a routine's
+/// `[Routine: …]`, and a first line) says after that line is run as if the user had typed it: `do run ls` asks about the action,
 /// `tell <bot> do run ls` passes it on, `say <words>` answers with the words.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
@@ -59,7 +60,7 @@ while IFS= read -r line; do
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
-      line=$(printf '%s' "$line" | sed -e 's/"text":"\[Message from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Answer from the bot [^]]*\]\\n/"text":"/')
+      line=$(printf '%s' "$line" | sed -e 's/"text":"\[Message from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Answer from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Routine: [^]]*\]\\n/"text":"/')
       case "$line" in
         *'limit-turn'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -170,11 +171,12 @@ while IFS= read -r line; do
       case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
       case "$line" in *'"name":"works","enabled":true'*)
         if [ -e works-dies ]; then echo "connector works: it stopped" >&2
-        else echo '{"type":"connector_loaded","name":"works","tools":2}'; fi ;; esac
+        else echo '{"type":"connector_loaded","name":"works","names":["works__a","works__b"]}'; fi ;; esac
       echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
     *'"type":"skills_off"'*) printf '%s\n' "$line" >> skills_off.log; echo "$ok" ;;
+    *'"type":"blocked_tools"'*) printf '%s\n' "$line" >> blocked.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"web_search"'*) printf '%s\n' "$line" >> web_search.log; echo "$ok" ;;
@@ -1728,6 +1730,10 @@ fn a_connector_the_engine_loaded_shows_working_for_that_bot_only_and_a_later_fai
     // Only the engine of `a` starts, so only `a` has loaded it.
     w.ok("set_model", json!({"bot": a, "model": "m1"}));
     eventually("working", || shown(&mut w, &a)["tools"] == 2);
+    assert_eq!(
+        shown(&mut w, &a)["toolNames"],
+        json!(["works__a", "works__b"])
+    );
     assert!(shown(&mut w, &a).get("error").is_none());
     assert!(shown(&mut w, &b).get("tools").is_none());
     // The engine now fails to load it again, with no change to the connector: the failure shows.
@@ -3433,7 +3439,10 @@ fn act(w: &mut Window, bot: &str, nonce: &str, action: &str, answer: Option<&str
         match entry["type"].as_str().unwrap() {
             "question" => {
                 let choice = answer.unwrap_or_else(|| panic!("the user was asked: {entry}"));
-                assert_eq!(entry["options"], json!(["Approve", "Always", "Deny"]));
+                assert_eq!(
+                    entry["options"],
+                    json!(["Approve", "Conversation", "Always", "Deny"])
+                );
                 w.ok(
                     "answer",
                     json!({"bot": bot, "question": entry["question"], "choice": choice}),
@@ -3458,7 +3467,8 @@ fn an_always_answer_is_remembered_for_exactly_that_action_until_it_is_removed() 
     assert_eq!(
         permissions(&mut w),
         json!({"levels": {"read": "always", "write": "ask", "run": "ask", "connector": "ask",
-            "desktop": "ask", "apple_read": "ask", "apple_change": "ask"}, "grants": []})
+            "desktop": "ask", "apple_read": "ask", "apple_change": "ask"},
+            "grants": [], "conversationGrants": [], "blocked": []})
     );
 
     assert_eq!(
@@ -3788,6 +3798,340 @@ fn a_connector_that_is_changed_or_removed_loses_its_grants() {
     let id = set(&mut w, "web__search", "x");
     let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(refused["code"], "invalid_connector", "{refused}");
+}
+
+/// What `get_permissions` lists for a bot's conversations, as `(conversation, kind, target)`.
+fn conversation_grants(w: &mut Window, bot: &str) -> Vec<(String, String, String)> {
+    let list = w.ok("get_permissions", json!({"bot": bot}))["conversationGrants"].clone();
+    let text = |g: &Value, key: &str| g[key].as_str().unwrap().to_owned();
+    let all = list.as_array().unwrap();
+    all.iter()
+        .map(|g| (text(g, "conversation"), text(g, "kind"), text(g, "target")))
+        .collect()
+}
+
+#[test]
+fn an_answer_for_the_conversation_covers_that_action_there_and_nowhere_else() {
+    let home = home("conversation-grants");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = w.ok("list_conversations", json!({"bot": bot}))["current"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        act(&mut w, &bot, "n1", "run ls", Some("Conversation")),
+        "chose Approve"
+    );
+    // It is not an "Always": that list stays empty, and the grant is listed with its conversation.
+    let permissions = w.ok("get_permissions", json!({"bot": bot}));
+    assert_eq!(permissions["grants"], json!([]));
+    let listed = &permissions["conversationGrants"][0];
+    assert_eq!(listed["title"], "do run ls", "{listed}");
+    assert_eq!(
+        conversation_grants(&mut w, &bot),
+        [(first.clone(), "run".to_owned(), "ls".to_owned())]
+    );
+
+    // The same action no longer asks there; any other action, or other kind, still does.
+    assert_eq!(act(&mut w, &bot, "n2", "run ls", None), "chose Approve");
+    assert_eq!(
+        act(&mut w, &bot, "n3", "run ls -la", Some("Deny")),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4", "write ls", Some("Deny")),
+        "chose Deny"
+    );
+
+    // A fork is another conversation: it asks again.
+    let fork = w.ok(
+        "rewind",
+        json!({"bot": bot, "conversation": first, "entry": "n4", "fork": true}),
+    )["conversation"]
+        .clone();
+    assert_ne!(fork, json!(first));
+    assert_eq!(
+        act(&mut w, &bot, "n5", "run ls", Some("Deny")),
+        "chose Deny"
+    );
+
+    // So does a new one, also after a restart; the grant is still the first one's.
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(conversation_grants(&mut w, &bot).len(), 1);
+    w.ok("new_conversation", json!({"bot": bot}));
+    assert_eq!(
+        act(&mut w, &bot, "n6", "run ls", Some("Deny")),
+        "chose Deny"
+    );
+
+    // It is removed where grants are shown, naming its conversation: without one, that is the
+    // list of "Always" grants, which has no such grant.
+    let id = w.send(
+        "delete_grant",
+        json!({"bot": bot, "kind": "run", "target": "ls"}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "no_such_grant", "{refused}");
+    w.ok(
+        "delete_grant",
+        json!({"bot": bot, "kind": "run", "target": "ls", "conversation": first}),
+    );
+    assert_eq!(conversation_grants(&mut w, &bot), []);
+}
+
+#[test]
+fn a_routines_run_is_not_offered_the_conversation_answer_and_does_not_use_one() {
+    let home = home("conversation-routine");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    assert_eq!(
+        act(&mut w, &bot, "n1", "run ls", Some("Conversation")),
+        "chose Approve"
+    );
+    let routine = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Deploys", "prompt": "do run ls",
+            "enabled": true, "webhook": true}}),
+    )["routine"]
+        .clone();
+    // The routine runs in the bot's current conversation, which holds the grant, and still asks.
+    assert_eq!(
+        http(
+            routine["hookUrl"].as_str().unwrap(),
+            "POST",
+            None,
+            "content-length: 0\r\n",
+            ""
+        ),
+        202
+    );
+    let asked = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    assert_eq!(
+        asked["entry"]["options"],
+        json!(["Approve", "Always", "Deny"])
+    );
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": asked["entry"]["question"], "choice": "Deny"}),
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+}
+
+#[test]
+fn a_conversation_answer_is_neither_offered_nor_used_for_work_another_bot_asked_for() {
+    let home = home("conversation-peer");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (ann, bo) = (named_bot(&mut w, "Ann"), named_bot(&mut w, "Bo"));
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": [ann, bo], "lead": ann}}),
+    );
+    // Ann would run it unasked, so only Bo's permissions are in question.
+    set_level(&mut w, &ann, "always");
+    let tell = format!("tell {bo} do run ls");
+
+    // Bo's own work is asked, and answered for the conversation.
+    assert_eq!(
+        act(&mut w, &bo, "own", "run ls", Some("Conversation")),
+        "chose Approve"
+    );
+    assert_eq!(conversation_grants(&mut w, &bo).len(), 1);
+    // For Ann's request Bo's conversation answer does not count (`peer_work` checks the card
+    // has no such button), and one sent anyway is taken as "approve" once and saves nothing.
+    let (said, asked) = peer_work(&mut w, &ann, &bo, "n1", &tell, Some("Conversation"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("text: chose Approve", Some(json!(["Ann"])))
+    );
+    assert_eq!(conversation_grants(&mut w, &bo).len(), 1);
+    assert_eq!(conversation_grants(&mut w, &ann), []);
+}
+
+#[test]
+fn a_blocked_tool_is_refused_whatever_else_is_set_and_survives_a_restart_but_not_its_connector() {
+    let home = home("blocked-tools");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    let works = |command: &str| {
+        json!({"name": "works", "enabled": true,
+            "transport": {"type": "stdio", "command": command, "args": [], "env": {}}})
+    };
+    for b in [&bot, &other] {
+        w.ok(
+            "set_connector",
+            json!({"bot": b, "connector": works("nowhere")}),
+        );
+    }
+    let shown = |w: &mut Window, bot: &str| {
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"][0].clone()
+    };
+    let blocked =
+        |w: &mut Window, bot: &str| w.ok("get_permissions", json!({"bot": bot}))["blocked"].clone();
+    let engine_is_told = |home: &Path, bot: &str, names: &'static str| {
+        last_logged(home, bot, "blocked.log").ends_with(&format!(r#""names":{names}}}"#))
+    };
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    eventually("the tools are listed", || {
+        shown(&mut w, &bot)["toolNames"] == json!(["works__a", "works__b"])
+    });
+    // Nothing is blocked: the engine is told nothing at its start.
+    assert_eq!(last_logged(&home, &bot, "blocked.log"), "");
+
+    // A tool of a connector the bot does not have cannot be blocked.
+    let id = w.send(
+        "block_tool",
+        json!({"bot": bot, "tool": "nope__a", "blocked": true}),
+    );
+    let refused = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(refused["code"], "bad_request", "{refused}");
+
+    // Blocking takes the "Always" the tool had: the three states are one choice.
+    assert_eq!(
+        act(&mut w, &bot, "n1", "connector works__a", Some("Always")),
+        "chose Approve"
+    );
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": true}),
+    );
+    eventually("the engine told", || {
+        engine_is_told(&home, &bot, r#"["works__a"]"#)
+    });
+    assert_eq!(blocked(&mut w, &bot), json!(["works__a"]));
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["grants"],
+        json!([])
+    );
+    let c = shown(&mut w, &bot);
+    assert_eq!(
+        (&c["blocked"], &c["toolNames"]),
+        (&json!(["works__a"]), &json!(["works__a", "works__b"]))
+    );
+
+    // Refused without asking, also where the kind is on "always"; its sibling still asks.
+    assert_eq!(
+        act(&mut w, &bot, "n2", "connector works__a", None),
+        "chose Deny"
+    );
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n3", "connector works__a", None),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4", "connector works__b", None),
+        "chose Approve"
+    );
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "ask"}),
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n5", "connector works__b", Some("Deny")),
+        "chose Deny"
+    );
+    // It is the bot's: the other bot, with the same connector, is asked.
+    assert_eq!(blocked(&mut w, &other), json!([]));
+    assert_eq!(
+        act(&mut w, &other, "n6", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+
+    // Changing the connector (here, switching it off and on) leaves the block.
+    let mut off = works("nowhere");
+    off["enabled"] = json!(false);
+    w.ok("set_connector", json!({"bot": bot, "connector": off}));
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": works("elsewhere")}),
+    );
+    assert_eq!(blocked(&mut w, &bot), json!(["works__a"]));
+
+    // A restart keeps it, and the new engine is told at its start.
+    fs::remove_file(home.join("bots").join(&bot).join("blocked.log")).unwrap();
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(blocked(&mut w, &bot), json!(["works__a"]));
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    eventually("the new engine told", || {
+        engine_is_told(&home, &bot, r#"["works__a"]"#)
+    });
+    assert_eq!(
+        act(&mut w, &bot, "n7", "connector works__a", None),
+        "chose Deny"
+    );
+
+    // Unblocked, it asks again (and "ask" is back, not the "Always" it had).
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": false}),
+    );
+    eventually("the engine told", || engine_is_told(&home, &bot, "[]"));
+    assert_eq!(
+        act(&mut w, &bot, "n8", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+
+    // Removing the connector forgets a block; a new connector of that name starts clean.
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": true}),
+    );
+    w.ok("delete_connector", json!({"bot": bot, "name": "works"}));
+    assert_eq!(blocked(&mut w, &bot), json!([]));
+    eventually("the engine told", || engine_is_told(&home, &bot, "[]"));
+    w.ok(
+        "set_connector",
+        json!({"bot": bot, "connector": works("nowhere")}),
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n9", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+}
+
+#[test]
+fn what_the_card_would_mark_is_stored_granted_and_given_to_the_engine_as_it_is() {
+    let home = home("marked-target");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // A zero-width space and a right-to-left override: the window marks them, the service keeps them.
+    let hidden = "ls\u{200b} -la \u{202e}txt";
+    assert_eq!(
+        act(&mut w, &bot, "n1", &format!("run {hidden}"), Some("Always")),
+        "chose Approve"
+    );
+    let opened = w.ok("open_bot", json!({"bot": bot}));
+    let asked = opened["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entry"]["type"] == "question");
+    assert_eq!(asked.unwrap()["entry"]["target"], hidden);
+    let grants = w.ok("get_permissions", json!({"bot": bot}))["grants"].clone();
+    assert_eq!(grants[0]["target"], hidden);
+    // Exactly that text is granted: the same command without the hidden characters asks.
+    assert_eq!(
+        act(&mut w, &bot, "n2", &format!("run {hidden}"), None),
+        "chose Approve"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n3", "run ls -la txt", Some("Deny")),
+        "chose Deny"
+    );
 }
 
 /// Has the bot's engine try `write <path>` or `read <path>`; returns `ok` or `refused`.

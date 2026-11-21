@@ -4,10 +4,12 @@
 use serde::{Deserialize, Serialize};
 
 /// The choices of a question about an action. Engines offer the first two; the service adds
-/// `ALWAYS` for the user and turns it into `APPROVE` plus a grant.
+/// `ALWAYS` and `CONVERSATION` for the user and turns each into `APPROVE` plus a grant: for
+/// good, or for the conversation the question was asked in.
 pub const APPROVE: &str = "Approve";
 pub const DENY: &str = "Deny";
 pub const ALWAYS: &str = "Always";
+pub const CONVERSATION: &str = "Conversation";
 
 /// A kind of action. An engine names it in the `question` it asks before acting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
