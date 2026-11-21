@@ -12763,10 +12763,10 @@ fn the_bots_that_asked_for_a_waiting_message_are_remembered_across_a_restart() {
     service.kill();
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
-    let frame = w.wait_for(|f| {
-        f["type"] == "transcript" && f["bot"] == cy.as_str() && f["entry"]["type"] == "text"
+    // Read from history: the message may be taken before this window is connected.
+    eventually("Cy's refusal", || {
+        has_entry(&history(&mut w, cy), "text", "delta", "chose Deny")
     });
-    assert_eq!(frame["entry"]["delta"], "chose Deny");
 }
 
 #[test]
