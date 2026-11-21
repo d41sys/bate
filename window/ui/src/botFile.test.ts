@@ -19,7 +19,10 @@ test("each thing the file holds is named, with when a routine runs and where a c
   const lines = botFileLines({
     ...empty,
     instructionsLength: 120,
-    skills: [{ name: "pdf-forms", description: "d", files: 2, runsScripts: true }, { name: "notes", description: "d", files: 1, runsScripts: false }],
+    skills: [
+      { name: "pdf-forms", description: "d", author: "Ada L.", files: 2, runsScripts: true },
+      { name: "notes", description: "d", files: 1, runsScripts: false },
+    ],
     routines: [
       { name: "Brief", schedule: { frequency: "daily", interval: 1, time: "09:00" }, webhook: false, chat: false },
       { name: "Hook", schedule: null, webhook: true, chat: false },
@@ -28,7 +31,7 @@ test("each thing the file holds is named, with when a routine runs and where a c
     connectors: [{ name: "docs", address: "https://docs.example.com/mcp" }],
   });
   assert.equal(lines[0], "Instructions: 120 characters");
-  assert.equal(lines[1], "Skills: pdf-forms (runs scripts), notes");
+  assert.equal(lines[1], "Skills: pdf-forms (runs scripts; by Ada L., not checked), notes");
   assert.equal(lines[2], "Routines (off until you turn them on): Brief (every day from 09:00), Hook (not on a schedule)");
   assert.equal(lines[3], "Notes: 3");
   assert.equal(lines[4], "Connectors (off until you turn them on): docs at https://docs.example.com/mcp");

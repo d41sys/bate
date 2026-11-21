@@ -99,6 +99,8 @@ export type Workplace = {
     name: string;
     version: string;
     description?: string;
+    /** A claim in the manifest, never checked. */
+    author?: string;
     program: { command: string; args: string[] };
     needs: { folders: string[]; hosts: string[]; commands: string[] };
     downloads?: { url: string; size: number; sha256: string; dest: string; unpack?: string }[];
@@ -128,7 +130,8 @@ export type Role = {
   raises: string[];
 };
 
-export type Skill = { name: string; description: string };
+/** `author` is what the skill's file says: a claim, never checked. */
+export type Skill = { name: string; description: string; author?: string };
 
 /** A skill as `list_skills` gives it: whether it is on for that bot (off: installed, but the model is not told of it). */
 export type InstalledSkill = Skill & { enabled: boolean };
@@ -140,7 +143,7 @@ export type SkillPreview = { skill: Skill; entries: number; bytes: number };
 export type BotFilePreview = {
   name: string;
   instructionsLength: number;
-  skills: { name: string; description: string; files: number; runsScripts: boolean }[];
+  skills: { name: string; description: string; author?: string; files: number; runsScripts: boolean }[];
   routines: { name: string; schedule: Routine["schedule"] | null; webhook: boolean; chat: boolean }[];
   notes: number;
   connectors: { name: string; address: string }[];
@@ -197,6 +200,8 @@ export type WorkplacePreview = {
 export type CatalogEntry = {
   name: string;
   description: string;
+  /** A claim in the list, never checked. */
+  author?: string;
   version: string;
   size: number;
   /** The archive the entry pins: sent back to install exactly what was shown. */
@@ -208,6 +213,6 @@ export type CatalogEntry = {
 
 /** What `preview_catalog` says of an entry's archive: what it needs that the installed one did not. */
 export type CatalogPreview = WorkplacePreview & {
-  entry: { version: string; sha256: string };
+  entry: { version: string; sha256: string; author?: string };
   newly: { folders: string[]; hosts: string[]; commands: string[]; downloads: { dest: string; size: number }[] };
 };

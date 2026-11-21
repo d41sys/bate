@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 import { Avatar } from "./Avatar.tsx";
+import { byLine } from "./addons.ts";
 import { Dialog } from "./Dialog.tsx";
 import type { Bot } from "./types.ts";
 
@@ -22,6 +23,8 @@ export function Sheet(p: {
   title: string;
   about?: string;
   maker?: string;
+  /** What the add-on's own file says about who made it: shown as a claim. */
+  author?: string;
   facts?: string[];
   may?: string[];
   /** What the person agrees to before anything is fetched. */
@@ -64,10 +67,11 @@ export function Sheet(p: {
         <h2 id="sheet-title">{p.title}</h2>
         {p.about && <p>{p.about}</p>}
         {p.children}
-        {p.maker && (
+        {(p.maker || p.author) && (
           <>
             <h3>Made by</h3>
-            <p>{p.maker}</p>
+            {p.maker && <p>{p.maker}</p>}
+            {p.author && <p>{byLine(p.author)}</p>}
           </>
         )}
         {list("What it is", p.facts)}

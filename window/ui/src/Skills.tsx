@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { each, madeBy, onFor, placed } from "./addons.ts";
+import { byLine, each, madeBy, onFor, placed } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
@@ -40,6 +40,7 @@ export function Skills({ bots }: { bots: Bot[] }) {
             <div className="what">
               <strong>{r.name}</strong>
               <small>{r.users[0].item.description}</small>
+              {r.users[0].item.author && <small>{byLine(r.users[0].item.author)}</small>}
             </div>
             <div className="actions">
               <RowMenu
@@ -74,6 +75,7 @@ export function Skills({ bots }: { bots: Bot[] }) {
           title={`Install ${ask.preview.skill.name}`}
           about={ask.preview.skill.description}
           maker={ask.maker}
+          author={ask.preview.skill.author}
           facts={[`${ask.preview.entries} ${ask.preview.entries === 1 ? "file or folder" : "files and folders"}, ${sizeText(ask.preview.bytes)}`, "Instructions in SKILL.md, and the files they refer to."]}
           may={[
             "It does nothing by itself: the bot reads it when a task fits, and may use the files in it.",

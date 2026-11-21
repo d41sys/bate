@@ -588,7 +588,13 @@ pub fn preview(file: &Checked, sha256: &str) -> Value {
     json!({
         "name": file.name,
         "instructionsLength": file.profile.instructions.chars().count(),
-        "skills": file.skills.iter().map(|(s, files)| json!({"name": s.name, "description": s.description, "files": files.len(), "runsScripts": files.iter().any(|f| f.runnable)})).collect::<Vec<_>>(),
+        "skills": file.skills.iter().map(|(s, files)| {
+            let mut shown = json!({"name": s.name, "description": s.description, "files": files.len(), "runsScripts": files.iter().any(|f| f.runnable)});
+            if let Some(author) = &s.author {
+                shown["author"] = json!(author);
+            }
+            shown
+        }).collect::<Vec<_>>(),
         "routines": file.routines.iter().map(|r| json!({"name": r.name, "schedule": r.schedule, "webhook": r.webhook, "chat": r.chat})).collect::<Vec<_>>(),
         "notes": file.notes.len(),
         "connectors": file.connectors.iter().map(|(c, address)| json!({"name": c.name, "address": address})).collect::<Vec<_>>(),

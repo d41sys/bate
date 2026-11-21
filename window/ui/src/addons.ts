@@ -9,6 +9,9 @@ export const madeBy = {
   copy: (bot: string) => `${bot}'s copy. Bate cannot tell who made it.`,
 };
 
+/** Who the file of an add-on says made it: shown as the claim it is, never as a fact. Nothing when there is none. */
+export const byLine = (author?: string) => (author ? `By ${author} (not checked)` : undefined);
+
 /** One add-on and the bots that have it, each with its own copy's data. */
 export type Placed<T> = { name: string; users: { bot: string; item: T }[] };
 

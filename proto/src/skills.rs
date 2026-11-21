@@ -9,6 +9,8 @@ pub const DIR: &str = "skills";
 pub const FILE: &str = "SKILL.md";
 /// Most characters of a description (the model sees every skill's description every turn).
 pub const MAX_DESCRIPTION: usize = 1024;
+/// Most characters of an `author`.
+pub const MAX_AUTHOR: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
@@ -16,10 +18,13 @@ pub struct Skill {
     pub name: String,
     /// When to use it, on one line.
     pub description: String,
+    /// Who says they made it: a claim in the file, which nothing checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
 }
 
 /// Reads the front matter of a `SKILL.md`: the lines between a first line `---` and the next
-/// `---`, as `key: value`. Only `name` and `description` are used.
+/// `---`, as `key: value`. Only `name`, `description` and `author` are used.
 // shortcut: one-line values only (no YAML block or quoted multi-line strings); use a YAML
 // parser when a real skill needs them.
 pub fn parse(text: &str) -> Result<Skill, String> {
@@ -27,7 +32,7 @@ pub fn parse(text: &str) -> Result<Skill, String> {
     if lines.next().map(str::trim_end) != Some("---") {
         return Err(format!("{FILE} must start with a `---` line"));
     }
-    let (mut name, mut description, mut closed) = (None, None, false);
+    let (mut name, mut description, mut author, mut closed) = (None, None, None, false);
     for line in lines {
         if line.trim_end() == "---" {
             closed = true;
@@ -40,6 +45,7 @@ pub fn parse(text: &str) -> Result<Skill, String> {
         match key.trim() {
             "name" => name = Some(value.to_owned()),
             "description" => description = Some(value.to_owned()),
+            "author" => author = Some(value.to_owned()),
             _ => {}
         }
     }
@@ -53,13 +59,36 @@ pub fn parse(text: &str) -> Result<Skill, String> {
     check_name(&name)?;
     let length = description.chars().count();
     // It goes into the model's instructions as one line: nothing that could pass for another.
-    let breaks = |c: char| c.is_control() || c == '\u{2028}' || c == '\u{2029}';
-    if length == 0 || length > MAX_DESCRIPTION || description.contains(breaks) {
+    if length == 0 || length > MAX_DESCRIPTION || description.contains(is_break) {
         return Err(format!(
             "`description` must be one line of 1 to {MAX_DESCRIPTION} characters"
         ));
     }
-    Ok(Skill { name, description })
+    if let Some(author) = &author {
+        check_author(author)?;
+    }
+    Ok(Skill {
+        name,
+        description,
+        author,
+    })
+}
+
+/// A control character, or a line or paragraph separator: nothing that could pass for another line.
+fn is_break(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
+/// The rule for the `author` of a skill, a workplace or a catalog entry, whichever way it comes
+/// in: one line of 1 to `MAX_AUTHOR` characters. It is shown marked as not checked.
+pub fn check_author(author: &str) -> Result<(), String> {
+    if author.trim().is_empty() || author.chars().count() > MAX_AUTHOR || author.contains(is_break)
+    {
+        return Err(format!(
+            "`author` must be one line of 1 to {MAX_AUTHOR} characters"
+        ));
+    }
+    Ok(())
 }
 
 pub fn check_name(name: &str) -> Result<(), String> {
@@ -89,7 +118,8 @@ mod tests {
             parse(text),
             Ok(Skill {
                 name: "pdf-forms".into(),
-                description: "Fill in PDF forms: use for any .pdf with fields.".into()
+                description: "Fill in PDF forms: use for any .pdf with fields.".into(),
+                author: None,
             })
         );
         assert_eq!(
@@ -98,6 +128,36 @@ mod tests {
                 .name,
             "a"
         );
+    }
+
+    #[test]
+    fn an_author_is_one_short_line_and_is_optional() {
+        let with = |author: &str| format!("---\nname: a\ndescription: b\nauthor: {author}\n---\n");
+        assert_eq!(
+            parse(&with("Ada L.")).unwrap().author.as_deref(),
+            Some("Ada L.")
+        );
+        assert_eq!(
+            parse(&with("\"Ada, Bo\"")).unwrap().author.as_deref(),
+            Some("Ada, Bo")
+        );
+        assert_eq!(
+            parse("---\nname: a\ndescription: b\n---\n").unwrap().author,
+            None
+        );
+        let long = "x".repeat(MAX_AUTHOR);
+        assert!(parse(&with(&long)).is_ok());
+        for bad in [
+            String::new(),
+            long + "x",
+            "Ada\rBo".into(),
+            "Ada\u{2028}Bo".into(),
+        ] {
+            assert!(
+                parse(&with(&bad)).unwrap_err().contains("author"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

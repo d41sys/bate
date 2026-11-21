@@ -1214,6 +1214,69 @@ fn connectors_reach_the_engine_when_it_starts_and_when_they_change() {
 }
 
 #[test]
+fn the_author_of_a_skill_is_one_short_line_and_shows_in_the_preview_and_the_list() {
+    let home = home("skill-author");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = |name: &str, author: &str| {
+        let source = home.join("picked").join(name);
+        fs::create_dir_all(&source).unwrap();
+        let author = if author.is_empty() {
+            String::new()
+        } else {
+            format!("author: {author}\n")
+        };
+        fs::write(
+            source.join("SKILL.md"),
+            format!("---\nname: pdf-forms\ndescription: Fill in PDF forms.\n{author}---\nHow.\n"),
+        )
+        .unwrap();
+        source
+    };
+    let refused = |w: &mut Window, command: &str, path: &Path| {
+        let id = w.send(command, json!({"bot": bot, "path": path}));
+        w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())
+    };
+    for (name, author) in [
+        ("long", "x".repeat(101)),
+        ("lines", "Ada\u{2028}Bo".to_owned()),
+    ] {
+        let source = folder(name, &author);
+        for command in ["preview_skill", "install_skill"] {
+            let reply = refused(&mut w, command, &source);
+            assert_eq!(reply["code"], "invalid_skill", "{name} {command}: {reply}");
+            assert!(
+                reply["error"].as_str().unwrap().contains("author"),
+                "{reply}"
+            );
+        }
+    }
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"],
+        json!([])
+    );
+
+    let signed = folder("signed", "Ada L.");
+    assert_eq!(
+        w.ok("preview_skill", json!({"path": &signed}))["skill"]["author"],
+        "Ada L."
+    );
+    w.ok("install_skill", json!({"bot": bot, "path": &signed}));
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"][0]["author"],
+        "Ada L."
+    );
+    // No author: none is said.
+    let plain = folder("plain", "");
+    assert!(
+        w.ok("preview_skill", json!({"path": &plain}))["skill"]
+            .get("author")
+            .is_none()
+    );
+}
+
+#[test]
 fn a_skill_switched_off_is_left_out_by_the_engine_survives_a_restart_and_is_forgotten_when_removed()
 {
     let home = home("skills-off");
@@ -8792,6 +8855,21 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
             "no manifest",
             broken(&|c| fs::remove_file(c.join("workplace.json")).unwrap()),
         ),
+        (
+            "an author on two lines",
+            broken(&|c| manifest(c, "\"program\"", "\"author\": \"a\\nb\", \"program\"")),
+        ),
+        (
+            "an author too long",
+            broken(&|c| {
+                let long = "x".repeat(101);
+                manifest(
+                    c,
+                    "\"program\"",
+                    &format!("\"author\": \"{long}\", \"program\""),
+                )
+            }),
+        ),
     ];
     for (what, copy) in &cases {
         let refused = install_refused(&mut w, copy);
@@ -8832,7 +8910,13 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
     // Installed again, it is replaced: the new version shows.
     let newer = copied_workplace("wp-newer");
     let text = fs::read_to_string(newer.join("workplace.json")).unwrap();
-    fs::write(newer.join("workplace.json"), text.replace("1.0.0", "2.0.0")).unwrap();
+    let text = text
+        .replace("1.0.0", "2.0.0")
+        .replace("\"program\"", "\"author\": \"Ada L.\", \"program\"");
+    fs::write(newer.join("workplace.json"), text).unwrap();
+    // Shown before it is installed, and in the list after.
+    let preview = w.ok("preview_workplace", json!({"path": &newer.0}));
+    assert_eq!(preview["manifest"]["author"], "Ada L.");
     w.ok("install_workplace", json!({"path": &newer.0}));
     let listed = w.ok("list_workplaces", json!({}))["workplaces"].clone();
     assert_eq!(
@@ -8842,6 +8926,7 @@ fn a_workplace_is_installed_from_a_folder_with_the_care_a_skill_gets() {
         ),
         (1, json!("2.0.0"))
     );
+    assert_eq!(listed[0]["manifest"]["author"], "Ada L.");
 }
 
 #[test]
@@ -10101,13 +10186,27 @@ fn a_workplace_is_installed_from_the_catalog_pinned_and_updated_only_when_asked(
     let v1 = packed(&example_workplace(), "v1");
     let url1 = host.url("/counter-1.0.0.tar.gz");
     serve(&files, "/counter-1.0.0.tar.gz", &v1);
-    serve_catalog(&files, vec![catalog_entry("counter", "1.0.0", &url1, &v1)]);
+    let mut signed = catalog_entry("counter", "1.0.0", &url1, &v1);
+    signed["author"] = json!("Ada L.");
+    serve_catalog(&files, vec![signed.clone()]);
     let _service = catalog_service(&home, &host);
     let mut w = Window::connect(&home);
     let code = |w: &mut Window, command: &str, fields: Value| {
         let id = w.send(command, fields);
         w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["code"].clone()
     };
+    // An author in the list is one short line, or the list is refused; a good one shows.
+    for bad in [json!("x".repeat(101)), json!("Ada\u{2028}Bo"), json!("")] {
+        let mut entry = signed.clone();
+        entry["author"] = bad;
+        serve_catalog(&files, vec![entry]);
+        assert_eq!(code(&mut w, "list_catalog", json!({})), "catalog_failed");
+    }
+    serve_catalog(&files, vec![signed]);
+    assert_eq!(
+        w.ok("list_catalog", json!({}))["catalog"][0]["author"],
+        "Ada L."
+    );
 
     // Listed, with nothing installed yet.
     let listed = w.ok("list_catalog", json!({}))["catalog"].clone();
@@ -11706,6 +11805,20 @@ fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported()
         &|f| f["instructions"] = json!("x".repeat(8001)),
         "at most 8000",
     );
+    for (name, author) in [
+        ("author-lines", "Ada\u{2028}Bo".to_owned()),
+        ("author-long", "x".repeat(101)),
+    ] {
+        case(
+            name,
+            &|f| {
+                let text = f["skills"][0]["files"][0]["text"].as_str().unwrap();
+                let text = text.replace("\n---\nHow", &format!("\nauthor: {author}\n---\nHow"));
+                f["skills"][0]["files"][0]["text"] = json!(text);
+            },
+            "author",
+        );
+    }
     case("newer", &|f| f["version"] = json!(2), "version 2");
     case(
         "kind",
@@ -11774,6 +11887,19 @@ fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported()
             .len(),
         1
     );
+
+    // A valid author shows in the preview; a skill with none shows nothing.
+    assert!(
+        w.ok("preview_bot_file", json!({"path": path}))["skills"][0]
+            .get("author")
+            .is_none()
+    );
+    let mut signed = good.clone();
+    let text = signed["skills"][0]["files"][0]["text"].as_str().unwrap();
+    signed["skills"][0]["files"][0]["text"] =
+        json!(text.replace("\n---\nHow", "\nauthor: Ada L.\n---\nHow"));
+    let by = w.ok("preview_bot_file", json!({"path": write("by", &signed)}));
+    assert_eq!(by["skills"][0]["author"], "Ada L.");
 
     // The file changes between the look and the import: what was shown is not what is made.
     let shown = w.ok("preview_bot_file", json!({"path": path}))["sha256"].clone();
