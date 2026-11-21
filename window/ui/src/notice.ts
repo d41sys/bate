@@ -15,9 +15,10 @@ const BUTTONS_FOR = ["read", "write", "run", "connector", "apple_read"];
 const TARGET = 160;
 
 /**
- * Buttons only for a question the notification can show whole enough to answer: one of the kinds above, with
- * both plain choices, and no hidden or direction-changing character in anything it shows (the notification
- * cannot mark them, so it shows none of it). "Always" is never offered here: it is a card's choice.
+ * Buttons only for a question the notification shows whole: one of the kinds above, with both plain
+ * choices, a target that is one line and is not cut, and no hidden or direction-changing character in
+ * anything it shows (the notification cannot mark them, so it shows none of it). A button must never
+ * allow text the person was not shown. "Always" is never offered here: it is a card's choice.
  */
 export function noticeFor(bot: string, q: Question): Notice {
   if (hasHidden(bot, q.title, q.target, q.folder, ...(q.askedBy ?? []))) {
@@ -25,10 +26,12 @@ export function noticeFor(bot: string, q: Question): Notice {
   }
   const flat = (q.target ?? "").replace(/\s+/g, " ").trim();
   const letters = Array.from(flat);
-  const target = letters.length > TARGET ? `${letters.slice(0, TARGET).join("")}… (cut: open Bate to read all of it)` : flat;
+  const cut = letters.length > TARGET;
+  const target = cut ? `${letters.slice(0, TARGET).join("")}… (cut: open Bate to read all of it)` : flat;
+  const whole = !cut && !/[\r\n]/.test(q.target ?? "") && Array.from(q.title).length <= TARGET;
   return {
     title: "Needs you",
     body: [`${bot}: ${q.title}`, target].filter(Boolean).join("\n"),
-    actions: !!q.kind && BUTTONS_FOR.includes(q.kind) && q.options.includes("Approve") && q.options.includes("Deny"),
+    actions: whole && !!q.kind && BUTTONS_FOR.includes(q.kind) && q.options.includes("Approve") && q.options.includes("Deny"),
   };
 }
