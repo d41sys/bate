@@ -2,11 +2,13 @@
 //! under one service: the launchd label, which is made per home, so two services with different
 //! homes never read, overwrite or delete each other's.
 //!
-//! A build with a Team ID (Developer ID) uses the login keychain. macOS knows any other build (ad
-//! hoc, the self-made `Bate Dev`) there by its code hash, new at every build, and asks about each
-//! secret again after each one. Such a build keeps `secrets.keychain` in its home instead: macOS
-//! makes a keychain file outside `~/Library/Keychains` without that check. `APPD_KEYCHAIN=<file>`
-//! names another file; the tests use it so they never touch the user's.
+//! A build with a Team ID (Developer ID) uses the login keychain. macOS knows any other build
+//! there by its code hash, new at every build, and asks about each secret again after each one.
+//! A build signed with a certificate that has no team (the self-made `Bate Dev`) keeps
+//! `secrets.keychain` in its home instead: macOS makes a keychain file outside
+//! `~/Library/Keychains` without that check, so the signer alone decides. An ad-hoc build has no
+//! signer to go by and stays with the login keychain. `APPD_KEYCHAIN=<file>` names another
+//! file; the tests use it so they never touch the user's.
 
 use security_framework::base::Error;
 use security_framework::os::macos::keychain::{CreateOptions, SecKeychain};
@@ -28,7 +30,11 @@ const NO_ACCESS_FOR_ITEM: i32 = -25243;
 fn open() -> Result<(SecKeychain, Option<SecKeychain>)> {
     let (file, before) = match std::env::var_os("APPD_KEYCHAIN") {
         Some(file) => (PathBuf::from(file), None),
-        None if proto::signer::has_team() => return Ok((SecKeychain::default()?, None)),
+        // Ad hoc: a new program to the file's items at every build too, and to allow it macOS
+        // would want the file's password, where the login keychain wants the one the user knows.
+        None if proto::signer::has_team() || proto::signer::own_requirement().is_none() => {
+            return Ok((SecKeychain::default()?, None));
+        }
         None => (
             crate::paths::home().join("secrets.keychain"),
             Some(SecKeychain::default()?),
