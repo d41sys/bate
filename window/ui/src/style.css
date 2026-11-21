@@ -330,8 +330,11 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .run code { background: none; padding: 0; }
 .run pre { max-height: calc(var(--leading) * 8); overflow: auto; }
 .run .thought p { margin: 0; white-space: pre-wrap; }
-/* Under the line of a write or edit that kept the earlier file: Undo, or why it did not and Undo anyway; then "Undone". */
-.run .undo { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; }
+/* At the end of the row of a write or edit that kept the earlier file: Undo, or why it did not and Undo anyway; then "Undone". It wraps under the name when the row is narrow. */
+.run:has(.undo) { align-self: stretch; }
+.run li:has(> .undo) { display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: var(--space-3); }
+.run li > details { flex: 1 1 calc(var(--popover-w) / 3); min-width: 0; }
+.run .undo { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
 /* The mark under the last message while the bot works, and its small cousin on its row in the sidebar. */
 .dots { display: inline-flex; gap: 3px; margin-right: var(--space-1); }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: beat var(--beat) var(--ease) infinite; }
@@ -487,3 +490,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .menu.more { position: relative; }
   .menu.more .popover { left: auto; right: 0; width: max-content; }
 }
+
+/* The earlier versions of a note: set in under it with the rule the folded calls use. */
+.versions { flex: 1 0 calc(100% - var(--space-2)); box-sizing: border-box; margin: 0 0 var(--space-1) var(--space-2); padding-left: var(--space-3); border-left: 1px solid var(--border-strong); }
+.versions > small { display: block; color: var(--fg-muted); }
+.versions > .rows { margin: 0; }

@@ -259,18 +259,21 @@ function Versions({ target, name, tick, disabled, restore }: {
   if (!list) return <p className="note">Loading versions…</p>;
   if (list.length === 0) return <p className="note">No earlier versions yet. One is kept each time this note is replaced or deleted.</p>;
   return (
-    <ul className="rows" aria-label={`Earlier versions of ${name}`}>
-      {list.map((v) => (
-        <li key={v.id}>
-          <div className="what">
-            <strong>{dayTime(v.atMs)}</strong>
-            <small>{size(v.bytes)} · changed by {WHO[v.by]}</small>
-          </div>
-          <div className="actions">
-            <button className="small" disabled={disabled} aria-label={`Restore the version of ${name} from ${dayTime(v.atMs)}`} onClick={() => void restore(name, v.id)}>Restore</button>
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div className="versions">
+      <small>Earlier versions</small>
+      <ul className="rows" aria-label={`Earlier versions of ${name}`}>
+        {list.map((v) => (
+          <li key={v.id}>
+            <div className="what">
+              <span>{dayTime(v.atMs)}</span>
+              <small>{size(v.bytes)} · changed by {WHO[v.by]}</small>
+            </div>
+            <div className="actions">
+              <button className="small" disabled={disabled} aria-label={`Restore the version of ${name} from ${dayTime(v.atMs)}`} onClick={() => void restore(name, v.id)}>Restore</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

@@ -716,29 +716,30 @@ function Run({ parts, live, bot }: { parts: Part[]; live: boolean; bot: string }
 }
 
 /**
- * What a write or edit that kept the earlier file offers under its line: Undo, then "Undone". A file that is no
+ * What a write or edit that kept the earlier file offers at the end of its line: Undo, then "Undone". A file that is no
  * longer as the change left it is not overwritten: the line says so and offers "Undo anyway".
  */
 function Undo({ part, bot }: { part: Extract<Part, { kind: "tool" }>; bot: string }) {
   const [state, setState] = useState<{ busy?: boolean; error?: string; changed?: boolean }>({});
   if (!part.undo || part.isError) return null;
-  if (part.undone) return <small className="undo note" role="status">Undone</small>;
+  if (part.undone) return <span className="undo"><small className="note" role="status">Undone</small></span>;
   const run = (force: boolean) => {
     setState({ busy: true });
     request("undo_change", { bot, change: part.undo, force }).then(
       () => setState({}),
-      (e: Failure) => setState({ error: e.message, changed: e.code === "changed" }),
+      (e: Failure) => setState(e.code === "changed" ? { changed: true } : { error: e.message }),
     );
   };
   return (
-    <div className="undo">
+    <span className="undo">
+      {state.changed && <small className="error" role="alert">No longer as the bot left it.</small>}
       {state.error && <small className="error" role="alert">{state.error}</small>}
       {state.changed ? (
         <button className="small danger" disabled={state.busy} onClick={() => run(true)}>Undo anyway</button>
       ) : (
         <button className="small" disabled={state.busy} onClick={() => run(false)}>Undo</button>
       )}
-    </div>
+    </span>
   );
 }
 
