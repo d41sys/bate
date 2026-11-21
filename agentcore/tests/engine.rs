@@ -514,13 +514,13 @@ fn a_changing_tool_asks_first_approve_writes_and_deny_does_not() {
     );
     let events = engine.until(is_turn_end);
     assert!(
-        matches!(
-            &events[0],
+        events.iter().any(|e| matches!(
+            e,
             Event::ToolEnd {
                 is_error: false,
                 ..
             }
-        ),
+        )),
         "{events:?}"
     );
     assert_eq!(fs::read_to_string(dir.join("yes.txt")).unwrap(), "ok");
@@ -655,6 +655,7 @@ fn a_killed_engine_leaves_its_unfinished_call_interrupted_on_open() {
             call,
             output,
             is_error,
+            undo: None,
         } => {
             assert_eq!(call, "r1");
             assert!(is_error && output.starts_with("Interrupted"));
@@ -1620,6 +1621,7 @@ fn a_sub_agent_does_a_task_in_a_conversation_of_its_own_and_its_answer_comes_bac
                 call,
                 output,
                 is_error,
+                undo: None,
             } => Some((call.as_str(), output.as_str(), *is_error)),
             _ => None,
         })
@@ -3159,4 +3161,99 @@ fn a_model_server_on_the_chat_api_is_never_offered_web_search() {
     engine.exchange("n1", "hello");
     let request = &model.requests()[0];
     assert!(!request.to_string().contains("web_search"), "{request}");
+}
+
+#[test]
+fn a_write_or_edit_keeps_the_earlier_text_under_an_id_the_tool_end_names_and_a_long_file_gets_none()
+{
+    let dir = workdir("kept");
+    let real = dir.canonicalize().unwrap();
+    fs::write(dir.join("a.txt"), "one two").unwrap();
+    fs::write(
+        dir.join("big.txt"),
+        "x".repeat(proto::undo::MAX_FILE as usize + 1),
+    )
+    .unwrap();
+    let model = Model::serve(vec![
+        vec![call(
+            "w1",
+            "write",
+            json!({"path": "a.txt", "content": "three"}),
+        )],
+        vec![call(
+            "w2",
+            "edit",
+            json!({"path": "a.txt", "old": "three", "new": "four"}),
+        )],
+        vec![call(
+            "w3",
+            "write",
+            json!({"path": "new.txt", "content": "n"}),
+        )],
+        vec![call(
+            "w4",
+            "write",
+            json!({"path": "big.txt", "content": "small"}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("change files");
+    let mut events = Vec::new();
+    for _ in 0..4 {
+        answer(&mut engine, "Approve");
+        events.extend(engine.until(|e| matches!(e, Event::ToolEnd { .. })));
+    }
+    events.extend(engine.until(is_turn_end));
+
+    // Each `kept` comes before the `tool_end` that names it.
+    let kept: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Kept {
+                id,
+                path,
+                earlier,
+                after,
+            } => Some((id.clone(), path.clone(), earlier.clone(), after.clone())),
+            _ => None,
+        })
+        .collect();
+    let undo: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolEnd { undo, .. } => Some(undo.clone()),
+            _ => None,
+        })
+        .collect();
+    let a = real.join("a.txt").to_str().unwrap().to_owned();
+    assert_eq!(kept.len(), 3, "{events:?}");
+    assert_eq!(kept[0].1, a);
+    assert_eq!(kept[0].2.as_deref(), Some("one two"));
+    assert_eq!(kept[0].3, proto::undo::digest(b"three"));
+    assert_eq!(kept[1].2.as_deref(), Some("three"));
+    assert_eq!(kept[1].3, proto::undo::digest(b"four"));
+    assert_eq!(kept[2].2, None);
+    assert_eq!(
+        undo[..3],
+        [
+            Some(kept[0].0.clone()),
+            Some(kept[1].0.clone()),
+            Some(kept[2].0.clone())
+        ]
+    );
+    // The long file is changed all the same, with no copy and no id.
+    assert_eq!(undo[3], None);
+    assert_eq!(fs::read_to_string(dir.join("big.txt")).unwrap(), "small");
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "four");
+    let first_kept = events
+        .iter()
+        .position(|e| matches!(e, Event::Kept { .. }))
+        .unwrap();
+    let first_end = events
+        .iter()
+        .position(|e| matches!(e, Event::ToolEnd { .. }))
+        .unwrap();
+    assert!(first_kept < first_end);
 }

@@ -26,6 +26,9 @@ use serde_json::{Value, json};
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
+/// A prompt `change <path> <word>` writes `<word>` to the file (a full path), as the engine's `write`
+/// does: it sends `kept` with the text the file had (`null`: none) and a hash of the new one, then the
+/// call's `tool_end` naming the copy `k-<nonce>`.
 /// A prompt `work` starts a turn that runs until `abort`. Each `steer` is logged to `steers.log` and
 /// answered; unless its text has `late` in it, the engine then takes it into the turn (`steered`).
 /// A session named `slow-…` or `slowgone-…` is opened (or refused) only once the file `go` is
@@ -79,6 +82,17 @@ while IFS= read -r line; do
           target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z_]* \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"question\",\"question\":\"q-$nonce\",\"title\":\"$kind $target\",\"options\":[\"Approve\",\"Deny\"],\"kind\":\"$kind\",\"target\":\"$target\"}" ;;
+        *'"text":"change '*|*'\n\nchange '*)
+          rest=$(printf '%s' "$line" | sed 's/.*change \([^"]*\)".*/\1/')
+          path=${rest%% *}; content=${rest#* }
+          if [ -e "$path" ]; then earlier="\"$(cat "$path")\""; else earlier=null; fi
+          printf '%s' "$content" > "$path"
+          after=$(printf '%s' "$content" | shasum -a 256 | cut -d' ' -f1)
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"tool_start\",\"call\":\"c-$nonce\",\"tool\":\"write\",\"args\":{\"path\":\"$path\"}}"
+          echo "{\"type\":\"kept\",\"id\":\"k-$nonce\",\"path\":\"$path\",\"earlier\":$earlier,\"after\":\"$after\"}"
+          echo "{\"type\":\"tool_end\",\"call\":\"c-$nonce\",\"output\":\"wrote\",\"isError\":false,\"undo\":\"k-$nonce\"}"
+          echo '{"type":"turn_end","reason":"done"}' ;;
         *'"text":"tell '*)
           to=$(printf '%s' "$line" | sed 's/.*"text":"tell \([^ ]*\) .*/\1/')
           words=$(printf '%s' "$line" | sed 's/.*"text":"tell [^ ]* \([^"]*\)".*/\1/')
@@ -2672,6 +2686,8 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("15", "read_surface"),
         ("16", "act_surface"),
         ("17", "watch_surfaces"),
+        // It changes files on this Mac, maybe outside the bot's folder.
+        ("21", "undo_change"),
     ] {
         send(
             &device,
@@ -10734,4 +10750,374 @@ fn deleting_a_bot_or_a_project_leaves_no_row_that_points_at_it() {
     let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
     assert_eq!(cells_holding(&db, &a), 0);
     assert_eq!(cells_holding(&db, &pid), 0);
+}
+
+/// The code a command is refused with.
+fn refused(w: &mut Window, command: &str, args: Value) -> String {
+    let id = w.send(command, args);
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(
+        reply["success"], false,
+        "{command} was not refused: {reply}"
+    );
+    reply["code"].as_str().unwrap().to_owned()
+}
+
+/// Has the fake engine write `word` to the file `path` as a `write` would, and gives the id of
+/// the copy the call's `tool_end` names.
+fn change(w: &mut Window, bot: &str, nonce: &str, path: &Path, word: &str) -> String {
+    let text = format!("change {} {word}", path.display());
+    w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": text}));
+    let end = w.wait_for(|f| {
+        f["entry"]["type"] == "tool_end" && f["entry"]["call"] == format!("c-{nonce}").as_str()
+    });
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    end["entry"]["undo"].as_str().expect("an id").to_owned()
+}
+
+fn history(w: &mut Window, bot: &str) -> Vec<Value> {
+    let opened = w.ok("open_bot", json!({"bot": bot}));
+    let rows = opened["history"].as_array().unwrap().iter();
+    rows.map(|r| r["entry"].clone()).collect()
+}
+
+fn text_of(path: impl AsRef<Path>) -> String {
+    fs::read_to_string(path).unwrap()
+}
+
+#[test]
+fn undo_puts_back_the_earlier_text_or_removes_a_file_the_change_made_and_stays_undone_after_a_restart()
+ {
+    let home = home("undo");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    let (edited, made) = (dir.join("a.txt"), dir.join("sub-b.txt"));
+    fs::write(&edited, "old").unwrap();
+
+    let id = change(&mut w, &bot, "n1", &edited, "new");
+    assert_eq!(text_of(&edited), "new");
+    let asked = w.send("undo_change", json!({"bot": bot, "change": id}));
+    // The line of the call is told it was undone, before the answer.
+    let told = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "undone");
+    assert_eq!(told["entry"]["undo"], id.as_str());
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == asked.as_str());
+    assert_eq!(reply["success"], true, "{reply}");
+    assert_eq!(text_of(&edited), "old");
+
+    // A file the change made is removed.
+    let id2 = change(&mut w, &bot, "n2", &made, "fresh");
+    assert_eq!(text_of(&made), "fresh");
+    w.ok("undo_change", json!({"bot": bot, "change": id2}));
+    assert!(!made.exists());
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id2})),
+        "bad_request"
+    );
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": "nope"})),
+        "no_such_change"
+    );
+
+    // After a restart the call still shows as undone, and cannot be undone twice.
+    drop(w);
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let undone: Vec<_> = history(&mut w, &bot)
+        .into_iter()
+        .filter(|e| e["type"] == "undone")
+        .map(|e| e["undo"].clone())
+        .collect();
+    assert_eq!(undone, [json!(id), json!(id2)]);
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id})),
+        "bad_request"
+    );
+}
+
+#[test]
+fn a_file_changed_since_is_not_overwritten_unless_the_person_insists() {
+    let home = home("undo-force");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    let (edited, made) = (dir.join("a.txt"), dir.join("b.txt"));
+    fs::write(&edited, "old").unwrap();
+    let id = change(&mut w, &bot, "n1", &edited, "new");
+    fs::write(&edited, "mine").unwrap();
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id})),
+        "changed"
+    );
+    assert_eq!(text_of(&edited), "mine");
+    // Not undone: the line still offers it.
+    assert!(!history(&mut w, &bot).iter().any(|e| e["type"] == "undone"));
+    w.ok(
+        "undo_change",
+        json!({"bot": bot, "change": id, "force": true}),
+    );
+    assert_eq!(text_of(&edited), "old");
+
+    // A file the change made that is gone, or is another file now.
+    let id = change(&mut w, &bot, "n2", &made, "fresh");
+    fs::remove_file(&made).unwrap();
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id})),
+        "changed"
+    );
+    w.ok(
+        "undo_change",
+        json!({"bot": bot, "change": id, "force": true}),
+    );
+    assert!(!made.exists());
+}
+
+#[test]
+fn the_bot_is_told_once_at_its_next_turn_which_files_the_person_put_back() {
+    let home = home("undo-told");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    let (edited, made) = (dir.join("a.txt"), dir.join("b.txt"));
+    fs::write(&edited, "old").unwrap();
+    let first = change(&mut w, &bot, "n1", &edited, "new");
+    let second = change(&mut w, &bot, "n2", &made, "fresh");
+    let kept = change(&mut w, &bot, "n3", &dir.join("c.txt"), "x");
+    w.ok("undo_change", json!({"bot": bot, "change": first}));
+    w.ok("undo_change", json!({"bot": bot, "change": second}));
+    let _ = kept;
+
+    let sent = |nonce: &str| {
+        let log = fs::read_to_string(dir.join("prompts.log")).unwrap();
+        let line = log
+            .lines()
+            .find(|l| l.contains(&format!("\"nonce\":\"{nonce}\"")))
+            .unwrap();
+        serde_json::from_str::<Value>(line).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    w.ok("prompt", json!({"bot": bot, "nonce": "n4", "text": "hi"}));
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    let text = sent("n4");
+    assert!(
+        text.contains(&format!(
+            "undid your change to {}: it has its earlier content again.",
+            edited.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "undid your change that created {}: the file is removed.",
+            made.display()
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with("\nhi"), "{text}");
+    // The chat shows the prompt as it was written.
+    let prompt = history(&mut w, &bot)
+        .into_iter()
+        .find(|e| e["nonce"] == "n4")
+        .unwrap();
+    assert_eq!(prompt["text"], "hi");
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n5", "text": "again"}),
+    );
+    w.wait_for(|f| f["entry"]["type"] == "turn_end");
+    assert_eq!(sent("n5"), "again");
+}
+
+#[test]
+fn a_link_the_bot_leaves_where_a_copy_is_put_back_is_not_followed() {
+    let home = home("undo-links");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    let outside = home.join("outside").canonicalize().unwrap_or_else(|_| {
+        fs::create_dir_all(home.join("outside")).unwrap();
+        home.join("outside").canonicalize().unwrap()
+    });
+    fs::write(outside.join("f.txt"), "new").unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub/f.txt"), "old").unwrap();
+    let id = change(&mut w, &bot, "n1", &dir.join("sub/f.txt"), "new");
+
+    // The folder is swapped for a link to a folder whose file looks as the change left it.
+    fs::remove_dir_all(dir.join("sub")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+    for force in [false, true] {
+        let args = json!({"bot": bot, "change": id, "force": force});
+        assert_ne!(refused(&mut w, "undo_change", args), "changed");
+        assert_eq!(text_of(outside.join("f.txt")), "new");
+    }
+
+    // The file is swapped for a link to a file elsewhere.
+    fs::remove_file(dir.join("sub")).unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    std::os::unix::fs::symlink(outside.join("f.txt"), dir.join("sub/f.txt")).unwrap();
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id})),
+        "changed"
+    );
+    assert_eq!(text_of(outside.join("f.txt")), "new");
+    w.ok(
+        "undo_change",
+        json!({"bot": bot, "change": id, "force": true}),
+    );
+    assert_eq!(text_of(outside.join("f.txt")), "new");
+    assert_eq!(text_of(dir.join("sub/f.txt")), "old");
+    assert!(
+        !fs::symlink_metadata(dir.join("sub/f.txt"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_limited_bot_cannot_get_a_file_outside_its_folders_changed_through_undo() {
+    let home = home("undo-limits");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let elsewhere = home.canonicalize().unwrap().join("elsewhere.txt");
+    fs::write(&elsewhere, "old").unwrap();
+    // With the whole disk it may change it, and undo may put it back.
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    let id = change(&mut w, &bot, "n1", &elsewhere, "new");
+    assert_eq!(text_of(&elsewhere), "new");
+    // The limit is back: the copy is no way to reach the file.
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": false}));
+    assert_eq!(
+        refused(
+            &mut w,
+            "undo_change",
+            json!({"bot": bot, "change": id, "force": true})
+        ),
+        "internal"
+    );
+    assert_eq!(text_of(&elsewhere), "new");
+    w.ok("set_disk_access", json!({"bot": bot, "wholeDisk": true}));
+    w.ok("undo_change", json!({"bot": bot, "change": id}));
+    assert_eq!(text_of(&elsewhere), "old");
+}
+
+#[test]
+fn every_replace_or_delete_of_a_note_leaves_a_version_a_deleted_note_comes_back_and_a_bot_deleted_takes_them()
+ {
+    let home = home("memory-versions");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    let dir = home.join("bots").join(&bot).canonicalize().unwrap();
+    fs::create_dir_all(dir.join("memory")).unwrap();
+    let note = json!({"bot": bot, "name": "user.md"});
+    let with = |extra: Value| {
+        let mut args = note.clone();
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    let versions = |w: &mut Window, args: Value| -> Vec<(String, u64, String)> {
+        let listed = w.ok("list_memory_versions", args)["versions"].clone();
+        let rows = listed.as_array().unwrap().iter();
+        rows.map(|v| {
+            (
+                v["id"].as_str().unwrap().to_owned(),
+                v["bytes"].as_u64().unwrap(),
+                v["by"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+    };
+
+    // A new note has nothing before it. Replacing it by the window, then by the bot, then
+    // deleting it by the window each keep what it was, and who changed it.
+    w.ok("write_memory", with(json!({"text": "v1"})));
+    assert!(versions(&mut w, note.clone()).is_empty());
+    w.ok("write_memory", with(json!({"text": "v2"})));
+    change(&mut w, &bot, "n1", &dir.join("memory/user.md"), "v3-long");
+    w.ok("delete_memory", note.clone());
+    let all = versions(&mut w, note.clone());
+    let who: Vec<_> = all
+        .iter()
+        .map(|(_, bytes, by)| (*bytes, by.as_str()))
+        .collect();
+    assert_eq!(who, [(7, "user"), (2, "bot"), (2, "user")]);
+
+    // The deleted note is listed with its newest version, and restoring it brings it back.
+    assert_eq!(w.ok("list_memory", json!({"bot": bot}))["notes"], json!([]));
+    let gone = w.ok("list_deleted_memory", json!({"bot": bot}))["notes"].clone();
+    assert_eq!(gone[0]["name"], "user.md");
+    assert_eq!(gone[0]["id"], all[0].0.as_str());
+    w.ok("restore_memory_version", with(json!({"version": all[0].0})));
+    assert_eq!(text_of(dir.join("memory/user.md")), "v3-long");
+    assert_eq!(
+        w.ok("list_deleted_memory", json!({"bot": bot}))["notes"],
+        json!([])
+    );
+    // Restoring an older one keeps what it replaces, so that is not lost either.
+    w.ok("restore_memory_version", with(json!({"version": all[2].0})));
+    assert_eq!(text_of(dir.join("memory/user.md")), "v1");
+    assert_eq!(versions(&mut w, note.clone()).len(), 4);
+    // An id that is another file's, or none, restores nothing.
+    let other_note = json!({"bot": bot, "name": "other.md", "version": all[0].0});
+    assert_eq!(
+        refused(&mut w, "restore_memory_version", other_note),
+        "no_such_change"
+    );
+    assert_eq!(
+        refused(
+            &mut w,
+            "restore_memory_version",
+            with(json!({"version": "nope"}))
+        ),
+        "no_such_change"
+    );
+    assert_eq!(
+        w.ok(
+            "list_memory_versions",
+            json!({"bot": other, "name": "user.md"})
+        )["versions"],
+        json!([])
+    );
+
+    // A project's notes have versions too.
+    let project = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [other]}}),
+    )["project"]
+        .clone();
+    let pid = project["id"].as_str().unwrap();
+    let pnote = json!({"projectId": pid, "name": "plan.md"});
+    let pwith = |text: &str| json!({"projectId": pid, "name": "plan.md", "text": text});
+    w.ok("write_memory", pwith("Friday."));
+    w.ok("write_memory", pwith("Monday."));
+    let listed = versions(&mut w, pnote.clone());
+    assert_eq!(listed.len(), 1);
+    w.ok(
+        "restore_memory_version",
+        json!({"projectId": pid, "name": "plan.md", "version": listed[0].0}),
+    );
+    let folder = Path::new(project["folder"].as_str().unwrap());
+    assert_eq!(text_of(folder.join(".bate/memory/plan.md")), "Friday.");
+
+    // Deleting a bot, or a project, deletes its copies.
+    w.ok("delete_bot", json!({"bot": bot}));
+    w.ok("delete_project", json!({"projectId": pid}));
+    drop(w);
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    let left: i64 = db
+        .query_row("SELECT count(*) FROM file_copies", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
 }

@@ -4,10 +4,11 @@
 //! listed, read or replaced.
 
 use crate::paths;
+use crate::store::Store;
 use crate::sys::Dir;
 use proto::memory::{DIR, PROJECT, is_note_name};
 use serde::Serialize;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
@@ -73,6 +74,19 @@ impl Place {
         Place(folder.into(), &[PROJECT, DIR])
     }
 
+    /// The full path of the notes' folder, which is how copies of its notes are found. The
+    /// folder in the bot's or the project's is the service's own, so nothing above it is a link
+    /// that matters; what lies beyond it is not looked up.
+    fn folder(&self) -> PathBuf {
+        let base = self.0.canonicalize().unwrap_or_else(|_| self.0.clone());
+        self.1.iter().fold(base, |dir, part| dir.join(part))
+    }
+
+    /// The full path of the note `name`.
+    pub fn path(&self, name: &str) -> String {
+        self.folder().join(name).to_string_lossy().into_owned()
+    }
+
     /// The notes' folder held open, made first if `create`; `None`: there is none.
     fn dir(&self, create: bool) -> io::Result<Option<Dir>> {
         let mut dir = Dir::open(&self.0)?;
@@ -130,17 +144,64 @@ pub fn read(place: &Place, name: &str) -> io::Result<Option<String>> {
 
 /// Creates or replaces the note. The new file takes the name's place, so a link the bot left
 /// under that name is replaced, not followed.
-pub fn write(place: &Place, name: &str, text: &str) -> io::Result<()> {
-    let dir = place.dir(true)?.expect("made");
-    let tmp = format!(".{}.{name}", crate::sys::random_hex(4));
-    let written = dir
-        .create(&tmp)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| dir.rename(&tmp, name));
-    if written.is_err() {
-        let _ = dir.remove(&tmp);
+pub fn write(place: &Place, name: &str, bytes: &[u8]) -> io::Result<()> {
+    place.dir(true)?.expect("made").put(name, bytes, None)
+}
+
+/// The note's bytes as they are, to keep before it is replaced or removed; `None`: no plain
+/// file, or one over `proto::undo::MAX_FILE`.
+pub fn current(place: &Place, name: &str) -> io::Result<Option<Vec<u8>>> {
+    let Some(file) = place
+        .dir(false)?
+        .map(|d| d.read(name))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(proto::undo::MAX_FILE + 1)
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= proto::undo::MAX_FILE).then_some(bytes))
+}
+
+/// A note that is gone, and its newest earlier version.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deleted {
+    pub name: String,
+    pub bytes: u64,
+    pub at_ms: u64,
+    pub by: String,
+    pub id: String,
+}
+
+/// The notes of `place` that have an earlier version and are not there now, newest first.
+pub fn deleted(place: &Place, store: &Store) -> Result<Vec<Deleted>, String> {
+    let dir = place.folder();
+    let dir = dir.to_string_lossy();
+    let mut gone = Vec::new();
+    for (path, version) in store.latest_under(&dir).map_err(|e| e.to_string())? {
+        let name = &path[dir.len() + 1..];
+        if !is_note_name(name) {
+            continue;
+        }
+        let there = match place.dir(false) {
+            Ok(Some(dir)) => dir.read(name).map_err(|e| e.to_string())?.is_some(),
+            Ok(None) => false,
+            Err(e) => return Err(e.to_string()),
+        };
+        if !there {
+            gone.push(Deleted {
+                name: name.to_owned(),
+                bytes: version.bytes,
+                at_ms: version.at_ms,
+                by: version.by,
+                id: version.id,
+            });
+        }
     }
-    written
+    Ok(gone)
 }
 
 /// Removes the note (or the link under its name); false if there was none.

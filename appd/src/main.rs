@@ -33,6 +33,7 @@ mod skills;
 mod store;
 mod surfaces;
 mod sys;
+mod undo;
 mod update;
 mod workplaces;
 

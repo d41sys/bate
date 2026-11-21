@@ -46,7 +46,34 @@ fn engine_events_parse_from_the_documented_json() {
         Event::ToolEnd {
             call: "c1".into(),
             output: "x".into(),
-            is_error: true
+            is_error: true,
+            undo: None
+        }
+    );
+    let ev: Event = serde_json::from_value(
+        json!({"type": "tool_end", "call": "c2", "output": "x", "isError": false, "undo": "k1"}),
+    )
+    .unwrap();
+    assert_eq!(
+        ev,
+        Event::ToolEnd {
+            call: "c2".into(),
+            output: "x".into(),
+            is_error: false,
+            undo: Some("k1".into())
+        }
+    );
+    let ev: Event = serde_json::from_value(
+        json!({"type": "kept", "id": "k1", "path": "/w/a.txt", "earlier": null, "after": "ab"}),
+    )
+    .unwrap();
+    assert_eq!(
+        ev,
+        Event::Kept {
+            id: "k1".into(),
+            path: "/w/a.txt".into(),
+            earlier: None,
+            after: "ab".into()
         }
     );
     let ev: Event = serde_json::from_value(

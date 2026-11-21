@@ -332,6 +332,7 @@ impl Bridge {
                 call,
                 output: "the turn ended before this call did".into(),
                 is_error: true,
+                undo: None,
             });
         }
         out(&Event::TurnEnd { reason, error });
@@ -490,6 +491,7 @@ impl Bridge {
                     call: id.to_owned(),
                     output,
                     is_error: failed,
+                    undo: None,
                 });
             }
             // The agent's plan, shown as the `plan` tool of Bate's own engine is: a call whose
@@ -526,6 +528,7 @@ impl Bridge {
                     call,
                     output: String::new(),
                     is_error: false,
+                    undo: None,
                 });
             }
             // Commands, modes: nothing the transcript shows.

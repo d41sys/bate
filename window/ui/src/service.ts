@@ -84,6 +84,9 @@ const pending = new Map<number, { resolve: (data: unknown) => void; reject: (e: 
 const listeners = new Set<(frame: Frame) => void>();
 let connected = false;
 
+/** What a command that failed rejects with: the service's `error`, and its `code` (PROTOCOL.md, "Requests and responses"). */
+export type Failure = Error & { code?: string };
+
 /** Sends a command; resolves with its `data`, rejects with the service's `error`. */
 /** `T` is the command's `data` as PROTOCOL.md gives it; the service is not checked against it. */
 export function request<T = unknown>(type: string, fields: Record<string, unknown> = {}): Promise<T> {
@@ -124,7 +127,7 @@ async function pump() {
       const waiting = pending.get(frame.id);
       pending.delete(frame.id);
       if (frame.success) waiting?.resolve(frame.data);
-      else waiting?.reject(new Error(frame.error ?? "failed"));
+      else waiting?.reject(Object.assign(new Error(frame.error ?? "failed"), { code: frame.code as string | undefined }));
     } else if (frame.type === "hello") {
       // A new connection: what was asked on the old one gets no reply.
       connected = false;

@@ -19,6 +19,44 @@ pub type Result<T, E = rusqlite::Error> = std::result::Result<T, E>;
 
 pub struct Store(Connection);
 
+/// Whose file copies they are: what is kept is bounded for each, and goes with it.
+#[derive(Clone, Copy)]
+pub enum Owner<'a> {
+    Bot(&'a str),
+    /// A window's change to a project's note, which no bot made.
+    Project(&'a str),
+}
+
+/// A file as it was before a change (`file_copies`, see "Undo" in PROTOCOL.md).
+pub struct Kept {
+    /// What the engine named it, or the service for a copy of its own.
+    pub id: String,
+    /// The conversation whose tool line made it.
+    pub conversation: String,
+    /// Full path.
+    pub path: String,
+    /// `None`: there was no file.
+    pub earlier: Option<Vec<u8>>,
+    /// Hash of what the change left; none for a change the window made.
+    pub after: Option<String>,
+    /// Who changed it: `bot` or `user`.
+    pub who: &'static str,
+    pub at: u64,
+    /// Output only: the bot whose copy it is, and whether the change was undone.
+    pub bot: Option<String>,
+    pub undone: bool,
+}
+
+/// What a note's earlier version is, for a list.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Version {
+    pub id: String,
+    pub at_ms: u64,
+    pub bytes: u64,
+    pub by: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotRow {
@@ -209,6 +247,8 @@ CREATE TABLE IF NOT EXISTS room(seq INTEGER PRIMARY KEY AUTOINCREMENT, project T
 CREATE INDEX IF NOT EXISTS room_project ON room(project, seq);
 CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 CREATE INDEX IF NOT EXISTS mail_from ON mail(from_bot);
+CREATE TABLE IF NOT EXISTS file_copies(n INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, bot TEXT REFERENCES bots(id) ON DELETE CASCADE, project TEXT REFERENCES projects(id) ON DELETE CASCADE, conversation TEXT NOT NULL, path TEXT NOT NULL, earlier BLOB, after_sum TEXT, who TEXT NOT NULL, at INTEGER NOT NULL, undone_at INTEGER, told INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS file_copies_path ON file_copies(path);
 ";
 
 /// What `PRAGMA user_version` holds: 0 before relations were foreign keys, 1 for those, 2 once
@@ -1969,6 +2009,131 @@ impl Store {
             [bot, name],
         )? > 0)
     }
+
+    /// Keeps a copy and drops the owner's oldest ones while they hold more than
+    /// `proto::undo::MAX_KEPT` (a copy counts its bytes and `ENTRY` more).
+    pub fn keep(&self, owner: Owner, k: &Kept) -> Result<()> {
+        let (bot, project) = match owner {
+            Owner::Bot(id) => (Some(id), None),
+            Owner::Project(id) => (None, Some(id)),
+        };
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO file_copies(id, bot, project, conversation, path, earlier, after_sum, who, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![k.id, bot, project, k.conversation, k.path, k.earlier, k.after, k.who, k.at],
+        )?;
+        tx.execute(
+            "DELETE FROM file_copies WHERE n IN (SELECT n FROM (SELECT n, \
+             SUM(COALESCE(LENGTH(earlier), 0) + ?3) OVER (ORDER BY n DESC) AS total \
+             FROM file_copies WHERE bot IS ?1 AND project IS ?2) WHERE total > ?4)",
+            params![bot, project, proto::undo::ENTRY, proto::undo::MAX_KEPT],
+        )?;
+        tx.commit()
+    }
+
+    /// The copy `id`, whoever owns it.
+    pub fn kept(&self, id: &str) -> Result<Option<Kept>> {
+        self.0
+            .query_row(
+                "SELECT id, bot, conversation, path, earlier, after_sum, who, at, undone_at \
+                 FROM file_copies WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(Kept {
+                        id: r.get(0)?,
+                        bot: r.get(1)?,
+                        conversation: r.get(2)?,
+                        path: r.get(3)?,
+                        earlier: r.get(4)?,
+                        after: r.get(5)?,
+                        who: if r.get::<_, String>(6)? == "bot" {
+                            "bot"
+                        } else {
+                            "user"
+                        },
+                        at: r.get(7)?,
+                        undone: r.get::<_, Option<u64>>(8)?.is_some(),
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn set_undone(&self, id: &str, at: u64) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE file_copies SET undone_at = ?2 WHERE id = ?1",
+                params![id, at],
+            )
+            .map(drop)
+    }
+
+    /// The earlier versions of the file at `path` (those with content), newest first.
+    pub fn versions(&self, path: &str) -> Result<Vec<Version>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT id, at, LENGTH(earlier), who FROM file_copies \
+             WHERE path = ?1 AND earlier IS NOT NULL ORDER BY n DESC",
+        )?;
+        stmt.query_map([path], |r| {
+            Ok(Version {
+                id: r.get(0)?,
+                at_ms: r.get(1)?,
+                bytes: r.get(2)?,
+                by: r.get(3)?,
+            })
+        })?
+        .collect()
+    }
+
+    /// The newest version (one with content) of each file whose path starts with `dir/`, newest first.
+    pub fn latest_under(&self, dir: &str) -> Result<Vec<(String, Version)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT path, id, at, LENGTH(earlier), who FROM file_copies \
+             WHERE substr(path, 1, ?2) = ?1 AND earlier IS NOT NULL ORDER BY n DESC",
+        )?;
+        let prefix = format!("{dir}/");
+        let rows = stmt.query_map(params![prefix, prefix.chars().count()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Version {
+                    id: r.get(1)?,
+                    at_ms: r.get(2)?,
+                    bytes: r.get(3)?,
+                    by: r.get(4)?,
+                },
+            ))
+        })?;
+        let mut seen = std::collections::HashSet::new();
+        let mut latest = Vec::new();
+        for row in rows {
+            let (path, version) = row?;
+            if seen.insert(path.clone()) {
+                latest.push((path, version));
+            }
+        }
+        Ok(latest)
+    }
+
+    /// The changes of the bot that the user undid and the bot has not been told of, oldest
+    /// first: `(id, path, created)`, where `created` says the change made the file.
+    pub fn untold(&self, bot: &str) -> Result<Vec<(String, String, bool)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT id, path, earlier IS NULL FROM file_copies \
+             WHERE bot = ?1 AND who = 'bot' AND undone_at IS NOT NULL AND told = 0 \
+             ORDER BY n LIMIT 20",
+        )?;
+        stmt.query_map([bot], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect()
+    }
+
+    pub fn set_told(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            self.0
+                .execute("UPDATE file_copies SET told = 1 WHERE id = ?1", [id])?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1989,6 +2154,42 @@ mod tests {
 
     use super::*;
     use proto::routines::RunOutcome;
+
+    #[test]
+    fn a_bots_copies_are_bounded_and_the_oldest_go_first_without_touching_another_bots() {
+        let dir = std::env::temp_dir().join(format!("appd-store-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        store.create_bot("b1", "Ada", 1).unwrap();
+        store.create_bot("b2", "Bo", 1).unwrap();
+        let copy = |id: &str, bytes: usize| Kept {
+            id: id.into(),
+            conversation: String::new(),
+            path: "/f".into(),
+            earlier: Some(vec![0; bytes]),
+            after: None,
+            who: "bot",
+            at: 1,
+            bot: None,
+            undone: false,
+        };
+        store.keep(Owner::Bot("b2"), &copy("other", 1)).unwrap();
+        // Fifty whole-file copies fill the bound: the entries' own weight tips it over.
+        let file = proto::undo::MAX_FILE as usize;
+        for n in 0..51 {
+            store
+                .keep(Owner::Bot("b1"), &copy(&format!("c{n}"), file))
+                .unwrap();
+        }
+        let kept = |id: &str| store.kept(id).unwrap().is_some();
+        assert!(!kept("c0") && !kept("c1"), "the oldest are dropped");
+        assert!(kept("c2") && kept("c50"), "the newest are kept");
+        assert!(kept("other"));
+        let held: u64 = (0..51).filter(|n| kept(&format!("c{n}"))).count() as u64;
+        assert!(held * (proto::undo::MAX_FILE + proto::undo::ENTRY) <= proto::undo::MAX_KEPT);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_routine_keeps_its_newest_runs_and_a_refusal_replaces_only_the_last() {

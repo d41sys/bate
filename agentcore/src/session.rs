@@ -25,7 +25,7 @@ pub struct Session {
     bytes: usize,
 }
 
-fn new_id() -> io::Result<String> {
+pub fn new_id() -> io::Result<String> {
     let mut bytes = [0u8; 8];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
