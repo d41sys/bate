@@ -1,5 +1,6 @@
 //! The `PATH` an installed agent is looked up and started with: the service's own folders, then
-//! those its user's login shell adds. Under launchd the service has only the system's; a program a
+//! those its user's login shell adds, then the folder of the adapters Bate installed itself (so
+//! a copy the user has on their own `PATH` wins). Under launchd the service has only the system's; a program a
 //! Node version manager or `~/.local/bin` provides (and the `node` it runs on) is on the shell's.
 
 use std::ffi::{OsStr, OsString};
@@ -31,6 +32,13 @@ pub fn get() -> &'static OsStr {
 }
 
 fn combined() -> OsString {
+    let all = login_paths();
+    let mut dirs: Vec<PathBuf> = env::split_paths(&all).collect();
+    dirs.push(crate::adapters::bin_dir());
+    env::join_paths(dirs).unwrap_or(all)
+}
+
+fn login_paths() -> OsString {
     let own = env::var_os("PATH").unwrap_or_default();
     match from_shell() {
         Ok(shell) => {

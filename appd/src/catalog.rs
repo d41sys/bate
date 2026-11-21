@@ -1,8 +1,9 @@
-//! The catalog: three lists that this project keeps in files of its repository (`catalog/`).
+//! The catalog: four lists that this project keeps in files of its repository (`catalog/`).
 //! `workplaces.json` lists workplaces that can be installed from a `.tar.gz` of their folder,
 //! pinned by size and SHA-256 (format in `docs/workplaces.md`); `skills.json` lists skills the
-//! same way; `connectors.json` lists connectors as the values of the "New connector" form, which
-//! installs nothing. An entry is a pointer, not something Bate has checked. Nothing here runs a
+//! same way; `agents.json` lists the adapters of installed agents, each as the npm packages it
+//! runs on, pinned the same way; `connectors.json` lists connectors as the values of the "New
+//! connector" form, which installs nothing. An entry is a pointer, not something Bate has checked. Nothing here runs a
 //! server: a list and an archive are read over HTTPS from where the entries say.
 
 use crate::core::{check_connector, check_connector_name};
@@ -127,6 +128,98 @@ fn parse_skills(text: &str) -> Result<Vec<SkillEntry>, String> {
     )
 }
 
+/// One npm package of an adapter: the tarball the registry serves, pinned. `path` is where it
+/// lies under the adapter's folder, as in `node_modules`: the folder's name is the name the
+/// others ask for it by (it may differ from `name`, the package's own, for an alias).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Package {
+    pub path: String,
+    pub name: String,
+    pub version: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+    /// The processor it is for (`arm64` or `x64`); none: any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+}
+
+/// An adapter of the list: the program that makes an installed agent speak the Agent Client
+/// Protocol, with every package it needs to run. `name` is the program's name, as the table of
+/// known agents has it; `bin` is the file `node` runs; `node` is the oldest Node version
+/// (major) it runs on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterEntry {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub home: String,
+    pub bin: String,
+    pub node: u32,
+    pub packages: Vec<Package>,
+}
+
+/// `Ok` when `path` is a place under a `node_modules` folder, written as a relative path.
+fn check_package_path(path: &str) -> Result<(), String> {
+    workplaces::line("path", path, 300)?;
+    let parts: Vec<&str> = path.split('/').collect();
+    let plain = parts.iter().all(|p| !p.is_empty() && !p.starts_with('.'));
+    if !plain
+        || parts[0] != "node_modules"
+        || parts.len() < 2
+        || parts.last() == Some(&"node_modules")
+    {
+        return Err(format!(
+            "`path` {path:?} must be a folder under node_modules"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_adapters(text: &str) -> Result<Vec<AdapterEntry>, String> {
+    parse_list(
+        text,
+        "agents",
+        |e: &AdapterEntry| &e.name,
+        |e| {
+            check_connector_name(&e.name)?;
+            workplaces::line("version", &e.version, 40)?;
+            workplaces::line("description", &e.description, 500)?;
+            workplaces::line("home", &e.home, 2000)?;
+            if !e.home.starts_with("https://") {
+                return Err("`home` must be an https address".into());
+            }
+            if !(1..=99).contains(&e.node) {
+                return Err("`node` is a Node version, 1 to 99".into());
+            }
+            if e.packages.is_empty() || e.packages.len() > MOST {
+                return Err(format!("`packages` has 1 to {MOST} entries"));
+            }
+            check_package_path(&e.bin)?;
+            for (i, p) in e.packages.iter().enumerate() {
+                check_package_path(&p.path)?;
+                workplaces::line("name", &p.name, 214)?;
+                workplaces::line("version", &p.version, 40)?;
+                check_pin(&p.url, p.size, &p.sha256)?;
+                if p.cpu
+                    .as_deref()
+                    .is_some_and(|c| !["arm64", "x64"].contains(&c))
+                {
+                    return Err("`cpu` is arm64 or x64".into());
+                }
+                if e.packages[..i].iter().any(|o| o.path == p.path) {
+                    return Err(format!("the path {} is used twice", p.path));
+                }
+            }
+            let inside = |p: &Package| e.bin.starts_with(&format!("{}/", p.path));
+            if !e.packages.iter().any(inside) {
+                return Err("`bin` must be in one of the packages".into());
+            }
+            Ok(())
+        },
+    )
+}
+
 /// A connector of the list: what the "New connector" form is filled in with. Never a value of
 /// the person's own: `fill` names what they must add (a key, a folder).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +316,11 @@ pub fn skill_list() -> Result<Vec<SkillEntry>, Refusal> {
     read("skills.json", parse_skills)
 }
 
+/// Reads the list of adapters.
+pub fn adapter_list() -> Result<Vec<AdapterEntry>, Refusal> {
+    read("agents.json", parse_adapters)
+}
+
 fn no_entry(name: &str) -> Refusal {
     (
         "no_such_catalog_entry",
@@ -234,6 +332,10 @@ pub fn entry(name: &str) -> Result<Entry, Refusal> {
     (list()?.into_iter().find(|e| e.name == name)).ok_or_else(|| no_entry(name))
 }
 
+pub fn adapter_entry(name: &str) -> Result<AdapterEntry, Refusal> {
+    (adapter_list()?.into_iter().find(|e| e.name == name)).ok_or_else(|| no_entry(name))
+}
+
 pub fn skill_entry(name: &str) -> Result<SkillEntry, Refusal> {
     (skill_list()?.into_iter().find(|e| e.name == name)).ok_or_else(|| no_entry(name))
 }
@@ -241,7 +343,7 @@ pub fn skill_entry(name: &str) -> Result<SkillEntry, Refusal> {
 /// Downloads the archive at `url`, checks its size and hash against the ones the catalog pins,
 /// unpacks it into a folder of its own and gives `then` that folder. The archive and the folder
 /// are gone afterwards.
-fn pinned<T>(
+pub fn pinned<T>(
     (url, size, sha256): (&str, u64, &str),
     then: impl FnOnce(&Path) -> Result<T, Refusal>,
 ) -> Result<T, Refusal> {
@@ -390,6 +492,50 @@ mod tests {
         assert!(parse(&twice).unwrap_err().contains("twice"));
     }
 
+    #[test]
+    fn a_list_of_adapters_is_checked() {
+        let sha = "a".repeat(64);
+        let package = format!(
+            r#"{{"path":"node_modules/a","name":"a","version":"1","url":"https://example.com/a.tgz","size":5,"sha256":"{sha}"}}"#
+        );
+        let entry = format!(
+            r#"{{"name":"codex-acp","description":"d","version":"1","home":"https://example.com","bin":"node_modules/a/x.js","node":20,"packages":[{package}]}}"#
+        );
+        let list = || format!(r#"{{"agents":[{entry}]}}"#);
+        assert_eq!(parse_adapters(&list()).unwrap().len(), 1);
+        let bad = |from: &str, to: &str| parse_adapters(&list().replace(from, to)).is_err();
+        assert!(bad("codex-acp", "Bad Name"));
+        assert!(bad("https://example.com/a.tgz", "ftp://example.com/a.tgz"));
+        assert!(bad("\"home\":\"https://", "\"home\":\"http://"));
+        // A path stays under node_modules, and `bin` in one of the packages.
+        for path in [
+            "a",
+            "node_modules",
+            "node_modules/../a",
+            "/node_modules/a",
+            "node_modules/.bin",
+        ] {
+            assert!(
+                bad(
+                    "\"path\":\"node_modules/a\"",
+                    &format!("\"path\":\"{path}\"")
+                ),
+                "{path}"
+            );
+        }
+        assert!(bad("node_modules/a/x.js", "node_modules/b/x.js"));
+        assert!(bad("\"node\":20", "\"node\":0"));
+        assert!(bad(&sha, "ABC"));
+        assert!(bad(
+            r#""version":"1","url""#,
+            r#""version":"1","cpu":"mips","url""#
+        ));
+        assert!(parse_adapters(r#"{"agents":[{"name":"codex-acp"}]}"#).is_err());
+        let twice =
+            format!(r#"{{"agents":[{entry}]}}"#).replace(&package, &format!("{package},{package}"));
+        assert!(parse_adapters(&twice).unwrap_err().contains("twice"));
+    }
+
     const ONE: &str = r#"{"name":"notes","description":"d","home":"https://example.com/docs","transport":{"type":"http","url":"https://example.com/mcp"},"oauth":true}"#;
 
     #[test]
@@ -436,5 +582,6 @@ mod tests {
         assert!(connectors.iter().all(|c| c.author.is_some()));
         parse_skills(include_str!("../../catalog/skills.json")).unwrap();
         parse(include_str!("../../catalog/workplaces.json")).unwrap();
+        parse_adapters(include_str!("../../catalog/agents.json")).unwrap();
     }
 }
