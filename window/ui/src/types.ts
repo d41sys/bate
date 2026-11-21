@@ -8,6 +8,8 @@ export type Bot = {
   busy: boolean;
   /** One of its questions is open: it waits for the person's answer. */
   waiting: boolean;
+  /** The user paused it: its turn is stopped, its routines skip, other bots' messages wait, and it takes none from the user. */
+  paused: boolean;
   wholeDisk: boolean;
   /** The hosts the bot's commands may reach (its project's are added); `null`: any. */
   network: string[] | null;
@@ -31,7 +33,7 @@ export type Bot = {
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 
-export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit"; error?: string };
+export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string };
 
 export type Routine = {
   id?: string;

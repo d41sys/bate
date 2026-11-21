@@ -67,6 +67,8 @@ pub enum RunOutcome {
     Limit,
     /// The slot passed while the service could not run it and is too old to catch up.
     Missed,
+    /// The service chose not to run the slot; `reason` says why.
+    Skipped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,9 @@ pub struct RoutineRun {
     pub outcome: RunOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why a `skipped` run was not run, in a word: `paused`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A routine. `hook_token`, `hook_url` and the fields after them are output only: the service

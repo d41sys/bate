@@ -241,6 +241,13 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* A bot's row is taller, with a bigger face; chosen, it keeps its weight so that its words do not move. */
 .sidebar .row:not(.plain) { min-height: var(--row-h-l); }
 .sidebar .avatar { width: var(--avatar-l); height: var(--avatar-l); font-size: var(--size-title); }
+/* A bot's row with its `⋯` menu beside it; a pointer sees the menu when it is over the row or has the focus, a touch screen always (not in the strip: see below). */
+.sidebar li.bot { display: flex; align-items: center; gap: var(--space-1); }
+.sidebar li.bot > .row { flex: 1; min-width: 0; }
+@media (hover: hover) {
+  .sidebar li.bot > .more { opacity: 0; }
+  .sidebar li.bot:hover > .more, .sidebar li.bot:focus-within > .more, .sidebar li.bot > .more:has([aria-expanded=true]) { opacity: 1; }
+}
 /* A working bot's row: a dot that breathes beside "Working…". */
 .pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
 /* A state on a row: a dot and a word. `quiet` is for what does not need the person. */
@@ -481,6 +488,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .sidebar ul, .sidebar li { display: flex; align-items: center; }
   .sidebar ul ul { padding-left: 0; }
   .sidebar ul, .sidebar li { flex: none; }
+  /* The strip scrolls, so a menu would be cut off: there the bot's Settings has Pause. */
+  .sidebar li.bot > .more { display: none; }
   .sidebar .foot { margin: 0 0 0 auto; }
   .row { width: auto; max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }

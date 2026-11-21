@@ -68,6 +68,7 @@ test("each shortcut stands for one action, by the physical key, and none while c
 test("a row shows the most urgent of its states", () => {
   const state = (b: Partial<Bot>, unread = false) => rowState({ ...bot("x"), ...b } as Bot, unread);
   assert.equal(state({ waiting: true, busy: true }, true), "waiting");
+  assert.equal(state({ paused: true, busy: true }, true), "paused");
   assert.equal(state({ busy: true }, true), "working");
   assert.equal(state({}, true), "unread");
   assert.equal(state({}), "idle");

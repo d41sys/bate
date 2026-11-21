@@ -12813,3 +12813,358 @@ fn an_answer_that_starts_a_bots_turn_goes_on_under_the_bots_that_asked_for_that_
     });
     assert_eq!(said["entry"]["delta"], "chose Deny");
 }
+
+fn paused_flag(w: &mut Window, bot: &str) -> Value {
+    let bots = w.ok("list_bots", json!({}));
+    let mut row = bots["bots"].as_array().unwrap().iter();
+    row.find(|b| b["id"] == bot).unwrap()["paused"].clone()
+}
+
+fn refusal(w: &mut Window, command: &str, fields: Value) -> Value {
+    let id = w.send(command, fields);
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["success"], false, "{reply}");
+    reply["code"].clone()
+}
+
+/// Waits until the conversation's history holds a `turn_end` with `reason` (all of them, counted).
+fn turns_ended(w: &mut Window, bot: &str, reason: &str, count: usize) {
+    eventually("the turn's end", || {
+        let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+        let ended = history.as_array().unwrap().iter();
+        let ended =
+            ended.filter(|e| e["entry"]["type"] == "turn_end" && e["entry"]["reason"] == reason);
+        ended.count() == count
+    });
+}
+
+#[test]
+fn a_paused_bot_stops_its_turn_refuses_the_user_keeps_what_waits_and_stays_paused_after_a_restart()
+{
+    let home = home("pause");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, other) = (w.create_bot(), w.create_bot());
+    assert_eq!(paused_flag(&mut w, &bot), false);
+
+    // A turn runs and a second prompt waits behind it; pausing stops the turn as `abort` does.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    eventually("the turn", || prompts_received(&home, &bot, "n1") == 1);
+    assert_eq!(
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": "n2", "text": "say later"})
+        )["queued"],
+        true
+    );
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    w.wait_for(|f| f["type"] == "bots_changed");
+    turns_ended(&mut w, &bot, "aborted", 1);
+    assert_eq!(paused_flag(&mut w, &bot), true);
+    assert_eq!(paused_flag(&mut w, &other), false);
+
+    // The user is refused, plainly; what waited stays in the queue and does not go.
+    let refused = |w: &mut Window, command: &str, fields: Value| {
+        let id = w.send(command, fields);
+        let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        (reply["code"].clone(), reply["error"].clone())
+    };
+    let (code, error) = refused(
+        &mut w,
+        "prompt",
+        json!({"bot": bot, "nonce": "n3", "text": "hi"}),
+    );
+    assert_eq!((code, error.is_string()), (json!("paused"), true));
+    assert_eq!(
+        refusal(&mut w, "steer", json!({"bot": bot, "text": "hi"})),
+        "paused"
+    );
+    assert_eq!(
+        w.ok("list_queue", json!({"bot": bot}))["queue"][0]["nonce"],
+        "n2"
+    );
+    assert_eq!(prompts_received(&home, &bot, "n2"), 0);
+
+    // It is stored: a restart leaves the bot paused, still refusing and still holding the queue.
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(paused_flag(&mut w, &bot), true);
+    assert_eq!(
+        refusal(
+            &mut w,
+            "prompt",
+            json!({"bot": bot, "nonce": "n4", "text": "hi"})
+        ),
+        "paused"
+    );
+    assert_eq!(
+        w.ok("list_queue", json!({"bot": bot}))["queue"][0]["nonce"],
+        "n2"
+    );
+    assert_eq!(prompts_received(&home, &bot, "n2"), 0);
+
+    // Resumed, the waiting prompt goes and the user may write again.
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+    eventually("the waiting prompt", || {
+        prompts_received(&home, &bot, "n2") == 1
+    });
+    assert_eq!(paused_flag(&mut w, &bot), false);
+    turns_ended(&mut w, &bot, "done", 1);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n5", "text": "say hi"}),
+    );
+
+    // No bot named: all of them, and back.
+    w.ok("set_paused", json!({"paused": true}));
+    assert_eq!(
+        (paused_flag(&mut w, &bot), paused_flag(&mut w, &other)),
+        (json!(true), json!(true))
+    );
+    assert_eq!(
+        refusal(
+            &mut w,
+            "prompt",
+            json!({"bot": other, "nonce": "n6", "text": "hi"})
+        ),
+        "paused"
+    );
+    w.ok("set_paused", json!({"paused": false}));
+    assert_eq!(
+        (paused_flag(&mut w, &bot), paused_flag(&mut w, &other)),
+        (json!(false), json!(false))
+    );
+    assert_eq!(
+        refusal(
+            &mut w,
+            "set_paused",
+            json!({"bot": "nobody", "paused": true})
+        ),
+        "no_such_bot"
+    );
+    assert_eq!(
+        refusal(&mut w, "set_paused", json!({"bot": bot})),
+        "bad_request"
+    );
+}
+
+#[test]
+fn a_paused_bots_routines_skip_with_a_recorded_reason_also_when_missed_slots_are_caught_up_at_start()
+ {
+    let home = home("pause-routines");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let daily = json!({"name": "Brief", "prompt": "hi", "enabled": true, "webhook": true,
+        "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": daily}))["routine"].clone();
+    let (id, url) = (
+        routine["id"].as_str().unwrap().to_owned(),
+        routine["hookUrl"].as_str().unwrap().to_owned(),
+    );
+    let runs = |w: &mut Window| {
+        w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"].clone()
+    };
+
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    // The webhook is told and the skip is recorded.
+    let head = "content-length: 0\r\n";
+    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    let seen = runs(&mut w);
+    assert_eq!(
+        (&seen[0]["outcome"], &seen[0]["reason"]),
+        (&json!("skipped"), &json!("paused"))
+    );
+
+    // A slot passes while the service is down; at start it is caught up, and skipped.
+    service.kill();
+    let due = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+        - 60_000;
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "UPDATE routines SET routine = json_set(routine, '$.nextRunMs', ?1) WHERE id = ?2",
+        rusqlite::params![due, id],
+    )
+    .unwrap();
+    drop(db);
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    eventually("the skipped slot", || {
+        runs(&mut w).as_array().unwrap().len() == 2
+    });
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"][0].clone();
+    assert_eq!(
+        (&listed["lastRun"]["outcome"], &listed["lastRun"]["reason"]),
+        (&json!("skipped"), &json!("paused"))
+    );
+    assert!(listed["nextRunMs"].as_i64().unwrap() > due);
+    assert_eq!(
+        prompts_received(&home, &bot, &format!("routine-{id}-{due}")),
+        0
+    );
+    assert_eq!(
+        ops_of(&home, &bot)
+            .iter()
+            .filter(|o| *o == "prompt")
+            .count(),
+        0
+    );
+
+    // Resumed, the webhook (on the port the restarted service chose) runs it.
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+    let url = listed["hookUrl"].as_str().unwrap();
+    assert_eq!(http(url, "POST", None, head, ""), 202);
+    assert_eq!(runs(&mut w)[0]["outcome"], "sent");
+}
+
+#[test]
+fn a_paused_bot_tells_a_chat_and_skips_the_routine_the_chat_starts() {
+    let (home, telegram) = (home("pause-chat"), Telegram::start());
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_TELEGRAM_API", &telegram.base);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "set_channel",
+        json!({"bot": bot, "kind": "telegram", "token": Telegram::TOKEN}),
+    );
+    let code = w.ok("pair_channel", json!({"bot": bot, "kind": "telegram"}))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    telegram.say(7, &code);
+    assert!(telegram.heard(7, 1).contains("Paired"));
+    let routine = json!({"name": "Report", "prompt": "Look.", "enabled": true, "chat": true});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    telegram.say(7, "hello");
+    assert!(telegram.heard(7, 2).contains("paused"));
+    telegram.say(7, "/run report");
+    assert!(telegram.heard(7, 3).contains("skipped"));
+    let runs = w.ok(
+        "list_routine_runs",
+        json!({"bot": bot, "routineId": routine["id"]}),
+    )["runs"]
+        .clone();
+    assert_eq!(
+        (&runs[0]["outcome"], &runs[0]["reason"]),
+        (&json!("skipped"), &json!("paused"))
+    );
+    assert_eq!(
+        ops_of(&home, &bot)
+            .iter()
+            .filter(|o| *o == "prompt")
+            .count(),
+        0
+    );
+
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+    telegram.say(7, "hello again");
+    assert_eq!(telegram.heard(7, 4), "hello");
+}
+
+#[test]
+fn messages_to_a_paused_bot_and_answers_to_it_wait_for_the_resume_and_the_room_is_refused() {
+    let home = home("pause-mail");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let named = |w: &mut Window, name: &str| {
+        w.ok("create_bot", json!({"name": name}))["bot"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (a, b) = (named(&mut w, "Ann"), named(&mut w, "Bo"));
+    let project = json!({"name": "Team", "bots": [a, b], "lead": a});
+    let pid = w.ok("set_project", json!({"project": project}))["project"]["id"].clone();
+    let prompts_of = |bot: &str| {
+        fs::read_to_string(home.join("bots").join(bot).join("prompts.log")).unwrap_or_default()
+    };
+    // What `a` is told came of its message to `b`.
+    let tell = |w: &mut Window, nonce: &str, words: &str| {
+        w.ok(
+            "prompt",
+            json!({"bot": a, "nonce": nonce, "text": format!("tell {b} {words}")}),
+        );
+        let said = w.wait_for(|f| {
+            f["type"] == "transcript" && f["bot"] == a.as_str() && f["entry"]["type"] == "text"
+        })["entry"]["delta"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        w.wait_for(|f| f["bot"] == a.as_str() && f["entry"]["type"] == "turn_end");
+        said
+    };
+
+    // A message for a paused bot waits in its inbox, and goes when the bot is resumed.
+    w.ok("set_paused", json!({"bot": b, "paused": true}));
+    let said = tell(&mut w, "n1", "count the tests");
+    assert!(
+        said.contains("is paused, so your message waits in its inbox"),
+        "{said}"
+    );
+    assert!(w.ok("list_mail", json!({"bot": b}))["mail"][0]["state"] == "waiting");
+    assert!(!prompts_of(&b).contains("count the tests"));
+    // The message and the pause are stored: after a restart it still waits.
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(paused_flag(&mut w, &b), true);
+    assert!(w.ok("list_mail", json!({"bot": b}))["mail"][0]["state"] == "waiting");
+    assert!(!prompts_of(&b).contains("count the tests"));
+    w.ok("set_paused", json!({"bot": b, "paused": false}));
+    eventually("the message", || prompts_of(&b).contains("count the tests"));
+    eventually("its answer", || {
+        prompts_of(&a).matches("[Answer from the bot").count() == 1
+    });
+    turns_ended(&mut w, &a, "done", 2);
+
+    // The user's room message for a paused bot is refused, by `to` or by `@name`; nothing is written.
+    w.ok("set_paused", json!({"bot": b, "paused": true}));
+    for fields in [
+        json!({"projectId": pid, "text": "hi", "to": b}),
+        json!({"projectId": pid, "text": "@Bo hi"}),
+    ] {
+        assert_eq!(refusal(&mut w, "send_room", fields), "paused");
+    }
+    assert_eq!(
+        w.ok("list_room", json!({"projectId": pid}))["room"],
+        json!([])
+    );
+    w.ok("set_paused", json!({"bot": b, "paused": false}));
+
+    // The answer of another bot to a paused bot waits, in its queue, for the resume.
+    w.ok("prompt", json!({"bot": b, "nonce": "w1", "text": "work"}));
+    eventually("Bo at work", || prompts_received(&home, &b, "w1") == 1);
+    let said = tell(&mut w, "n2", "again");
+    assert!(said.contains("is busy, so your message waits"), "{said}");
+    w.ok("set_paused", json!({"bot": a, "paused": true}));
+    w.ok("abort", json!({"bot": b}));
+    eventually("Bo to answer", || {
+        w.ok("list_mail", json!({"bot": b}))["mail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["state"] == "answered")
+    });
+    let queue = w.ok("list_queue", json!({"bot": a}))["queue"].clone();
+    assert!(
+        queue[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[Answer from the bot"),
+        "{queue}"
+    );
+    assert_eq!(prompts_of(&a).matches("[Answer from the bot").count(), 1);
+    w.ok("set_paused", json!({"bot": a, "paused": false}));
+    eventually("the answer", || {
+        prompts_of(&a).matches("[Answer from the bot").count() == 2
+    });
+}

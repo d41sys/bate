@@ -27,6 +27,7 @@ import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { LATER } from "./firstRun.ts";
 import { Palette, type Choice } from "./Palette.tsx";
+import { RowMenu } from "./RowMenu.tsx";
 import "./highlight.css";
 import "./style.css";
 
@@ -262,6 +263,8 @@ function App() {
     addEventListener("bate-open-bot", onOpen);
     return () => removeEventListener("bate-open-bot", onOpen);
   }, []);
+  // One bot's, or (no `bot`) every bot's.
+  const setPaused = (paused: boolean, id?: string) => request("set_paused", { bot: id, paused }).catch((e: Error) => setError(e.message));
   const choices: Choice[] = [
     ...projects.map((p) => ({ group: "Projects", label: p.name, run: () => openProject(p.id!) })),
     ...bots.map((b) => ({ group: "Bots", label: b.name, bot: b, run: () => openBot(b.id) })),
@@ -271,6 +274,8 @@ function App() {
     { group: "Commands", label: "New bot", keys: "⌘N", run: actions["new-bot"] },
     { group: "Commands", label: "New project", run: actions["new-project"] },
     { group: "Commands", label: "New window", keys: "⇧⌘N", run: actions["new-window"] },
+    ...(bots.some((b) => !b.paused) ? [{ group: "Commands", label: "Pause all bots", run: () => setPaused(true) }] : []),
+    ...(bots.some((b) => b.paused) ? [{ group: "Commands", label: "Resume all bots", run: () => setPaused(false) }] : []),
     ...(Object.keys(ADDON_TABS) as AddonTab[]).map((t) => ({ group: "Pages", label: `Add-ons: ${ADDON_TABS[t]}`, run: () => setView({ page: "addons", tab: t }) })),
     { group: "Pages", label: "Activity", run: () => setView({ page: "attention" }) },
     { group: "Pages", label: "App settings", keys: "⌘,", run: actions.settings },
@@ -289,6 +294,7 @@ function App() {
     return (
     <li
       key={b.id}
+      className="bot"
       draggable
       onDragStart={() => setDragged(b.id)}
       onDragOver={(e) => e.preventDefault()}
@@ -317,8 +323,10 @@ function App() {
         </span>
         {state === "working" && <span className="pulse" aria-hidden="true" />}
         {state === "waiting" && <span className="badge">Needs you</span>}
+        {state === "paused" && <span className="badge quiet">Paused</span>}
         {state === "unread" && <span className="badge quiet">New reply</span>}
       </button>
+      <RowMenu label={b.name} items={[{ label: b.paused ? "Resume" : "Pause", run: () => setPaused(!b.paused, b.id) }]} />
     </li>
     );
   };

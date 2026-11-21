@@ -55,10 +55,10 @@ export function shortcut(e: Chord): string | undefined {
   if (e.ctrlKey && !e.metaKey && e.code === "Tab") return e.shiftKey ? "previous-bot" : "next-bot";
 }
 
-export type RowState = "waiting" | "working" | "unread" | "idle";
+export type RowState = "waiting" | "paused" | "working" | "unread" | "idle";
 
-/** The one state a row shows, the most urgent first: waiting for the person, working, unread, idle. */
-export const rowState = (bot: Bot, unread: boolean): RowState => (bot.waiting ? "waiting" : bot.busy ? "working" : unread ? "unread" : "idle");
+/** The one state a row shows, the most urgent first: waiting for the person, paused, working, unread, idle. */
+export const rowState = (bot: Bot, unread: boolean): RowState => (bot.waiting ? "waiting" : bot.paused ? "paused" : bot.busy ? "working" : unread ? "unread" : "idle");
 
 /** How many bots wait for the person: the Dock's badge. */
 export const waitingCount = (bots: Bot[]) => bots.filter((b) => b.waiting).length;

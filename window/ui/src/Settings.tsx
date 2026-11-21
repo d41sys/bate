@@ -67,6 +67,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
 
   return (
     <>
+      <Group title="Pause">
+        <Setting
+          id="bot-paused"
+          inline
+          title={bot.paused ? "Paused" : "Pause this bot"}
+          hint="Stops its turn, skips its routines and holds the messages other bots send it. It takes no message from you until you resume."
+          saved={saved("paused")}
+          error={error("paused")}
+        >
+          <button type="button" className="small" onClick={() => run("paused", request("set_paused", { bot: bot.id, paused: !bot.paused }))}>{bot.paused ? "Resume" : "Pause"}</button>
+        </Setting>
+      </Group>
       <Group title="The bot">
         <form onSubmit={(e) => { e.preventDefault(); run("look", request("set_bot", { bot: bot.id, ...look })); }}>
           <Setting id="bot-name" title="Name">

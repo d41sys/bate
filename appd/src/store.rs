@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS skills_off(bot TEXT NOT NULL REFERENCES bots(id) ON D
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS paused(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS web_search(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
@@ -264,7 +265,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 17] = [
+const BOT_TABLES: [&str; 18] = [
     "ledger",
     "access",
     "network",
@@ -280,6 +281,7 @@ const BOT_TABLES: [&str; 17] = [
     "models",
     "step_limits",
     "web_search",
+    "paused",
     "channels",
     "chats",
 ];
@@ -925,6 +927,22 @@ impl Store {
                 params![bot, enabled],
             )
             .map(drop)
+    }
+
+    /// Whether the bot is paused (see Pause in PROTOCOL.md).
+    pub fn paused(&self, bot: &str) -> Result<bool> {
+        self.0
+            .query_row("SELECT 1 FROM paused WHERE bot = ?1", [bot], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
+    }
+
+    pub fn set_paused(&self, bot: &str, paused: bool) -> Result<()> {
+        let sql = match paused {
+            true => "INSERT OR IGNORE INTO paused(bot) VALUES (?1)",
+            false => "DELETE FROM paused WHERE bot = ?1",
+        };
+        self.0.execute(sql, [bot]).map(drop)
     }
 
     /// The model server URL and optional API key configured in the service.
@@ -2363,6 +2381,7 @@ mod tests {
             at_ms,
             outcome,
             error: None,
+            reason: None,
         };
         for at in 1..=MAX_RUNS as u64 + 5 {
             store
