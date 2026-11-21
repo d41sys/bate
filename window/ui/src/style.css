@@ -554,3 +554,19 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .versions { flex: 1 0 calc(100% - var(--space-2)); box-sizing: border-box; margin: 0 0 var(--space-1) var(--space-2); padding-left: var(--space-3); border-left: 1px solid var(--border-strong); }
 .versions > small { display: block; color: var(--fg-muted); }
 .versions > .rows { margin: 0; }
+
+/* Quick Ask: the page of the small panel a global shortcut opens. It fills the panel; the answer scrolls in the middle. */
+.quick { display: flex; flex-direction: column; gap: var(--space-2); box-sizing: border-box; height: 100%; padding: var(--space-3); background: var(--bg-raised); overflow: hidden; }
+.quick > form { display: flex; flex-direction: column; gap: var(--space-2); flex: 1; min-height: 0; }
+.quick > header, .quick form > header { display: flex; align-items: center; gap: var(--space-2); }
+.quick > header strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick form > header select { flex: 1; min-width: 0; }
+.quick textarea { flex: 1; min-height: 0; resize: none; font-size: var(--size-chat); line-height: var(--leading-chat); }
+.quick .attached { margin: 0; }
+.quick .attached select { min-height: var(--control-h-small); }
+.quick .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.quick .asked { margin: 0; color: var(--fg-muted); max-height: calc(var(--leading) * 2); overflow: hidden; overflow-wrap: anywhere; }
+.quick .answer { flex: 1; min-height: 0; overflow: auto; }
+.quick .answer > p { margin: var(--space-2) 0 0; }
+.quick .question { margin: 0; }
+.quick > .error, .quick form > .error, .quick form > .note { margin: 0; }

@@ -203,6 +203,16 @@ pub enum Msg {
     },
 }
 
+/// A part of Quick Ask's context that may not have been asked for (`None`) or may have failed:
+/// what it gave, and why it did not.
+fn split<T>(part: Option<Result<T, String>>) -> (Option<T>, Option<String>) {
+    match part {
+        Some(Ok(value)) => (Some(value), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
+    }
+}
+
 /// Longest piece of engine stderr logged as one line.
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
@@ -2300,6 +2310,103 @@ impl Core {
                     .open_settings(str_field(f, "pane")?)
                     .map_err(|e| bad(&e))?;
                 Ok(Some(json!({})))
+            }
+            "get_quick_ask" => Ok(Some(json!(self.store.quick_ask().map_err(internal)?))),
+            "set_quick_ask" => {
+                let mut quick = self.store.quick_ask().map_err(internal)?;
+                match f.get("shortcut") {
+                    None => {}
+                    Some(Value::Null) => quick.shortcut = None,
+                    Some(v) => {
+                        let text = v
+                            .as_str()
+                            .ok_or_else(|| bad("`shortcut` must be text, or null"))?;
+                        quick.shortcut = match text {
+                            "" => None,
+                            text => Some(
+                                proto::quick::Shortcut::parse(text)
+                                    .map_err(bad)?
+                                    .to_string(),
+                            ),
+                        };
+                    }
+                }
+                let (was_selection, was_screenshot) = (quick.selection, quick.screenshot);
+                for (key, on) in [
+                    ("selection", &mut quick.selection),
+                    ("screenshot", &mut quick.screenshot),
+                ] {
+                    if let Some(v) = f.get(key) {
+                        *on = v
+                            .as_bool()
+                            .ok_or_else(|| bad(format!("`{key}` must be true or false")))?;
+                    }
+                }
+                // Both need the helper app, which holds the permissions: no switch is turned on
+                // without it.
+                let newly =
+                    (quick.selection && !was_selection) || (quick.screenshot && !was_screenshot);
+                if newly && !self.desktop.installed() {
+                    return Err(bad(
+                        "Bate Helper is not installed; it holds the permissions this needs",
+                    ));
+                }
+                self.store.set_quick_ask(&quick).map_err(internal)?;
+                self.broadcast(&json!({"type": "quick_ask_changed"}));
+                Ok(Some(json!(quick)))
+            }
+            "quick_context" => {
+                let quick = self.store.quick_ask().map_err(internal)?;
+                let helper = self.desktop.clone();
+                self.reply_later(client, id, "quick_context", move || {
+                    // A part that fails is told on its own: the panel opens all the same.
+                    let part = |on: bool, call| on.then(|| helper.text(call));
+                    let quote = part(quick.selection, proto::desktop::Call::Selection);
+                    let windows = part(quick.screenshot, proto::desktop::Call::Windows);
+                    let windows = windows.map(|r| {
+                        r.map(|lines| {
+                            lines
+                                .lines()
+                                .filter_map(|line| {
+                                    let mut p = line.splitn(3, '\t');
+                                    let id = p.next()?.parse::<u32>().ok()?;
+                                    Some(json!({"id": id, "app": p.next()?, "title": p.next()?}))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    });
+                    let (quote, quote_error) = split(quote.map(|r| r.map(|q| q.trim().to_owned())));
+                    let (windows, windows_error) = split(windows);
+                    Ok(json!({
+                        "quote": quote.filter(|q| !q.is_empty()),
+                        "quoteError": quote_error,
+                        "windows": windows,
+                        "windowsError": windows_error,
+                    }))
+                });
+                Ok(None)
+            }
+            "quick_shot" => {
+                let bot = self.bot_of(f)?;
+                if !self.store.quick_ask().map_err(internal)?.screenshot {
+                    return Err(bad("Attach a screenshot is off in Settings"));
+                }
+                let window = match f.get("window") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(
+                        v.as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| bad("`window` must be the id of a window"))?,
+                    ),
+                };
+                let (helper, full_path) = (self.desktop.clone(), self.full_attachment_paths(&bot));
+                self.reply_later(client, id, "quick_shot", move || {
+                    helper
+                        .picture(&bot, proto::desktop::Call::Screen { window }, full_path)
+                        .map(|path| json!({"path": path}))
+                        .map_err(|e| ("helper_failed", e))
+                });
+                Ok(None)
             }
             "set_agent" => {
                 let bot = self.bot_of(f)?;

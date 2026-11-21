@@ -6,6 +6,7 @@
 mod bridge;
 mod files;
 mod notify;
+mod quick;
 mod service;
 
 use bridge::Bridge;
@@ -17,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::webview::NewWindowResponse;
+use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{
     AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
@@ -136,22 +137,82 @@ fn pick_path(folder: bool) -> Result<Option<String>, String> {
         .map(|p| p.to_string()))
 }
 
+/// Hides Quick Ask's panel and shows `bot` in a window, the bot's newest conversation (the question
+/// just asked) in front. The page asks after "Open in Bate".
+#[tauri::command]
+fn open_in_bate(app: AppHandle, bot: String) -> Result<(), String> {
+    if !notify::is_bot_id(&bot) {
+        return Err("not a bot".into());
+    }
+    quick::hide(&app);
+    open_bot(&app, &bot);
+    Ok(())
+}
+
+/// Makes `shortcut` (`Ctrl+Alt+Space`) the one that opens Quick Ask's panel, or none. Refused with
+/// the system's reason when another app holds the key. Sync commands run on the main thread.
+#[tauri::command]
+fn set_quick_shortcut(app: AppHandle, shortcut: Option<String>) -> Result<(), String> {
+    quick::set_shortcut(&app, shortcut.as_deref())
+}
+
+/// Closes Quick Ask's panel (Esc).
+#[tauri::command]
+fn hide_quick(app: AppHandle) {
+    quick::hide(&app);
+}
+
+/// The windows of the app: Quick Ask's panel is not one.
+fn windows(app: &AppHandle) -> Vec<WebviewWindow> {
+    let mut all = app.webview_windows();
+    all.remove(quick::LABEL);
+    all.into_values().collect()
+}
+
 /// Opens one more window on the page.
 fn open_window(app: &AppHandle) -> tauri::Result<()> {
+    open_window_on(app, None)
+}
+
+/// A window comes forward and shows `bot` (a bot id: nothing else goes into the script); with none
+/// open, one opens on it.
+fn open_bot(app: &AppHandle, bot: &str) {
+    if !notify::is_bot_id(bot) {
+        return;
+    }
+    let Some(window) = windows(app).into_iter().next() else {
+        let _ = open_window_on(app, Some(bot));
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = window.eval(format!(
+        "dispatchEvent(new CustomEvent('bate-open-bot', {{ detail: '{bot}' }}))"
+    ));
+}
+
+/// A view of its own is opened by the shell alone: a link goes to the user's browser.
+fn deny_new_window(url: Url, _: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
+    open_outside(&url);
+    NewWindowResponse::Deny
+}
+
+/// `bot`: the bot the window opens on (a bot id).
+fn open_window_on(app: &AppHandle, bot: Option<&str>) -> tauri::Result<()> {
     static OPENED: AtomicUsize = AtomicUsize::new(0);
     let label = format!("bate-{}", OPENED.fetch_add(1, Ordering::Relaxed));
-    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Bate")
         .inner_size(1000.0, 700.0)
         // Files dropped on the page reach the page (attachments), not the shell.
         .disable_drag_drop_handler()
         .on_navigation(stays)
-        // A view of its own is opened by the shell alone.
-        .on_new_window(|url, _| {
-            open_outside(&url);
-            NewWindowResponse::Deny
-        })
-        .build()?;
+        .on_new_window(deny_new_window);
+    if let Some(bot) = bot.filter(|b| notify::is_bot_id(b)) {
+        builder = builder.initialization_script(format!("window.__BATE_OPEN__ = '{bot}';"));
+    }
+    let window = builder.build()?;
     window.set_focus()
 }
 
@@ -215,7 +276,7 @@ fn chosen(app: &AppHandle, id: &str) {
         "new-window" => {
             let _ = open_window(app);
         }
-        "open" => match app.webview_windows().into_values().next() {
+        "open" => match windows(app).into_iter().next() {
             Some(window) => {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
@@ -271,17 +332,23 @@ fn main() {
             service_note,
             set_badge,
             notify_waiting,
-            pick_path
+            pick_path,
+            set_quick_shortcut,
+            hide_quick,
+            open_in_bate
         ])
         .register_uri_scheme_protocol("botfile", |_, request| {
             files::serve(&proto::paths::home(), &request.uri().to_string())
         })
         .menu(menu)
         .on_menu_event(|app, event| chosen(app, event.id().as_ref()))
-        .on_window_event(|window, event| {
-            if let WindowEvent::Destroyed = event {
-                window.state::<Bridges>().close(window.label());
+        .on_window_event(|window, event| match event {
+            WindowEvent::Destroyed => window.state::<Bridges>().close(window.label()),
+            // Clicking away from the panel, onto another app, puts it away.
+            WindowEvent::Focused(false) if window.label() == quick::LABEL => {
+                quick::hide(window.app_handle());
             }
+            _ => {}
         })
         .setup(|app| {
             let handle = app.handle();
@@ -298,6 +365,7 @@ fn main() {
             icon.build(app)?;
             app.state::<Note>().start();
             notify::listen(handle);
+            quick::restore(handle);
             open_window(handle)?;
             Ok(())
         })

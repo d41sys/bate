@@ -78,6 +78,19 @@ pub enum Call {
         with: Option<String>,
         limit: u32,
     },
+    /// The text selected in the app in front. Not a `desktop` action: Quick Ask's own, which
+    /// the service asks for when the person has switched it on. Needs Accessibility.
+    Selection,
+    /// The windows on screen, one line each: id, app and title, separated by tabs, for Quick Ask's
+    /// picker. Not a
+    /// `desktop` action.
+    Windows,
+    /// A picture of the whole screen without Bate's own windows, or of the window `window`.
+    /// Not a `desktop` action. Needs Screen Recording.
+    Screen {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u32>,
+    },
 }
 
 impl Call {
@@ -87,7 +100,9 @@ impl Call {
             .map_err(|e| format!("not a desktop action: {e}"))?;
         match &call {
             // The `desktop` tool is asked about as `desktop`; reading messages is `apple_read`.
-            Call::Messages { .. } => return Err("not a desktop action: messages".into()),
+            Call::Messages { .. } | Call::Selection | Call::Windows | Call::Screen { .. } => {
+                return Err("not a desktop action: it is not one a bot may ask for".into());
+            }
             Call::Apps => {}
             Call::Look { app, .. } | Call::Screenshot { app, .. } => name(app)?,
             Call::Press { app, element, .. } => {
@@ -156,6 +171,9 @@ impl Call {
         match self {
             Call::Apps => "apps",
             Call::Messages { .. } => "messages",
+            Call::Selection => "selection",
+            Call::Windows => "windows",
+            Call::Screen { .. } => "screen",
             Call::Look { app, .. }
             | Call::Screenshot { app, .. }
             | Call::Press { app, .. }
@@ -275,6 +293,10 @@ mod tests {
             json!({"action": "type", "app": "A", "text": "x".repeat(MAX_TEXT + 1)}),
             // Reading messages is the `messages` tool's, never a `desktop` action.
             json!({"action": "messages", "limit": 5}),
+            // Nor Quick Ask's own: the selected text, the screen, the list of windows.
+            json!({"action": "selection"}),
+            json!({"action": "windows"}),
+            json!({"action": "screen"}),
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad}");
         }

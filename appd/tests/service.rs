@@ -3669,6 +3669,11 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("33", "read_change"),
         // A spend cap is set where it was made: not raised or cleared from the network.
         ("34", "set_token_limit"),
+        // So are Quick Ask's settings and what it takes from this Mac's screen.
+        ("35", "get_quick_ask"),
+        ("36", "set_quick_ask"),
+        ("37", "quick_context"),
+        ("38", "quick_shot"),
     ] {
         send(
             &device,
@@ -8791,8 +8796,14 @@ impl FakeHelper {
                         json!({"type": "reply", "id": id, "output": "TextEdit\n  window 5 \"Untitled\" 500x400\n"})
                     }
                     ("look", Some("Gone")) => break,
-                    ("screenshot", _) => {
+                    ("screenshot" | "screen", _) => {
                         json!({"type": "reply", "id": id, "output": "A picture of window 5.", "png": "aGVsbG8="})
+                    }
+                    ("selection", _) => {
+                        json!({"type": "reply", "id": id, "output": "two words\nand a line"})
+                    }
+                    ("windows", _) => {
+                        json!({"type": "reply", "id": id, "output": "5\tTextEdit\tUntitled\n7\tFinder\t\n"})
                     }
                     (_, Some("Nowhere")) => {
                         json!({"type": "reply", "id": id, "error": "No app named Nowhere has a window on screen."})
@@ -15174,4 +15185,224 @@ fn changes_in_a_plain_folder_are_what_the_bots_own_write_and_edit_replaced() {
     }
     let args = json!({"bot": bot, "path": "never.txt"});
     assert_eq!(refused(&mut w, "read_change", args), "no_such_change");
+}
+
+#[test]
+fn quick_ask_settings_are_checked_kept_across_a_restart_and_told_to_every_window() {
+    let home = home("quick-settings");
+    // No helper app where the service looks: the two switches may not be turned on.
+    let start = |home: &Path| {
+        Service::start_with(home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("APPD_HELPER", home.join("no-such-helper"));
+        })
+    };
+    let service = start(&home);
+    let mut w = Window::connect(&home);
+    let mut other = Window::connect(&home);
+    assert_eq!(
+        w.ok("get_quick_ask", json!({})),
+        json!({"shortcut": null, "selection": false, "screenshot": false})
+    );
+
+    // A key that macOS would take for typing, or that is no key, is refused and nothing is kept.
+    for bad in ["K", "Shift+K", "Cmd", "Ctrl+Alt+Nope", "Ctrl++K"] {
+        assert_eq!(
+            refused(&mut w, "set_quick_ask", json!({"shortcut": bad})),
+            "bad_request",
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        refused(&mut w, "set_quick_ask", json!({"shortcut": 5})),
+        "bad_request"
+    );
+    assert_eq!(
+        refused(&mut w, "set_quick_ask", json!({"selection": "yes"})),
+        "bad_request"
+    );
+    assert_eq!(w.ok("get_quick_ask", json!({}))["shortcut"], Value::Null);
+
+    // The text is kept in one spelling, whatever the order and case it was typed in.
+    let saved = w.ok("set_quick_ask", json!({"shortcut": "cmd+shift+space"}));
+    assert_eq!(saved["shortcut"], "Shift+Cmd+Space");
+    other.wait_for(|f| f["type"] == "quick_ask_changed");
+
+    // Turning a switch on needs the helper app; the shortcut stays as it was.
+    assert_eq!(
+        refused(&mut w, "set_quick_ask", json!({"selection": true})),
+        "bad_request"
+    );
+    assert_eq!(
+        refused(&mut w, "set_quick_ask", json!({"screenshot": true})),
+        "bad_request"
+    );
+    // With both off there is nothing to read and nothing to take.
+    let context = w.ok("quick_context", json!({}));
+    assert_eq!(
+        (&context["quote"], &context["windows"]),
+        (&Value::Null, &Value::Null)
+    );
+    let bot = w.create_bot();
+    assert_eq!(
+        refused(&mut w, "quick_shot", json!({"bot": bot})),
+        "bad_request"
+    );
+
+    // After a restart the shortcut is read from what was stored.
+    drop((w, other, service));
+    let _service = start(&home);
+    let mut w = Window::connect(&home);
+    eventually("the stored shortcut", || {
+        w.ok("get_quick_ask", json!({}))["shortcut"] == "Shift+Cmd+Space"
+    });
+    // An empty text, or null, takes the shortcut away.
+    assert_eq!(
+        w.ok("set_quick_ask", json!({"shortcut": ""}))["shortcut"],
+        Value::Null
+    );
+    w.ok("set_quick_ask", json!({"shortcut": "Ctrl+Alt+F5"}));
+    assert_eq!(
+        w.ok("set_quick_ask", json!({"shortcut": null}))["shortcut"],
+        Value::Null
+    );
+}
+
+#[test]
+fn a_quick_prompt_with_a_quote_and_a_picture_goes_through_the_helper_and_starts_a_new_conversation()
+{
+    let home = home("quick-ask");
+    let opener = home.join("fake-open");
+    fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            home.join("open.log").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
+    let me = std::env::current_exe().unwrap();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("APPD_HELPER", &me)
+            .env("APPD_OPEN", &opener);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    w.ok(
+        "set_quick_ask",
+        json!({"shortcut": "Ctrl+Alt+Space", "selection": true, "screenshot": true}),
+    );
+
+    // The panel opens: the helper app starts, so that each permission is asked for when it is first
+    // needed and not both at once, and the quote and the windows come back, on a thread of their own.
+    let id = w.send("quick_context", json!({}));
+    eventually("the helper to be started", || {
+        home.join("open.log").exists()
+    });
+    let started = fs::read_to_string(home.join("open.log")).unwrap();
+    assert!(started.trim_end().ends_with("--ask-when-used"), "{started}");
+    let helper = FakeHelper::connect(&home, true, true, false);
+    let context = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())["data"].clone();
+    assert_eq!(context["quote"], "two words\nand a line");
+    assert_eq!(
+        context["windows"],
+        json!([{"id": 5, "app": "TextEdit", "title": "Untitled"}, {"id": 7, "app": "Finder", "title": ""}])
+    );
+    assert_eq!(
+        (&context["quoteError"], &context["windowsError"]),
+        (&Value::Null, &Value::Null)
+    );
+
+    // Send: a new conversation, the picture of the chosen window saved in the bot's folder, and a
+    // prompt that holds the question, the quote and the picture's full path.
+    let conversation = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    assert_ne!(conversation, first);
+    let shot = w.ok("quick_shot", json!({"bot": bot, "window": 5}));
+    let path = shot["path"].as_str().unwrap().to_owned();
+    // Not in a project: the path is the bot's own, as the chat's attachments are.
+    assert!(path.starts_with("attachments/"), "{path}");
+    assert_eq!(
+        fs::read(home.join("bots").join(&bot).join(&path)).unwrap(),
+        b"hello"
+    );
+    let text =
+        format!("Why is this?\n\nSelected text:\n> two words\n> and a line\n\nAttached:\n- {path}");
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "conversation": conversation, "nonce": "q1", "text": text}),
+    );
+    // The answer is in the new conversation, which is now the bot's current one, and not in the old.
+    eventually("the answer", || {
+        history(&mut w, &bot)
+            .iter()
+            .any(|e| e["type"] == "turn_end")
+    });
+    let opened = history(&mut w, &bot);
+    assert!(
+        opened
+            .iter()
+            .any(|e| e["type"] == "prompt" && e["text"] == text.as_str())
+    );
+    let reply: String = opened
+        .iter()
+        .filter(|e| e["type"] == "text")
+        .map(|e| e["delta"].as_str().unwrap())
+        .collect();
+    assert_eq!(reply, "hello");
+    // The engine got the same words: the question, the quote and the picture's path.
+    let got = fs::read_to_string(home.join("bots").join(&bot).join("prompts.log")).unwrap();
+    assert!(got.contains("Why is this?") && got.contains("> two words") && got.contains(&path));
+
+    // What the helper was asked, and nothing more: the picture is of window 5.
+    let asked: Vec<Value> = helper
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.as_object_mut().unwrap().remove("id");
+            c
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            json!({"action": "selection"}),
+            json!({"action": "windows"}),
+            json!({"action": "screen", "window": 5}),
+        ]
+    );
+
+    // The same calls are not a bot's to make: they are refused here and never reach the helper.
+    let log = home.join("bots").join(&bot).join("desktop.log");
+    for (nonce, what) in [("d1", "selection"), ("d2", "windows"), ("d3", "screen")] {
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "text": format!("desktop {what}")}),
+        );
+        eventually("the refusal", || {
+            fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains(&format!("\"d-{nonce}\""))
+        });
+    }
+    let refusals = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        refusals.matches("not a desktop action").count(),
+        3,
+        "{refusals}"
+    );
+    assert_eq!(helper.calls.lock().unwrap().len(), 3);
+
+    // With the switch off again, no picture is taken.
+    w.ok("set_quick_ask", json!({"screenshot": false}));
+    assert_eq!(
+        refused(&mut w, "quick_shot", json!({"bot": bot})),
+        "bad_request"
+    );
+    drop(helper);
 }

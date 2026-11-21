@@ -199,7 +199,7 @@ impl Link {
         let link = self.clone();
         thread::spawn(move || {
             if exe().exists() && lock(&link.0.state).writer.is_none() {
-                let _ = launch();
+                let _ = launch(false);
             }
             let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
             if let Err(e) = Command::new(opener()).arg(url).status() {
@@ -209,11 +209,44 @@ impl Link {
         Ok(())
     }
 
+    /// Whether the helper app is where it should be (it may not be running).
+    pub fn installed(&self) -> bool {
+        exe().exists()
+    }
+
     /// Does one call of `bot` in the helper and gives the text for the bot. A screenshot is
     /// saved in the bot's folder and its path given (`full_path`: by its full path). Blocks:
     /// not for the core's thread.
     pub fn call(&self, bot: &str, call: Call, full_path: bool) -> Result<String, String> {
-        self.start_helper()?;
+        match self.exchange(call)? {
+            (output, None) => Ok(output),
+            (output, Some(png)) => {
+                let path = save_picture(bot, &png, full_path)?;
+                Ok(format!("{output} Saved in your folder as {path}."))
+            }
+        }
+    }
+
+    /// A call of Quick Ask that gives text: the selected text, or the list of windows.
+    /// Blocks: not for the core's thread.
+    pub fn text(&self, call: Call) -> Result<String, String> {
+        self.exchange(call).map(|(output, _)| output)
+    }
+
+    /// A call of Quick Ask that gives a picture: it is saved in the bot's folder as a
+    /// bot's screenshot is, and its path given. Blocks: not for the core's thread.
+    pub fn picture(&self, bot: &str, call: Call, full_path: bool) -> Result<String, String> {
+        match self.exchange(call)? {
+            (_, Some(png)) => save_picture(bot, &png, full_path),
+            (_, None) => Err("Bate Helper sent no picture.".into()),
+        }
+    }
+
+    /// The helper's answer to one call: its text, and the PNG of a picture.
+    fn exchange(&self, call: Call) -> Result<(String, Option<Vec<u8>>), String> {
+        // Quick Ask's own calls start the helper so that each permission is asked for when it is first needed.
+        let ask_when_used = matches!(call, Call::Selection | Call::Windows | Call::Screen { .. });
+        self.start_helper(ask_when_used)?;
         let (waiter, answer) = mpsc::channel();
         let id = {
             let mut state = lock(&self.0.state);
@@ -239,15 +272,12 @@ impl Link {
                 png,
                 ..
             }) => match png {
-                None => Ok(output),
+                None => Ok((output, None)),
                 Some(png) => {
                     let png = attach::base64(&png)
                         .filter(|png| png.len() <= attach::MAX_BYTES)
                         .ok_or("Bate Helper sent a picture that is not usable.")?;
-                    let name = format!("screenshot-{}.png", now_ms());
-                    let path = attach::save(bot, &name, &png, full_path)
-                        .map_err(|e| format!("The picture was not saved: {e}"))?;
-                    Ok(format!("{output} Saved in your folder as {path}."))
+                    Ok((output, Some(png)))
                 }
             },
             Ok(_) => Err("Bate Helper answered with nothing.".into()),
@@ -265,7 +295,7 @@ impl Link {
     }
 
     /// Waits for the helper to be connected, starting it if it is not running.
-    fn start_helper(&self) -> Result<(), String> {
+    fn start_helper(&self, ask_when_used: bool) -> Result<(), String> {
         if lock(&self.0.state).writer.is_some() {
             return Ok(());
         }
@@ -276,7 +306,7 @@ impl Link {
                 app(&exe).display()
             ));
         }
-        launch().map_err(|e| format!("Bate Helper did not start: {e}"))?;
+        launch(ask_when_used).map_err(|e| format!("Bate Helper did not start: {e}"))?;
         let state = lock(&self.0.state);
         let (state, _) = self
             .0
@@ -290,17 +320,27 @@ impl Link {
     }
 }
 
+/// Puts a picture in the bot's `attachments/` folder and gives its path.
+fn save_picture(bot: &str, png: &[u8], full_path: bool) -> Result<String, String> {
+    let name = format!("screenshot-{}.png", now_ms());
+    attach::save(bot, &name, png, full_path).map_err(|e| format!("The picture was not saved: {e}"))
+}
+
 /// Starts the helper app in the background, telling it where the service listens. Through
 /// the system's `open`, so that macOS attributes the permissions to the app and not to the
-/// service.
-fn launch() -> io::Result<()> {
+/// service. `ask_when_used`: the helper asks for each permission when a call first needs it, not
+/// all of them as it starts.
+fn launch(ask_when_used: bool) -> io::Result<()> {
     let exe = exe();
-    let status = Command::new(opener())
-        .args(["-g", "-a"])
+    let mut open = Command::new(opener());
+    open.args(["-g", "-a"])
         .arg(app(&exe))
         .arg("--args")
-        .arg(paths::helper_socket())
-        .status()?;
+        .arg(paths::helper_socket());
+    if ask_when_used {
+        open.arg("--ask-when-used");
+    }
+    let status = open.status()?;
     status
         .success()
         .then_some(())

@@ -75,6 +75,20 @@ export const setBadge = (count: number) => invoke("set_badge", { count }) as Pro
 export const notifyWaiting = (bot: string, conversation: string, id: string, title: string, body: string, actions: boolean) =>
   invoke("notify_waiting", { bot, conversation, id, title, body, actions }) as Promise<void>;
 
+/** What the shell's start script says of this page: it is Quick Ask's panel, or a window that opens on a bot. */
+const start = window as unknown as { __BATE_QUICK__?: boolean; __BATE_OPEN__?: string };
+export const inQuickPanel = start.__BATE_QUICK__ === true;
+export const openAtStart = start.__BATE_OPEN__;
+
+/** Registers the global shortcut that opens Quick Ask, or none (`null`); rejects with why the system refused (the shell's). */
+export const setQuickShortcut = (shortcut: string | null) => invoke("set_quick_shortcut", { shortcut }) as Promise<void>;
+
+/** Closes Quick Ask's panel (the shell's). */
+export const hideQuick = () => invoke("hide_quick") as Promise<void>;
+
+/** Closes Quick Ask's panel and opens `bot`, whose newest conversation is the question, in a window (the shell's). */
+export const openInBate = (bot: string) => invoke("open_in_bate", { bot }) as Promise<void>;
+
 /** The system's panel for a folder or a file: the path chosen, or null when the person cancels (the shell's; not on another device). */
 export const pickPath = (folder: boolean) => invoke("pick_path", { folder }) as Promise<string | null>;
 

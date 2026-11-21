@@ -40,7 +40,12 @@ fn main() {
         )
     };
     let mut last = status();
-    ax::ask_for_permissions();
+    // Started for Quick Ask (`--ask-when-used`): each permission is asked for when a call first
+    // needs it, not all at once. Started for a bot, or from Settings: all at once, as before.
+    if !std::env::args_os().any(|a| a == "--ask-when-used") {
+        ax::ask_accessibility();
+        ax::ask_screen_recording();
+    }
     send(&out, &frame(last));
     // The user grants a permission in System Settings while the helper runs.
     let watcher = out.clone();
@@ -131,6 +136,33 @@ fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8
             )
             .map(|text| (text, None));
         }
+        // Quick Ask's own calls (`Call::parse` never lets a bot ask for them).
+        Call::Windows => return Ok((ax::windows_list(&ax::windows()), None)),
+        Call::Selection => {
+            if !ax::trusted() {
+                ax::ask_accessibility();
+                return Err(NO_ACCESSIBILITY.into());
+            }
+            return Ok((ax::selection(&ax::windows()), None));
+        }
+        Call::Screen { window } => {
+            if !ax::can_capture() {
+                ax::ask_screen_recording();
+                return Err(NO_SCREEN.into());
+            }
+            let png = match window {
+                None => ax::screen()?,
+                Some(id) => {
+                    let wins = ax::windows();
+                    let win = wins
+                        .iter()
+                        .find(|w| w.id == id)
+                        .ok_or(format!("Window {id} is not on screen any more."))?;
+                    ax::screenshot(win)?
+                }
+            };
+            return Ok(("A picture.".into(), Some(png)));
+        }
         call => call,
     };
     let wins = ax::windows();
@@ -147,7 +179,9 @@ fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8
         )),
     };
     match call {
-        Call::Messages { .. } => unreachable!("answered above"),
+        Call::Messages { .. } | Call::Windows | Call::Selection | Call::Screen { .. } => {
+            unreachable!("answered above")
+        }
         Call::Apps => Ok((ax::apps_text(&wins), None)),
         Call::Look { app, window } => {
             let (text, seen) = ax::look(ax::find(&wins, &app, window)?)?;
