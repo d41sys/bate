@@ -216,6 +216,8 @@ pub struct Provider {
     /// Set once the provider refused a request for its web search tool; kept by the engine
     /// beyond one turn, so no later request offers the tool again.
     search_refused: Arc<AtomicBool>,
+    /// A chat server answered 400 to `stream_options` and took the request without it.
+    usage_refused: Arc<AtomicBool>,
     /// How long a call may send nothing; `BATE_MODEL_IDLE_MS`.
     idle: Duration,
     /// The first wait before a retry; `BATE_MODEL_RETRY_MS`.
@@ -264,8 +266,9 @@ struct Body<'a> {
     messages: Messages<'a>,
     tools: &'a Value,
     stream: bool,
-    /// Without this a chat stream carries no `usage`.
-    stream_options: StreamOptions,
+    /// Without this a chat stream carries no `usage`; a server that refuses it is asked without.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
 }
@@ -317,13 +320,14 @@ fn pause(wait: Duration, abort: &AtomicBool) -> bool {
 }
 
 impl Provider {
-    pub fn new(search_refused: Arc<AtomicBool>) -> Provider {
+    pub fn new(search_refused: Arc<AtomicBool>, usage_refused: Arc<AtomicBool>) -> Provider {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build();
         Provider {
             agent: ureq::Agent::new_with_config(config),
             search_refused,
+            usage_refused,
             idle: millis("BATE_MODEL_IDLE_MS", IDLE),
             wait: millis("BATE_MODEL_RETRY_MS", RETRY_WAIT),
         }
@@ -348,9 +352,12 @@ impl Provider {
         let mut tried_search = None;
         let mut search =
             ask.web_search && api == Api::Responses && !self.search_refused.load(Ordering::Relaxed);
+        // The same for a chat server and the option that asks it for `usage`.
+        let mut tried_usage = None;
+        let mut usage = api == Api::Chat && !self.usage_refused.load(Ordering::Relaxed);
         loop {
             let mut streamed = false;
-            let once = self.once(base_url, key, api, search, ask, abort, |d| {
+            let once = self.once(base_url, key, api, (search, usage), ask, abort, |d| {
                 streamed = true;
                 on(d)
             });
@@ -361,7 +368,19 @@ impl Provider {
                 self.search_refused.store(true, Ordering::Relaxed);
                 eprintln!("web search is left out: {first}");
             }
+            if let Some(first) = tried_usage.take()
+                && !matches!(&once, Err(fail) if bad_request(&fail.why))
+            {
+                self.usage_refused.store(true, Ordering::Relaxed);
+                eprintln!("usage is not counted: {first}");
+            }
             let fail = match once {
+                // Any 400 may be the option; if the request without it is refused too, it was not.
+                Err(fail) if usage && bad_request(&fail.why) => {
+                    tried_usage = Some(fail.why);
+                    usage = false;
+                    continue;
+                }
                 // The backend's wording is not known, so any 400 may be the tool: ask again without it.
                 Err(fail) if search && bad_request(&fail.why) => {
                     tried_search = Some(fail.why);
@@ -400,7 +419,7 @@ impl Provider {
         base_url: &str,
         key: Option<&str>,
         api: Api,
-        search: bool,
+        (search, usage): (bool, bool),
         ask: &Ask,
         abort: &AtomicBool,
         on: impl FnMut(Delta),
@@ -414,9 +433,9 @@ impl Provider {
                     messages: Messages(&system, ask.messages, ask.last),
                     tools: ask.tools,
                     stream: true,
-                    stream_options: StreamOptions {
+                    stream_options: usage.then_some(StreamOptions {
                         include_usage: true,
-                    },
+                    }),
                     reasoning_effort: ask.effort,
                 };
                 let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;

@@ -848,10 +848,13 @@ fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
         ok("A1"),
         ok("A2"),
         ok("A3"),
+        // Any 400 is asked again without the usage option, and this one is refused as well.
+        full.to_vec(),
         full.to_vec(),
         ok("OVERFLOW-SUMMARY"),
         ok("A4"),
         // Nothing old enough to summarise: the refusal ends the turn, and is not asked about twice.
+        full.to_vec(),
         full.to_vec(),
     ]);
     let mut engine = Engine::start(&dir, &model);
@@ -865,9 +868,9 @@ fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
         matches!(events.last(), Some(Event::TurnEnd { error: None, .. })),
         "{events:?}"
     );
-    assert_eq!(model.requests().len(), 6);
-    assert!(sent(&model, 4).contains("Summarise"));
-    let last = sent(&model, 5);
+    assert_eq!(model.requests().len(), 7);
+    assert!(sent(&model, 5).contains("Summarise"));
+    let last = sent(&model, 6);
     assert!(
         last.contains("OVERFLOW-SUMMARY") && last.contains("Q4") && !last.contains("Q1-old"),
         "{last}"
@@ -883,7 +886,7 @@ fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
         panic!("{events:?}")
     };
     assert!(e.contains("maximum context length"), "{e}");
-    assert_eq!(model.requests().len(), 7);
+    assert_eq!(model.requests().len(), 9);
 }
 
 #[test]
@@ -3205,6 +3208,113 @@ fn done_reply(text: &str) -> Vec<u8> {
 
 fn ended(events: &[Event]) -> &Event {
     events.last().expect("a turn_end")
+}
+
+/// A chat reply of `t`, whole.
+fn chat_reply(t: &str) -> Vec<u8> {
+    format!("data: {}\n\ndata: [DONE]\n\n", text(t)).into_bytes()
+}
+
+/// One chat turn; every event up to its end.
+fn chat_turn(engine: &mut Engine, nonce: &str) -> Vec<Event> {
+    engine.prompt_as(nonce, "hi");
+    engine.until(is_turn_end)
+}
+
+fn asked_for_usage(request: &Value) -> bool {
+    request["stream_options"] == json!({"include_usage": true})
+}
+
+#[test]
+fn a_chat_400_to_the_usage_option_is_asked_again_without_it_and_the_server_is_not_asked_again() {
+    let dir = workdir("engine-usage-refused");
+    let model = Model::replay(vec![
+        answer_with("400 Bad Request", "Unknown field."),
+        chat_reply("A1"),
+        chat_reply("A2"),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let events = chat_turn(&mut engine, "n1");
+    assert!(matches!(
+        ended(&events),
+        Event::TurnEnd {
+            reason: TurnEnd::Done,
+            error: None
+        }
+    ));
+    chat_turn(&mut engine, "n2");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(asked_for_usage(&requests[0]));
+    assert!(
+        requests[1..]
+            .iter()
+            .all(|r| r.get("stream_options").is_none())
+    );
+    assert_eq!(requests[0]["messages"], requests[1]["messages"]);
+    // Said so: nothing is counted for this server.
+    let unreported = Event::Usage {
+        reported: false,
+        tokens: Tokens::default(),
+    };
+    assert_eq!(
+        engine.usage.try_iter().collect::<Vec<_>>(),
+        [unreported.clone(), unreported]
+    );
+}
+
+#[test]
+fn a_chat_400_that_the_request_without_the_usage_option_gets_too_is_the_servers_and_the_option_stays()
+ {
+    let dir = workdir("engine-usage-both-refused");
+    let model = Model::replay(vec![
+        answer_with("400 Bad Request", "Bad input."),
+        answer_with("400 Bad Request", "Bad input."),
+        chat_reply("A1"),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let events = chat_turn(&mut engine, "n1");
+    let Event::TurnEnd {
+        reason: TurnEnd::Error,
+        error: Some(error),
+    } = ended(&events)
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(error.matches("Bad input.").count(), 1, "{error}");
+    chat_turn(&mut engine, "n2");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(asked_for_usage(&requests[0]));
+    assert!(requests[1].get("stream_options").is_none());
+    assert!(asked_for_usage(&requests[2]));
+}
+
+#[test]
+fn a_chat_401_is_not_asked_again_without_the_usage_option() {
+    let dir = workdir("engine-usage-401");
+    let model = Model::replay(vec![
+        answer_with("401 Unauthorized", "Sign in again."),
+        chat_reply("A1"),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let events = chat_turn(&mut engine, "n1");
+    let Event::TurnEnd {
+        reason: TurnEnd::Error,
+        error: Some(error),
+    } = ended(&events)
+    else {
+        panic!("{events:?}")
+    };
+    assert!(error.contains("401"), "{error}");
+    assert_eq!(model.requests().len(), 1);
+    chat_turn(&mut engine, "n2");
+    assert!(model.requests().iter().all(asked_for_usage));
 }
 
 #[test]
