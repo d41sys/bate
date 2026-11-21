@@ -31,7 +31,7 @@ use crate::proxy::{self, Upstream};
 use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
-    apple, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
+    apple, botfile, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
 };
 use crate::{limit, memory, paths, roles, schedule, skills, store, undo, update};
 
@@ -276,6 +276,39 @@ fn link_work_bot(store: &Store, bot: &str) {
 
 fn bad(msg: impl Into<String>) -> Refusal {
     ("bad_request", msg.into())
+}
+
+/// The rules of a bot's name and look, for `create_bot` and `set_bot` and for a bot file.
+pub fn check_bot_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("`name` must be 1 to 80 characters");
+    }
+    Ok(())
+}
+
+pub fn check_instructions(text: &str) -> Result<(), &'static str> {
+    if text.chars().count() > 8000 {
+        return Err("`instructions` may be at most 8000 characters");
+    }
+    Ok(())
+}
+
+// shortcut: an avatar is a few characters (an emoji or initials), not a picture; add images when asked.
+pub fn check_avatar(avatar: &str) -> Result<(), &'static str> {
+    if avatar.chars().count() > 8 || avatar.chars().any(char::is_control) {
+        return Err("`avatar` must be at most 8 characters, such as an emoji");
+    }
+    Ok(())
+}
+
+pub fn check_color(color: &str) -> Result<(), &'static str> {
+    let hex = color.len() == 7
+        && color.starts_with('#')
+        && color[1..].bytes().all(|b| b.is_ascii_hexdigit());
+    if !(color.is_empty() || hex) {
+        return Err("`color` must be #rrggbb or empty");
+    }
+    Ok(())
 }
 
 /// The hosts of a `set_network` or `set_project`, as stored: trimmed, in lower case, each once.
@@ -1156,9 +1189,7 @@ impl Core {
             }
             "create_bot" => {
                 let name = str_field(f, "name")?.trim();
-                if name.is_empty() || name.chars().count() > 80 {
-                    return Err(bad("`name` must be 1 to 80 characters"));
-                }
+                check_bot_name(name).map_err(bad)?;
                 let bot = self
                     .store
                     .create_bot(&sys::random_hex(4), name, now_ms())
@@ -2012,6 +2043,38 @@ impl Core {
                     .map_err(|e| ("export_failed", e.to_string()))?;
                 Ok(Some(json!({"path": path})))
             }
+            "export_bot" => {
+                let bot = self.bot_of(f)?;
+                let notes = f.get("notes").and_then(Value::as_bool).unwrap_or(false);
+                let path = botfile::export(&self.store, &bot, notes, now_ms())
+                    .map_err(|e| ("export_failed", e))?;
+                Ok(Some(json!({"path": path})))
+            }
+            "preview_bot_file" => {
+                let path = std::path::Path::new(str_field(f, "path")?);
+                let (file, sha256) =
+                    botfile::read(path, now_ms()).map_err(|e| ("invalid_bot_file", e))?;
+                Ok(Some(botfile::preview(&file, &sha256)))
+            }
+            "import_bot" => {
+                let path = std::path::Path::new(str_field(f, "path")?);
+                let shown = str_field(f, "sha256")?;
+                let (file, sha256) =
+                    botfile::read(path, now_ms()).map_err(|e| ("invalid_bot_file", e))?;
+                // What was read now is not what the person was shown: nothing is made.
+                if sha256 != shown {
+                    return Err((
+                        "bot_file_changed",
+                        "the file changed after it was shown: look at it again".into(),
+                    ));
+                }
+                let bot = botfile::import(&self.store, file, now_ms())
+                    .map_err(|e| ("invalid_bot_file", e))?;
+                self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(
+                    json!({"bot": self.bot_info(&bot.id, serde_json::to_value(&bot).expect("serializable"))}),
+                ))
+            }
             "set_bot" => {
                 let bot = self.bot_of(f)?;
                 let steps = match f.get("stepLimit").filter(|v| !v.is_null()) {
@@ -2041,34 +2104,20 @@ impl Core {
                 };
                 if let Some(name) = text("name").transpose()? {
                     let name = name.trim();
-                    if name.is_empty() || name.chars().count() > 80 {
-                        return Err(bad("`name` must be 1 to 80 characters"));
-                    }
+                    check_bot_name(name).map_err(bad)?;
                     self.store.rename_bot(&bot, name).map_err(internal)?;
                 }
                 let instructions = text("instructions").transpose()?;
                 if let Some(t) = instructions {
-                    if t.chars().count() > 8000 {
-                        return Err(bad("`instructions` may be at most 8000 characters"));
-                    }
+                    check_instructions(t).map_err(bad)?;
                     profile.instructions = t.to_owned();
                 }
                 if let Some(a) = text("avatar").transpose()? {
-                    // shortcut: an avatar is a few characters (an emoji or initials), not a picture; add images when asked.
-                    if a.chars().count() > 8 || a.chars().any(char::is_control) {
-                        return Err(bad(
-                            "`avatar` must be at most 8 characters, such as an emoji",
-                        ));
-                    }
+                    check_avatar(a).map_err(bad)?;
                     profile.avatar = a.to_owned();
                 }
                 if let Some(c) = text("color").transpose()? {
-                    let hex = c.len() == 7
-                        && c.starts_with('#')
-                        && c[1..].bytes().all(|b| b.is_ascii_hexdigit());
-                    if !(c.is_empty() || hex) {
-                        return Err(bad("`color` must be #rrggbb or empty"));
-                    }
+                    check_color(c).map_err(bad)?;
                     profile.color = c.to_owned();
                 }
                 self.store.set_profile(&bot, &profile).map_err(internal)?;
@@ -5647,23 +5696,7 @@ impl Core {
     fn set_routine(&mut self, bot: &str, raw: Value) -> Result<Routine, Refusal> {
         let invalid = |e: String| ("invalid_routine", e);
         let mut r: Routine = serde_json::from_value(raw).map_err(|e| invalid(e.to_string()))?;
-        r.name = r.name.trim().to_owned();
-        r.prompt = r.prompt.trim().to_owned();
-        if r.name.is_empty() || r.name.chars().count() > 80 {
-            return Err(invalid("`name` must be 1 to 80 characters".into()));
-        }
-        if r.prompt.is_empty() || r.prompt.chars().count() > 8000 {
-            return Err(invalid("`prompt` must be 1 to 8000 characters".into()));
-        }
-        r.schedule = match &r.schedule {
-            Some(s) => Some(schedule::normalize(s).map_err(invalid)?),
-            None if r.webhook || r.chat => None,
-            None => {
-                return Err(invalid(
-                    "a routine needs a `schedule`, `webhook: true` or `chat: true`".into(),
-                ));
-            }
-        };
+        clean_routine(&mut r).map_err(invalid)?;
         let existing = self.store.routines(bot).map_err(internal)?;
         let old = match &r.id {
             Some(id) => Some(
@@ -5977,7 +6010,26 @@ pub fn check_connector_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_connector(c: &Connector) -> Result<(), String> {
+/// A routine's name, prompt and schedule, trimmed and checked: what `set_routine` and a bot
+/// file both require.
+pub fn clean_routine(r: &mut Routine) -> Result<(), String> {
+    r.name = r.name.trim().to_owned();
+    r.prompt = r.prompt.trim().to_owned();
+    if r.name.is_empty() || r.name.chars().count() > 80 {
+        return Err("`name` must be 1 to 80 characters".into());
+    }
+    if r.prompt.is_empty() || r.prompt.chars().count() > 8000 {
+        return Err("`prompt` must be 1 to 8000 characters".into());
+    }
+    r.schedule = match &r.schedule {
+        Some(s) => Some(schedule::normalize(s)?),
+        None if r.webhook || r.chat => None,
+        None => return Err("a routine needs a `schedule`, `webhook: true` or `chat: true`".into()),
+    };
+    Ok(())
+}
+
+pub fn check_connector(c: &Connector) -> Result<(), String> {
     check_connector_name(&c.name)?;
     match &c.transport {
         Transport::Stdio { command, .. } if command.trim().is_empty() => {

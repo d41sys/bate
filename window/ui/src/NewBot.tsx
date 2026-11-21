@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { request } from "./service.ts";
+import { madeBy } from "./addons.ts";
+import { botFileLines } from "./botFile.ts";
+import { Choose } from "./ProjectDialog.tsx";
+import { Sheet } from "./Sheet.tsx";
+import { inShell, request } from "./service.ts";
 import { STARTERS } from "./firstRun.ts";
-import type { Bot } from "./types.ts";
+import type { Bot, BotFilePreview } from "./types.ts";
 
 /** A new bot: a name, what it is for (the first line of its instructions) and a sign. A card fills the fields. */
 export function NewBot({ opened, report }: { opened: (bot: string) => void; report: (message: string) => void }) {
@@ -9,6 +13,11 @@ export function NewBot({ opened, report }: { opened: (bot: string) => void; repo
   const [purpose, setPurpose] = useState("");
   const [avatar, setAvatar] = useState("");
   const [error, setError] = useState("");
+  const [importError, setImportError] = useState("");
+  /** The file chosen and what it holds, shown before anything is made; the import must be of this very file. */
+  const [asked, setAsked] = useState<{ path: string; preview: BotFilePreview }>();
+  const look = (path: string) =>
+    request<BotFilePreview>("preview_bot_file", { path }).then((preview) => (setAsked({ path, preview }), setImportError("")), (e: Error) => setImportError(e.message));
   const create = async () => {
     let bot: Bot;
     try {
@@ -52,6 +61,25 @@ export function NewBot({ opened, report }: { opened: (bot: string) => void; repo
         <button disabled={!name.trim()}>Create</button>
         {error && <p className="error" role="alert">{error}</p>}
       </form>
+      {inShell && (
+        <div className="stack">
+          <h2>Or import a bot from a file</h2>
+          <p className="note">A file made by Export bot, in a bot's settings.</p>
+          <div className="actions"><Choose folder={false} set={(path) => void look(path)} fail={setImportError} /></div>
+          {importError && <p className="error" role="alert">{importError}</p>}
+        </div>
+      )}
+      {asked && (
+        <Sheet
+          title={`Import ${asked.preview.name}`}
+          about="Made as a new bot, with the usual permissions and none of the old bot's answers."
+          maker={madeBy.file}
+          facts={botFileLines(asked.preview)}
+          action="Import"
+          go={async () => opened((await request<{ bot: Bot }>("import_bot", { path: asked.path, sha256: asked.preview.sha256 })).bot.id)}
+          close={() => setAsked(undefined)}
+        />
+      )}
     </section>
   );
 }

@@ -757,6 +757,17 @@ impl Store {
 
     /// A new bot has one conversation.
     pub fn create_bot(&self, id: &str, name: &str, now: u64) -> Result<BotRow> {
+        self.create_bot_with(id, name, now, None)
+    }
+
+    /// A bot made with a profile, routines and connectors too, all or nothing (a bot file).
+    pub fn create_bot_with(
+        &self,
+        id: &str,
+        name: &str,
+        now: u64,
+        rest: Option<(&Profile, &[Routine], &[Connector])>,
+    ) -> Result<BotRow> {
         let tx = self.0.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO bots(id, name, created_at) VALUES (?1, ?2, ?3)",
@@ -766,6 +777,16 @@ impl Store {
             "INSERT INTO conversations(id, bot, created_at, touched_at) VALUES (?1, ?2, ?3, ?3)",
             params![random_hex(4), id, now],
         )?;
+        // The same connection: these run inside the transaction, and a failure rolls back all.
+        if let Some((profile, routines, connectors)) = rest {
+            self.set_profile(id, profile)?;
+            for r in routines {
+                self.put_routine(id, r)?;
+            }
+            for c in connectors {
+                self.put_connector(id, c)?;
+            }
+        }
         tx.commit()?;
         Ok(BotRow {
             id: id.to_owned(),

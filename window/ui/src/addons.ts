@@ -4,6 +4,7 @@ import type { Connector } from "./types.ts";
 export const madeBy = {
   catalog: "Bate's catalog, a list in Bate's own repository on GitHub (d41sys/bate). Each entry pins the exact archive by its hash.",
   folder: "A folder you chose on this Mac. Bate cannot tell who made it.",
+  file: "A file you chose on this Mac. Bate cannot tell who made it.",
   typed: "You, here. Bate cannot tell who runs the server or the program.",
   copy: (bot: string) => `${bot}'s copy. Bate cannot tell who made it.`,
 };

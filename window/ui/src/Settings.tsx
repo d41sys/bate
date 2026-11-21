@@ -21,6 +21,9 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   const looks = () => ({ name: bot.name, instructions: bot.instructions, avatar: bot.avatar, color: bot.color, stepLimit: bot.stepLimit });
   const [look, setLook] = useState(looks);
   const [deleting, setDeleting] = useState(false);
+  const [withNotes, setWithNotes] = useState(false);
+  const [exported, setExported] = useState("");
+  useEffect(() => setExported(""), [bot.id]);
   // Saved here or elsewhere: show what the service has.
   useEffect(() => setLook(looks()), [bot.name, bot.instructions, bot.avatar, bot.color, bot.stepLimit]);
   const [hosts, setHosts] = useState((bot.network ?? []).join("\n"));
@@ -214,6 +217,20 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           )}
         </Group>
       )}
+      <Group title="Export">
+        <Setting id="bot-export-notes" inline title="With notes" hint="Its memory notes go in the file too.">
+          <input type="checkbox" role="switch" checked={withNotes} onChange={(e) => setWithNotes(e.target.checked)} />
+        </Setting>
+        <Setting
+          title="Export bot"
+          hint="One file to import as a new bot. No sign-ins, keys or chats. Connector commands go as written: check them."
+          saved={saved("export")}
+          error={error("export")}
+        >
+          <button type="button" onClick={() => run("export", request<{ path: string }>("export_bot", { bot: bot.id, notes: withNotes }).then((d) => setExported(d.path)))}>Export bot</button>
+        </Setting>
+        {exported && <p className="note" role="status">Saved to <code>{exported}</code></p>}
+      </Group>
       <Group title="Delete">
         <Setting title="Delete this bot" hint="Its folder moves to the Trash.">
           <button type="button" className="danger" onClick={() => setDeleting(true)}>Delete this bot…</button>
