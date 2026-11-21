@@ -271,7 +271,12 @@ impl Turn {
         // Whether the conversation was already summarised for the model call that comes next.
         let mut shrunk = false;
         let system = self.system();
-        mcp.sync(&self.connectors, &self.dir, &self.control);
+        for (name, tools) in mcp.sync(&self.connectors, &self.dir, &self.control) {
+            self.out.send(&Event::ConnectorLoaded {
+                name,
+                tools: tools as u32,
+            });
+        }
         let tools = self.tools(mcp, 0);
         session
             .push(json!({"role": "user", "content": text}))

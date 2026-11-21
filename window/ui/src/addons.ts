@@ -33,11 +33,13 @@ export async function each(ids: string[], run: (id: string) => Promise<unknown>)
   return failed;
 }
 
-/** What a connector's line says: off, waiting for the sign-in, failed to load (and why), or no problem reported. */
-export function connectorState(c: Connector): { text: string; problem: boolean } {
+/** What a connector's line says: off, waiting for the sign-in, failed to load (and why), working (the engine loaded it), or no problem reported. An installed agent reports nothing, so it is never said to work. */
+export function connectorState(c: Connector, agent = false): { text: string; problem: boolean } {
   if (!c.enabled) return { text: "Off", problem: false };
   if (c.error) return { text: `Could not start: ${c.error}`, problem: true };
   if (c.oauth && !c.signedIn) return { text: "On, but not signed in", problem: true };
+  if (agent) return { text: "On; the agent does not report", problem: false };
+  if (c.tools !== undefined) return { text: `Working, ${c.tools} ${c.tools === 1 ? "tool" : "tools"}`, problem: false };
   return { text: "On, no problem reported", problem: false };
 }
 

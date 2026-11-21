@@ -245,6 +245,12 @@ pub enum Event {
         tool: String,
         args: Map<String, Value>,
     },
+    /// The connector `name` has just been loaded (started or reached) and offers `tools` tools.
+    /// A connector that fails is reported on standard error instead. Not part of the transcript.
+    ConnectorLoaded {
+        name: String,
+        tools: u32,
+    },
     /// The engine asks the service for the endpoint and token before a model call.
     /// The engine waits until the service sends `token` for `request`.
     Token {

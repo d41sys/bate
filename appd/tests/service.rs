@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 /// Answers every request. A prompt `hang` is never answered; a prompt `ask`
 /// asks question `q1` (the answer `Maybe` is refused); any other prompt streams "hel", waits a second, then "lo".
-/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
+/// `abort` ends the turn `aborted`. Each `connectors` operation is logged to `connectors.log`; one that has the enabled
+/// connector `works` reports it loaded with 2 tools, or failed while the file `works-dies` is there. `compact` takes 0.3 s. A prompt `do <kind> <target>` asks whether that action may run, and
 /// the turn then says which choice the engine was given. A prompt `probe write <path>` or
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
 /// `probe work <path>` says whether that is the folder the engine was told to work in.
@@ -159,6 +160,9 @@ while IFS= read -r line; do
     *'"type":"connectors"'*)
       printf '%s\n' "$line" >> connectors.log
       case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
+      case "$line" in *'"name":"works","enabled":true'*)
+        if [ -e works-dies ]; then echo "connector works: it stopped" >&2
+        else echo '{"type":"connector_loaded","name":"works","tools":2}'; fi ;; esac
       echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
@@ -1232,6 +1236,53 @@ fn a_connector_the_engine_could_not_load_shows_why_until_it_changes() {
         json!({"bot": bot, "connector": broken(false)}),
     );
     assert!(shown(&mut w).get("error").is_none());
+}
+
+#[test]
+fn a_connector_the_engine_loaded_shows_working_for_that_bot_only_and_a_later_failure_replaces_it() {
+    let home = home("connector-works");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let connector = |name: &str| {
+        json!({"name": name, "enabled": true,
+            "transport": {"type": "stdio", "command": "nowhere", "args": [], "env": {}}})
+    };
+    for bot in [&a, &b] {
+        w.ok(
+            "set_connector",
+            json!({"bot": bot, "connector": connector("works")}),
+        );
+    }
+    let shown = |w: &mut Window, bot: &str| {
+        let list = w.ok("list_connectors", json!({"bot": bot}));
+        list["connectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "works")
+            .unwrap()
+            .clone()
+    };
+    // Only the engine of `a` starts, so only `a` has loaded it.
+    w.ok("set_model", json!({"bot": a, "model": "m1"}));
+    eventually("working", || shown(&mut w, &a)["tools"] == 2);
+    assert!(shown(&mut w, &a).get("error").is_none());
+    assert!(shown(&mut w, &b).get("tools").is_none());
+    // The engine now fails to load it again, with no change to the connector: the failure shows.
+    fs::write(home.join("bots").join(&a).join("works-dies"), "").unwrap();
+    w.ok(
+        "set_connector",
+        json!({"bot": a, "connector": connector("other")}),
+    );
+    eventually("the failure", || shown(&mut w, &a)["error"] == "it stopped");
+    assert!(shown(&mut w, &a).get("tools").is_none());
+    // A change to the connector forgets what was said of it.
+    let mut off = connector("works");
+    off["enabled"] = json!(false);
+    w.ok("set_connector", json!({"bot": a, "connector": off}));
+    let c = shown(&mut w, &a);
+    assert!(c.get("tools").is_none() && c.get("error").is_none(), "{c}");
 }
 
 #[test]

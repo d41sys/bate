@@ -57,6 +57,8 @@ export type Connector = {
   signedIn?: boolean;
   /** What the bot's engine said when it could not load the connector (output only). */
   error?: string;
+  /** How many tools the bot's engine got from the connector when it loaded it (output only); absent: not loaded in this run. */
+  tools?: number;
 };
 
 export const KINDS = ["read", "write", "run", "connector", "desktop", "apple_read", "apple_change"] as const;

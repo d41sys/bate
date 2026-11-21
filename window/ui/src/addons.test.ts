@@ -29,6 +29,10 @@ test("a connector's line says off, failed with why, or waiting for the sign-in",
   assert.deepEqual(connectorState({ ...c, error: "no such program" }), { text: "Could not start: no such program", problem: true });
   assert.equal(connectorState({ ...c, oauth: true, signedIn: false }).problem, true);
   assert.equal(connectorState(c).problem, false);
+  assert.equal(connectorState(c).text, "On, no problem reported");
+  assert.deepEqual(connectorState({ ...c, tools: 3 }), { text: "Working, 3 tools", problem: false });
+  assert.equal(connectorState({ ...c, tools: 1 }).text, "Working, 1 tool");
+  assert.equal(connectorState({ ...c, tools: 3 }, true).text.startsWith("Working"), false);
 });
 
 test("a connector's row says on for how many bots, and how many need a look", () => {

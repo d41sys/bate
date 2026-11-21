@@ -11,7 +11,7 @@ const blank: ConnectorForm = { name: "", type: "http", url: "", command: "", arg
 type Ask = { form: ConnectorForm } | { copy: Connector; from: string; has: string[] } | { remove: string; users: string[] };
 const address = (c: Connector) => (c.transport.type === "http" ? c.transport.url : [c.transport.command, ...(c.transport.args ?? [])].join(" "));
 /** What `set_connector` takes: the output-only fields are left out. */
-const sent = ({ error, signedIn, ...c }: Connector) => c;
+const sent = ({ error, tools, signedIn, ...c }: Connector) => c;
 
 /** The connectors of every bot in one list: is each on, does it work, who has it; add to more bots in one step. */
 export function Connectors({ bots }: { bots: Bot[] }) {
@@ -66,7 +66,7 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                 </summary>
                 <ul className="rows">
                   {r.users.map(({ bot, item }) => {
-                    const state = connectorState(item);
+                    const state = connectorState(item, !!bots.find((b) => b.id === bot)?.agent);
                     return (
                       <li key={bot}>
                         <label>

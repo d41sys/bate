@@ -649,9 +649,9 @@ pub struct Core {
     workplaces_off: HashMap<String, String>,
     /// Bots whose project change takes effect after the turn now running.
     project_restarts: HashSet<String>,
-    /// What each bot's engine last said of a connector that failed to load, by bot and name;
-    /// cleared when the connector changes and when the bot's engine starts.
-    connector_errors: HashMap<String, HashMap<String, String>>,
+    /// What each bot's engine last said of a connector, by bot and name: that it loaded, or why it
+    /// did not. Cleared when the connector changes and when the bot's engine starts.
+    connector_reports: HashMap<String, HashMap<String, ConnectorReport>>,
     /// Engine request ids and engine generations.
     counter: u64,
     /// Earliest `nextRunMs` of any enabled routine; 0 forces a recheck.
@@ -745,7 +745,7 @@ impl Core {
             servers: HashMap::new(),
             workplaces_off: HashMap::new(),
             project_restarts: HashSet::new(),
-            connector_errors: HashMap::new(),
+            connector_reports: HashMap::new(),
             counter: 0,
             next_due: 0,
         }
@@ -833,11 +833,7 @@ impl Core {
                     .connectors(&bot)
                     .is_ok_and(|all| all.iter().any(|c| c.name == name));
                 if current && known {
-                    self.connector_errors
-                        .entry(bot.clone())
-                        .or_default()
-                        .insert(name, why);
-                    self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                    self.report_connector(&bot, name, ConnectorReport::Failed(why));
                 }
             }
             Msg::Surface {
@@ -2449,13 +2445,15 @@ impl Core {
                     let tokens = self.store.tokens(&bot, &c.name).map_err(internal)?;
                     c.signed_in = Some(tokens.is_some());
                 }
-                let failed = self.connector_errors.get(&bot);
+                let reports = self.connector_reports.get(&bot);
                 let connectors: Vec<Value> = connectors
                     .iter()
                     .map(|c| {
                         let mut shown = json!(c);
-                        if let Some(why) = failed.and_then(|m| m.get(&c.name)) {
-                            shown["error"] = json!(why);
+                        match reports.and_then(|m| m.get(&c.name)) {
+                            Some(ConnectorReport::Failed(why)) => shown["error"] = json!(why),
+                            Some(ConnectorReport::Loaded(tools)) => shown["tools"] = json!(tools),
+                            None => {}
                         }
                         shown
                     })
@@ -2506,7 +2504,7 @@ impl Core {
                     self.store.delete_oauth(&bot, &c.name).map_err(internal)?;
                 }
                 self.store.put_connector(&bot, &c).map_err(internal)?;
-                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(&c.name);
                 }
                 self.forget_connector_grants(&bot, &c.name);
@@ -2603,7 +2601,7 @@ impl Core {
                 self.store
                     .delete_oauth(&bot, str_field(f, "name")?)
                     .map_err(internal)?;
-                if let Some(m) = self.connector_errors.get_mut(&bot) {
+                if let Some(m) = self.connector_reports.get_mut(&bot) {
                     m.remove(str_field(f, "name")?);
                 }
                 self.forget_connector_grants(&bot, str_field(f, "name")?);
@@ -2961,7 +2959,7 @@ impl Core {
         .map_err(failed)?;
         self.counter += 1;
         let generation = self.counter;
-        self.connector_errors.remove(bot);
+        self.connector_reports.remove(bot);
         let (name, failures) = (bot.to_owned(), self.tx.clone());
         // Engine diagnostics go through the service log, so they are rotated with it.
         // Bytes, not `lines()`: a non-UTF-8 byte must not stop the draining (the engine would block),
@@ -5048,7 +5046,27 @@ impl Core {
         }
     }
 
+    /// Keeps what the engine said of connector `name` of `bot`, and tells the windows.
+    fn report_connector(&mut self, bot: &str, name: String, report: ConnectorReport) {
+        self.connector_reports
+            .entry(bot.to_owned())
+            .or_default()
+            .insert(name, report);
+        self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+    }
+
     fn on_event(&mut self, bot: &str, mut ev: Event) {
+        if let Event::ConnectorLoaded { name, tools } = &ev {
+            // Not for the transcript. Only a connector the bot still has is kept.
+            let known = self
+                .store
+                .connectors(bot)
+                .is_ok_and(|all| all.iter().any(|c| c.name == *name));
+            if known {
+                self.report_connector(bot, name.clone(), ConnectorReport::Loaded(*tools));
+            }
+            return;
+        }
         if let Event::Token { request } = &ev {
             // A ChatGPT sign-in comes before a model server.
             match self.store.chatgpt() {
@@ -6039,6 +6057,12 @@ fn write_op(bot: &str, r: &mut Running, id: &str, op: &Op) {
     if let Err(e) = r.input.send(id, op) {
         log!("bot {bot}: cannot write to the engine: {e}");
     }
+}
+
+/// What a bot's engine said of a connector (`Event::ConnectorLoaded`, or a line on standard error).
+enum ConnectorReport {
+    Loaded(u32),
+    Failed(String),
 }
 
 /// `connector <name>: <why>`: how the engine reports, on stderr, a connector it could not load.

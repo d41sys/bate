@@ -68,8 +68,14 @@ impl Drop for Link {
 
 impl Servers {
     /// Makes the running servers match `connectors`: stops those removed, changed or disabled, and
-    /// starts the new enabled ones. A connector that fails is reported on stderr (the service log).
-    pub fn sync(&mut self, connectors: &[Connector], dir: &Path, control: &Control) {
+    /// starts the new enabled ones. A connector that fails is reported on stderr (the service log);
+    /// the ones that loaded are returned with their tool counts, for the service to be told.
+    pub fn sync(
+        &mut self,
+        connectors: &[Connector],
+        dir: &Path,
+        control: &Control,
+    ) -> Vec<(String, usize)> {
         // A server that has stopped is forgotten here, so it is started again below.
         self.0.retain_mut(|(known, server)| {
             connectors.contains(known) && server.as_mut().is_none_or(Server::alive)
@@ -94,8 +100,9 @@ impl Servers {
                 .collect()
         });
         // An aborted start is not a failure: the next turn tries again.
+        let mut loaded = Vec::new();
         if control.aborted() {
-            return;
+            return loaded;
         }
         for (connector, mut server) in new.into_iter().zip(started) {
             if let Ok(server) = &mut server {
@@ -110,12 +117,14 @@ impl Servers {
                     }
                     free
                 });
+                loaded.push((connector.name.clone(), server.tools.len()));
             }
             let server = server
                 .map_err(|e| eprintln!("connector {}: {e}", connector.name))
                 .ok();
             self.0.push((connector.clone(), server));
         }
+        loaded
     }
 
     fn tools(&self) -> impl Iterator<Item = (&Connector, &Tool)> {
