@@ -1534,6 +1534,42 @@ impl Core {
                 let current = self.current_conversation(&bot)?;
                 Ok(Some(json!({"conversations": list, "current": current})))
             }
+            "list_attention" => {
+                let mut items = Vec::new();
+                for b in self.store.bots().map_err(internal)? {
+                    let working = self
+                        .engines
+                        .get(&b.id)
+                        .filter(|r| r.busy || r.compacting > 0)
+                        .map(|r| r.conversation.as_str());
+                    for c in self.store.conversations(&b.id).map_err(internal)? {
+                        let questions = self.store.questions(&c.id).map_err(internal)?;
+                        let busy = working == Some(c.id.as_str());
+                        let end = self.store.unseen_end(&c.id).map_err(internal)?;
+                        if questions.is_empty() && !busy && end.is_none() {
+                            continue;
+                        }
+                        let (at, line) = self.store.tail(&c.id).map_err(internal)?;
+                        items.push(json!({
+                            "bot": b.id, "conversation": c.id,
+                            "title": if c.name.is_empty() { &c.title } else { &c.name },
+                            "atMs": at, "busy": busy, "questions": questions, "line": line,
+                            // How the turn the person has not seen ended: `done`, `limit` or `error`.
+                            "ended": end.as_ref().and_then(|e| e["reason"].as_str()),
+                            "error": end.as_ref().and_then(|e| e["error"].as_str()),
+                        }));
+                    }
+                }
+                Ok(Some(json!({"items": items})))
+            }
+            "mark_seen" => {
+                let bot = self.bot_of(f)?;
+                let conversation = self.conversation_of(f, &bot)?;
+                if self.store.mark_seen(&conversation).map_err(internal)? {
+                    self.broadcast(&json!({"type": "conversations_changed", "bot": bot}));
+                }
+                Ok(Some(json!({})))
+            }
             "new_conversation" => {
                 let bot = self.bot_of(f)?;
                 let conversation = self

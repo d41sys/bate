@@ -254,6 +254,7 @@ CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
 CREATE INDEX IF NOT EXISTS mail_from ON mail(from_bot);
 CREATE TABLE IF NOT EXISTS file_copies(n INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, bot TEXT REFERENCES bots(id) ON DELETE CASCADE, project TEXT REFERENCES projects(id) ON DELETE CASCADE, conversation TEXT NOT NULL, path TEXT NOT NULL, earlier BLOB, after_sum TEXT, who TEXT NOT NULL, at INTEGER NOT NULL, undone_at INTEGER, told INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS file_copies_path ON file_copies(path);
+CREATE TABLE IF NOT EXISTS seen(conversation TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE, seq INTEGER NOT NULL);
 ";
 
 /// What `PRAGMA user_version` holds: 0 before relations were foreign keys, 1 for those, 2 once
@@ -376,6 +377,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             tx.execute(&format!("DROP INDEX {index}"), [])?;
         }
     }
+    let first_seen = !has_table(&tx, "seen")?;
     tx.execute_batch(SCHEMA)?;
     // A database of version 2 made before a message kept the one its sender was working on.
     if !has_column(&tx, "mail", "parent")? {
@@ -434,6 +436,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         if broken > 0 {
             return Err(refused("the moved rows break a foreign key"));
         }
+    }
+    if first_seen {
+        // What was there before the person could look is not news.
+        tx.execute(
+            "INSERT INTO seen(conversation, seq) SELECT conversation, max(seq) FROM transcript GROUP BY conversation",
+            [],
+        )?;
     }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()
@@ -1563,6 +1572,66 @@ impl Store {
             .prepare_cached("SELECT entry FROM questions WHERE conversation = ?1 ORDER BY rowid")?;
         stmt.query_map([conversation], |r| parse(r.get(0)?))?
             .collect()
+    }
+
+    /// The person has looked at the conversation up to its newest entry. `false` when they had
+    /// already.
+    pub fn mark_seen(&self, conversation: &str) -> Result<bool> {
+        Ok(self.0.execute(
+            "INSERT INTO seen(conversation, seq) SELECT ?1, COALESCE(max(seq), 0) FROM transcript WHERE conversation = ?1 \
+             ON CONFLICT(conversation) DO UPDATE SET seq = excluded.seq WHERE seq < excluded.seq",
+            [conversation],
+        )? > 0)
+    }
+
+    /// The `turn_end` entry of the last turn that ended after the person last looked at the
+    /// conversation; `None` when it was the person who stopped it.
+    pub fn unseen_end(&self, conversation: &str) -> Result<Option<Value>> {
+        let end: Option<String> = self
+            .0
+            .query_row(
+                "SELECT entry FROM transcript WHERE conversation = ?1 \
+                 AND seq > COALESCE((SELECT seq FROM seen WHERE conversation = ?1), 0) \
+                 AND json_extract(entry, '$.type') = 'turn_end' ORDER BY seq DESC LIMIT 1",
+                [conversation],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let end: Option<Value> = end.map(parse).transpose()?;
+        Ok(end.filter(|e| e["reason"] != "aborted"))
+    }
+
+    /// When the conversation last changed, and the last line of the bot's latest reply in it.
+    // shortcut: looks at the last 200 entries only; a reply further back is not shown.
+    pub fn tail(&self, conversation: &str) -> Result<(u64, String)> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT at, entry FROM transcript WHERE conversation = ?1 ORDER BY seq DESC LIMIT 200",
+        )?;
+        let (mut at, mut said, mut reading) = (0, Vec::new(), false);
+        for row in stmt.query_map([conversation], |r| {
+            Ok((r.get::<_, u64>(0)?, parse::<Value>(r.get(1)?)?))
+        })? {
+            let (when, entry) = row?;
+            at = at.max(when);
+            match entry["type"].as_str() {
+                Some("text") => {
+                    reading = true;
+                    said.push(entry["delta"].as_str().unwrap_or_default().to_owned());
+                }
+                // The reply is the run of text just before it; a prompt is an older turn.
+                Some("prompt") => break,
+                _ if reading => break,
+                _ => {}
+            }
+        }
+        said.reverse();
+        let said = said.concat();
+        let last = said
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .unwrap_or_default();
+        Ok((at, last.chars().take(300).collect()))
     }
 
     /// Whether a question is open in any conversation of the bot.

@@ -18,6 +18,7 @@ import { DeleteProject, ProjectBots, ProjectForm, Projects } from "./Projects.ts
 import { Workplaces } from "./Workplaces.tsx";
 import { Channels } from "./Channels.tsx";
 import { Room } from "./Room.tsx";
+import { Attention } from "./Attention.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings, type SettingsSection } from "./AppSettings.tsx";
@@ -43,12 +44,14 @@ type AddonTab = keyof typeof ADDON_TABS;
 /** What the page shows. The channels and the surfaces are for Bate's own window only. */
 type View =
   | { page: "new-bot" }
+  | { page: "attention" }
   | { page: "settings"; section?: SettingsSection }
   | { page: "addons"; tab: AddonTab }
   /** `asked`: when "New project" was asked for, so that its dialog opens at once, each time. */
   | { page: "projects"; asked?: number }
   | { page: "project"; id: string; tab: ProjectTab }
-  | { page: "bot"; id: string; tab: BotTab };
+  /** `conversation`: the one to show, else the bot's current. */
+  | { page: "bot"; id: string; tab: BotTab; conversation?: string };
 const botTabs = (Object.keys(BOT_TABS) as BotTab[]).filter((t) => inShell || t !== "channels");
 const projectTabs = (Object.keys(PROJECT_TABS) as ProjectTab[]).filter((t) => inShell || t !== "surfaces");
 
@@ -180,7 +183,7 @@ function App() {
     setLater(on);
   };
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
-  const openBot = (id: string, tab: BotTab = "chat") => setView({ page: "bot", id, tab });
+  const openBot = (id: string, tab: BotTab = "chat", conversation?: string) => setView({ page: "bot", id, tab, conversation });
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
   const order = shownBots(bots, projects);
   // Like a click on its row: the tab in front stays.
@@ -269,6 +272,7 @@ function App() {
     { group: "Commands", label: "New project", run: actions["new-project"] },
     { group: "Commands", label: "New window", keys: "⇧⌘N", run: actions["new-window"] },
     ...(Object.keys(ADDON_TABS) as AddonTab[]).map((t) => ({ group: "Pages", label: `Add-ons: ${ADDON_TABS[t]}`, run: () => setView({ page: "addons", tab: t }) })),
+    { group: "Pages", label: "Activity", run: () => setView({ page: "attention" }) },
     { group: "Pages", label: "App settings", keys: "⌘,", run: actions.settings },
     ...(inShell
       ? [
@@ -319,9 +323,10 @@ function App() {
     );
   };
   /** A row with no avatar: a project, or a page of the app. */
-  const plain = (text: string, current: boolean, go: () => void) => (
+  const plain = (text: string, current: boolean, go: () => void, badge?: ReactNode) => (
     <button className={current ? "row plain current" : "row plain"} aria-current={current ? "page" : undefined} onClick={go}>
       <span className="label"><span>{text}</span></span>
+      {badge}
     </button>
   );
 
@@ -329,6 +334,9 @@ function App() {
   return (
     <div className="app">
       <nav className="sidebar" aria-label="Projects and bots">
+        <ul>
+          <li>{plain("Activity", view?.page === "attention", () => setView({ page: "attention" }), waiting > 0 && <span className="badge">{waiting} {waiting === 1 ? "needs" : "need"} you</span>)}</li>
+        </ul>
         <div className="heading">
           <h2>Projects</h2>
           <button className="round ghost" aria-label="New project" data-tip="New project" onClick={actions["new-project"]}>+</button>
@@ -367,6 +375,12 @@ function App() {
           />
         )}
         {error && <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p>}
+        {view?.page === "attention" && (
+          <>
+            <header><div className="who"><h1>Activity</h1></div></header>
+            <Attention key={connection} bots={bots} open={(id, conversation) => openBot(id, "chat", conversation)} />
+          </>
+        )}
         {view?.page === "new-bot" && (
           <>
             <header><div className="who"><h1>New bot</h1></div></header>
@@ -441,7 +455,7 @@ function App() {
             <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
-              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation} slot={conversationSlot}>
+              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation ?? view.conversation} slot={conversationSlot}>
                 {(conversation, show, offerCompact) => <Chat
                   key={`${bot.id}-${conversation}-${connection}`}
                   bot={bot}
