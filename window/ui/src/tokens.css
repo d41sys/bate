@@ -18,6 +18,8 @@
   --border-field: #8a8a8a;
   --ink: #1a1a1a;
   --on-ink: #ffffff;
+  --bubble-user: var(--ink);
+  --on-bubble-user: var(--on-ink);
   --accent: #0a66d1;
   --danger: #c8232c;
   --warn: #8a5300;
@@ -36,6 +38,8 @@
   --size-title: 17px;
   --size-head: 22px;
   --leading: 20px;
+  --size-chat: 15px;
+  --leading-chat: 22px;
   --weight-strong: 600;
 
   /* Space: a 4 px grid. */
@@ -54,9 +58,13 @@
   --control-h: 32px;
   --control-h-small: 24px;
   --row-h: 44px;
+  --row-h-l: 52px;
+  --head-h: 52px;
   --avatar: 28px;
+  --avatar-l: 36px;
   --side-w: 280px;
   --thread-w: 720px;
+  --reply-w: 640px;
   --popover-w: 300px;
   --nav-w: 180px;
   --chip-w: 180px;
@@ -67,6 +75,10 @@
   /* Motion: short, and none when the system asks for less. */
   --fast: 100ms;
   --ease: cubic-bezier(.2, 0, 0, 1);
+  /* A message arriving; a working mark turning (--spin) or breathing (--beat). The two that repeat are stopped, not shortened, for reduced motion (style.css). */
+  --slow: 180ms;
+  --spin: 900ms;
+  --beat: 1400ms;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -84,6 +96,9 @@
     --border-field: #707070;
     --ink: #f3f3f3;
     --on-ink: #161616;
+    /* The person's message is a mid grey, so the one bright thing is the main action. */
+    --bubble-user: #3a3a3a;
+    --on-bubble-user: #f3f3f3;
     --accent: #62a8ff;
     --danger: #ff6f6f;
     --warn: #ffcf70;
@@ -96,5 +111,5 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root { --fast: 0ms; }
+  :root { --fast: 0ms; --slow: 0ms; }
 }

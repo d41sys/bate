@@ -63,10 +63,12 @@ input[role=switch]:disabled { opacity: .45; cursor: default; }
 label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
 /* ---- Tabs ---- */
-[role=tablist] { display: flex; gap: var(--space-1); overflow-x: auto; }
-[role=tab] { border: 0; background: none; color: var(--fg-muted); min-height: 28px; }
-[role=tab]:hover:not(:disabled) { background: var(--bg-hover); }
-[role=tab][aria-selected=true] { background: var(--bg-current); color: var(--fg); font-weight: var(--weight-strong); }
+[role=tablist] { display: flex; align-items: stretch; align-self: stretch; gap: var(--space-1); min-width: 0; overflow-x: auto; scrollbar-width: none; }
+/* Plain words, a line under the chosen one; it keeps its weight so the words do not move. */
+[role=tab] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--fg-muted); min-height: 28px; padding: 0 var(--space-2); }
+[role=tab]:hover:not(:disabled) { background: none; color: var(--fg); }
+[role=tab][aria-selected=true] { color: var(--fg); border-bottom-color: var(--ink); }
+[role=tab]:focus-visible { outline-offset: -2px; }
 /* The panel adds no box: its contents lay out as the main area's own. */
 [role=tabpanel] { display: contents; }
 
@@ -135,7 +137,7 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
 .starters button[aria-pressed=true] { background: var(--bg-current); border-color: var(--ink); }
 .starters .label { display: grid; gap: var(--space-1); min-width: 0; white-space: normal; }
-.question { overflow-wrap: anywhere; }
+.question { overflow-wrap: anywhere; box-shadow: none; flex: none; position: sticky; bottom: 0; z-index: 1; }
 .question > p { margin: var(--space-2) 0 0; }
 .question > p:first-child { font-weight: var(--weight-strong); margin-top: 0; }
 .question .note { font-size: var(--size-small); }
@@ -144,6 +146,11 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 /* Deny sits apart from the two that allow. */
 .question .actions { margin-top: var(--space-2); }
 .question .actions .danger { margin-left: auto; }
+.question button code { background: none; padding: 0; }
+@media (hover: hover) {
+  /* Deny is at the edge: its tip grows to the left. */
+  .question .actions > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+}
 
 /* ---- Dialog: a modal sheet. The dialog is the scrim itself: ::backdrop cannot read the tokens in older WebKit ---- */
 .sheet { max-width: none; max-height: none; width: 100%; height: 100%; margin: 0; padding: var(--space-4); border: 0; background: var(--scrim); color: var(--fg); }
@@ -173,12 +180,17 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .sidebar .foot { margin-top: auto; }
 .row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
 .row:hover:not(:disabled) { background: var(--bg-hover); }
-.row.current { background: var(--bg-current); font-weight: var(--weight-strong); }
+.row.current { background: var(--bg-current); }
 .row .label { display: grid; min-width: 0; line-height: 18px; }
 .row .label > * { overflow: hidden; text-overflow: ellipsis; }
 .row small { font-weight: 400; }
 /* A row with no avatar: a project, or a page of the app. */
 .row.plain { min-height: var(--control-h); }
+/* A bot's row is taller, with a bigger face; chosen, it keeps its weight so that its words do not move. */
+.sidebar .row:not(.plain) { min-height: var(--row-h-l); }
+.sidebar .avatar { width: var(--avatar-l); height: var(--avatar-l); font-size: var(--size-title); }
+/* A working bot's row: a dot that breathes beside "Working…". */
+.pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
 /* A state on a row: a dot and a word. `quiet` is for what does not need the person. */
 .badge { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-1); flex: none; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
@@ -188,8 +200,9 @@ main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padd
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
 main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
 /* No bar on top: who this is floats above the page as a chip, the tabs beside it. */
-main > header { position: sticky; top: 0; z-index: 1; max-width: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-2) var(--space-4); padding: var(--space-2) 0; background: var(--glass); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
-.who { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); box-shadow: var(--shadow-1); }
+main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--glass); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
+/* Who this is: a chip, no shadow; the tabs and the conversation chip follow on the same row. */
+.who { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); }
 .who h1 { font-size: var(--size-ui); line-height: var(--leading); }
 /* A project or a page has no avatar before its name. */
 .who > h1:first-child { margin-left: var(--space-2); }
@@ -239,21 +252,53 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-1) 0; user-select: text; -webkit-user-select: text; }
 .item > * { max-width: 100%; margin-block: 0; }
 .item.user { align-items: flex-end; }
-.bubble { padding: var(--space-2) var(--space-3); border-radius: var(--radius-bubble); background: var(--bg-soft); min-width: 0; overflow-wrap: anywhere; }
+.bubble { padding: var(--space-2) var(--space-3); border-radius: var(--radius-bubble); background: var(--bg-soft); min-width: 0; max-width: min(var(--reply-w), 100%); overflow-wrap: anywhere; font-size: var(--size-chat); line-height: var(--leading-chat); }
 .bubble > :first-child { margin-top: 0; }
 .bubble > :last-child { margin-bottom: 0; }
-.bubble pre { background: var(--bg); }
+/* Code is a hairline block, not a box in a box. */
+.bubble pre { background: none; border: 1px solid var(--border-strong); }
 .bubble :not(pre) > code { background: var(--bg-hover); }
-.bubble th, .bubble td { border: 1px solid var(--border-strong); padding: var(--space-1) var(--space-2); }
-.bubble pre code.hljs { border-radius: var(--radius-s); }
+.bubble table { display: block; max-width: 100%; overflow-x: auto; }
+.bubble th, .bubble td { padding: var(--space-1) var(--space-3) var(--space-1) 0; border-bottom: 1px solid var(--border-strong); text-align: left; }
+.bubble th { font-weight: var(--weight-strong); }
+.bubble pre code.hljs { padding: 0; background: none; }
 /* Who said it, in a room of many bots: above the message. */
 .item .from { display: flex; align-items: center; gap: var(--space-1); }
 .item .from b { color: var(--fg); font-weight: var(--weight-strong); }
-.item.user .bubble { background: var(--ink); color: var(--on-ink); max-width: 80%; white-space: pre-wrap; }
+.item.user .bubble { background: var(--bubble-user); color: var(--on-bubble-user); max-width: 80%; white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
-.item.thinking, .item.forked, .item.steered, .item.ended, .item.retrying, .item.tool { color: var(--fg-muted); font-size: var(--size-small); }
-.item.thinking p { white-space: pre-wrap; font-style: italic; }
-.item.tool summary { display: inline-block; padding: 2px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-pill); }
+.item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
+.item.working p { margin: 0; }
+.item.arriving { animation: arrive var(--slow) var(--ease); }
+/* A run of calls: one line (a mark, what happened, a chevron) that opens to a row for each call, named by what it acted on. */
+.run > summary { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; list-style: none; }
+.run > summary::-webkit-details-marker { display: none; }
+.run > summary::after { content: "›"; transition: transform var(--fast) var(--ease); }
+.run[open] > summary::after { transform: rotate(90deg); }
+.run > summary:hover { color: var(--fg); }
+.mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
+.mark.ok::before { content: "✓"; }
+.mark.bad { color: var(--danger); }
+.mark.bad::before { content: "✕"; }
+.mark.spin { border: 2px solid var(--border-strong); border-top-color: var(--fg-muted); border-radius: 50%; animation: spin var(--spin) linear infinite; }
+.run > ul { list-style: none; margin: var(--space-1) 0 var(--space-1) var(--space-2); padding: 0 0 0 var(--space-3); border-left: 1px solid var(--border-strong); }
+.run li { padding: 2px 0; }
+.run li summary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run code { background: none; padding: 0; }
+.run pre { max-height: calc(var(--leading) * 8); overflow: auto; }
+.run .thought p { margin: 0; white-space: pre-wrap; }
+/* The mark under the last message while the bot works, and its small cousin on its row in the sidebar. */
+.dots { display: inline-flex; gap: 3px; margin-right: var(--space-1); }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: beat var(--beat) var(--ease) infinite; }
+.dots i:nth-child(2) { animation-delay: calc(var(--beat) / 6); }
+.dots i:nth-child(3) { animation-delay: calc(var(--beat) / 3); }
+@keyframes arrive { from { opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes beat { 0%, 100% { opacity: .3; transform: scale(.7); } 50% { opacity: 1; transform: scale(1); } }
+/* Reduced motion: what repeats is still, and a message just arrives. */
+@media (prefers-reduced-motion: reduce) {
+  .mark.spin, .dots i, .pulse, .item.arriving { animation: none; }
+}
 .item.marked { outline: 2px solid var(--mark); outline-offset: -2px; border-radius: var(--radius-m); }
 .item .actions { gap: 0; }
 .item .actions button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); border-color: transparent; background: none; color: var(--fg-muted); }
@@ -270,15 +315,16 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .attached button, .queue button, .mention button { min-height: 20px; padding: 0 var(--space-2); border-color: transparent; background: none; }
 
 /* The composer is one pill: what to add, the words, what to do with them. */
-.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-1); border: 1px solid var(--border-field); border-radius: calc(var(--control-h) / 2 + var(--space-1)); background: var(--bg-raised); box-shadow: var(--shadow-1); }
-.composer:has(textarea:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-1); border: 1px solid var(--border-strong); border-radius: calc(var(--control-h) / 2 + var(--space-1)); background: var(--bg-raised); }
+/* One edge, no ring: it darkens while the words are being written. */
+.composer:focus-within { border-color: var(--border-field); }
 .composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: 6px var(--space-2); resize: none; outline: none; }
 .composer button[type=button]:not(.primary) { border-color: transparent; background: none; color: var(--fg-muted); }
 .composer button[type=button]:not(.primary):hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 .composer .note { align-self: center; font-size: var(--size-small); }
 /* The model chip: its name, cut short when long; the popover opens above it. */
 .menu { position: relative; display: flex; min-width: 0; }
-.chip { max-width: var(--chip-w); }
+.chip { max-width: var(--chip-w); min-width: 0; }
 /* In the composer the chip is as tall as the buttons beside it, so its words sit on their line. */
 .composer .chip { min-height: var(--control-h); }
 .chip > :first-child { overflow: hidden; text-overflow: ellipsis; }
@@ -293,18 +339,26 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .hints { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); margin-block: var(--space-1) 0; padding-inline: var(--space-3); font-size: var(--size-small); }
 .hints b { color: var(--fg); font-weight: var(--weight-strong); }
 
-/* ---- The bot's conversations: the one shown, a list to switch, a button for a new one ---- */
-.conversations { position: relative; display: flex; align-items: center; gap: var(--space-2); padding-bottom: var(--space-2); }
-/* The list is placed by the strip, so it is as wide as the column. */
-.conversations .menu { position: static; }
-.conversations .chip { max-width: 100%; }
-.conversations .popover { width: 100%; max-width: var(--thread-w); }
+/* ---- The bot's conversations: a chip at the end of the header opens the list; each row has a ⋯ for its actions; the foot has the actions on the whole ---- */
+/* With the pane open the row is short: the chip gives way first (its name is cut), then the tabs scroll. */
+main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto; min-width: 0; }
 .popover.start { left: 0; right: auto; }
 .popover.below { top: calc(100% + var(--space-1)); bottom: auto; left: 0; right: auto; }
-.popover li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1); }
-.popover li > .row { flex: 1; min-width: 0; }
-.popover li > form { display: flex; flex: 1; gap: var(--space-1); }
+.popover.end { left: auto; right: 0; }
+.popover li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1); border-radius: var(--radius-m); }
+.popover li > .row { flex: 1; min-width: 0; min-height: calc(var(--control-h) + var(--space-2)); padding: var(--space-1) var(--space-3); }
+.popover li > form { display: flex; flex: 1; gap: var(--space-1); padding: var(--space-1) var(--space-2); }
 .popover li > form input { flex: 1; min-width: 0; }
+/* The actions of the row that is open come under it. */
+.popover li > .actions { flex: 1 0 100%; justify-content: flex-end; padding: 0 var(--space-2) var(--space-1); }
+.popover .foot { display: grid; padding-top: var(--space-1); border-top: 1px solid var(--border); }
+.popover .foot .row { min-height: var(--control-h); padding: 0 var(--space-3); }
+/* A pinned conversation: a drawn pin before its name. */
+.pin { width: 12px; height: 12px; margin-right: var(--space-1); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
+@media (hover: hover) {
+  .popover li > .more { opacity: 0; }
+  .popover li:hover > .more, .popover li:focus-within > .more, .popover li.acting > .more { opacity: 1; }
+}
 
 /* ---- A project's surfaces: a chip for each, and one drawn in the pane ---- */
 .surfaces .chip { gap: var(--space-2); }
@@ -371,7 +425,10 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
   .sidebar .foot { margin: 0 0 0 auto; }
   .row { width: auto; max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }
-  main > header { justify-content: flex-start; }
+  /* The header is two rows: who and the conversation, then the tabs. */
+  main > header { flex-wrap: wrap; gap: 0 var(--space-3); }
+  [role=tablist] { order: 1; flex: 1 0 100%; }
+  .popover.below.end { left: 0; }
   .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
   button kbd, .palette kbd { display: none; }

@@ -10,7 +10,7 @@
 <body>
 <div class="app">
   <nav class="sidebar" aria-label="Projects and bots">
-    <h2>Projects</h2>
+    <div class="heading"><h2>Projects</h2><button class="round ghost" aria-label="New project">+</button></div>
     <ul>
       <li>
         <button class="row plain"><span class="label"><span>Firmware teardown</span></span></button>
@@ -22,7 +22,7 @@
       </li>
       <li><button class="row plain"><span class="label"><span>Website redesign</span></span></button></li>
     </ul>
-    <h2>Bots</h2>
+    <div class="heading"><h2>Bots</h2><button class="round ghost" aria-label="New bot">+</button></div>
     <ul>
       <li><button class="row"><span class="avatar" aria-hidden="true" style="--tint: #d6a01e">🌼</span><span class="label"><span>Daisy</span></span></button></li>
       <li><button class="row"><span class="avatar" aria-hidden="true" style="--tint: #2e8a5c">S</span><span class="label"><span>Scout</span><small>Daily at 08:00</small></span></button></li>
@@ -44,12 +44,13 @@
         <button role="tab" aria-selected="false">Skills</button>
         <button role="tab" aria-selected="false">Settings</button>
       </div>
+      <div class="conversation"><div class="menu"><button type="button" class="small chip" aria-label="Conversation: Firmware update check. Choose another"><span>Firmware update check</span> <span aria-hidden="true">▾</span></button></div></div>
     </header>
 
     <section class="chat">
       <div class="items"><div>
         <div class="item user"><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p></div>
-        <div class="item tool"><details><summary>Read 3 functions in Ghidra</summary></details></div>
+        <div class="item run"><details class="run"><summary><span class="mark ok" aria-hidden="true"></span>Read 3 functions in Ghidra</summary></details></div>
         <div class="item reply"><div class="bubble">
           <p>The update check is in <code>fw_check_update</code> at <code>0x0801a3c0</code>. It asks <code>updates.example.net</code> over HTTPS every 6 hours, and once more right after start.</p>
           <ul>
@@ -66,7 +67,7 @@
         <pre>binwalk -e firmware.bin</pre>
         <div class="actions">
           <button class="primary">Allow once</button>
-          <button>Always allow binwalk here</button>
+          <button>Always allow <code>binwalk -e firmware.bin</code></button>
           <button class="danger">Deny</button>
         </div>
       </div>
