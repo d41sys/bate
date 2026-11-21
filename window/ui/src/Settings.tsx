@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { agentChoice, OTHER, OWN, type Agent } from "./agents.ts";
 import { Confirm } from "./Confirm.tsx";
 import { Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
-import { listen, request } from "./service.ts";
+import { inShell, listen, request } from "./service.ts";
 import { hostLines, hostsHint } from "./network.ts";
 import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
 
@@ -39,6 +39,14 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   }, []);
   const saves = useSaves();
   const { run, edit, saved, error } = saves;
+  // Whether bots run on the ChatGPT plan; only Bate's own window may read the sign-in, as in Model.
+  const [onPlan, setOnPlan] = useState<boolean>();
+  useEffect(() => {
+    if (!inShell) return;
+    const load = () => request<{ signedIn: boolean }>("get_chatgpt").then((c) => setOnPlan(c.signedIn), () => {});
+    load();
+    return listen((frame) => frame.type === "chatgpt_changed" && load());
+  }, []);
 
   useEffect(() => {
     const load = () =>
@@ -144,6 +152,20 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
             </div>
           </form>
         )}
+        <Setting
+          id="bot-web-search"
+          inline
+          title="Search the web"
+          hint={
+            onPlan === false
+              ? "Needs the ChatGPT sign-in: this bot runs on the model server, which has no search."
+              : "The search runs at ChatGPT, so a bot's allowed-hosts list does not hold it."
+          }
+          saved={saved("search")}
+          error={error("search")}
+        >
+          <input type="checkbox" role="switch" checked={bot.webSearch} onChange={(e) => run("search", request("set_bot", { bot: bot.id, webSearch: e.target.checked }))} />
+        </Setting>
       </Group>
       {bot.browserTaken && (
         <Group title="Browser">

@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS connectors(bot TEXT NOT NULL REFERENCES bots(id) ON D
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS web_search(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
@@ -217,7 +218,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 15] = [
+const BOT_TABLES: [&str; 16] = [
     "ledger",
     "access",
     "network",
@@ -231,6 +232,7 @@ const BOT_TABLES: [&str; 15] = [
     "profiles",
     "models",
     "step_limits",
+    "web_search",
     "channels",
     "chats",
 ];
@@ -814,6 +816,29 @@ impl Store {
                 "INSERT INTO step_limits(bot, steps) VALUES (?1, ?2) \
                  ON CONFLICT(bot) DO UPDATE SET steps = ?2",
                 params![bot, steps],
+            )
+            .map(drop)
+    }
+
+    /// Whether the provider's web search tool is offered to `bot`; on unless turned off.
+    pub fn web_search(&self, bot: &str) -> Result<bool> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT enabled FROM web_search WHERE bot = ?1",
+                [bot],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.unwrap_or(true))
+    }
+
+    pub fn set_web_search(&self, bot: &str, enabled: bool) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO web_search(bot, enabled) VALUES (?1, ?2) \
+                 ON CONFLICT(bot) DO UPDATE SET enabled = ?2",
+                params![bot, enabled],
             )
             .map(drop)
     }

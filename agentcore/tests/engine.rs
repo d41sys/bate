@@ -2429,8 +2429,8 @@ fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
         first["input"],
         json!([{"role": "user", "content": "Read a.txt"}])
     );
-    // Function tools go in one namespace, each in the Responses shape.
-    assert_eq!(first["tools"].as_array().unwrap().len(), 1);
+    // Function tools go in one namespace, each in the Responses shape; the provider's search follows.
+    assert_eq!(first["tools"].as_array().unwrap().len(), 2);
     assert_eq!(first["tools"][0]["type"], "namespace");
     let read = first["tools"][0]["tools"]
         .as_array()
@@ -2933,4 +2933,154 @@ fn a_turn_stops_after_its_tool_rounds_and_one_more_prompt_goes_on() {
     let last = model.requests()[2]["messages"].as_array().unwrap().clone();
     assert_eq!(last.iter().filter(|m| m["role"] == "tool").count(), 2);
     assert_eq!(last.last().unwrap()["content"], "Continue.");
+}
+
+/// A turn on the Responses API: the prompt, the token, and every event up to `turn_end`.
+fn responses_turn(engine: &mut Engine, model: &Model, nonce: &str, text: &str) -> Vec<Event> {
+    engine.prompt_as(nonce, text);
+    give_responses_token(engine, model);
+    engine.until(is_turn_end)
+}
+
+fn said(events: &[Event]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The kinds of the tools a Responses request offers.
+fn tool_types(request: &Value) -> Vec<&str> {
+    let tools = request["tools"].as_array().unwrap();
+    tools.iter().filter_map(|t| t["type"].as_str()).collect()
+}
+
+#[test]
+fn a_hosted_web_search_is_offered_shown_as_a_tool_line_and_not_sent_back_and_the_switch_turns_it_off()
+ {
+    let dir = workdir("engine-web-search");
+    let completed = json!({"type": "response.completed", "response": {"status": "completed"}});
+    let reply = |text: &str| json!({"type": "response.output_text.delta", "delta": text});
+    let model = Model::replay(vec![
+        responses_body(&[
+            json!({"type": "response.output_item.added", "item": {"type": "web_search_call",
+                "id": "ws_1", "status": "in_progress"}}),
+            json!({"type": "response.output_item.done", "item": {"type": "web_search_call",
+                "id": "ws_1", "status": "completed",
+                "action": {"type": "search", "query": "newest stable rust"}}}),
+            reply("See [the release](https://example.org/rust) "),
+            json!({"type": "response.output_text.annotation.added", "annotation": {
+                "type": "url_citation", "url": "https://example.org/rust"}}),
+            reply("for it."),
+            completed.clone(),
+        ]),
+        responses_body(&[reply("Ok."), completed.clone()]),
+        responses_body(&[reply("Fine."), completed]),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+
+    let events = responses_turn(&mut engine, &model, "n1", "What is the newest Rust?");
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStart { call, tool, args } => Some((call, tool, args["query"].clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        [(
+            &"ws_1".to_owned(),
+            &"web_search".to_owned(),
+            json!("newest stable rust")
+        )]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ToolEnd { call, is_error: false, .. } if call == "ws_1"))
+    );
+    // The reply arrives whole, its link in it.
+    assert_eq!(
+        said(&events),
+        "See [the release](https://example.org/rust) for it."
+    );
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd {
+            reason: TurnEnd::Done,
+            ..
+        })
+    ));
+
+    // The next turn keeps the reply and drops the search item, and still offers the tool.
+    responses_turn(&mut engine, &model, "n2", "Thanks");
+    assert_eq!(engine.request(Op::WebSearch { on: false }), None);
+    responses_turn(&mut engine, &model, "n3", "Again");
+    let requests = model.requests();
+    assert_eq!(tool_types(&requests[0]), ["namespace", "web_search"]);
+    assert_eq!(requests[0]["tools"][1], json!({"type": "web_search"}));
+    assert_eq!(tool_types(&requests[1]), ["namespace", "web_search"]);
+    let input = requests[1]["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3, "{input:?}");
+    assert_eq!(input[1]["role"], "assistant");
+    assert!(input.iter().all(|i| i["type"] != "web_search_call"));
+    assert_eq!(tool_types(&requests[2]), ["namespace"]);
+}
+
+#[test]
+fn a_refused_web_search_tool_is_left_out_and_the_turn_goes_on() {
+    let dir = workdir("engine-web-search-refused");
+    let completed = json!({"type": "response.completed", "response": {"status": "completed"}});
+    let reply = |text: &str| {
+        responses_body(&[
+            json!({"type": "response.output_text.delta", "delta": text}),
+            completed.clone(),
+        ])
+    };
+    let model = Model::replay(vec![
+        b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+          {\"error\":{\"message\":\"Unsupported tool type: web_search\"}}"
+            .to_vec(),
+        reply("Answered."),
+        reply("Again."),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+
+    let events = responses_turn(&mut engine, &model, "n1", "hi");
+    assert_eq!(said(&events), "Answered.");
+    assert!(retries(&events).is_empty(), "{events:?}");
+    assert!(matches!(
+        events.last(),
+        Some(Event::TurnEnd {
+            reason: TurnEnd::Done,
+            error: None
+        })
+    ));
+    let events = responses_turn(&mut engine, &model, "n2", "hi again");
+    assert_eq!(said(&events), "Again.");
+
+    // Asked once with it, then the same request without it, and never with it again.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(tool_types(&requests[0]), ["namespace", "web_search"]);
+    assert_eq!(tool_types(&requests[1]), ["namespace"]);
+    assert_eq!(tool_types(&requests[2]), ["namespace"]);
+    assert_eq!(requests[0]["input"], requests[1]["input"]);
+}
+
+#[test]
+fn a_model_server_on_the_chat_api_is_never_offered_web_search() {
+    let dir = workdir("engine-web-search-chat");
+    let model = Model::serve(replies(&["Hi."]));
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.exchange("n1", "hello");
+    let request = &model.requests()[0];
+    assert!(!request.to_string().contains("web_search"), "{request}");
 }

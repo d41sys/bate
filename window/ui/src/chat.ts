@@ -174,6 +174,8 @@ const SAY: Record<string, Say> = {
   search: ["made", "making", "search", "searches"],
   fetch: ["opened", "opening", "page", "pages"],
   browser: ["made", "making", "browser action", "browser actions"],
+  // The provider's own search, shown as a call of ours (PROTOCOL.md, Web search).
+  web_search: ["made", "making", "web search", "web searches"],
   other: ["used", "using", "tool", "tools"],
 };
 // An installed agent names its kinds of tool its own way.
@@ -215,6 +217,7 @@ export function describe(parts: Part[], live: boolean): { text: string; running:
 /** What a call acted on, to name its row: the command, else the path, else what was searched for; the tool's name only when nothing else is known. */
 export function aim(part: Extract<Part, { kind: "tool" }>): string {
   const a = (part.args && typeof part.args === "object" ? part.args : {}) as Record<string, unknown>;
+  if (part.tool === "web_search") return typeof a.query === "string" && a.query ? `Searched the web: ${a.query}` : "Searched the web";
   const input = (a.rawInput && typeof a.rawInput === "object" ? a.rawInput : {}) as Record<string, unknown>;
   const first = (...values: unknown[]) => values.find((v): v is string => typeof v === "string" && v !== "");
   const acted = first(a.command, input.command, a.url, input.url);

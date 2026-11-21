@@ -16,6 +16,8 @@ export type Bot = {
   instructions: string;
   /** Tool rounds a turn may take before it stops and asks to continue. */
   stepLimit: number;
+  /** Whether the model provider's own web search is offered (it exists only on the ChatGPT plan). */
+  webSearch: boolean;
   /** A few characters, such as an emoji; empty: none. */
   avatar: string;
   /** `#rrggbb`; empty: none. */

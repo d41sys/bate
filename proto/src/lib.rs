@@ -82,6 +82,8 @@ pub enum Op {
     SkillFolders { folders: Vec<PathBuf> },
     /// Tool rounds a turn may take before it ends with `limit`, 1 or more; without it, `STEP_LIMIT`.
     StepLimit { steps: u32 },
+    /// Whether the model provider's own web search tool is offered, where it has one; on until told otherwise.
+    WebSearch { on: bool },
     /// The bots this one may message: the whole list each time. `leads`: it leads its project.
     Peers {
         peers: Vec<projects::Peer>,

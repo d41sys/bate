@@ -14,6 +14,7 @@ use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request};
 use session::Session;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -75,6 +76,10 @@ struct Engine {
     instructions: String,
     /// Tool rounds a turn may take; set by the service.
     steps: u32,
+    /// Whether the provider's web search tool is offered; set by the service.
+    web_search: bool,
+    /// Set once the provider refused that tool: it stays out until the engine ends.
+    search_refused: Arc<AtomicBool>,
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -145,6 +150,8 @@ fn main() {
         skill_folders: Vec::new(),
         instructions: String::new(),
         steps: proto::STEP_LIMIT,
+        web_search: true,
+        search_refused: Arc::default(),
         running: None,
         model: default_model(),
         effort: None,
@@ -353,6 +360,10 @@ impl Engine {
                 self.instructions = text;
                 self.respond(id, Ok(()));
             }
+            Op::WebSearch { on } => {
+                self.web_search = on;
+                self.respond(id, Ok(()));
+            }
             Op::StepLimit { steps } => match steps {
                 0 => self.respond(id, Err("`steps` must be at least 1".into())),
                 steps => {
@@ -463,7 +474,7 @@ impl Engine {
     fn begin_turn(&mut self) -> Result<(turn::Turn, Work), String> {
         self.idle()?;
         let model = self.model.clone();
-        let provider = model::Provider::new();
+        let provider = model::Provider::new(self.search_refused.clone());
         let context = match std::env::var("BATE_MODEL_CONTEXT") {
             Ok(tokens) => Some(
                 tokens
@@ -495,6 +506,7 @@ impl Engine {
             skill_folders: self.skill_folders.clone(),
             instructions: self.instructions.clone(),
             steps: self.steps,
+            web_search: self.web_search,
             control,
             answers: answers_rx,
             steer: steer_rx,

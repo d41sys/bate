@@ -1995,6 +1995,13 @@ impl Core {
                         }
                     },
                 };
+                let web_search = match f.get("webSearch").filter(|v| !v.is_null()) {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_bool()
+                            .ok_or_else(|| bad("`webSearch` must be true or false"))?,
+                    ),
+                };
                 let mut profile = self.store.profile(&bot).map_err(internal)?;
                 let text = |key: &str| {
                     f.get(key).filter(|v| !v.is_null()).map(|v| {
@@ -2043,6 +2050,12 @@ impl Core {
                     self.store.set_step_limit(&bot, steps).map_err(internal)?;
                     if self.engines.contains_key(&bot) {
                         self.send_op(&bot, Op::StepLimit { steps }, Waiter::Quiet)?;
+                    }
+                }
+                if let Some(on) = web_search {
+                    self.store.set_web_search(&bot, on).map_err(internal)?;
+                    if self.engines.contains_key(&bot) {
+                        self.send_op(&bot, Op::WebSearch { on }, Waiter::Quiet)?;
                     }
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
@@ -2533,6 +2546,7 @@ impl Core {
                 .flatten()
                 .unwrap_or(STEP_LIMIT)
         );
+        row["webSearch"] = json!(self.store.web_search(bot).unwrap_or(true));
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
         if let Ok(Some((model, effort))) = self.store.model(bot) {
@@ -2739,6 +2753,7 @@ impl Core {
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
         let steps = self.store.step_limit(bot).map_err(internal)?;
+        let web_search = self.store.web_search(bot).map_err(internal)?;
         let model = self.store.model(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
@@ -2885,6 +2900,10 @@ impl Core {
         }
         if let Some(steps) = steps {
             self.send_op(bot, Op::StepLimit { steps }, Waiter::Quiet)?;
+        }
+        // The engine offers it until told otherwise.
+        if !web_search {
+            self.send_op(bot, Op::WebSearch { on: false }, Waiter::Quiet)?;
         }
         if let Some((model, effort)) = model {
             self.send_op(bot, Op::SetModel { model, effort }, Waiter::Quiet)?;

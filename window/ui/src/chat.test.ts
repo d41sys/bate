@@ -192,4 +192,8 @@ test("a row is named by what the call acted on, not by the tool", () => {
   assert.equal(first(call(1, "read", { title: "Read a file", locations: [{ path: "/x/y.txt" }] }, "")), "/x/y.txt");
   assert.equal(first(call(1, "browser", { action: "open", url: "https://example.com" }, "")), "https://example.com");
   assert.equal(first(call(1, "mystery", null, "")), "mystery");
+  // The provider's own search folds with the other calls and says what was looked for.
+  assert.equal(first(call(1, "web_search", { query: "newest stable rust" }, "")), "Searched the web: newest stable rust");
+  assert.equal(first(call(1, "web_search", { query: "" }, "")), "Searched the web");
+  assert.equal(describe(parts([...call(1, "run", { command: "ls" }, "a"), ...call(2, "web_search", { query: "x" }, "")]), false).text, "Ran 1 command, made 1 web search");
 });
