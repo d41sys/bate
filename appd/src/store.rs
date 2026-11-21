@@ -120,6 +120,9 @@ pub struct Mail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub at_ms: u64,
+    /// The message its sender was answering when it sent this one (see `mail_askers`).
+    #[serde(skip)]
+    pub parent: Option<i64>,
 }
 
 /// One line of a project's room: what the person or a bot wrote there.
@@ -147,7 +150,7 @@ fn room_row(r: &rusqlite::Row) -> Result<RoomEntry> {
     })
 }
 
-const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at FROM mail";
+const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at, parent FROM mail";
 
 fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
     Ok(Mail {
@@ -159,6 +162,7 @@ fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
         answer: r.get(5)?,
         error: r.get(6)?,
         at_ms: r.get(7)?,
+        parent: r.get(8)?,
     })
 }
 

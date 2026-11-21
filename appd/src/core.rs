@@ -564,6 +564,9 @@ enum Caller {
     /// The message `seq`, which waited in the bot's inbox: its sender is not waiting, and gets
     /// the answer as a new prompt.
     Mail { seq: i64 },
+    /// A turn that an answer from another bot started: it goes on with work that bot was doing for
+    /// the message `mail`, and nobody waits for its last words.
+    Answer { mail: i64 },
     /// A message the person wrote in the room of `project`: the reply goes into the room.
     Room { project: String },
     /// A chat on one of the bot's own channels; `routine` when its message started one.
@@ -1377,8 +1380,10 @@ impl Core {
                     ));
                 };
                 // "Always" is the service's own choice: the engine gets "Approve", and exactly
-                // the action the question named is remembered once the engine has taken it.
-                let grant = if choice == ALWAYS {
+                // the action the question named is remembered once the engine has taken it. A
+                // question about work another bot asked for is answered once: it saves nothing.
+                let peer = asked.get("askedBy").is_some();
+                let grant = if choice == ALWAYS && !peer {
                     let action = serde_json::from_value::<Kind>(asked["kind"].clone())
                         .ok()
                         .zip(asked["target"].as_str());
@@ -1395,7 +1400,7 @@ impl Core {
                 };
                 let op = Op::Answer {
                     question: question.into(),
-                    choice: if grant.is_some() { APPROVE } else { choice }.into(),
+                    choice: if choice == ALWAYS { APPROVE } else { choice }.into(),
                 };
                 self.send_op(
                     &bot,
@@ -4293,6 +4298,7 @@ impl Core {
             match self.store.ledger(bot, &nonce) {
                 Ok(None) => {
                     let (text, caller) = self.room_prompt(bot, &nonce, text);
+                    let caller = caller.or_else(|| self.answer_hold(&nonce));
                     let prompt = Outgoing { nonce, text };
                     let sent = self.send_prompt_to(bot, Some(&conversation), prompt, |prompt| {
                         Waiter::Queued { prompt, caller }
@@ -4701,6 +4707,7 @@ impl Core {
                 let text = reply.unwrap_or_else(no_reply);
                 self.say(bot, kind, &chat, &text);
             }
+            Caller::Answer { .. } => {}
             Caller::Room { project } => {
                 let mut text = reply.unwrap_or_else(no_reply);
                 cut(&mut text, MAX_REPLY);
@@ -5320,8 +5327,10 @@ impl Core {
                 }
                 return;
             }
-            // A send or change shows its card every time: there is no `Always` for it.
-            let choices: &[&str] = if kind.always_asks() {
+            // A send or change shows its card every time: there is no `Always` for it. Nor is
+            // there for work another bot asked for: that is answered once.
+            let held = self.askers(bot).map_or(true, |askers| !askers.is_empty());
+            let choices: &[&str] = if kind.always_asks() || held {
                 &[APPROVE, DENY]
             } else {
                 &[APPROVE, ALWAYS, DENY]
@@ -5565,10 +5574,19 @@ impl Core {
         }
     }
 
-    /// The message that the running turn of `bot` answers, when another bot sent it.
+    /// What a queued prompt `answer-<seq>` carries on with: the answer to a message of this bot
+    /// that it sent while it was working for another message, whose askers still hold the turn.
+    fn answer_hold(&self, nonce: &str) -> Option<Caller> {
+        let seq = nonce.strip_prefix("answer-")?.parse().ok()?;
+        let mail = self.store.mail(seq).ok()??.parent?;
+        Some(Caller::Answer { mail })
+    }
+
+    /// The message whose askers hold the running turn of `bot`: the one it answers, when another
+    /// bot sent it, or the one that the work it goes on with after an answer was for.
     fn working_mail(&self, bot: &str) -> Option<i64> {
         match &self.engines.get(bot)?.call.as_ref()?.caller {
-            Caller::Bot { mail, .. } => Some(*mail),
+            Caller::Bot { mail, .. } | Caller::Answer { mail } => Some(*mail),
             Caller::Mail { seq } => Some(*seq),
             Caller::Room { .. } | Caller::Chat { .. } => None,
         }
@@ -5770,7 +5788,10 @@ impl Core {
                     None => {
                         let routine = match &caller {
                             Caller::Chat { routine, .. } => routine.clone(),
-                            Caller::Bot { .. } | Caller::Mail { .. } | Caller::Room { .. } => None,
+                            Caller::Bot { .. }
+                            | Caller::Mail { .. }
+                            | Caller::Answer { .. }
+                            | Caller::Room { .. } => None,
                         };
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.routine = routine;
