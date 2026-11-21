@@ -126,6 +126,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 /* A section's heading with its one action at the end. */
 .head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-block: var(--space-5) var(--space-2); }
 .head h2 { margin: 0; }
+.head > .what { flex: 1 1 0; min-width: 0; }
+.head > .actions { flex-wrap: nowrap; flex: none; }
 /* The app's settings: a list of sections that jump to them, and all of them in one scroll; a strip across the top on a phone. */
 .settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
 .settings nav { position: sticky; top: calc(var(--row-h) + var(--space-3)); z-index: 1; background: var(--bg); }
@@ -146,7 +148,7 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .row:has(input:disabled) { opacity: .6; cursor: default; }
 .rows li:has(> label.row) { padding: 0; }
 /* An add-on's row: what it is, its buttons at the end, and under them a line for each bot or project that has it. */
-.rows li > .what { flex: 1 1 var(--popover-w); min-width: 0; overflow-wrap: anywhere; }
+.rows li > .what { flex: 1 1 calc(var(--popover-w) / 2); min-width: 0; overflow-wrap: anywhere; }
 .rows li > .what > small { display: block; }
 .rows li > details > summary { font-size: var(--size-small); color: var(--fg-muted); }
 .rows li > .actions { margin-left: auto; }
