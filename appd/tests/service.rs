@@ -743,6 +743,126 @@ fn a_bot_with_an_open_question_is_listed_as_waiting_and_windows_are_told_when_th
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["waiting"], false);
 }
 
+fn attention(w: &mut Window) -> Vec<Value> {
+    w.ok("list_attention", json!({}))["items"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn the_attention_list_follows_a_conversation_from_its_question_to_a_finished_turn_the_person_has_not_seen()
+ {
+    let home = home("attention");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    assert_eq!(
+        attention(&mut w),
+        Vec::<Value>::new(),
+        "an idle bot is not listed"
+    );
+
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "ask"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    let items = attention(&mut w);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["bot"], bot.as_str());
+    assert_eq!(items[0]["busy"], true);
+    assert_eq!(items[0]["questions"][0]["question"], "q1");
+    assert_eq!(items[0]["ended"], Value::Null);
+
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": "q1", "choice": "Approve"}),
+    );
+    turn_ended(&mut w);
+    eventually("the turn to be over", || {
+        attention(&mut w)[0]["busy"] == false
+    });
+    let items = attention(&mut w);
+    assert_eq!(items[0]["questions"], json!([]));
+    assert_eq!(items[0]["ended"], "done");
+    assert_eq!(items[0]["line"], "chose Approve");
+    assert_eq!(items[0]["title"], "ask");
+    assert!(items[0]["atMs"].as_u64().unwrap() > 0);
+
+    // A window that starts later, or a service that does, still knows it was not seen.
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(attention(&mut w).len(), 1);
+    let conversation = items[0]["conversation"].clone();
+    w.ok(
+        "mark_seen",
+        json!({"bot": bot, "conversation": conversation}),
+    );
+    assert_eq!(attention(&mut w), Vec::<Value>::new());
+}
+
+#[test]
+fn a_turn_that_hit_its_limit_is_listed_with_why_and_one_the_person_stopped_is_not() {
+    let home = home("attention-ends");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "limit-turn"}),
+    );
+    turn_ended(&mut w);
+    eventually("the bot to be free", || {
+        attention(&mut w)[0]["busy"] == false
+    });
+    let items = attention(&mut w);
+    assert_eq!(items[0]["ended"], "limit");
+    assert_eq!(items[0]["error"], "stopped after 3 tool rounds");
+
+    let second = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "conversation": second, "nonce": "n2", "text": "work"}),
+    );
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["delta"] == "working");
+    let items = attention(&mut w);
+    let working = items.iter().find(|i| i["conversation"] == second).unwrap();
+    assert_eq!(working["busy"], true);
+    assert_eq!(working["line"], "working");
+    w.ok("abort", json!({"bot": bot}));
+    turn_ended(&mut w);
+    eventually("the stopped turn to leave the list", || {
+        attention(&mut w)
+            .iter()
+            .all(|i| i["conversation"] != second)
+    });
+    assert_eq!(attention(&mut w).len(), 1, "the limit is still there");
+}
+
+#[test]
+fn a_database_from_before_the_screen_has_nothing_unseen() {
+    let home = home("attention-old");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "limit-turn"}),
+    );
+    turn_ended(&mut w);
+    eventually("the bot to be free", || {
+        attention(&mut w)[0]["busy"] == false
+    });
+    service.kill();
+    // The state before the table was there.
+    rusqlite::Connection::open(home.join("app.db"))
+        .unwrap()
+        .execute("DROP TABLE seen", [])
+        .unwrap();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(attention(&mut w), Vec::<Value>::new());
+}
+
 #[test]
 fn a_question_about_a_file_or_a_command_names_the_folder_it_would_act_in() {
     let home = home("question-folder");

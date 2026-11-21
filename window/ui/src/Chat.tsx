@@ -4,6 +4,7 @@ import { inShell, listen, request, startDictation, type Failure } from "./servic
 import { add, aim, build, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
+import { QuestionCard } from "./Question.tsx";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
@@ -15,23 +16,6 @@ const PAGE = 2000;
 
 /** How long (ms) a row that just came in counts as arriving: a little longer than its fade (`--slow`). */
 const ARRIVING = 400;
-
-/** The service's choices, in the person's words. */
-const CHOICES: Record<string, string> = { Approve: "Allow once", Always: "Always", Deny: "Deny" };
-
-/** What "Always" remembers: a grant is for this kind of action and exactly this target (PROTOCOL.md, Permissions). */
-const COVERS: Record<string, string> = {
-  read: "this exact path",
-  write: "this exact file",
-  run: "this exact command",
-  connector: "this connector tool, whatever it is given",
-};
-
-/** The first line of a target, cut to what a button can hold; the card shows all of it above. */
-const short = (target: string) => {
-  const line = target.split("\n")[0];
-  return line.length > 32 ? `${line.slice(0, 31)}…` : line;
-};
 
 type Hit = { seq: number };
 
@@ -111,6 +95,15 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     getItemKey: (index) => shown[index].id,
   });
 
+  // The person reads this conversation: the service stops counting what it holds as not yet seen.
+  const looked = () => {
+    if (document.hasFocus()) request("mark_seen", { bot: bot.id, conversation }).catch(() => {});
+  };
+  useEffect(() => {
+    addEventListener("focus", looked);
+    return () => removeEventListener("focus", looked);
+  }, [bot.id, conversation]);
+
   useEffect(() => {
     let gone = false;
     let loading = false;
@@ -130,6 +123,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         setItems(build(entries.current));
         setQuestions(d.questions);
         setWaiting(d.queue);
+        looked();
       }, (e) => {
         live = undefined;
         setError(e.message);
@@ -172,6 +166,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         setItems((items) => add(items, row));
         // History holds every question ever asked; only one asked now is still open.
         if (entry.type === "question") setQuestions((qs) => [...qs, entry]);
+        if (entry.type === "turn_end") looked();
       } else if (frame.type === "question_closed") {
         setQuestions((qs) => qs.filter((q) => q.question !== frame.question));
       } else if (frame.type === "engine_stopped") {
@@ -483,25 +478,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         </div>
       </div>
       {questions.map((q, i) => (
-        <div key={q.question} className="question" role="group" aria-label={q.title}>
-          <p>{q.title}</p>
-          {q.target && <pre>{q.target}</pre>}
-          {q.folder && <p className="note">In <code>{q.folder}</code></p>}
-          {q.askedBy?.length ? <p className="note">Asked for by {q.askedBy.join(", who was asked by ")}</p> : null}
-          <div className="actions">
-            {q.options.map((choice) => (
-              <button
-                key={choice}
-                className={choice === "Approve" ? "primary" : choice === "Deny" ? "danger" : undefined}
-                // The keys are tips; what Always covers is the tip of its button.
-                data-tip={choice === "Approve" ? (i === 0 ? "Allow once (⌘Enter)" : undefined) : choice === "Deny" ? (i === 0 ? "Deny (Esc)" : undefined) : `Bate stops asking for ${COVERS[q.kind ?? ""] ?? "this exact action"}. The bot still asks again for anything else. Remove it in Settings.`}
-                onClick={() => run(answer(q, choice))}
-              >
-                {choice === "Always" ? <>Always allow <code>{q.target ? short(q.target) : "this action"}</code></> : CHOICES[choice] ?? choice}
-              </button>
-            ))}
-          </div>
-        </div>
+        <QuestionCard key={q.question} q={q} keys={i === 0} answer={(choice) => run(answer(q, choice))} />
       ))}
       {error && <p className="error" role="alert">{error}</p>}
       <KeychainNotice />
