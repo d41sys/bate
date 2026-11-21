@@ -36,6 +36,9 @@ use serde_json::{Value, json};
 /// there (`let_open`), or after 10 s, and the file `holding` says the engine has got that far
 /// (`engine_held`): what a test does "while the engine opens it" does not depend on how fast
 /// the machine is.
+/// What a bot's message (`[Message from the bot …]` or an answer, `[Answer from the bot …]`, and a first
+/// line) says after that line is run as if the user had typed it: `do run ls` asks about the action,
+/// `tell <bot> do run ls` passes it on, `say <words>` answers with the words.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
 printf '%s\n' "$PATH" >> path.log
@@ -56,10 +59,15 @@ while IFS= read -r line; do
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
+      line=$(printf '%s' "$line" | sed -e 's/"text":"\[Message from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Answer from the bot [^]]*\]\\n/"text":"/')
       case "$line" in
         *'limit-turn'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"turn_end","reason":"limit","error":"stopped after 3 tool rounds"}' ;;
+        *'"text":"say '*)
+          words=$(printf '%s' "$line" | sed 's/.*"text":"say \([^"]*\)".*/\1/')
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"text\",\"delta\":\"$words\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
         *'"text":"hang"'*) ;;
         *'"text":"probe '*)
           what=$(printf '%s' "$line" | sed 's/.*"text":"probe \([a-z]*\) .*/\1/')
@@ -12407,4 +12415,281 @@ fn a_bad_bot_file_makes_nothing_and_says_why_and_a_changed_one_is_not_imported()
     let again = w.ok("preview_bot_file", json!({"path": path}))["sha256"].clone();
     let made = w.ok("import_bot", json!({"path": path, "sha256": again}));
     assert_eq!(made["bot"]["instructions"], "Do something else.");
+}
+
+fn set_level(w: &mut Window, bot: &str, level: &str) {
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "run", "level": level}),
+    );
+}
+
+/// The bot `from` is prompted with `words` (`tell <bot> do run ls`, which its engine sends on as a
+/// message), and what it is told in the end comes back. The bot `worker` does the work: a question
+/// it shows the user is answered with `answer` (`None`: none may come) and its `askedBy` comes back.
+fn peer_work(
+    w: &mut Window,
+    from: &str,
+    worker: &str,
+    nonce: &str,
+    words: &str,
+    answer: Option<&str>,
+) -> (String, Option<Value>) {
+    w.ok(
+        "prompt",
+        json!({"bot": from, "nonce": nonce, "text": words}),
+    );
+    let mut asked = None;
+    loop {
+        let frame = w.wait_for(|f| {
+            f["type"] == "transcript"
+                && (f["entry"]["type"] == "question"
+                    || (f["entry"]["type"] == "text" && f["bot"] == from))
+        });
+        let entry = frame["entry"].clone();
+        if entry["type"] == "question" {
+            let choice = answer.unwrap_or_else(|| panic!("the user was asked: {entry}"));
+            assert_eq!(frame["bot"], worker);
+            // Work for another bot is answered once: there is no "Always" on its card.
+            assert_eq!(entry["options"], json!(["Approve", "Deny"]));
+            asked = Some(entry["askedBy"].clone());
+            w.ok(
+                "answer",
+                json!({"bot": worker, "question": entry["question"], "choice": choice}),
+            );
+        } else {
+            w.wait_for(|f| f["bot"] == from && f["entry"]["type"] == "turn_end");
+            return (entry["delta"].as_str().unwrap().to_owned(), asked);
+        }
+    }
+}
+
+fn named_bot(w: &mut Window, name: &str) -> String {
+    w.ok("create_bot", json!({"name": name}))["bot"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn work_a_bot_does_for_another_is_held_to_both_bots_permissions_and_names_who_asked() {
+    let home = home("peer-levels");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (ann, bo) = (named_bot(&mut w, "Ann"), named_bot(&mut w, "Bo"));
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": [ann, bo], "lead": ann}}),
+    );
+    let tell = format!("tell {bo} do run ls");
+
+    // The sender asks and the receiver would run it: the user is asked, and told who asked.
+    set_level(&mut w, &ann, "ask");
+    set_level(&mut w, &bo, "always");
+    let (said, asked) = peer_work(&mut w, &ann, &bo, "n1", &tell, Some("Approve"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("text: chose Approve", Some(json!(["Ann"])))
+    );
+
+    // The sender has "never": refused, with no question.
+    set_level(&mut w, &ann, "never");
+    let (said, _) = peer_work(&mut w, &ann, &bo, "n2", &tell, None);
+    assert_eq!(said, "text: chose Deny");
+
+    // The receiver has "never": refused too.
+    set_level(&mut w, &ann, "always");
+    set_level(&mut w, &bo, "never");
+    let (said, _) = peer_work(&mut w, &ann, &bo, "n3", &tell, None);
+    assert_eq!(said, "text: chose Deny");
+
+    // Both "always": it runs, with no question.
+    set_level(&mut w, &bo, "always");
+    let (said, _) = peer_work(&mut w, &ann, &bo, "n4", &tell, None);
+    assert_eq!(said, "text: chose Approve");
+
+    // A turn the user starts in the receiver's own chat is as it was: its own level alone.
+    set_level(&mut w, &ann, "never");
+    assert_eq!(act(&mut w, &bo, "own", "run ls", None), "chose Approve");
+}
+
+#[test]
+fn a_chain_of_three_bots_is_held_to_the_strictest_of_them() {
+    let home = home("peer-chain");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let ids = [
+        named_bot(&mut w, "Ann"),
+        named_bot(&mut w, "Bo"),
+        named_bot(&mut w, "Cy"),
+    ];
+    let [ann, bo, cy] = &ids;
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": ids, "lead": ann}}),
+    );
+    let tell = format!("tell {bo} tell {cy} do run ls");
+    let run = |w: &mut Window, n: &str, levels: [&str; 3], answer: Option<&str>| {
+        for (bot, level) in ids.iter().zip(levels) {
+            set_level(w, bot, level);
+        }
+        let (said, asked) = peer_work(w, ann, cy, n, &tell, answer);
+        (said.rsplit(' ').next().unwrap().to_owned(), asked)
+    };
+
+    // Cy would run it for Bo, and Bo for Ann; Ann asks: the user is asked, and told the chain.
+    let (said, asked) = run(&mut w, "n1", ["ask", "always", "always"], Some("Approve"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("Approve", Some(json!(["Bo", "Ann"])))
+    );
+    // The one in the middle asks.
+    let (said, asked) = run(&mut w, "n2", ["always", "ask", "always"], Some("Approve"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("Approve", Some(json!(["Bo", "Ann"])))
+    );
+    // Each of the three with "never" refuses it, whatever the others say.
+    for (i, levels) in [
+        ["never", "always", "always"],
+        ["always", "never", "always"],
+        ["always", "always", "never"],
+        ["never", "ask", "always"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (said, _) = run(&mut w, &format!("d{i}"), levels, None);
+        assert_eq!(said, "Deny", "{levels:?}");
+    }
+    // All three "always": it runs unasked.
+    let (said, _) = run(&mut w, "n3", ["always", "always", "always"], None);
+    assert_eq!(said, "Approve");
+}
+
+#[test]
+fn an_always_answer_during_peer_work_saves_nothing_and_the_asking_bot_is_asked_again() {
+    let home = home("peer-always");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (ann, bo) = (named_bot(&mut w, "Ann"), named_bot(&mut w, "Bo"));
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": [ann, bo], "lead": ann}}),
+    );
+    let tell = format!("tell {bo} do run ls");
+    let grants =
+        |w: &mut Window, bot: &str| w.ok("get_permissions", json!({"bot": bot}))["grants"].clone();
+
+    // Both ask, and the user's "always" (sent although the card has no such button) is taken
+    // as "approve" once: no grant is saved for anybody.
+    let (said, asked) = peer_work(&mut w, &ann, &bo, "n1", &tell, Some("Always"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("text: chose Approve", Some(json!(["Ann"])))
+    );
+    assert_eq!(grants(&mut w, &bo), json!([]));
+    assert_eq!(grants(&mut w, &ann), json!([]));
+
+    // Bo's own work is asked, with an "Always" on the card, and the grant is Bo's.
+    assert_eq!(
+        act(&mut w, &bo, "own", "run ls", Some("Always")),
+        "chose Approve"
+    );
+    assert_eq!(grants(&mut w, &bo).as_array().unwrap().len(), 1);
+
+    // Ann's request is asked again: Bo's grant does not open it for her.
+    let (said, asked) = peer_work(&mut w, &ann, &bo, "n2", &tell, Some("Deny"));
+    assert_eq!(
+        (said.as_str(), asked),
+        ("text: chose Deny", Some(json!(["Ann"])))
+    );
+    assert_eq!(grants(&mut w, &ann), json!([]));
+}
+
+#[test]
+fn the_bots_that_asked_for_a_waiting_message_are_remembered_across_a_restart() {
+    let home = home("peer-restart");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let ids = [
+        named_bot(&mut w, "Ann"),
+        named_bot(&mut w, "Bo"),
+        named_bot(&mut w, "Cy"),
+    ];
+    let [ann, bo, cy] = &ids;
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": ids, "lead": ann}}),
+    );
+    // Only Ann refuses. Cy is busy, so Bo's message to it, sent for Ann's, waits in its inbox.
+    for (bot, level) in ids.iter().zip(["never", "always", "always"]) {
+        set_level(&mut w, bot, level);
+    }
+    w.ok("prompt", json!({"bot": cy, "nonce": "w1", "text": "work"}));
+    eventually("Cy at work", || prompts_received(&home, cy, "w1") == 1);
+    let (said, _) = peer_work(
+        &mut w,
+        ann,
+        bo,
+        "n1",
+        &format!("tell {bo} tell {cy} do run ls"),
+        None,
+    );
+    assert!(said.contains("is busy, so your message waits"), "{said}");
+
+    // The service restarts; Cy's engine is new, and takes the message. Ann's "never" still holds.
+    drop(w);
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let frame = w.wait_for(|f| {
+        f["type"] == "transcript" && f["bot"] == cy.as_str() && f["entry"]["type"] == "text"
+    });
+    assert_eq!(frame["entry"]["delta"], "chose Deny");
+}
+
+#[test]
+fn an_answer_that_starts_a_bots_turn_goes_on_under_the_bots_that_asked_for_that_work() {
+    let home = home("peer-answer");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let ids = [
+        named_bot(&mut w, "Xi"),
+        named_bot(&mut w, "Ann"),
+        named_bot(&mut w, "Bo"),
+    ];
+    let [xi, ann, bo] = &ids;
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": ids, "lead": xi}}),
+    );
+    // Only Xi refuses.
+    for (bot, level) in ids.iter().zip(["never", "always", "always"]) {
+        set_level(&mut w, bot, level);
+    }
+    // Bo is busy, so Ann's message to it (sent for Xi's) waits and Ann's turn ends without the answer.
+    w.ok("prompt", json!({"bot": bo, "nonce": "w1", "text": "work"}));
+    eventually("Bo at work", || prompts_received(&home, bo, "w1") == 1);
+    let (said, _) = peer_work(
+        &mut w,
+        xi,
+        ann,
+        "n1",
+        &format!("tell {ann} tell {bo} say do run ls"),
+        None,
+    );
+    assert!(said.contains("is busy, so your message waits"), "{said}");
+
+    // Bo is free later; its answer starts a new turn of Ann, which asks to run what it said.
+    // That turn goes on with the work Xi asked for, so Xi's "never" holds in it.
+    w.ok("abort", json!({"bot": bo}));
+    let said = w.wait_for(|f| {
+        f["type"] == "transcript"
+            && f["bot"] == ann.as_str()
+            && f["entry"]["delta"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("chose"))
+    });
+    assert_eq!(said["entry"]["delta"], "chose Deny");
 }

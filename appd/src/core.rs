@@ -564,6 +564,9 @@ enum Caller {
     /// The message `seq`, which waited in the bot's inbox: its sender is not waiting, and gets
     /// the answer as a new prompt.
     Mail { seq: i64 },
+    /// A turn that an answer from another bot started: it goes on with work that bot was doing for
+    /// the message `mail`, and nobody waits for its last words.
+    Answer { mail: i64 },
     /// A message the person wrote in the room of `project`: the reply goes into the room.
     Room { project: String },
     /// A chat on one of the bot's own channels; `routine` when its message started one.
@@ -1377,8 +1380,10 @@ impl Core {
                     ));
                 };
                 // "Always" is the service's own choice: the engine gets "Approve", and exactly
-                // the action the question named is remembered once the engine has taken it.
-                let grant = if choice == ALWAYS {
+                // the action the question named is remembered once the engine has taken it. A
+                // question about work another bot asked for is answered once: it saves nothing.
+                let peer = asked.get("askedBy").is_some();
+                let grant = if choice == ALWAYS && !peer {
                     let action = serde_json::from_value::<Kind>(asked["kind"].clone())
                         .ok()
                         .zip(asked["target"].as_str());
@@ -1395,7 +1400,7 @@ impl Core {
                 };
                 let op = Op::Answer {
                     question: question.into(),
-                    choice: if grant.is_some() { APPROVE } else { choice }.into(),
+                    choice: if choice == ALWAYS { APPROVE } else { choice }.into(),
                 };
                 self.send_op(
                     &bot,
@@ -4293,6 +4298,7 @@ impl Core {
             match self.store.ledger(bot, &nonce) {
                 Ok(None) => {
                     let (text, caller) = self.room_prompt(bot, &nonce, text);
+                    let caller = caller.or_else(|| self.answer_hold(&nonce));
                     let prompt = Outgoing { nonce, text };
                     let sent = self.send_prompt_to(bot, Some(&conversation), prompt, |prompt| {
                         Waiter::Queued { prompt, caller }
@@ -4472,6 +4478,7 @@ impl Core {
             .mail_in("waiting", Some(to))
             .map_err(|e| e.to_string())?;
         let queued = self.store.queue(to).map_err(|e| e.to_string())?;
+        let parent = self.working_mail(from);
         // In order: behind its user's prompts and the messages already waiting.
         if !self.free(to) || !queued.is_empty() || !waiting.is_empty() {
             if waiting.len() >= MAIL_MAX {
@@ -4480,7 +4487,7 @@ impl Core {
                 ));
             }
             self.store
-                .put_mail(from, to, text, "waiting", now_ms())
+                .put_mail(from, to, text, "waiting", now_ms(), parent)
                 .map_err(|e| e.to_string())?;
             self.broadcast(&json!({"type": "mail_changed"}));
             return Ok(Some(format!(
@@ -4489,7 +4496,7 @@ impl Core {
         }
         let seq = self
             .store
-            .put_mail(from, to, text, "working", now_ms())
+            .put_mail(from, to, text, "working", now_ms(), parent)
             .map_err(|e| e.to_string())?;
         self.broadcast(&json!({"type": "mail_changed"}));
         let prompt = Self::mail_prompt(seq, &self.name_of(from), text);
@@ -4700,6 +4707,7 @@ impl Core {
                 let text = reply.unwrap_or_else(no_reply);
                 self.say(bot, kind, &chat, &text);
             }
+            Caller::Answer { .. } => {}
             Caller::Room { project } => {
                 let mut text = reply.unwrap_or_else(no_reply);
                 cut(&mut text, MAX_REPLY);
@@ -5319,8 +5327,10 @@ impl Core {
                 }
                 return;
             }
-            // A send or change shows its card every time: there is no `Always` for it.
-            let choices: &[&str] = if kind.always_asks() {
+            // A send or change shows its card every time: there is no `Always` for it. Nor is
+            // there for work another bot asked for: that is answered once.
+            let held = self.askers(bot).map_or(true, |askers| !askers.is_empty());
+            let choices: &[&str] = if kind.always_asks() || held {
                 &[APPROVE, DENY]
             } else {
                 &[APPROVE, ALWAYS, DENY]
@@ -5390,10 +5400,23 @@ impl Core {
             }
         )
         .then(|| self.work_folder(bot));
-        let with_folder = |ev: &Event| {
+        // Work another bot asked for says so on its card: who asked, nearest first.
+        let asked_by: Vec<String> = match &ev {
+            Event::Question { kind: Some(_), .. } => self
+                .askers(bot)
+                .unwrap_or_default()
+                .iter()
+                .map(|id| self.name_of(id))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let with_context = |ev: &Event| {
             let mut entry = serde_json::to_value(ev).expect("serializable");
             if let Some(folder) = &folder {
                 entry["folder"] = json!(folder);
+            }
+            if !asked_by.is_empty() {
+                entry["askedBy"] = json!(asked_by);
             }
             entry
         };
@@ -5492,7 +5515,7 @@ impl Core {
             Event::Question {
                 question, title, ..
             } => {
-                let entry = with_folder(&ev);
+                let entry = with_context(&ev);
                 let conversation = r.conversation.clone();
                 if let Err(e) = self.store.put_question(&conversation, question, &entry) {
                     log!("bot {bot}: question not stored: {e}");
@@ -5513,7 +5536,7 @@ impl Core {
         let Some(conversation) = self.engines.get(bot).map(|r| r.conversation.clone()) else {
             return;
         };
-        self.record(bot, &conversation, with_folder(&ev));
+        self.record(bot, &conversation, with_context(&ev));
         if matches!(ev, Event::Question { .. }) {
             self.broadcast(&json!({"type": "bots_changed"}));
         }
@@ -5551,8 +5574,59 @@ impl Core {
         }
     }
 
+    /// What a queued prompt `answer-<seq>` carries on with: the answer to a message of this bot
+    /// that it sent while it was working for another message, whose askers still hold the turn.
+    fn answer_hold(&self, nonce: &str) -> Option<Caller> {
+        let seq = nonce.strip_prefix("answer-")?.parse().ok()?;
+        let mail = self.store.mail(seq).ok()??.parent?;
+        Some(Caller::Answer { mail })
+    }
+
+    /// The message whose askers hold the running turn of `bot`: the one it answers, when another
+    /// bot sent it, or the one that the work it goes on with after an answer was for.
+    fn working_mail(&self, bot: &str) -> Option<i64> {
+        match &self.engines.get(bot)?.call.as_ref()?.caller {
+            Caller::Bot { mail, .. } | Caller::Answer { mail } => Some(*mail),
+            Caller::Mail { seq } => Some(*seq),
+            Caller::Room { .. } | Caller::Chat { .. } => None,
+        }
+    }
+
+    /// The bots that asked for the work `bot` is doing, nearest first: the sender of the message
+    /// it answers, and the senders that one was working for. None for a turn the user, a routine
+    /// or a channel started.
+    fn askers(&self, bot: &str) -> rusqlite::Result<Vec<String>> {
+        match self.working_mail(bot) {
+            Some(seq) => self.store.mail_askers(seq),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// The service's own answer to "may this action run", or `None` when the user must be asked.
+    /// Work another bot asked for is held to every bot that asked: it is refused if any of them
+    /// (or the working bot) refuses it, and runs unasked only if all of them would run it unasked.
     fn decide(&self, bot: &str, kind: Kind, target: &str) -> Option<&'static str> {
+        let askers = match self.askers(bot) {
+            Ok(askers) => askers,
+            // A store that cannot be read must not allow anything: the user is asked.
+            Err(e) => {
+                log!("bot {bot}: askers not read: {e}");
+                return None;
+            }
+        };
+        let mut choice = Some(APPROVE);
+        for who in std::iter::once(bot).chain(askers.iter().map(String::as_str)) {
+            match self.decide_alone(who, kind, target) {
+                Some(DENY) => return Some(DENY),
+                Some(_) => {}
+                None => choice = None,
+            }
+        }
+        choice
+    }
+
+    /// What the permissions of the one bot `bot` say.
+    fn decide_alone(&self, bot: &str, kind: Kind, target: &str) -> Option<&'static str> {
         let known = self.store.level(bot, kind).and_then(|level| {
             Ok(match level {
                 Level::Never => Some(DENY),
@@ -5714,7 +5788,10 @@ impl Core {
                     None => {
                         let routine = match &caller {
                             Caller::Chat { routine, .. } => routine.clone(),
-                            Caller::Bot { .. } | Caller::Mail { .. } | Caller::Room { .. } => None,
+                            Caller::Bot { .. }
+                            | Caller::Mail { .. }
+                            | Caller::Answer { .. }
+                            | Caller::Room { .. } => None,
                         };
                         if let Some(r) = self.engines.get_mut(bot) {
                             r.routine = routine;

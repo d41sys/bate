@@ -41,6 +41,8 @@ export type Question = {
   target?: string;
   /** Where a file or a command would act: the bot's folder, or its project's. */
   folder?: string;
+  /** The bots that asked for the work the question is about, nearest first. Absent for the user's own. */
+  askedBy?: string[];
 };
 
 /** Puts one more entry into `items`, in place. Text and thinking deltas join the item they continue. */
