@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Problem, useSaves } from "./Form.tsx";
+import { Group, Problem, Setting, useSaves } from "./Form.tsx";
 import { inShell, listen, request } from "./service.ts";
 
 type Update = { state: "off" | "current" | "checking" | "ready" | "waiting" | "error"; current: string; available: string | null; error: string | null };
@@ -15,32 +15,28 @@ export function Updates() {
   }, []);
   const act = (p: Promise<unknown>) => run("update", p).then(load);
   const ready = update?.available && (update.state === "ready" || update.state === "waiting");
+  const says = update && {
+    off: "This build has no update key, so it does not update itself.",
+    current: "It is up to date.",
+    checking: "Checking…",
+    waiting: "Waiting for the replies to end. Bate restarts then.",
+    ready: inShell ? "Installs when no reply is running." : "Install it in Bate's own window.",
+    error: "",
+  }[update.state];
   return (
-    <>
-      <h2 id="settings-updates" tabIndex={-1}>Updates</h2>
+    <Group id="settings-updates" title="Updates">
       {!update && !error("load") && <p className="note">Loading…</p>}
       {update && (
-        <p>
-          Bate {update.current}.{" "}
-          {update.state === "off" && "This build has no update key, so it does not update itself."}
-          {update.state === "current" && "It is up to date."}
-          {update.state === "checking" && "Checking…"}
-          {update.state === "waiting" && "Waiting for the replies to end. Bate restarts then."}
-        </p>
-      )}
-      <div className="actions">
-        {update && update.state !== "off" && (
-          <button disabled={update.state === "checking"} onClick={() => act(request("check_update"))}>Check for updates</button>
-        )}
-        {ready && inShell && (
-          <>
+        <Setting title={`Bate ${update.current}`} hint={ready ? `Version ${update.available} is ready. ${says}` : says}>
+          {update.state !== "off" && (
+            <button disabled={update.state === "checking"} onClick={() => act(request("check_update"))}>Check for updates</button>
+          )}
+          {ready && inShell && (
             <button className="primary" disabled={update.state === "waiting"} onClick={() => act(request("install_update"))}>Install {update.available}</button>
-            <span className="note">Installs when no reply is running.</span>
-          </>
-        )}
-      </div>
-      {ready && !inShell && <p>Version {update.available} is ready. Install it in Bate's own window.</p>}
+          )}
+        </Setting>
+      )}
       <Problem text={error("update") || error("load") || update?.error || undefined} />
-    </>
+    </Group>
   );
 }

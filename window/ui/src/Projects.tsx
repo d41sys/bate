@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { request } from "./service.ts";
 import type { Bot, Project } from "./types.ts";
+import { Group, Setting } from "./Form.tsx";
 import { Choose, ProjectDialog } from "./ProjectDialog.tsx";
 import { sent } from "./projects.ts";
 import { useWorkplaces } from "./Workplaces.tsx";
@@ -15,16 +16,20 @@ export function Projects({ bots, projects, open, adding: asked }: { bots: Bot[];
   const name = (id: string) => label(bots.find((o) => o.id === id));
   return (
     <section>
-      <p className="note">The bots in a project work in the project's folder and can message each other. Open a project to see its room, its bots and its settings.</p>
       <button onClick={() => setAdding(true)}>New project…</button>
       {projects.length === 0 && <p className="note">No projects yet.</p>}
       <ul className="rows">
         {projects.map((p) => (
           <li key={p.id}>
-            <strong>{p.name}</strong>
-            <span className="note"><code>{p.folder}</code> · Bots: {p.bots.map(name).join(", ") || "none"}</span>
-            {p.connectorError && <span className="error" role="alert"> · {p.connectorError}</span>}
-            <button onClick={() => open(p.id!)}>Open</button>
+            <div className="what">
+              <strong>{p.name}</strong>
+              <small><code>{p.folder}</code></small>
+              <small>Bots: {p.bots.map(name).join(", ") || "none"}</small>
+              {p.connectorError && <small className="error" role="alert">{p.connectorError}</small>}
+            </div>
+            <div className="actions">
+              <button className="small" onClick={() => open(p.id!)}>Open</button>
+            </div>
           </li>
         ))}
       </ul>
@@ -62,30 +67,35 @@ export function ProjectForm({ project, bots }: { project: Project; bots: Bot[] }
   const switchingOn = !!chosen && project.workplace !== chosen.name;
 
   return (
-    <form className="fields" onSubmit={(e) => { e.preventDefault(); save(); }}>
-      <h2>Settings</h2>
+    <form onSubmit={(e) => { e.preventDefault(); save(); }}>
       {project.connectorError && <p className="error" role="alert">{project.connectorError}</p>}
-      <label>Name <input required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-      <div className="field">
-        <label htmlFor="project-folder">Folder</label>
-        <div className="find">
-          <input id="project-folder" placeholder="Pick one, or type its whole path" value={form.folder} onChange={(e) => setForm({ ...form, folder: e.target.value })} />
-          <Choose folder set={(folder) => setForm({ ...form, folder })} fail={setError} />
-        </div>
-      </div>
-      <label>
-        Instructions for all its bots, after their own{" "}
-        <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
-      </label>
-      <label>
-        Hosts its bots with a network limit may also reach{" "}
-        <textarea rows={3} placeholder="example.com" value={hosts} onChange={(e) => setHosts(e.target.value)} />
-      </label>
-      <p className="note">{hostsHint}</p>
-      <fieldset>
-        <legend>Workplace</legend>
-        <label>
-          Workplace{" "}
+      <Group title="Project">
+        <Setting id="project-name" title="Name">
+          <input required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </Setting>
+        <Setting id="project-folder" title="Folder" wide>
+          <div className="find">
+            <input id="project-folder" placeholder="Pick one, or type its whole path" value={form.folder} onChange={(e) => setForm({ ...form, folder: e.target.value })} />
+            <Choose folder set={(folder) => setForm({ ...form, folder })} fail={setError} />
+          </div>
+        </Setting>
+        <Setting id="project-instructions" title="Instructions for all its bots, after their own" wide>
+          <textarea rows={6} maxLength={8000} value={form.instructions ?? ""} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
+        </Setting>
+        <Setting id="project-lead" title="Lead, who gets a room message with no @name">
+          <select value={form.lead ?? ""} onChange={(e) => setForm({ ...form, lead: e.target.value || undefined })}>
+            <option value="">The first bot</option>
+            {project.bots.map((id) => <option key={id} value={id}>{label(bots.find((b) => b.id === id))}</option>)}
+          </select>
+        </Setting>
+      </Group>
+      <Group title="Network">
+        <Setting id="project-hosts" title="Hosts its bots with a network limit may also reach" hint={hostsHint} wide>
+          <textarea rows={3} placeholder="example.com" value={hosts} onChange={(e) => setHosts(e.target.value)} />
+        </Setting>
+      </Group>
+      <Group title="Workplace">
+        <Setting id="project-workplace" title="Workplace" hint={form.workplace ? "A project has a workplace or a connector of its own, not both." : undefined}>
           <select value={form.workplace ?? ""} onChange={(e) => (setConfirmed(false), setForm({ ...form, workplace: e.target.value || undefined }))}>
             <option value="">None</option>
             {workplaces.map((w) => (
@@ -94,40 +104,34 @@ export function ProjectForm({ project, bots }: { project: Project; bots: Bot[] }
               </option>
             ))}
           </select>
-        </label>
+        </Setting>
         {chosen && (
-          <>
-            <p className="note">{chosen.name} needs: {needsLines(chosen).join("; ")}.</p>
-            <p className="note">Its program runs as this project's connector and reaches only the network hosts listed above; its skills go to every bot of the project.</p>
-            {switchingOn && (
-              <label>
-                <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I have read what {chosen.name} needs, and I switch it on for this project
-              </label>
-            )}
-          </>
+          <p className="note">
+            {chosen.name} needs: {needsLines(chosen).join("; ")}. Its program runs as this project's connector and reaches only the network hosts listed above; its skills go to every bot of the project.
+          </p>
         )}
-        {form.workplace && <p className="note">A project has a workplace or a connector of its own, not both.</p>}
-      </fieldset>
-      <fieldset disabled={!!form.workplace}>
-        <legend>Connector for all its bots</legend>
-        <label>
-          Name{" "}
-          <input maxLength={40} pattern="[a-z0-9_\-]*" placeholder="notes" value={form.connector?.name ?? ""} onChange={(e) => setForm({ ...form, connector: { command: "", args: [], ...form.connector, name: e.target.value } })} />
-        </label>
-        <label>
-          Program and arguments{" "}
-          <input size={50} placeholder="python3 server.py" value={line} onChange={(e) => setLine(e.target.value)} />
-        </label>
-        <p className="note">Bate runs this program once for the project, limited to the project's folder and a folder of its own, and every bot of the project gets its tools. It serves MCP over HTTP on the unix socket named in <code>BATE_MCP_SOCKET</code>. Arguments are split at spaces; leave the program empty for no connector.</p>
-      </fieldset>
-      <label>
-        Lead, who gets a room message with no @name{" "}
-        <select value={form.lead ?? ""} onChange={(e) => setForm({ ...form, lead: e.target.value || undefined })}>
-          <option value="">The first bot</option>
-          {project.bots.map((id) => <option key={id} value={id}>{label(bots.find((b) => b.id === id))}</option>)}
-        </select>
-      </label>
-      <button disabled={switchingOn && !confirmed}>Save</button>
+        {chosen && switchingOn && (
+          <Setting id="project-confirm" title={`I have read what ${chosen.name} needs, and I switch it on for this project`} inline>
+            <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+          </Setting>
+        )}
+      </Group>
+      <Group title="Connector for all its bots">
+        <Setting id="project-connector-name" title="Name">
+          <input disabled={!!form.workplace} maxLength={40} pattern="[a-z0-9_\-]*" placeholder="notes" value={form.connector?.name ?? ""} onChange={(e) => setForm({ ...form, connector: { command: "", args: [], ...form.connector, name: e.target.value } })} />
+        </Setting>
+        <Setting
+          id="project-connector-line"
+          title="Program and arguments"
+          hint={<>Bate runs it once for the project, limited to the project's folder and a folder of its own, and every bot of the project gets its tools. It serves MCP over HTTP on the unix socket named in <code>BATE_MCP_SOCKET</code>. Arguments are split at spaces; leave it empty for no connector.</>}
+          wide
+        >
+          <input disabled={!!form.workplace} placeholder="python3 server.py" value={line} onChange={(e) => setLine(e.target.value)} />
+        </Setting>
+      </Group>
+      <div className="actions">
+        <button disabled={switchingOn && !confirmed}>Save</button>
+      </div>
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
     </form>
   );
@@ -140,7 +144,7 @@ export function ProjectBots({ project, bots }: { project: Project; bots: Bot[] }
 
   return (
     <section>
-      <p className="note">The bots in a project work in the project's folder and can message each other. A bot kept in its folder can read and change everything in the project's folder.</p>
+      <p className="note">A bot kept in its folder can read and change everything in the project's folder.</p>
       {agents.length > 0 && (
         <p className="note">{agents.map(label).join(", ")}: an installed agent gets neither the project's instructions nor its notes.</p>
       )}
@@ -160,6 +164,7 @@ export function DeleteProject({ project, bots, gone }: { project: Project; bots:
   const [withBots, setWithBots] = useState(false);
   const [error, setError] = useState("");
   const members = bots.filter((b) => b.project?.id === project.id);
+  const one = members.length === 1;
   const remove = async () => {
     try {
       // The bots first: if one cannot go, the project is still there to show why.
@@ -171,15 +176,19 @@ export function DeleteProject({ project, bots, gone }: { project: Project; bots:
     }
   };
   return (
-    <section>
-      <h2>Delete</h2>
+    <Group title="Delete">
       {asking ? (
         <>
           <p>Delete {project.name}? Its folder stays.</p>
           {members.length > 0 && (
-            <label>
-              <input type="checkbox" checked={withBots} onChange={(e) => setWithBots(e.target.checked)} /> Also delete its {members.length === 1 ? "bot" : `${members.length} bots`} ({members.map(label).join(", ")}) and move {members.length === 1 ? "its folder" : "their folders"} to the Trash. Left unticked, {members.length === 1 ? "it stays" : "they stay"} in no project.
-            </label>
+            <Setting
+              id="delete-bots"
+              inline
+              title={`Also delete its ${one ? "bot" : `${members.length} bots`} (${members.map(label).join(", ")}) and move ${one ? "its folder" : "their folders"} to the Trash`}
+              hint={`Left unticked, ${one ? "it stays" : "they stay"} in no project.`}
+            >
+              <input type="checkbox" checked={withBots} onChange={(e) => setWithBots(e.target.checked)} />
+            </Setting>
           )}
           <div className="actions">
             <button className="danger" onClick={remove}>Delete</button>
@@ -187,9 +196,11 @@ export function DeleteProject({ project, bots, gone }: { project: Project; bots:
           </div>
         </>
       ) : (
-        <button className="danger" onClick={() => setAsking(true)}>Delete this project…</button>
+        <Setting title="Delete this project" hint="Its folder stays.">
+          <button className="danger" onClick={() => setAsking(true)}>Delete this project…</button>
+        </Setting>
       )}
       {error && <p className="error" role="alert">{error}</p>}
-    </section>
+    </Group>
   );
 }

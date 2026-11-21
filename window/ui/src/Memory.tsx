@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { type Editor, firstLine, keep, kept, size, unsaved } from "./memory.ts";
+import { RowMenu } from "./RowMenu.tsx";
+import { dayTime } from "./times.ts";
 
 type Note = { name: string; bytes: number; modifiedMs: number; first: string };
 const NONE: Editor = { open: null, name: "", text: "", saved: "" };
@@ -122,12 +124,16 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
 
   return (
     <section aria-labelledby={heading}>
-      <h2 id={heading}>{title}</h2>
-      <p className="note">
-        {"bot" in target
-          ? "Only this bot reads them: at the start of every turn, in every conversation. It adds its own."
-          : "Every bot in this project reads them, after its own notes, and can add to them. They are files in the project's folder."}
-      </p>
+      <div className="head">
+        <div className="what">
+          <h2 id={heading}>{title}</h2>
+          <small>{"bot" in target ? "Only this bot reads them, at the start of every turn." : "Every bot in this project reads them, and can add to them."}</small>
+        </div>
+        <div className="actions">
+          {rows && !empty && <button className="small" ref={add} disabled={dirty} onClick={() => put({ ...NONE, open: "" })}>New note</button>}
+          <button className="small ghost" onClick={reload}>Reload</button>
+        </div>
+      </div>
       {errorAt("*")}
       {!rows ? (
         !error && <p className="note">Loading notes…</p>
@@ -147,7 +153,7 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
                   <strong>{n.first || n.name}</strong>
                   <small>
                     {n.first ? `${n.name} · ` : ""}
-                    {n.modifiedMs ? `${size(n.bytes)} · changed ${new Date(n.modifiedMs).toLocaleString()}` : "not in the list"}
+                    {n.modifiedMs ? `${size(n.bytes)} · ${dayTime(n.modifiedMs)}` : "not in the list"}
                   </small>
                 </div>
                 <div className="actions">
@@ -162,7 +168,7 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
                       <button className="small" disabled={dirty} aria-expanded={isOpen} aria-label={`${isOpen ? "Close" : "Open"} ${n.name}`} onClick={() => (isOpen ? put(NONE) : void read(n.name))}>
                         {isOpen ? "Close" : "Open"}
                       </button>
-                      <button className="small danger" aria-label={`Delete ${n.name}`} onClick={() => setDeleting(n.name)}>Delete</button>
+                      <RowMenu label={n.name} items={[{ label: "Delete", danger: true, run: () => setDeleting(n.name) }]} />
                     </>
                   )}
                 </div>
@@ -172,10 +178,6 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
           })}
         </ul>
       )}
-      <div className="actions">
-        {rows && !empty && <button className="small" ref={add} disabled={dirty} onClick={() => put({ ...NONE, open: "" })}>New note</button>}
-        <button className="small ghost" onClick={reload}>Reload</button>
-      </div>
     </section>
   );
 }

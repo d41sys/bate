@@ -40,6 +40,7 @@
   --leading: 20px;
   --size-chat: 15px;
   --leading-chat: 22px;
+  --leading-small: 16px;
   --weight-strong: 600;
 
   /* Space: a 4 px grid. */
@@ -71,6 +72,8 @@
   --switch-w: 36px;
   --switch-h: 20px;
   --tip-w: 240px;
+  --control-w: 240px;
+  --control-w-short: 96px;
 
   /* Motion: short, and none when the system asks for less. */
   --fast: 100ms;

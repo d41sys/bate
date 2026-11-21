@@ -86,7 +86,7 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 
 /* ---- Rows of a list, actions side by side, a card ---- */
 .rows { list-style: none; padding: 0; margin: var(--space-2) 0; }
-.rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; min-height: var(--row-h); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
 /* A label over a box and the buttons beside it (a path and its Choose button). */
 .field { margin: var(--space-3) 0; }
 .field > label { margin: 0 0 var(--space-1); }
@@ -100,23 +100,57 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .codeblock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
 .codeblock pre { flex: 1 1 var(--popover-w); min-width: 0; margin: 0; }
 .rows li > .error { flex: 1 0 100%; margin: 0; }
-/* The app's settings: a list of sections, and the chosen one beside it; a strip across the top on a phone. */
-.settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+/* ---- Settings: a group is a heading over one card of rows. A row has its title and one small line on the left and its control at the end ---- */
+.group { margin-block: var(--space-5) 0; }
+.group > h2 { margin: 0 0 var(--space-2); }
+.group-rows { background: var(--bg-soft); border-radius: var(--radius-l); padding: 0 var(--space-4); }
+.group-rows > * + *, .group-rows > form > * + * { border-top: 1px solid var(--border-strong); }
+.group-rows > p { margin: 0; padding: var(--space-3) 0; }
+.group-rows > .note { font-size: var(--size-small); line-height: var(--leading-small); }
+.group-rows code { background: var(--bg-hover); }
+.group-rows .actions { padding: var(--space-3) 0; }
+.group + .actions { margin-top: var(--space-4); }
+/* A name and the small lines under it, in a row of settings or of a list. */
+.what > small { display: block; line-height: var(--leading-small); }
+.setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 var(--space-4); min-height: var(--row-h); padding: var(--space-2) 0; }
+.setting .what { min-width: 0; overflow-wrap: anywhere; }
+.setting > .error { grid-column: 1 / -1; margin: 0; padding-bottom: var(--space-1); }
+.control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.control > :where(input:not([type=checkbox], [type=radio], [type=color], [type=range]), select) { width: var(--control-w); }
+.control > input.short { width: var(--control-w-short); }
+.control > input[type=color] { width: calc(var(--control-h) * 2); padding: var(--space-1); }
+/* A text of several lines has the row's whole width, under its title. */
+.setting.wide { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-2); }
+.setting.wide .control > * { flex: 1; min-width: 0; }
+.control > textarea { width: 100%; }
+/* A section's heading with its one action at the end. */
+.head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-block: var(--space-5) var(--space-2); }
+.head h2 { margin: 0; }
+.head > .what { flex: 1 1 0; min-width: 0; }
+.head > .actions { flex-wrap: nowrap; flex: none; }
+/* The app's settings: a list of sections that jump to them, and all of them in one scroll; a strip across the top on a phone. */
+.settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
+.settings nav { position: sticky; top: calc(var(--row-h) + var(--space-3)); z-index: 1; background: var(--bg); }
 .settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.settings > section > h2:first-child { margin-top: 0; }
+.settings > div > .group:first-child { margin-top: 0; }
 .settings code { overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .settings { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
   .settings nav ul { display: flex; overflow-x: auto; }
   .settings nav li { flex: none; }
+  /* A row's control goes under its title, as wide as the column; a switch or a button stays at the end. */
+  .setting:not(.inline) { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-2); }
+  .setting:not(.inline) .control { justify-content: flex-start; flex-wrap: wrap; }
+  .setting:not(.inline) .control > :where(input:not([type=checkbox], [type=radio], [type=color], [type=range]), select) { width: 100%; }
 }
 /* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
 .row:has(input:disabled) { opacity: .6; cursor: default; }
 .rows li:has(> label.row) { padding: 0; }
 /* An add-on's row: what it is, its buttons at the end, and under them a line for each bot or project that has it. */
-.rows li > .what { flex: 1 1 var(--popover-w); min-width: 0; overflow-wrap: anywhere; }
+.rows li > .what { flex: 1 1 calc(var(--popover-w) / 2); min-width: 0; overflow-wrap: anywhere; }
 .rows li > .what > small { display: block; }
+.rows li > details > summary { font-size: var(--size-small); color: var(--fg-muted); }
 .rows li > .actions { margin-left: auto; }
 .rows li > .rows { flex: 1 0 100%; margin: 0; }
 /* A note open in place, or the error of its row, under the row's line. */
@@ -124,14 +158,19 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .rows li > .rows li { padding: var(--space-1) 0; border-bottom: 0; }
 /* A routine's past runs: a disclosure under its row, one line for each run. */
 .rows li > details { flex: 1 0 100%; }
-.rows li > details .rows li { padding: var(--space-1) 0; border-bottom: 0; }
+.rows li > details .rows li { padding: var(--space-1) 0; border-bottom: 0; min-height: var(--control-h); }
 .actions, .tools, .find, .surfaces { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .tools, .find, .surfaces { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
 .card, .question, .first-run { background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); padding: var(--space-3) var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
-.first-run { margin-top: var(--space-5); }
-.first-run h1 + p { margin-top: var(--space-1); }
-.first-run h2 { margin-top: var(--space-4); }
+/* First run: one card in the middle of the page and one main button; the model server's fields stay folded until asked for. */
+main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
+.first-run h1, .first-run p { margin: 0; }
+.first-run h1 + p { color: var(--fg-muted); }
+.first-run button.primary { min-height: var(--row-h); }
+.first-run details { text-align: left; }
+.first-run summary { color: var(--fg-muted); text-align: center; }
+.first-run details[open] summary { margin-bottom: var(--space-2); }
 /* Starter cards: a button each, to start a form from. */
 .starters { list-style: none; margin: var(--space-2) 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--popover-w), 1fr)); gap: var(--space-2); }
 .starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
@@ -348,6 +387,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .popover li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1); border-radius: var(--radius-m); }
 .popover li > .row { flex: 1; min-width: 0; min-height: calc(var(--control-h) + var(--space-2)); padding: var(--space-1) var(--space-3); }
 .popover li > form { display: flex; flex: 1; gap: var(--space-1); padding: var(--space-1) var(--space-2); }
+/* A row's `⋯` menu: its items below the button, as wide as the longest. */
+.popover.dropdown { top: calc(100% + var(--space-1)); bottom: auto; width: max-content; min-width: calc(var(--popover-w) / 2); gap: 0; padding: var(--space-1); }
 .popover li > form input { flex: 1; min-width: 0; }
 /* The actions of the row that is open come under it. */
 .popover li > .actions { flex: 1 0 100%; justify-content: flex-end; padding: 0 var(--space-2) var(--space-1); }
@@ -391,8 +432,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .sheet.palette { align-items: flex-start; }
 .sheet.palette > form { display: flex; flex-direction: column; margin: 12vh auto 0; max-height: calc(100% - 12vh); padding: 0; overflow: hidden; }
 .sheet.palette input { width: 100%; padding: var(--space-3) var(--space-4); font-size: var(--size-title); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: none; }
-/* The ring sits inside the edge, where the panel's rounded corners do not cut it. */
-.sheet.palette input:focus-visible { outline-offset: -2px; }
+/* The focus is the accent line under the box, where the panel's rounded corners do not cut it and no second ring sits on its edge. */
+.sheet.palette input:focus-visible { outline: none; box-shadow: inset 0 -2px 0 var(--accent); }
 .sheet.palette ul { list-style: none; margin: 0; padding: 0; }
 .sheet.palette ul[role=listbox] { overflow: auto; padding: var(--space-1) var(--space-2) var(--space-2); }
 /* A group's name, then its options: rows of the list-row component, chosen with the arrows. */
@@ -437,4 +478,6 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .composer textarea { order: -1; flex: 1 0 100%; }
   .menu { position: static; }
   .popover { left: 0; right: 0; width: auto; }
+  .menu.more { position: relative; }
+  .menu.more .popover { left: auto; right: 0; width: max-content; }
 }

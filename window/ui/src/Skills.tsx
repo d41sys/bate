@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { each, madeBy, placed } from "./addons.ts";
 import { Choose } from "./ProjectDialog.tsx";
+import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { usePerBot } from "./usePerBot.ts";
 import { inShell, request } from "./service.ts";
@@ -25,33 +26,32 @@ export function Skills({ bots }: { bots: Bot[] }) {
 
   return (
     <section>
-      <p className="note">A skill is a set of instructions for a bot, with the files that go with it. Each bot keeps its own copy; here they are listed together.</p>
-      <h2>Installed</h2>
-      {rows.length === 0 && <p className="note">No skills yet.{inShell ? " Choose a folder under Browse to add one." : ""}</p>}
+      <div className="head">
+        <h2>Installed</h2>
+        <Choose folder set={(path) => void look({ path }, madeBy.folder)} fail={setError} />
+      </div>
+      {rows.length === 0 && <p className="note">No skills yet.{inShell ? " Choose a folder with a SKILL.md in it." : ""}</p>}
       <ul className="rows">
         {rows.map((r) => (
           <li key={r.name}>
             <div className="what">
-              <strong>{r.name}</strong> <span className="note">{r.users[0].item.description}</span>
+              <strong>{r.name}</strong>
+              <small>{r.users[0].item.description}</small>
               <small>On: {names(r.users.map((u) => u.bot))}</small>
             </div>
             <div className="actions">
-              {inShell && <button className="small" onClick={() => void look({ fromBot: r.users[0].bot, name: r.name }, madeBy.copy(names([r.users[0].bot])))}>Add to bots…</button>}
-              <button className="small danger" onClick={() => setAsk({ remove: r.name })}>Remove…</button>
+              <RowMenu
+                label={r.name}
+                items={[
+                  ...(inShell ? [{ label: "Add to bots…", run: () => void look({ fromBot: r.users[0].bot, name: r.name }, madeBy.copy(names([r.users[0].bot]))) }] : []),
+                  { label: "Remove…", danger: true, run: () => setAsk({ remove: r.name }) },
+                ]}
+              />
             </div>
           </li>
         ))}
       </ul>
-      {inShell && (
-        <>
-          <h2>Browse</h2>
-          <p className="note">
-            Bate has no online list of skills yet, so a skill comes from a folder on this Mac: one with a <code>SKILL.md</code> in it. You see what it is, how big, and who gets it before anything is copied. A skill with the name a bot already has replaces it.
-          </p>
-          <Choose folder set={(path) => void look({ path }, madeBy.folder)} fail={setError} />
-        </>
-      )}
-      {!inShell && <p className="note">A skill is added in Bate's own window on the Mac. Here you can see which bots have one and remove it.</p>}
+      {!inShell && <p className="note">Skills are added in Bate's own window on the Mac.</p>}
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
       {ask && "preview" in ask && (
         <Sheet
