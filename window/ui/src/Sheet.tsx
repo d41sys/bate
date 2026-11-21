@@ -36,6 +36,8 @@ export function Sheet(p: {
   danger?: boolean;
   /** What is happening while it runs (a download's progress). */
   status?: string;
+  /** Why it cannot be done: shown, and the action is off. */
+  blocked?: string;
   go: (ids: string[]) => Promise<{ id: string; error: string }[] | void>;
   close: () => void;
 }) {
@@ -108,9 +110,10 @@ export function Sheet(p: {
           </fieldset>
         )}
         {p.status && <p className="note" role="status">{p.status}</p>}
+        {p.blocked && <p className="error" role="alert">{p.blocked}</p>}
         {error && <p className="error" role="alert">{error}</p>}
         <div className="actions">
-          <button className={p.danger ? "danger" : undefined} disabled={busy || (!!p.who && !p.who.optional && ticked.length === 0)}>
+          <button className={p.danger ? "danger" : undefined} disabled={busy || !!p.blocked || (!!p.who && !p.who.optional && ticked.length === 0)}>
             {p.action}
           </button>
           <button type="button" onClick={p.close}>Cancel</button>

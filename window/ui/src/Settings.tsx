@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { AdapterRow } from "./AdapterRow.tsx";
 import { agentChoice, OTHER, OWN, type Agent, type Found } from "./agents.ts";
 import { Confirm } from "./Confirm.tsx";
 import { CodeBlock, Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
@@ -38,9 +39,8 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
     setAgent(savedAgent);
     setOther(false);
   }, [bot.id, savedAgent]);
-  useEffect(() => {
-    request<Found>("list_agents").then(setFound, () => setFound({ agents: [], missing: [] }));
-  }, []);
+  const lookForAgents = () => request<Found>("list_agents").then(setFound, () => setFound({ agents: [], missing: [] }));
+  useEffect(() => void lookForAgents(), []);
   const saves = useSaves();
   const { run, edit, saved, error } = saves;
   // Whether bots run on the ChatGPT plan; only Bate's own window may read the sign-in, as in Model.
@@ -242,10 +242,14 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
               </Setting>
             </form>
           )}
+          {found.agents.map((a) => a.adapter?.version != null && <AdapterRow key={a.label} label={a.label} adapter={a.adapter} reload={lookForAgents} />)}
           {found.missing.map((m) => (
-            <Setting key={m.label} title={`${m.label} (not installed)`} wide={!!m.install}>
-              {m.install && <CodeBlock key={m.install} text={m.install} label={`the install command for ${m.label}`} />}
-            </Setting>
+            <Fragment key={m.label}>
+              <Setting title={`${m.label} (not installed)`} wide={!!m.install}>
+                {m.install && <CodeBlock key={m.install} text={m.install} label={`the install command for ${m.label}`} />}
+              </Setting>
+              {m.adapter && <AdapterRow label={m.label} adapter={m.adapter} reload={lookForAgents} />}
+            </Fragment>
           ))}
           {found.missing.length > 0 && <p className="note">Bate looks again each time these settings are opened.</p>}
         </Group>

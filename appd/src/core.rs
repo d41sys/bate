@@ -32,7 +32,8 @@ use crate::proxy::{self, Upstream};
 use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
-    apple, botfile, browser, catalog, desktop, egress, oauth, project_server, surfaces, workplaces,
+    adapters, apple, botfile, browser, catalog, desktop, egress, oauth, project_server, surfaces,
+    workplaces,
 };
 use crate::{
     limit, login_path, memory, paths, precheck, roles, schedule, skills, store, undo, update,
@@ -105,6 +106,12 @@ pub enum Msg {
         id: Value,
         command: &'static str,
         result: Result<workplaces::Prepared, Refusal>,
+    },
+    /// An adapter is downloaded and checked, or why not; `id` is the `install_agent`.
+    AdapterBuilt {
+        client: u64,
+        id: Value,
+        result: Result<adapters::Built, Refusal>,
     },
     /// A routine's precheck ended: it passed or stopped, or could not be run.
     Prechecked {
@@ -376,6 +383,15 @@ fn str_field<'a>(f: &'a Value, key: &str) -> Result<&'a str, Refusal> {
         .ok_or_else(|| bad(format!("`{key}` must be a string")))
 }
 
+/// The `name` of a request about an adapter: the program of a known agent that Bate can install.
+fn known_adapter(f: &Value) -> Result<String, Refusal> {
+    let name = str_field(f, "name")?;
+    if !KNOWN_AGENTS.iter().any(|k| k.adapter == Some(name)) {
+        return Err(bad(format!("`name` is not an agent Bate installs: {name}")));
+    }
+    Ok(name.to_owned())
+}
+
 /// Asks Foundation to move a file to the Trash, as Finder does (so Put Back works): a plain
 /// rename into `~/.Trash` is refused to a service without Full Disk Access.
 const TRASH_JS: &str = "function run(argv) { ObjC.import('Foundation'); \
@@ -414,11 +430,13 @@ const EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
 
 /// An installed agent the window offers for `set_agent`. `commands`: how it is started; the
 /// first whose program is on the agent `PATH` is the one listed (the program is the first word).
-/// `install`: the one command that gets it, where there is one.
+/// `install`: the one command that gets it, where there is one. `adapter`: the entry of
+/// `catalog/agents.json` that Bate can install it from, which is also the program's name.
 struct KnownAgent {
     label: &'static str,
     commands: &'static [&'static [&'static str]],
     install: Option<&'static str>,
+    adapter: Option<&'static str>,
 }
 
 const KNOWN_AGENTS: [KnownAgent; 4] = [
@@ -427,21 +445,25 @@ const KNOWN_AGENTS: [KnownAgent; 4] = [
         // The adapter's newer program name first.
         commands: &[&["claude-agent-acp"], &["claude-code-acp"]],
         install: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
+        adapter: Some("claude-agent-acp"),
     },
     KnownAgent {
         label: "Codex",
         commands: &[&["codex-acp"]],
         install: Some("npm install -g @agentclientprotocol/codex-acp"),
+        adapter: Some("codex-acp"),
     },
     KnownAgent {
         label: "opencode",
         commands: &[&["opencode", "acp"]],
         install: None,
+        adapter: None,
     },
     KnownAgent {
         label: "Gemini CLI",
         commands: &[&["gemini", "--experimental-acp"]],
         install: None,
+        adapter: None,
     },
 ];
 
@@ -1077,6 +1099,21 @@ impl Core {
                 command,
                 result,
             } => self.reply(client, &id, command, result),
+            Msg::AdapterBuilt { client, id, result } => {
+                let result = result.and_then(|built| {
+                    // Not while a bot is running on the copy that goes.
+                    if let Err(refusal) = self.stop_adapter_users(&built.name) {
+                        built.discard();
+                        return Err(refusal);
+                    }
+                    let version = built.version.clone();
+                    let name = built.name.clone();
+                    adapters::put(built)
+                        .map_err(|e| ("adapter_failed", format!("cannot install it: {e}")))?;
+                    Ok(json!({"name": name, "version": version}))
+                });
+                self.reply(client, &id, "install_agent", result);
+            }
             Msg::SkillInstalled {
                 client,
                 id,
@@ -2221,17 +2258,74 @@ impl Core {
                         let found = known.commands.iter().find_map(|command| {
                             Some((command, project_server::on_path_in(path, command[0])?))
                         });
+                        // Bate's own copy of the adapter, if it has one: used when the person has none.
+                        let copy = known.adapter.map(|name| {
+                            let version = adapters::installed(name);
+                            json!({"name": name, "version": version})
+                        });
                         match found {
-                            Some((command, at)) => agents.push(
-                                json!({"label": known.label, "command": command, "path": at}),
-                            ),
-                            None => missing
-                                .push(json!({"label": known.label, "install": known.install})),
+                            Some((command, at)) => {
+                                let mut row =
+                                    json!({"label": known.label, "command": command, "path": at});
+                                if let Some(mut copy) = copy {
+                                    copy["used"] = json!(at.starts_with(adapters::bin_dir()));
+                                    row["adapter"] = copy;
+                                }
+                                agents.push(row);
+                            }
+                            None => {
+                                let mut row =
+                                    json!({"label": known.label, "install": known.install});
+                                if let Some(mut copy) = copy {
+                                    copy["used"] = json!(false);
+                                    row["adapter"] = copy;
+                                }
+                                missing.push(row);
+                            }
                         }
                     }
                     Ok(json!({"agents": agents, "missing": missing}))
                 });
                 Ok(None)
+            }
+            "preview_agent" => {
+                let name = known_adapter(f)?;
+                self.reply_later(client, id, "preview_agent", move || {
+                    Ok(adapters::preview(&catalog::adapter_entry(&name)?))
+                });
+                Ok(None)
+            }
+            "install_agent" => {
+                let name = known_adapter(f)?;
+                // The version the person was shown: what is installed is that one.
+                let shown = str_field(f, "version")?.to_owned();
+                let (tx, id) = (self.tx.clone(), id.clone());
+                thread::spawn(move || {
+                    let result = catalog::adapter_entry(&name).and_then(|entry| {
+                        if entry.version != shown {
+                            return Err((
+                                "catalog_changed",
+                                format!("the catalog now lists another version of {name} than the one shown: look at it again"),
+                            ));
+                        }
+                        adapters::build(&entry)
+                    });
+                    let _ = tx.send(Msg::AdapterBuilt { client, id, result });
+                });
+                Ok(None)
+            }
+            "remove_agent" => {
+                let name = known_adapter(f)?;
+                self.stop_adapter_users(&name)?;
+                let found = adapters::remove(&name)
+                    .map_err(|e| ("adapter_failed", format!("cannot remove it: {e}")))?;
+                if !found {
+                    return Err((
+                        "no_such_adapter",
+                        format!("Bate has no copy of {name} installed"),
+                    ));
+                }
+                Ok(Some(json!({})))
             }
             "get_permissions" => {
                 let bot = self.bot_of(f)?;
@@ -3782,6 +3876,33 @@ impl Core {
     /// The workplaces with what is on disk now. One that may not run is switched off in every
     /// project that has it on.
     /// The names of the workplaces that some project has on.
+    /// Before the adapter `name` is replaced or removed: refused (`busy`) while a bot that runs on
+    /// it is in a turn; their idle engines are stopped, so that the next start is of the new copy.
+    fn stop_adapter_users(&mut self, name: &str) -> Result<(), Refusal> {
+        let mut users = Vec::new();
+        for bot in self.store.bots().map_err(internal)? {
+            let command = self.store.agent(&bot.id).map_err(internal)?;
+            if command.is_some_and(|c| c.first().is_some_and(|program| program == name)) {
+                users.push(bot.id);
+            }
+        }
+        if users
+            .iter()
+            .any(|b| self.engines.get(b).is_some_and(|r| r.busy))
+        {
+            return Err((
+                "busy",
+                format!("a bot is in a turn on {name}; stop it first"),
+            ));
+        }
+        for bot in users {
+            if let Some(r) = self.engines.get_mut(&bot) {
+                let _ = r.child.kill();
+            }
+        }
+        Ok(())
+    }
+
     fn workplaces_in_use(&self) -> rusqlite::Result<Vec<String>> {
         let projects = self.store.projects()?;
         Ok(projects.into_iter().filter_map(|p| p.workplace).collect())

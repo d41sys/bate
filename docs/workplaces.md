@@ -100,6 +100,13 @@ Bate's own list of workplaces is the file `catalog/workplaces.json` in this repo
 
 Beside it, `catalog/connectors.json` and `catalog/skills.json` are read the same way, on a click in the Connectors and the Skills tab. Their format is in `PROTOCOL.md` (The catalog). An entry in any of the three lists is a pointer, not a recommendation: Bate has not checked what it names. The connectors listed are only those published by the maker of the service they connect to, or the Model Context Protocol project's own reference servers (at most 10), and each entry's `home` is the page its address or command was read from; to add or change one, read that page again on the day. The skills listed are only skills whose folder lives in this repository; a skill that only works with a workplace's tools goes with that workplace instead, so the list may be empty.
 
+`catalog/agents.json` lists the adapters of installed agents (Claude Code's and Codex's) that Bate can fetch; its format and what an install checks are in `PROTOCOL.md` (Installed agents, Adapters Bate installs). It pins every npm package the adapter runs on, not only the adapter. To add or move one:
+
+1. In an empty folder run `npm install --package-lock-only --ignore-scripts <package>@<version>`. The `package-lock.json` it writes lists every package npm would install, each with `resolved` (the tarball's address) and `integrity` (its sha512), and the packages for each processor (`os`, `cpu`).
+2. For each package for macOS, download the tarball, check its sha512 against `integrity`, and write its `size` and `sha256` in the entry, with `cpu` for a package of one processor.
+3. Read each tarball's `package.json`: `scripts` has no `preinstall`, `install` or `postinstall` and there is no `binding.gyp`, every `dependencies` and required `peerDependencies` name is a pinned package, and the entry's `node` is the highest `engines.node` among them.
+4. Unpack the packages as the entry says on a copy, run the adapter with `node` and send it `initialize`: it must answer.
+
 ```json
 {
   "workplaces": [

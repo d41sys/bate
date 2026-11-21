@@ -3296,6 +3296,10 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("26", "install_catalog"),
         ("27", "preview_skill_catalog"),
         ("28", "install_skill_catalog"),
+        // An adapter is a program from the network, run as the user.
+        ("29", "preview_agent"),
+        ("30", "install_agent"),
+        ("31", "remove_agent"),
     ] {
         send(
             &device,
@@ -5953,8 +5957,10 @@ fn the_window_is_told_which_known_agents_are_installed_and_how_to_get_the_others
     assert_eq!(
         none["missing"],
         json!([
-            {"label": "Claude Code", "install": "npm install -g @agentclientprotocol/claude-agent-acp"},
-            {"label": "Codex", "install": "npm install -g @agentclientprotocol/codex-acp"},
+            {"label": "Claude Code", "install": "npm install -g @agentclientprotocol/claude-agent-acp",
+                "adapter": {"name": "claude-agent-acp", "version": null, "used": false}},
+            {"label": "Codex", "install": "npm install -g @agentclientprotocol/codex-acp",
+                "adapter": {"name": "codex-acp", "version": null, "used": false}},
             {"label": "opencode", "install": null},
             {"label": "Gemini CLI", "install": null},
         ])
@@ -5971,8 +5977,10 @@ fn the_window_is_told_which_known_agents_are_installed_and_how_to_get_the_others
     assert_eq!(
         listed["agents"],
         json!([
-            {"label": "Claude Code", "command": ["claude-code-acp"], "path": tools.join("claude-code-acp")},
-            {"label": "Codex", "command": ["codex-acp"], "path": tools.join("codex-acp")},
+            {"label": "Claude Code", "command": ["claude-code-acp"], "path": tools.join("claude-code-acp"),
+                "adapter": {"name": "claude-agent-acp", "version": null, "used": false}},
+            {"label": "Codex", "command": ["codex-acp"], "path": tools.join("codex-acp"),
+                "adapter": {"name": "codex-acp", "version": null, "used": false}},
             {"label": "opencode", "command": ["opencode", "acp"], "path": bin.join("opencode")},
         ])
     );
@@ -5987,7 +5995,8 @@ fn the_window_is_told_which_known_agents_are_installed_and_how_to_get_the_others
     assert_eq!(agents.as_array().unwrap().len(), 3);
     assert_eq!(
         agents[0],
-        json!({"label": "Claude Code", "command": ["claude-agent-acp"], "path": bin.join("claude-agent-acp")})
+        json!({"label": "Claude Code", "command": ["claude-agent-acp"], "path": bin.join("claude-agent-acp"),
+            "adapter": {"name": "claude-agent-acp", "version": null, "used": false}})
     );
 }
 
@@ -6072,7 +6081,12 @@ fn an_installed_agent_starts_with_the_shells_path_and_the_own_engine_keeps_the_s
         json!({"bot": bot, "command": ["opencode", "acp"]}),
     );
     turn(&mut w, "n1");
-    let combined = format!("{own}:{}", tools.display());
+    // Bate's own adapters come last.
+    let combined = format!(
+        "{own}:{}:{}",
+        tools.display(),
+        home.join("agents/.bin").display()
+    );
     assert_eq!(paths(), [combined.as_str()]);
 
     w.ok("set_agent", json!({"bot": bot, "command": null}));
@@ -14135,4 +14149,479 @@ fn a_device_cannot_add_change_or_clear_a_precheck_but_can_edit_the_rest_and_the_
     edit.as_object_mut().unwrap().remove("precheck");
     w.ok("set_routine", json!({"bot": bot, "routine": edit}));
     assert!(row(&mut w)["precheck"].is_null());
+}
+
+/// A package as the registry serves it: a tarball of a folder `package/` with `files` and this
+/// `package.json`.
+fn npm_package(tag: &str, package: Value, files: &[(&str, &str)]) -> Vec<u8> {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tarball(&format!("npm-{tag}-{n}"), &[], |dir| {
+        let root = dir.join("package");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("package.json"), package.to_string()).unwrap();
+        for (path, text) in files {
+            let to = root.join(path);
+            fs::create_dir_all(to.parent().unwrap()).unwrap();
+            fs::write(to, text).unwrap();
+        }
+        vec!["package".into()]
+    })
+}
+
+/// The list's pin of `tarball`, which `files` serves.
+fn package_pin(
+    host: &FileHost,
+    files: &Files,
+    (path, name, version): (&str, &str, &str),
+    tarball: &[u8],
+) -> Value {
+    let url_path = format!("/npm/{}-{version}.tgz", name.replace('/', "_"));
+    serve(files, &url_path, tarball);
+    json!({"path": path, "name": name, "version": version, "url": host.url(&url_path),
+        "size": tarball.len(), "sha256": sha256_of(tarball)})
+}
+
+/// This Mac's processor as the list names it, and the other one.
+fn cpus() -> (&'static str, &'static str) {
+    if cfg!(target_arch = "aarch64") {
+        ("arm64", "x64")
+    } else {
+        ("x64", "arm64")
+    }
+}
+
+/// The entry of an adapter of the Codex agent: the program is a shell script that says `said`,
+/// with a package it needs and a package for each processor.
+fn adapter_entry(host: &FileHost, files: &Files, version: &str, said: &str) -> Value {
+    let program = format!("echo {said}\n");
+    let main = npm_package(
+        &format!("main-{version}"),
+        json!({"name": "fake-adapter", "version": version, "dependencies": {"dep-a": "1.0.0"}}),
+        &[("dist/index.js", &program)],
+    );
+    let dep = npm_package(
+        "dep",
+        json!({"name": "dep-a", "version": "1.0.0"}),
+        &[("index.js", "")],
+    );
+    let (mine, other) = cpus();
+    let native = |cpu: &str| {
+        let name = format!("fake-native-{cpu}");
+        let tarball = npm_package(
+            &name,
+            json!({"name": name, "version": "1.0.0", "cpu": [cpu]}),
+            &[("bin", "")],
+        );
+        let mut pin = package_pin(
+            host,
+            files,
+            (&format!("node_modules/{name}"), &name, "1.0.0"),
+            &tarball,
+        );
+        pin["cpu"] = json!(cpu);
+        pin
+    };
+    let packages = vec![
+        package_pin(
+            host,
+            files,
+            ("node_modules/fake-adapter", "fake-adapter", version),
+            &main,
+        ),
+        package_pin(host, files, ("node_modules/dep-a", "dep-a", "1.0.0"), &dep),
+        native(mine),
+        native(other),
+    ];
+    json!({"name": "codex-acp", "description": "d", "version": version, "home": "https://example.com/codex",
+        "bin": "node_modules/fake-adapter/dist/index.js", "node": 22, "packages": packages})
+}
+
+/// A service with the catalog of `host`, whose own `PATH` has no `node`: only the shell's has.
+fn adapter_service(home: &Home, host: &FileHost) -> Service {
+    Service::start_with(home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env("BATE_CATALOG", host.url("/"))
+            .env("PATH", "/usr/bin:/bin");
+    })
+}
+
+/// A stand-in `node`: it says its version, and runs a script with the shell.
+fn fake_node(dir: &Path, version: &str) {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("node");
+    fs::write(&path, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else exec /bin/sh \"$@\"; fi\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The `code` and `error` an answer to `command` carries.
+fn code_and_error(w: &mut Window, command: &str, fields: Value) -> (String, String) {
+    let id = w.send(command, fields);
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["success"], false, "{reply}");
+    (
+        reply["code"].as_str().unwrap().to_owned(),
+        reply["error"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn an_adapter_is_installed_updated_and_removed_from_pinned_packages_and_the_users_own_copy_wins() {
+    let home = home("adapter");
+    let tools = home.join("tools");
+    fake_node(&tools, "v22.1.0");
+    shell_with_path(&home, &format!("{}:/usr/bin:/bin", tools.display()));
+    let (host, files) = changing_host();
+    serve_list(
+        &files,
+        "agents",
+        vec![adapter_entry(&host, &files, "1.0.0", "one")],
+    );
+    let _service = adapter_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let agents_now = |w: &mut Window| w.ok("list_agents", json!({}));
+
+    // Not installed: the list says Bate can install it.
+    let listed = agents_now(&mut w);
+    assert_eq!(
+        listed["missing"][1],
+        json!({"label": "Codex", "install": "npm install -g @agentclientprotocol/codex-acp",
+            "adapter": {"name": "codex-acp", "version": null, "used": false}})
+    );
+
+    // Shown before anything is fetched: what, from where, how big, and the `node` it runs on.
+    let packages_before = host.hits.load(std::sync::atomic::Ordering::SeqCst);
+    let preview = w.ok("preview_agent", json!({"name": "codex-acp"}));
+    assert_eq!(preview["version"], "1.0.0");
+    assert_eq!(preview["installedVersion"], Value::Null);
+    assert_eq!(preview["packages"], 3);
+    assert_eq!(preview["hosts"], json!([host.addr()]));
+    assert_eq!(preview["runtime"]["version"], "v22.1.0");
+    assert_eq!(preview["missing"], Value::Null);
+    assert!(preview["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        host.hits.load(std::sync::atomic::Ordering::SeqCst),
+        packages_before + 1,
+        "only the list is read"
+    );
+
+    // Only what was shown is installed.
+    let (code, _) = code_and_error(
+        &mut w,
+        "install_agent",
+        json!({"name": "codex-acp", "version": "0.9.0"}),
+    );
+    assert_eq!(code, "catalog_changed");
+    let made = w.ok(
+        "install_agent",
+        json!({"name": "codex-acp", "version": "1.0.0"}),
+    );
+    assert_eq!(made, json!({"name": "codex-acp", "version": "1.0.0"}));
+    let kept = home.join("agents/codex-acp");
+    let (mine, other) = cpus();
+    assert!(
+        kept.join("node_modules/fake-adapter/dist/index.js")
+            .is_file()
+    );
+    assert!(kept.join("node_modules/dep-a/index.js").is_file());
+    assert!(
+        kept.join(format!("node_modules/fake-native-{mine}/bin"))
+            .is_file()
+    );
+    assert!(
+        !kept
+            .join(format!("node_modules/fake-native-{other}"))
+            .exists(),
+        "only this Mac's processor"
+    );
+    staging_is_empty(&home);
+
+    // It is listed as installed, and starts with the user's `node`.
+    let script = home.join("agents/.bin/codex-acp");
+    let agents = agents_now(&mut w)["agents"].clone();
+    assert_eq!(
+        agents[0],
+        json!({"label": "Codex", "command": ["codex-acp"], "path": script,
+            "adapter": {"name": "codex-acp", "version": "1.0.0", "used": true}})
+    );
+    let run = Command::new(&script).env("PATH", &tools).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "one");
+
+    // A newer one is offered, and applied only when asked, whole: nothing of the old stays.
+    serve_list(
+        &files,
+        "agents",
+        vec![adapter_entry(&host, &files, "2.0.0", "two")],
+    );
+    let preview = w.ok("preview_agent", json!({"name": "codex-acp"}));
+    assert_eq!(
+        (
+            preview["installedVersion"].clone(),
+            preview["update"].clone()
+        ),
+        (json!("1.0.0"), json!(true))
+    );
+    assert_eq!(installed_version(&home), "1.0.0");
+    w.ok(
+        "install_agent",
+        json!({"name": "codex-acp", "version": "2.0.0"}),
+    );
+    assert_eq!(installed_version(&home), "2.0.0");
+    let run = Command::new(&script).env("PATH", &tools).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "two");
+    staging_is_empty(&home);
+
+    // A program of the same name on the user's own PATH is found first, and is never touched.
+    let theirs = program(&tools, "codex-acp");
+    let agents = agents_now(&mut w)["agents"].clone();
+    assert_eq!(
+        agents[0],
+        json!({"label": "Codex", "command": ["codex-acp"], "path": theirs,
+            "adapter": {"name": "codex-acp", "version": "2.0.0", "used": false}})
+    );
+    w.ok("remove_agent", json!({"name": "codex-acp"}));
+    assert!(theirs.is_file(), "the user's own copy stays");
+    assert!(!kept.exists() && !script.exists());
+    staging_is_empty(&home);
+    let agents = agents_now(&mut w)["agents"].clone();
+    assert_eq!(
+        agents[0]["adapter"],
+        json!({"name": "codex-acp", "version": null, "used": false})
+    );
+    assert_eq!(agents[0]["path"], json!(theirs));
+    let (code, _) = code_and_error(&mut w, "remove_agent", json!({"name": "codex-acp"}));
+    assert_eq!(code, "no_such_adapter");
+
+    // Only the agents of the table, and nothing that is a path.
+    for name in ["opencode", "../x", "codex-acp/../.."] {
+        let (code, _) = code_and_error(
+            &mut w,
+            "install_agent",
+            json!({"name": name, "version": "1"}),
+        );
+        assert_eq!(code, "bad_request", "{name}");
+        assert_eq!(
+            code_and_error(&mut w, "remove_agent", json!({"name": name})).0,
+            "bad_request",
+            "{name}"
+        );
+    }
+}
+
+fn installed_version(home: &Path) -> String {
+    let mark: Value = serde_json::from_str(
+        &fs::read_to_string(home.join("agents/codex-acp/adapter.json")).unwrap(),
+    )
+    .unwrap();
+    mark["version"].as_str().unwrap().to_owned()
+}
+
+/// What is wrong with an update, the change that makes it, and what the refusal says.
+type Case<'a> = (&'a str, Box<dyn Fn(&mut Value)>, &'a str);
+/// A bad package: what is wrong, its package.json, its files, and what the refusal says.
+type Attempt<'a> = (&'a str, Value, Vec<(&'a str, &'a str)>, &'a str);
+
+#[test]
+fn an_adapter_that_is_not_what_the_list_pins_is_refused_and_leaves_nothing() {
+    let home = home("adapter-bad");
+    let tools = home.join("tools");
+    fake_node(&tools, "v22.1.0");
+    shell_with_path(&home, &format!("{}:/usr/bin:/bin", tools.display()));
+    let (host, files) = changing_host();
+    let good = adapter_entry(&host, &files, "1.0.0", "one");
+    serve_list(&files, "agents", vec![good.clone()]);
+    let _service = adapter_service(&home, &host);
+    let mut w = Window::connect(&home);
+    w.ok(
+        "install_agent",
+        json!({"name": "codex-acp", "version": "1.0.0"}),
+    );
+    staging_is_empty(&home);
+
+    // `change` edits the good entry (or the package served for it); each makes the update fail.
+    let cases: Vec<Case> = vec![
+        (
+            "wrong hash",
+            Box::new(|e| e["packages"][1]["sha256"] = json!("0".repeat(64))),
+            "sha256",
+        ),
+        (
+            "wrong size",
+            Box::new(|e| e["packages"][1]["size"] = json!(1)),
+            "larger than",
+        ),
+        (
+            "another version in the package",
+            Box::new(|e| e["packages"][1]["version"] = json!("9.9.9")),
+            "not the dep-a 9.9.9",
+        ),
+        (
+            "a missing file",
+            Box::new(|e| e["bin"] = json!("node_modules/dep-a/dist/none.js")),
+            "has no",
+        ),
+    ];
+    for (what, change, reason) in cases {
+        let mut entry = adapter_entry(&host, &files, "2.0.0", "two");
+        change(&mut entry);
+        serve_list(&files, "agents", vec![entry]);
+        let (code, error) = code_and_error(
+            &mut w,
+            "install_agent",
+            json!({"name": "codex-acp", "version": "2.0.0"}),
+        );
+        assert!(
+            code == "catalog_failed" || code == "adapter_failed",
+            "{what}: {code} {error}"
+        );
+        assert!(
+            error.contains(reason),
+            "{what}: {reason:?} not in {error:?}"
+        );
+        // What was installed stays, and the staging folder is empty.
+        assert_eq!(installed_version(&home), "1.0.0", "{what}");
+        staging_is_empty(&home);
+    }
+
+    // A dependency the list does not pin, an install script, and a build step.
+    let with = |package: Value, files_in: &[(&str, &str)]| {
+        let main = npm_package("bad-main", package, files_in);
+        let mut entry = adapter_entry(&host, &files, "2.0.0", "two");
+        entry["packages"][0] = package_pin(
+            &host,
+            &files,
+            ("node_modules/fake-adapter", "fake-adapter", "2.0.0"),
+            &main,
+        );
+        serve_list(&files, "agents", vec![entry]);
+    };
+    let main = |extra: Value| {
+        let mut package =
+            json!({"name": "fake-adapter", "version": "2.0.0", "dependencies": {"dep-a": "1.0.0"}});
+        for (k, v) in extra.as_object().unwrap() {
+            package[k] = v.clone();
+        }
+        package
+    };
+    let program = [("dist/index.js", "echo two\n")];
+    let attempts: Vec<Attempt> = vec![
+        (
+            "an unpinned dependency",
+            main(json!({"dependencies": {"dep-a": "1.0.0", "left-out": "1.0.0"}})),
+            program.to_vec(),
+            "needs left-out",
+        ),
+        (
+            "an unpinned peer",
+            main(json!({"peerDependencies": {"left-out": "1.0.0"}})),
+            program.to_vec(),
+            "needs left-out",
+        ),
+        (
+            "an install script",
+            main(json!({"scripts": {"postinstall": "node setup.js"}})),
+            program.to_vec(),
+            "postinstall",
+        ),
+        (
+            "a build step",
+            main(json!({})),
+            vec![program[0], ("binding.gyp", "{}")],
+            "must be built",
+        ),
+    ];
+    for (what, package, in_package, reason) in attempts {
+        with(package, &in_package);
+        let (code, error) = code_and_error(
+            &mut w,
+            "install_agent",
+            json!({"name": "codex-acp", "version": "2.0.0"}),
+        );
+        assert_eq!(code, "adapter_failed", "{what}: {error}");
+        assert!(
+            error.contains(reason),
+            "{what}: {reason:?} not in {error:?}"
+        );
+        assert_eq!(installed_version(&home), "1.0.0", "{what}");
+        staging_is_empty(&home);
+    }
+
+    // An optional dependency or optional peer that is not pinned is no reason to refuse.
+    let optional = main(
+        json!({"optionalDependencies": {"left-out": "1.0.0"}, "peerDependencies": {"left-out": "1.0.0"}, "peerDependenciesMeta": {"left-out": {"optional": true}}}),
+    );
+    with(optional, &program);
+    w.ok(
+        "install_agent",
+        json!({"name": "codex-acp", "version": "2.0.0"}),
+    );
+    assert_eq!(installed_version(&home), "2.0.0");
+    w.ok("remove_agent", json!({"name": "codex-acp"}));
+
+    // Nothing is installed and nothing left either, for a first install.
+    let mut entry = adapter_entry(&host, &files, "3.0.0", "three");
+    entry["packages"][2]["sha256"] = json!("0".repeat(64));
+    entry["packages"][3]["sha256"] = json!("0".repeat(64));
+    serve_list(&files, "agents", vec![entry]);
+    let (code, _) = code_and_error(
+        &mut w,
+        "install_agent",
+        json!({"name": "codex-acp", "version": "3.0.0"}),
+    );
+    assert_eq!(code, "catalog_failed");
+    assert!(
+        !home.join("agents/codex-acp").exists() && !home.join("agents/.bin/codex-acp").exists()
+    );
+    staging_is_empty(&home);
+}
+
+#[test]
+fn an_adapter_needs_a_node_that_is_there_and_new_enough() {
+    let home = home("adapter-node");
+    let tools = home.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    // The shell's PATH has a folder that has no node yet.
+    shell_with_path(&home, &format!("{}:/usr/bin:/bin", tools.display()));
+    let (host, files) = changing_host();
+    serve_list(
+        &files,
+        "agents",
+        vec![adapter_entry(&host, &files, "1.0.0", "one")],
+    );
+    let _service = adapter_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let install = json!({"name": "codex-acp", "version": "1.0.0"});
+    let hits = || host.hits.load(std::sync::atomic::Ordering::SeqCst);
+    for (node, said) in [
+        (None, "Node.js is not installed"),
+        (Some("v20.9.0"), "22 or newer"),
+    ] {
+        if let Some(version) = node {
+            fake_node(&tools, version);
+        }
+        // The preview says what is missing, and the install is refused before any package is
+        // fetched: the list is the only request.
+        let preview = w.ok("preview_agent", json!({"name": "codex-acp"}));
+        assert_eq!(preview["runtime"], Value::Null);
+        assert!(
+            preview["missing"].as_str().unwrap().contains(said),
+            "{preview}"
+        );
+        let before = hits();
+        let (code, error) = code_and_error(&mut w, "install_agent", install.clone());
+        assert_eq!(
+            (code.as_str(), error.contains(said)),
+            ("no_runtime", true),
+            "{error}"
+        );
+        assert_eq!(hits(), before + 1);
+        assert!(!home.join("agents/codex-acp").exists());
+        staging_is_empty(&home);
+    }
+    fake_node(&tools, "v22.0.0");
+    assert_eq!(
+        w.ok("preview_agent", json!({"name": "codex-acp"}))["missing"],
+        Value::Null
+    );
+    w.ok("install_agent", install);
 }

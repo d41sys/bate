@@ -213,6 +213,7 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .sheet[open] { display: flex; }
 .sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-4); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
 .sheet .rows li button { margin-left: auto; }
+.sheet p, .sheet li { overflow-wrap: anywhere; }
 .sheet h3 { margin-top: var(--space-3); }
 .sheet ul:not(.rows) { margin: var(--space-1) 0; padding-left: var(--space-4); }
 .sheet .error { white-space: pre-line; }
