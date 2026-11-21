@@ -69,7 +69,7 @@ while IFS= read -r line; do
           words=$(printf '%s' "$line" | sed 's/.*"text":"say \([^"]*\)".*/\1/')
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"text\",\"delta\":\"$words\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
-        *'"text":"hang"'*) ;;
+        *'"text":"hang"'*|*'\nhang"'*) ;;
         *'"text":"probe '*)
           what=$(printf '%s' "$line" | sed 's/.*"text":"probe \([a-z]*\) .*/\1/')
           path=$(printf '%s' "$line" | sed 's/.*"text":"probe [a-z]* \([^"]*\)".*/\1/')
@@ -13511,4 +13511,550 @@ fn messages_to_a_paused_bot_and_answers_to_it_wait_for_the_resume_and_the_room_i
     eventually("the answer", || {
         prompts_of(&a).matches("[Answer from the bot").count() == 2
     });
+}
+
+/// While the service is down: a routine's next slot is a minute ago, and its past runs are
+/// `age_ms` older. This is how the tests move time.
+fn make_due(home: &Path, id: &str, age_ms: i64) {
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "UPDATE routines SET routine = json_set(routine, '$.nextRunMs', ?1) WHERE id = ?2",
+        rusqlite::params![now_ms() - 60_000, id],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE routine_runs SET run = json_set(run, '$.atMs', json_extract(run, '$.atMs') - ?1) WHERE routine = ?2",
+        rusqlite::params![age_ms, id],
+    )
+    .unwrap();
+}
+
+fn runs_of(w: &mut Window, bot: &str, id: &str) -> Vec<Value> {
+    let runs = w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}));
+    runs["runs"].as_array().unwrap().clone()
+}
+
+fn routine_row(w: &mut Window, bot: &str, id: &str) -> Value {
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+fn prompt_count(home: &Path, bot: &str) -> usize {
+    ops_of(home, bot).iter().filter(|o| *o == "prompt").count()
+}
+
+#[test]
+fn a_routine_is_skipped_while_a_connector_that_needs_a_sign_in_is_signed_out() {
+    let home = home("routine-signed-out");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let daily = json!({"name": "Brief", "prompt": "hi", "enabled": true, "webhook": true,
+        "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": daily}))["routine"].clone();
+    let (id, url) = (
+        routine["id"].as_str().unwrap().to_owned(),
+        routine["hookUrl"].as_str().unwrap().to_owned(),
+    );
+    let oauth = |enabled: bool| {
+        json!({"name": "notes", "enabled": enabled, "oauth": true,
+            "transport": {"type": "http", "url": "https://example.com/mcp", "headers": {}}})
+    };
+    let set = |w: &mut Window, connector: Value| {
+        w.ok("set_connector", json!({"bot": bot, "connector": connector}));
+    };
+    let head = "content-length: 0\r\n";
+
+    // A connector that is off, or that needs no sign-in, is no reason.
+    let files = json!({"name": "files", "enabled": true,
+        "transport": {"type": "stdio", "command": "nowhere", "args": [], "env": {}}});
+    set(&mut w, files);
+    set(&mut w, oauth(false));
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    turns_ended(&mut w, &bot, "done", 1);
+
+    // On and signed out: the start is skipped, naming the connector.
+    set(&mut w, oauth(true));
+    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    let runs = runs_of(&mut w, &bot, &id);
+    assert_eq!(
+        (&runs[0]["outcome"], &runs[0]["reason"], &runs[0]["detail"]),
+        (&json!("skipped"), &json!("signed_out"), &json!("notes"))
+    );
+
+    // A slot of the schedule too, also one caught up when the service starts.
+    service.kill();
+    make_due(&home, &id, 0);
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    eventually("the skipped slot", || runs_of(&mut w, &bot, &id).len() == 3);
+    let row = routine_row(&mut w, &bot, &id);
+    assert_eq!(
+        (
+            &row["lastRun"]["outcome"],
+            &row["lastRun"]["reason"],
+            &row["lastRun"]["detail"]
+        ),
+        (&json!("skipped"), &json!("signed_out"), &json!("notes"))
+    );
+    assert_eq!(prompt_count(&home, &bot), 1);
+
+    // Switched off, it runs again.
+    set(&mut w, oauth(false));
+    assert_eq!(
+        http(row["hookUrl"].as_str().unwrap(), "POST", None, head, ""),
+        202
+    );
+    eventually("the run", || prompt_count(&home, &bot) == 2);
+}
+
+#[test]
+fn a_routine_that_keeps_failing_runs_less_often_until_one_run_works_and_a_restart_keeps_count() {
+    let home = home("routine-backoff");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let daily = json!({"name": "Flaky", "prompt": "fall over", "enabled": true, "webhook": true,
+        "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": daily}))["routine"].clone();
+    let id = routine["id"].as_str().unwrap().to_owned();
+    const HOUR: i64 = 3_600_000;
+
+    // One slot after another, each after a restart: `age` hours go by first.
+    let slot = |service: &mut Service, w: &mut Window, age: i64| {
+        service.kill();
+        make_due(&home, &id, age * HOUR);
+        *service = Service::start(&home);
+        *w = Window::connect(&home);
+    };
+    let newest = |w: &mut Window| runs_of(w, &bot, &id)[0].clone();
+
+    // Three runs fail, each held to nothing yet.
+    for failed in 1..=3 {
+        slot(&mut service, &mut w, 0);
+        eventually("the failed run", || {
+            let runs = runs_of(&mut w, &bot, &id);
+            runs.len() == failed && runs[0]["outcome"] == "failed"
+        });
+    }
+    let row = routine_row(&mut w, &bot, &id);
+    assert_eq!(row["backoff"]["failures"], 3);
+    let last = row["lastRun"]["atMs"].as_i64().unwrap();
+    assert!(row["backoff"]["nextRunMs"].as_i64().unwrap() >= last + HOUR);
+
+    // The fourth slot, after a restart, is skipped; the next one replaces its record.
+    slot(&mut service, &mut w, 0);
+    eventually("the skipped slot", || newest(&mut w)["reason"] == "backoff");
+    let seen = newest(&mut w);
+    assert_eq!(
+        (&seen["outcome"], runs_of(&mut w, &bot, &id).len()),
+        (&json!("skipped"), 4)
+    );
+    slot(&mut service, &mut w, 0);
+    eventually("the next skip", || {
+        newest(&mut w)["atMs"].as_i64() > seen["atMs"].as_i64()
+    });
+    assert_eq!(runs_of(&mut w, &bot, &id).len(), 4);
+    assert_eq!(routine_row(&mut w, &bot, &id)["backoff"]["failures"], 3);
+    assert_eq!(prompt_count(&home, &bot), 3);
+
+    // A webhook is not held back.
+    let url = routine_row(&mut w, &bot, &id)["hookUrl"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(http(&url, "POST", None, "content-length: 0\r\n", ""), 202);
+    eventually("the run", || {
+        newest(&mut w)["outcome"] == "failed" && runs_of(&mut w, &bot, &id).len() == 5
+    });
+
+    // An hour after the last run it may run again; six failures wait four hours.
+    for failed in 6..=7 {
+        slot(&mut service, &mut w, 2);
+        eventually("the failed run", || {
+            runs_of(&mut w, &bot, &id).len() == failed && newest(&mut w)["outcome"] == "failed"
+        });
+    }
+    slot(&mut service, &mut w, 2);
+    eventually("the skipped slot", || newest(&mut w)["reason"] == "backoff");
+    assert_eq!(routine_row(&mut w, &bot, &id)["backoff"]["failures"], 6);
+    slot(&mut service, &mut w, 3);
+    eventually("the run", || {
+        runs_of(&mut w, &bot, &id).len() == 9 && newest(&mut w)["outcome"] == "failed"
+    });
+
+    // One run that works ends it; the routine was never switched off.
+    let mut fixed = routine_row(&mut w, &bot, &id);
+    fixed["prompt"] = json!("hi");
+    w.ok("set_routine", json!({"bot": bot, "routine": fixed}));
+    assert!(routine_row(&mut w, &bot, &id)["backoff"].is_object());
+    w.ok("run_routine", json!({"bot": bot, "routineId": id}));
+    let row = routine_row(&mut w, &bot, &id);
+    assert!(row["backoff"].is_null(), "{row}");
+    assert_eq!(row["enabled"], true);
+}
+
+#[test]
+fn the_test_button_runs_a_routine_now_as_the_persons_run_unless_the_bot_is_paused_or_busy() {
+    let home = home("routine-test");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // Off, and with nothing that starts it by itself: it can still be tried.
+    let make = |w: &mut Window, name: &str, prompt: &str| {
+        let routine = json!({"name": name, "prompt": prompt, "enabled": false, "webhook": true});
+        w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (plain, limited, hung) = (
+        make(&mut w, "Plain", "just look"),
+        make(&mut w, "Limited", "limit-turn"),
+        make(&mut w, "Hung", "hang"),
+    );
+
+    w.ok("run_routine", json!({"bot": bot, "routineId": plain}));
+    let runs = runs_of(&mut w, &bot, &plain);
+    assert_eq!(
+        (&runs[0]["outcome"], &runs[0]["by"]),
+        (&json!("sent"), &json!("user"))
+    );
+    let nonce = format!("\"nonce\":\"run-{plain}-");
+    let log = home.join("bots").join(&bot).join("prompts.log");
+    eventually("the prompt", || {
+        fs::read_to_string(&log).is_ok_and(|sent| sent.contains(&nonce))
+    });
+    turns_ended(&mut w, &bot, "done", 1);
+
+    // The outcome of the turn is kept on the same run.
+    w.ok("run_routine", json!({"bot": bot, "routineId": limited}));
+    eventually("the turn's outcome", || {
+        runs_of(&mut w, &bot, &limited)[0]["outcome"] == "limit"
+    });
+    assert_eq!(runs_of(&mut w, &bot, &limited)[0]["by"], "user");
+
+    // Refused while the bot is busy, paused, or the routine is not there.
+    w.ok("run_routine", json!({"bot": bot, "routineId": hung}));
+    assert_eq!(
+        refusal(
+            &mut w,
+            "run_routine",
+            json!({"bot": bot, "routineId": plain})
+        ),
+        "busy"
+    );
+    assert_eq!(runs_of(&mut w, &bot, &plain).len(), 1);
+    w.ok("abort", json!({"bot": bot}));
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    assert_eq!(
+        refusal(
+            &mut w,
+            "run_routine",
+            json!({"bot": bot, "routineId": plain})
+        ),
+        "paused"
+    );
+    assert_eq!(runs_of(&mut w, &bot, &plain).len(), 1);
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+    assert_eq!(
+        refusal(
+            &mut w,
+            "run_routine",
+            json!({"bot": bot, "routineId": "nothing"})
+        ),
+        "no_such_routine"
+    );
+}
+
+#[test]
+fn a_precheck_runs_first_in_the_bots_limits_and_decides_whether_the_bot_runs() {
+    let home = home("routine-precheck");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let outside = home.join("outside.txt");
+    let make = |w: &mut Window, name: &str, precheck: &str| {
+        let routine = json!({"name": name, "prompt": "Look at it.", "enabled": true,
+            "webhook": true, "precheck": precheck});
+        let routine =
+            w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+        (
+            routine["id"].as_str().unwrap().to_owned(),
+            routine["hookUrl"].as_str().unwrap().to_owned(),
+        )
+    };
+    let head = "content-length: 0\r\n";
+
+    // Exit 0: the bot runs, with the output in front of the prompt, marked as the precheck's.
+    let (ok, url) = make(&mut w, "Passes", "echo news: three; echo more");
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    turns_ended(&mut w, &bot, "done", 1);
+    let sent = fs::read_to_string(home.join("bots").join(&bot).join("prompts.log")).unwrap();
+    let (at_check, at_prompt) = (
+        sent.find("news: three\\nmore").unwrap(),
+        sent.find("Look at it.").unwrap(),
+    );
+    assert!(
+        sent.contains("precheck ran before you") && at_check < at_prompt,
+        "{sent}"
+    );
+    assert_eq!(runs_of(&mut w, &bot, &ok)[0]["outcome"], "sent");
+
+    // Any other exit: skipped, with the first line it printed.
+    let (stops, url) = make(&mut w, "Stops", "echo nothing new; echo second; exit 3");
+    // The precheck runs on its own: the answer is "accepted", the skip shows in the runs.
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the skip", || !runs_of(&mut w, &bot, &stops).is_empty());
+    let run = runs_of(&mut w, &bot, &stops)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"], &run["detail"]),
+        (&json!("skipped"), &json!("precheck"), &json!("nothing new"))
+    );
+    assert_eq!(prompt_count(&home, &bot), 1);
+
+    // The folder limit holds it as it holds the bot: it cannot write outside the bot's folder.
+    let (denied, url) = make(&mut w, "Denied", &format!("echo x > {}", outside.display()));
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the skip", || !runs_of(&mut w, &bot, &denied).is_empty());
+    let run = runs_of(&mut w, &bot, &denied)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"]),
+        (&json!("skipped"), &json!("precheck"))
+    );
+    assert!(!outside.exists());
+    // Inside its folder it may.
+    let (inside, url) = make(&mut w, "Inside", "echo x > made.txt && cat made.txt");
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the file", || {
+        home.join("bots").join(&bot).join("made.txt").exists()
+    });
+    turns_ended(&mut w, &bot, "done", 2);
+
+    // The person's "never run commands" holds.
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "run", "level": "never"}),
+    );
+    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    let run = runs_of(&mut w, &bot, &inside)[0].clone();
+    assert_eq!(run["reason"], "precheck");
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "run", "level": "ask"}),
+    );
+
+    // A precheck that cannot be started is a failed run.
+    let folder = home.join("bots").join(&bot);
+    fs::remove_dir_all(&folder).unwrap();
+    fs::write(&folder, "not a folder").unwrap();
+    assert_eq!(http(&url, "POST", None, head, ""), 503);
+    fs::remove_file(&folder).unwrap();
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    let inside = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Inside")
+        .unwrap();
+    assert_eq!(inside["lastRun"]["outcome"], "failed");
+    assert!(
+        inside["lastRun"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("precheck could not be started")
+    );
+}
+
+/// A routine whose precheck waits until the file `gate` is in the bot's folder; it writes its
+/// process id first. Returns its id and webhook address.
+fn waiting_routine(w: &mut Window, bot: &str) -> (String, String) {
+    let check = "echo $$ > pid; while [ ! -e gate ]; do sleep 0.05; done; echo open";
+    let routine = json!({"name": "Waits", "prompt": "Look at it.", "enabled": true,
+        "webhook": true, "precheck": check});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+    (
+        routine["id"].as_str().unwrap().to_owned(),
+        routine["hookUrl"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn a_precheck_that_waits_does_not_hold_up_the_service_and_the_run_starts_when_it_ends() {
+    let home = home("routine-precheck-wait");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    let (id, url) = waiting_routine(&mut w, &bot);
+    let head = "content-length: 0\r\n";
+
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    // The service answers while the precheck waits.
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["id"], bot.as_str());
+    // The routine counts as starting: a second start is refused as for a run under way.
+    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    assert_eq!(
+        refusal(&mut w, "run_routine", json!({"bot": bot, "routineId": id})),
+        "busy"
+    );
+    assert_eq!(prompt_count(&home, &bot), 0);
+    assert!(runs_of(&mut w, &bot, &id).is_empty());
+
+    fs::write(folder.join("gate"), "").unwrap();
+    turns_ended(&mut w, &bot, "done", 1);
+    assert_eq!(runs_of(&mut w, &bot, &id)[0]["outcome"], "sent");
+    let sent = fs::read_to_string(folder.join("prompts.log")).unwrap();
+    assert!(
+        sent.contains("open") && sent.contains("Look at it."),
+        "{sent}"
+    );
+}
+
+#[test]
+fn pausing_the_bot_or_deleting_the_routine_while_its_precheck_waits_ends_in_no_run() {
+    let home = home("routine-precheck-cancel");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    let (id, url) = waiting_routine(&mut w, &bot);
+    let head = "content-length: 0\r\n";
+    let ended = |folder: &Path| {
+        let pid = fs::read_to_string(folder.join("pid")).unwrap();
+        // `kill -0` fails once the process is gone.
+        !Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    let run = runs_of(&mut w, &bot, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"]),
+        (&json!("skipped"), &json!("paused"))
+    );
+    eventually("the command is killed", || ended(&folder));
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+
+    fs::remove_file(folder.join("pid")).unwrap();
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    w.ok("delete_routine", json!({"bot": bot, "routineId": id}));
+    eventually("the command is killed", || ended(&folder));
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+    assert_eq!(prompt_count(&home, &bot), 0);
+}
+
+#[test]
+fn a_device_cannot_add_change_or_clear_a_precheck_but_can_edit_the_rest_and_the_window_can() {
+    let home = home("routine-precheck-lan");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0");
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let port = w.ok("set_lan", json!({"on": true}))["port"]
+        .as_u64()
+        .unwrap();
+    let code = w.ok("pair_device", json!({}))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut device = Device::new(port);
+    let body = json!({"code": code, "name": "Phone"}).to_string();
+    let (status, _, cookie) = device.call("POST", "/api/pair", &body, true);
+    assert_eq!(status, 200);
+    device.cookie = Some(cookie.unwrap().split(';').next().unwrap().to_owned());
+    let session: Value = serde_json::from_str(&device.post("/api/session", "").1).unwrap();
+    let session = session["session"].as_str().unwrap().to_owned();
+    let mut sent = 0;
+    // One frame from the device, and the answer to it.
+    let mut ask = |command: &str, mut frame: Value| -> Value {
+        sent += 1;
+        frame["id"] = sent.to_string().into();
+        frame["type"] = command.into();
+        let path = format!("/api/send?session={session}");
+        assert_eq!(device.post(&path, &frame.to_string()).0, 200);
+        for _ in 0..10 {
+            let path = format!("/api/recv?session={session}");
+            let (_, body, _) = device.call("GET", &path, "", true);
+            let lines: Vec<Value> = serde_json::from_str(&body).unwrap();
+            let id = sent.to_string();
+            if let Some(r) = lines
+                .into_iter()
+                .find(|v| v["type"] == "response" && v["id"] == id)
+            {
+                return r;
+            }
+        }
+        panic!("no answer");
+    };
+    ask("hello", json!({"protocol": 1}));
+
+    let made = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Checked", "prompt": "Look.", "enabled": false, "chat": true, "precheck": "echo one"}}),
+    )["routine"]
+        .clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    let row = |w: &mut Window| routine_row(w, &bot, &id);
+
+    // An edit that leaves the precheck out leaves it as it was.
+    let mut edit = made.clone();
+    edit["name"] = "Renamed".into();
+    edit.as_object_mut().unwrap().remove("precheck");
+    let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(answer["success"], true, "{answer}");
+    let now = row(&mut w);
+    assert_eq!(
+        (&now["name"], &now["precheck"]),
+        (&json!("Renamed"), &json!("echo one"))
+    );
+
+    // Adding, changing or clearing one is refused, and nothing is stored.
+    for precheck in [json!("echo two"), json!(null)] {
+        let mut edit = made.clone();
+        edit["precheck"] = precheck;
+        let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+        assert_eq!(
+            (&answer["success"], &answer["code"]),
+            (&json!(false), &json!("forbidden")),
+            "{answer}"
+        );
+    }
+    let fresh = json!({"name": "New", "prompt": "Look.", "enabled": false, "chat": true, "precheck": "echo three"});
+    let answer = ask("set_routine", json!({"bot": bot, "routine": fresh}));
+    assert_eq!(answer["code"], "forbidden", "{answer}");
+    assert_eq!(row(&mut w)["precheck"], "echo one");
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+
+    // A device may add a routine with none.
+    let plain = json!({"name": "Plain", "prompt": "Look.", "enabled": false, "chat": true});
+    let answer = ask("set_routine", json!({"bot": bot, "routine": plain}));
+    assert_eq!(answer["success"], true, "{answer}");
+    assert!(answer["data"]["routine"]["precheck"].is_null(), "{answer}");
+
+    // The window may change it and clear it.
+    let mut edit = made.clone();
+    edit["precheck"] = "echo two".into();
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(row(&mut w)["precheck"], "echo two");
+    edit.as_object_mut().unwrap().remove("precheck");
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert!(row(&mut w)["precheck"].is_null());
 }

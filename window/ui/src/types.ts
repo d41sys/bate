@@ -33,7 +33,11 @@ export type Bot = {
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 
-export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string };
+/** `reason`: why a skipped run was not run (`paused`, `signed_out`, `backoff`, `precheck`); `detail`: the connector, or the first line the precheck printed; `by`: `user` for a run the person started. */
+export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string; detail?: string; by?: string };
+
+/** Output only: a scheduled routine whose last runs failed is held to fewer runs. */
+export type Backoff = { failures: number; nextRunMs?: number };
 
 export type Routine = {
   id?: string;
@@ -43,9 +47,11 @@ export type Routine = {
   schedule?: { frequency: Frequency; interval: number; time: string; timezone?: string };
   webhook: boolean;
   chat: boolean;
+  precheck?: string;
   hookUrl?: string;
   nextRunMs?: number;
   lastRun?: RoutineRun;
+  backoff?: Backoff;
 };
 
 export type Connector = {

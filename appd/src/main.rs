@@ -26,6 +26,7 @@ mod login_path;
 mod memory;
 mod oauth;
 mod paths;
+mod precheck;
 mod project_server;
 mod proxy;
 mod report;

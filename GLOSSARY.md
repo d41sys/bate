@@ -67,6 +67,10 @@ _Avoid_: backup, archive, template
 A prompt that a bot runs on a schedule or when something triggers it.
 _Avoid_: job, automation, cron
 
+**Precheck**:
+A command a routine runs before the bot, with no model, under the bot's own limits. If it ends well, the bot runs with its output; if not, the run is skipped. Saving the routine is the person's approval of that exact command.
+_Avoid_: hook, guard
+
 ### The app
 
 **Channel**:
