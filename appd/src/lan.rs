@@ -446,6 +446,8 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "install_update",
     "set_disk_access",
     "undo_change",
+    "list_changes",
+    "read_change",
     "set_network",
     "set_project",
     "delete_project",

@@ -25,6 +25,9 @@
   --warn: #8a5300;
   --warn-soft: #fff1d1;
   --mark: #f5a623;
+  /* A diff: the fill of an added and of a removed line (the + and - sign says it too). */
+  --diff-add: #e3f4e6;
+  --diff-del: #fde6e6;
   --scrim: rgba(0, 0, 0, .35);
   --glass: rgba(255, 255, 255, .8);
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .06), 0 2px 8px rgba(0, 0, 0, .05);
@@ -106,6 +109,8 @@
     --danger: #ff6f6f;
     --warn: #ffcf70;
     --warn-soft: rgba(255, 190, 60, .16);
+    --diff-add: rgba(70, 190, 110, .18);
+    --diff-del: rgba(255, 100, 100, .18);
     --scrim: rgba(0, 0, 0, .6);
     --glass: rgba(22, 22, 22, .8);
     --shadow-1: 0 0 0 1px rgba(255, 255, 255, .06);

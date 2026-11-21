@@ -11,10 +11,12 @@ import type { Conversation } from "./types.ts";
  * `want` names one to show (a search hit); `show` switches to another (a fork). The chip that opens the
  * list is drawn into `slot`, a place in the page's header.
  */
-export function Conversations({ bot, want, slot, children }: {
+export function Conversations({ bot, want, slot, showChanges, children }: {
   bot: string;
   want?: string;
   slot: HTMLElement | null;
+  /** Opens the diff of what the bot changed; absent where there is no pane (other devices). */
+  showChanges?: (conversation: string) => void;
   children: (conversation: string, show: (id: string) => void, offerCompact: (item: { run: () => void; disabled: boolean } | null) => void) => ReactNode;
 }) {
   const [all, setAll] = useState<Conversation[]>([]);
@@ -196,6 +198,7 @@ export function Conversations({ bot, want, slot, children }: {
                 <div className="foot">
                   {foot("New conversation", () => void make())}
                   {foot("Export chat", () => void run(request<{ path: string }>("export_chat", { bot, conversation: shown }).then((d) => setSaved(d.path))))}
+                  {showChanges && foot("Show changes", () => showChanges(shown), { "data-tip": "What the bot changed in its folder, as a diff to comment on" })}
                   {compact &&
                     foot("Compact this conversation", compact.run, {
                       disabled: compact.disabled,

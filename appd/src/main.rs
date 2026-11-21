@@ -8,6 +8,7 @@ mod attach;
 mod botfile;
 mod browser;
 mod catalog;
+mod changes;
 mod channels;
 mod chatgpt;
 mod clients;

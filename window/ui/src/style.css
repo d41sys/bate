@@ -458,6 +458,42 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .surface .code .line { display: flex; min-height: var(--leading); padding-right: var(--space-3); }
 .surface .code .no { flex: none; min-width: 4ch; margin-right: var(--space-2); padding-right: var(--space-2); text-align: right; color: var(--fg-muted); border-right: 1px solid var(--border); user-select: none; }
 
+/* ---- Changes: what a bot changed, as a diff for each file in the pane, with comments on lines ---- */
+.changes { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.changes > .tools { flex-wrap: nowrap; justify-content: space-between; align-items: flex-start; }
+.changes .note, .changes .error, .changes .banner, .changes .empty { margin: var(--space-2) 0; }
+.changes > .tools .note { flex: 1; min-width: 0; margin: 0; }
+.changes .files { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 0; }
+.changes .files > li { border-top: 1px solid var(--border); }
+.changes summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--row-h); cursor: pointer; }
+.changes summary code { padding: 0; background: none; overflow-wrap: anywhere; }
+.changes summary .badge { margin-left: 0; }
+.changes summary small { color: var(--fg-muted); }
+/* The kept comments, always in reach at the foot, with the one button that sends them. */
+.changes .comments { flex: none; padding-top: var(--space-2); border-top: 1px solid var(--border); }
+.changes .comments .rows { max-height: calc(var(--row-h) * 3); overflow: auto; }
+.diff { width: 100%; margin-bottom: var(--space-2); border-collapse: collapse; font: var(--size-small) / var(--leading-small) var(--font-mono); }
+.diff td { padding: 0; vertical-align: top; }
+.diff .hunk td { padding: 0 var(--space-2); background: var(--bg-soft); color: var(--fg-muted); }
+.diff tr:not(.hunk, .compose) { cursor: pointer; }
+.diff .add { background: var(--diff-add); }
+.diff .del { background: var(--diff-del); }
+/* A line is chosen (fill) or has a comment (a bar at its start), not by colour alone: the number's button names it. */
+.diff .chosen > td { background: var(--bg-current); }
+.diff .marked > .no { box-shadow: inset 3px 0 0 var(--warn); }
+.diff .no { width: 5ch; text-align: right; border-right: 1px solid var(--border); user-select: none; }
+.diff .no button { width: 100%; min-height: 0; padding: 0 var(--space-2); border: 0; border-radius: 0; background: none; color: var(--fg-muted); font: inherit; justify-content: flex-end; }
+.diff .text { padding: 0 var(--space-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff .compose td { padding: var(--space-2); background: var(--bg-soft); font: var(--size-ui) / var(--leading) var(--font-ui); }
+.diff .compose label { display: grid; gap: var(--space-1); }
+.diff .compose textarea { width: 100%; }
+.diff .compose .actions { margin-top: var(--space-2); }
+@media (pointer: coarse) {
+  .diff .no button, .diff .text { padding-block: var(--space-1); }
+}
+/* The quiet line under a run that changed files. */
+.item.run .changed { display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+
 /* ---- Palette (⌘K): a Dialog whose panel is a search box over groups of options ---- */
 .sheet.palette { align-items: flex-start; }
 .sheet.palette > form { display: flex; flex-direction: column; margin: 12vh auto 0; max-height: calc(100% - 12vh); padding: 0; overflow: hidden; }

@@ -32,7 +32,8 @@ use crate::proxy::{self, Upstream};
 use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::{
-    adapters, apple, botfile, browser, catalog, desktop, egress, oauth, project_server, surfaces,
+    adapters, apple, botfile, browser, catalog, changes, desktop, egress, oauth, project_server,
+    surfaces,
     workplaces,
 };
 use crate::{
@@ -2131,6 +2132,33 @@ impl Core {
                 Ok(Some(json!({"notes": notes})))
             }
             "undo_change" => self.undo_change(f),
+            "list_changes" => {
+                let bot = self.bot_of(f)?;
+                let conversation = f.get("conversation").and_then(Value::as_str);
+                let root = self.changes_root(&bot)?;
+                let copies = self
+                    .store
+                    .changed_files(&bot, conversation)
+                    .map_err(internal)?;
+                self.reply_later(client, id, "list_changes", move || {
+                    changes::list(&root, copies)
+                });
+                Ok(None)
+            }
+            "read_change" => {
+                let bot = self.bot_of(f)?;
+                let conversation = f.get("conversation").and_then(Value::as_str);
+                let root = self.changes_root(&bot)?;
+                let path = str_field(f, "path")?.to_owned();
+                let copy = self
+                    .store
+                    .first_copy(&bot, conversation, &changes::full(&root, &path)?)
+                    .map_err(internal)?;
+                self.reply_later(client, id, "read_change", move || {
+                    changes::read(&root, &path, copy)
+                });
+                Ok(None)
+            }
             "set_network" => {
                 let bot = self.bot_of(f)?;
                 let hosts = match f.get("hosts") {
@@ -3542,6 +3570,13 @@ impl Core {
             Ok(Some(project)) => project.folder,
             _ => paths::bot_dir(bot).to_string_lossy().into_owned(),
         }
+    }
+
+    /// The folder the Changes view reads: the bot's work folder, with its links followed now.
+    fn changes_root(&self, bot: &str) -> Result<PathBuf, Refusal> {
+        Path::new(&self.work_folder(bot))
+            .canonicalize()
+            .map_err(|e| ("no_folder", format!("the bot's folder is not there: {e}")))
     }
 
     /// What holds a limited process of `owner` (`bot:<id>`, `project:<id>`) to its hosts: the

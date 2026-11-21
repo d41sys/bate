@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
-import { add, aim, build, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { add, aim, build, changedFiles, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
@@ -23,7 +23,7 @@ type Hit = { seq: number };
  * `jump`: show the item that begins at `seq` (a search hit), loading older pages to reach it.
  * `find`: open the find bar. Each is taken once: `used` says so.
  */
-export function Chat({ bot, conversation, onFork, jump, find = false, used = () => {}, showFile, model, signIn, start = "", started = () => {}, offerCompact }: {
+export function Chat({ bot, conversation, onFork, jump, find = false, used = () => {}, showFile, showChanges, model, signIn, start = "", started = () => {}, offerCompact }: {
   bot: Bot;
   /** The conversation shown; the service holds the rest. */
   conversation: string;
@@ -34,6 +34,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   used?: () => void;
   // Opens a file of the bot's in the pane; absent where there is no pane (other devices).
   showFile?: (path: string) => void;
+  // Opens the diff of what the bot changed in the pane; absent where there is no pane.
+  showChanges?: () => void;
   // The model and thinking chip, which sits in the message box.
   model?: ReactNode;
   // Set while the bot has no way to reach a model: opens the sign-in, and nothing is sent until then.
@@ -466,6 +468,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                   read={canRead ? read : undefined}
                   stopReading={stopReading}
                   open={showFile}
+                  changes={showChanges}
                   bot={bot.id}
                   edit={(item) => {
                     setEditing(item.nonce);
@@ -598,6 +601,8 @@ type Actions = {
   edit: (p: Prompt) => void;
   fork: (p: Prompt) => void;
   open?: (path: string) => void;
+  /** Opens the diff of what the bot changed. */
+  changes?: () => void;
   /** The bot's id: what Undo names. */
   bot: string;
   /** Whether this reply is being read aloud; `read` is missing where the page can't speak. */
@@ -606,7 +611,7 @@ type Actions = {
   stopReading: () => void;
 };
 
-function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
       return (
@@ -624,7 +629,7 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "run":
-      return <Run parts={item.parts} live={working} bot={bot} />;
+      return <Run parts={item.parts} live={working} bot={bot} changes={changes} />;
     case "plan":
       return (
         <ul className="plan">
@@ -669,35 +674,44 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
 }
 
 /** Calls and thinking that follow each other: one line saying what happened, which opens to a row for each call. */
-function Run({ parts, live, bot }: { parts: Part[]; live: boolean; bot: string }) {
+function Run({ parts, live, bot, changes }: { parts: Part[]; live: boolean; bot: string; changes?: () => void }) {
   const { text, running, failed } = describe(parts, live);
+  const files = changedFiles(parts).length;
   return (
-    <details className="run">
-      <summary>
-        <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true" />
-        {text}
-        {failed > 0 && <span className="error"> · {failed} failed</span>}
-      </summary>
-      <ul>
-        {parts.map((part) =>
-          part.kind === "thinking" ? (
-            <li key={part.id} className="thought"><p>{part.text}</p></li>
-          ) : (
-            <li key={part.id}>
-              <details>
-                <summary>
-                  <code>{aim(part)}</code>
-                  {part.isError && <span className="error"> failed</span>}
-                </summary>
-                <pre>{JSON.stringify(part.args, null, 2)}</pre>
-                {part.output !== undefined && <pre>{part.output}</pre>}
-              </details>
-              {inShell && <Undo part={part} bot={bot} />}
-            </li>
-          ),
-        )}
-      </ul>
-    </details>
+    <>
+      <details className="run">
+        <summary>
+          <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true" />
+          {text}
+          {failed > 0 && <span className="error"> · {failed} failed</span>}
+        </summary>
+        <ul>
+          {parts.map((part) =>
+            part.kind === "thinking" ? (
+              <li key={part.id} className="thought"><p>{part.text}</p></li>
+            ) : (
+              <li key={part.id}>
+                <details>
+                  <summary>
+                    <code>{aim(part)}</code>
+                    {part.isError && <span className="error"> failed</span>}
+                  </summary>
+                  <pre>{JSON.stringify(part.args, null, 2)}</pre>
+                  {part.output !== undefined && <pre>{part.output}</pre>}
+                </details>
+                {inShell && <Undo part={part} bot={bot} />}
+              </li>
+            ),
+          )}
+        </ul>
+      </details>
+      {changes && !live && files > 0 && (
+        <p className="changed">
+          Changed {files === 1 ? "1 file" : `${files} files`}
+          <button type="button" className="small ghost" onClick={changes}>See changes</button>
+        </p>
+      )}
+    </>
   );
 }
 

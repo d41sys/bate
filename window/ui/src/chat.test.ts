@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, aim, build, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
+import { add, aim, build, changedFiles, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -213,4 +213,17 @@ test("a row is named by what the call acted on, not by the tool", () => {
   assert.equal(first(call(1, "web_search", { query: "newest stable rust" }, "")), "Searched the web: newest stable rust");
   assert.equal(first(call(1, "web_search", { query: "" }, "")), "Searched the web");
   assert.equal(describe(parts([...call(1, "run", { command: "ls" }, "a"), ...call(2, "web_search", { query: "x" }, "")]), false).text, "Ran 1 command, made 1 web search");
+});
+
+test("the files a run changed are those of its write and edit calls that worked, each once", () => {
+  const run = parts([
+    ...call(1, "write", { path: "a.txt" }, "wrote"),
+    ...call(2, "edit", { path: "a.txt" }, "edited"),
+    ...call(3, "write", { path: "b.txt" }, "no", true),
+    ...call(4, "write", { path: "c.txt" }),
+    ...call(5, "read", { path: "d.txt" }, "D"),
+    ...call(6, "run", { command: "touch e.txt" }, ""),
+    ...call(7, "edit", { title: "Edit", locations: [{ path: "/x/f.txt" }] }, "ok"),
+  ]);
+  assert.deepEqual(changedFiles(run), ["a.txt", "/x/f.txt"]);
 });
