@@ -1278,6 +1278,23 @@ fn a_chatgpt_sign_in_macos_would_ask_about_is_neither_ended_nor_lost_while_it_wa
 }
 
 #[test]
+fn a_keychain_file_that_cannot_be_unlocked_is_a_plain_error_and_asks_nobody() {
+    use security_framework::os::macos::keychain::CreateOptions;
+    let home = home("keychain-wrong-password");
+    // The service opens its file with a password of its own: this one has another (the home's path).
+    CreateOptions::new()
+        .password(&home.display().to_string())
+        .create(home.join("keychain"))
+        .unwrap();
+    let _service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    w.ok("set_provider", json!({"url": "http://127.0.0.1:9/v1"}));
+    assert_eq!(refused(&mut w, "get_provider", json!({})), "internal");
+    assert_eq!(w.ok("get_keychain", json!({})), json!({"refused": false}));
+    assert_eq!(asked(&home, "provider"), 0);
+}
+
+#[test]
 fn a_channel_whose_token_macos_would_ask_about_starts_once_the_person_has_answered() {
     let (home, telegram) = (home("keychain-asks-channel"), Telegram::start());
     let start = || {

@@ -62,14 +62,36 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// home (0700), not by the login password.
 const FILE_PASSWORD: &str = "bate-test";
 const ITEM_NOT_FOUND: i32 = -25300;
-/// What a read, write or delete that macOS would have asked about reports, questions being off.
+/// What an item operation reports when macOS would ask and questions are off: for a locked
+/// keychain, and for the hook of the tests.
 const INTERACTION_NOT_ALLOWED: i32 = -25308;
+/// The same for an item whose partition list does not hold this program (measured: another
+/// build of the program, in the login keychain). It is also what a wrong keychain password gives.
+const AUTH_FAILED: i32 = -25293;
 const DUPLICATE_KEYCHAIN: i32 = -25296;
 /// What a delete that did not remove the item reports.
 const NO_ACCESS_FOR_ITEM: i32 = -25243;
 
 /// The keychain in use and, when that is the file in the home, the login keychain: an earlier
 /// version kept the secrets there.
+/// What a code reported by an operation on an item means.
+#[derive(Debug, PartialEq)]
+enum Code {
+    /// There is no such item.
+    Absent,
+    /// macOS would ask, were questions on.
+    WouldAsk,
+    Plain,
+}
+
+fn classify(code: i32) -> Code {
+    match code {
+        ITEM_NOT_FOUND => Code::Absent,
+        INTERACTION_NOT_ALLOWED | AUTH_FAILED => Code::WouldAsk,
+        _ => Code::Plain,
+    }
+}
+
 fn open() -> base::Result<(SecKeychain, Option<SecKeychain>)> {
     let (file, before) = match std::env::var_os("APPD_KEYCHAIN") {
         Some(file) => (PathBuf::from(file), None),
@@ -97,7 +119,7 @@ fn open() -> base::Result<(SecKeychain, Option<SecKeychain>)> {
 fn find(keychain: &SecKeychain, account: &str) -> base::Result<Option<(String, SecKeychainItem)>> {
     match keychain.find_generic_password(&crate::launch::label(), account) {
         Ok((secret, item)) => Ok(Some((String::from_utf8_lossy(&secret).into_owned(), item))),
-        Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
+        Err(e) if classify(e.code()) == Code::Absent => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -195,15 +217,15 @@ fn ask_in_child(account: String) {
     });
 }
 
-/// What the outcome of an operation on `account` means for the caller: a failure that macOS
-/// would have asked about starts the child, or says that one is asking or was refused.
+/// What the outcome of an operation on an item of `account` means for the caller: a failure
+/// that macOS would have asked about starts the child, or says that one is asking or was refused.
 fn settle<T>(account: &str, done: base::Result<T>) -> Result<T> {
     match done {
         Ok(v) => {
             asks().remove(account);
             return Ok(v);
         }
-        Err(e) if e.code() == INTERACTION_NOT_ALLOWED && ENDED.get().is_some() => {}
+        Err(e) if classify(e.code()) == Code::WouldAsk && ENDED.get().is_some() => {}
         Err(e) => return Err(e.into()),
     }
     let mut asks = asks();
@@ -226,12 +248,21 @@ fn settle<T>(account: &str, done: base::Result<T>) -> Result<T> {
 /// The secret kept under `account`, if there is one. A secret macOS would ask about is asked
 /// for in a child, and this fails with `Waiting` meanwhile: never `None`.
 pub fn get(account: &str) -> Result<Option<String>> {
-    settle(account, hook(account).and_then(|()| read_account(account)))
+    on_items(account, |own, before| read(own, before, account))
 }
 
-fn read_account(account: &str) -> base::Result<Option<String>> {
+/// Runs `op` on the keychains, and settles what it says. Only `op` can mean "macOS would ask":
+/// a keychain that cannot be opened or unlocked (a wrong password for the file) is a plain
+/// error, and no child, which would show nothing, is started for it.
+fn on_items<T>(
+    account: &str,
+    op: impl FnOnce(&SecKeychain, Option<&SecKeychain>) -> base::Result<T>,
+) -> Result<T> {
     let (own, before) = open()?;
-    read(&own, before.as_ref(), account)
+    settle(
+        account,
+        hook(account).and_then(|()| op(&own, before.as_ref())),
+    )
 }
 
 /// Keeps `secret` under `account`; an empty one forgets it, as `delete` does. A value is never
@@ -249,13 +280,7 @@ pub fn put(account: &str, secret: &str) -> Result<()> {
 
 /// Forgets `account`; fine if there is none.
 pub fn delete(account: &str) -> Result<()> {
-    settle(account, remove_account(account))
-}
-
-fn remove_account(account: &str) -> base::Result<()> {
-    hook(account)?;
-    let (own, before) = open()?;
-    remove(&own, before.as_ref(), account)
+    on_items(account, |own, before| remove(own, before, account))
 }
 
 /// `appd keychain ask <account>`: reads the secret with questions on, so that the person is
@@ -264,7 +289,9 @@ fn remove_account(account: &str) -> base::Result<()> {
 pub fn ask(account: &str) -> base::Result<()> {
     #[cfg(debug_assertions)]
     person(account)?;
-    read_account(account).map(drop)
+    let (own, before) = open()?;
+    // A failure here, with a question answered or none shown, ends the child as a refusal.
+    read(&own, before.as_ref(), account).map(drop)
 }
 
 /// For tests, in debug builds only: `APPD_KEYCHAIN_ASK=<folder>` makes an account whose file in
@@ -318,6 +345,18 @@ fn person(account: &str) -> base::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_code_means_absent_would_ask_or_a_plain_error() {
+        assert_eq!(classify(-25300), Code::Absent);
+        // A locked keychain, and an item whose partition list lacks this build.
+        assert_eq!(classify(-25308), Code::WouldAsk);
+        assert_eq!(classify(-25293), Code::WouldAsk);
+        // A cancelled question, a denied delete, a duplicate keychain, success: none is asked about.
+        for code in [-128, -25243, -25296, 0, -50] {
+            assert_eq!(classify(code), Code::Plain, "{code}");
+        }
+    }
 
     fn file(dir: &std::path::Path, name: &str) -> SecKeychain {
         CreateOptions::new()
