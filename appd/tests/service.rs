@@ -11150,6 +11150,12 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     )
     .unwrap();
     fs::write(source.join("scripts/fill.sh"), "#!/bin/sh\necho fill\n").unwrap();
+    fs::set_permissions(
+        source.join("scripts/fill.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(source.join("scripts/readme.txt"), "Plain.\n").unwrap();
     w.ok("install_skill", json!({"bot": bot, "path": source}));
     let schedule = json!({"frequency": "daily", "time": "09:00", "timezone": "UTC"});
     let routine = w.ok(
@@ -11242,6 +11248,7 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
     assert_eq!(preview["instructionsLength"], 9);
     assert_eq!(preview["notes"], 1);
     assert_eq!(preview["skills"][0]["name"], "pdf-forms");
+    assert_eq!(preview["skills"][0]["runsScripts"], true);
     assert_eq!(preview["routines"][0]["name"], "Brief");
     assert_eq!(preview["routines"][0]["schedule"]["time"], "09:00");
     assert_eq!(
@@ -11278,15 +11285,16 @@ fn a_bot_goes_out_as_a_file_and_comes_in_as_a_new_bot_without_anything_private()
         w.ok("list_skills", json!({"bot": new}))["skills"],
         json!([{"name": "pdf-forms", "description": "Fill in PDF forms."}])
     );
+    let skill = home.join("bots").join(&new).join("skills/pdf-forms");
     assert_eq!(
-        fs::read_to_string(
-            home.join("bots")
-                .join(&new)
-                .join("skills/pdf-forms/scripts/fill.sh")
-        )
-        .unwrap(),
+        fs::read_to_string(skill.join("scripts/fill.sh")).unwrap(),
         "#!/bin/sh\necho fill\n"
     );
+    // A runnable file stays runnable, a plain one plain, and nothing is writable by others.
+    let mode = |p: &str| fs::metadata(skill.join(p)).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode("scripts/fill.sh"), 0o755);
+    assert_eq!(mode("scripts/readme.txt") & 0o111, 0);
+    assert_eq!(mode("SKILL.md") & 0o111, 0);
     // Off, with its own webhook token.
     let routines = w.ok("list_routines", json!({"bot": new}))["routines"].clone();
     assert_eq!(routines.as_array().unwrap().len(), 1);

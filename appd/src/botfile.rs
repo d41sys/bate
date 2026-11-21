@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Most bytes of a file, checked before it is parsed.
@@ -79,6 +79,9 @@ struct SkillFile {
     /// Relative to the skill's folder, with `/` between parts.
     path: String,
     text: String,
+    /// The owner can run it (a script); absent: not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    runnable: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -290,6 +293,7 @@ fn collect(
                 "the skill `{skill}`: {path} is a link or a special file, so it cannot go in the file"
             ));
         };
+        let runnable = file.metadata().map_err(err)?.permissions().mode() & 0o100 != 0;
         let mut bytes = Vec::new();
         let left = MAX_BYTES - *seen.1 + 1;
         file.take(left).read_to_end(&mut bytes).map_err(err)?;
@@ -300,7 +304,11 @@ fn collect(
         let text = String::from_utf8(bytes).map_err(|_| {
             format!("the skill `{skill}`: {path} is not text, so it cannot go in the file")
         })?;
-        files.push(SkillFile { path, text });
+        files.push(SkillFile {
+            path,
+            text,
+            runnable,
+        });
     }
     Ok(())
 }
@@ -570,7 +578,7 @@ pub fn preview(file: &Checked, sha256: &str) -> Value {
     json!({
         "name": file.name,
         "instructionsLength": file.profile.instructions.chars().count(),
-        "skills": file.skills.iter().map(|(s, files)| json!({"name": s.name, "description": s.description, "files": files.len()})).collect::<Vec<_>>(),
+        "skills": file.skills.iter().map(|(s, files)| json!({"name": s.name, "description": s.description, "files": files.len(), "runsScripts": files.iter().any(|f| f.runnable)})).collect::<Vec<_>>(),
         "routines": file.routines.iter().map(|r| json!({"name": r.name, "schedule": r.schedule, "webhook": r.webhook, "chat": r.chat})).collect::<Vec<_>>(),
         "notes": file.notes.len(),
         "connectors": file.connectors.iter().map(|(c, address)| json!({"name": c.name, "address": address})).collect::<Vec<_>>(),
@@ -617,7 +625,10 @@ pub fn import(store: &Store, file: Checked, now: u64) -> Result<BotRow, String> 
                 .map_err(|e| format!("cannot write the note {}: {e}", short(&n.name)))?;
         }
         for (skill, files) in &file.skills {
-            let files: Vec<(&str, &str)> = files.iter().map(|f| (&*f.path, &*f.text)).collect();
+            let files: Vec<(&str, &str, bool)> = files
+                .iter()
+                .map(|f| (&*f.path, &*f.text, f.runnable))
+                .collect();
             skills::install_texts(&id, &skill.name, &files)?;
         }
         let connectors: Vec<Connector> = file.connectors.iter().map(|(c, _)| c.clone()).collect();

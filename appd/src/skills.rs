@@ -116,13 +116,15 @@ pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
 }
 
 /// Makes the skill `name` in the bot's skills from `files` (paths already checked to stay
-/// inside the folder, each with its text): written in the staging folder, moved in whole.
-pub fn install_texts(bot: &str, name: &str, files: &[(&str, &str)]) -> Result<(), String> {
+/// inside the folder, each with its text and whether it is runnable): written in the staging
+/// folder, moved in whole. A runnable file gets the mode `copy` gives one (owner rwx, group and
+/// others r-x); never anything more.
+pub fn install_texts(bot: &str, name: &str, files: &[(&str, &str, bool)]) -> Result<(), String> {
     let failed = |e: io::Error| format!("cannot install the skill {name}: {e}");
     let staged = staging().map_err(failed)?;
     let installed = (|| {
         fs::DirBuilder::new().create(&staged)?;
-        for (path, text) in files {
+        for (path, text, runnable) in files {
             let to = staged.join(path);
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent)?;
@@ -130,7 +132,7 @@ pub fn install_texts(bot: &str, name: &str, files: &[(&str, &str)]) -> Result<()
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .mode(0o644)
+                .mode(if *runnable { 0o755 } else { 0o644 })
                 .open(&to)?;
             io::Write::write_all(&mut file, text.as_bytes())?;
         }

@@ -135,7 +135,7 @@ export type SkillPreview = { skill: Skill; entries: number; bytes: number };
 export type BotFilePreview = {
   name: string;
   instructionsLength: number;
-  skills: { name: string; description: string; files: number }[];
+  skills: { name: string; description: string; files: number; runsScripts: boolean }[];
   routines: { name: string; schedule: Routine["schedule"] | null; webhook: boolean; chat: boolean }[];
   notes: number;
   connectors: { name: string; address: string }[];
