@@ -333,6 +333,9 @@ impl Provider {
         mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
         let mut retries = 0;
+        // The reason of a 400 that may have been the web search tool, until the request
+        // without it shows which it was.
+        let mut tried_search = None;
         let mut search =
             ask.web_search && api == Api::Responses && !self.search_refused.load(Ordering::Relaxed);
         loop {
@@ -341,14 +344,17 @@ impl Provider {
                 streamed = true;
                 on(d)
             });
+            // The request without the tool was not refused as a bad request: the tool was why.
+            if let Some(first) = tried_search.take()
+                && !matches!(&once, Err(fail) if bad_request(&fail.why))
+            {
+                self.search_refused.store(true, Ordering::Relaxed);
+                eprintln!("web search is left out: {first}");
+            }
             let fail = match once {
-                // A turn never fails because of web search: ask again without it, for good.
-                Err(fail) if search && refuses_search(&fail.why) => {
-                    self.search_refused.store(true, Ordering::Relaxed);
-                    eprintln!(
-                        "web search is left out: the model server refused it ({})",
-                        fail.why
-                    );
+                // The backend's wording is not known, so any 400 may be the tool: ask again without it.
+                Err(fail) if search && bad_request(&fail.why) => {
+                    tried_search = Some(fail.why);
                     search = false;
                     continue;
                 }
@@ -505,12 +511,9 @@ impl Provider {
     }
 }
 
-/// Whether `why`, a failed call's reason, is an HTTP 4xx whose body names the web search tool
-/// (or `tools`).
-fn refuses_search(why: &str) -> bool {
-    let why = why.to_lowercase();
-    why.starts_with("the model server answered 4")
-        && (why.contains(WEB_SEARCH) || why.contains("tools"))
+/// Whether `why`, a failed call's reason, is an HTTP 400 (and no other status).
+fn bad_request(why: &str) -> bool {
+    why.starts_with("the model server answered 400")
 }
 
 /// What a hosted search looked for: its query, else the first of its queries, else the page.

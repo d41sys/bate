@@ -157,14 +157,16 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           inline
           title="Search the web"
           hint={
-            onPlan === false
-              ? "Needs the ChatGPT sign-in: this bot runs on the model server, which has no search."
-              : "The search runs at ChatGPT, so a bot's allowed-hosts list does not hold it."
+            bot.network !== null
+              ? "Off while commands reach only some hosts."
+              : onPlan === false
+                ? "Needs the ChatGPT sign-in: this bot runs on the model server, which has no search."
+                : "The search runs at ChatGPT."
           }
           saved={saved("search")}
           error={error("search")}
         >
-          <input type="checkbox" role="switch" checked={bot.webSearch} onChange={(e) => run("search", request("set_bot", { bot: bot.id, webSearch: e.target.checked }))} />
+          <input type="checkbox" role="switch" checked={bot.webSearch && bot.network === null} disabled={bot.network !== null} onChange={(e) => run("search", request("set_bot", { bot: bot.id, webSearch: e.target.checked }))} />
         </Setting>
       </Group>
       {bot.browserTaken && (

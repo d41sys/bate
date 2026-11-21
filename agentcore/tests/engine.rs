@@ -3032,22 +3032,33 @@ fn a_hosted_web_search_is_offered_shown_as_a_tool_line_and_not_sent_back_and_the
     assert_eq!(tool_types(&requests[2]), ["namespace"]);
 }
 
+/// A whole answer with `status` whose body says `message`.
+fn answer_with(status: &str, message: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+         {{\"error\":{{\"message\":\"{message}\"}}}}"
+    )
+    .into_bytes()
+}
+
+fn done_reply(text: &str) -> Vec<u8> {
+    responses_body(&[
+        json!({"type": "response.output_text.delta", "delta": text}),
+        json!({"type": "response.completed", "response": {"status": "completed"}}),
+    ])
+}
+
+fn ended(events: &[Event]) -> &Event {
+    events.last().expect("a turn_end")
+}
+
 #[test]
-fn a_refused_web_search_tool_is_left_out_and_the_turn_goes_on() {
+fn a_400_to_a_request_with_web_search_is_asked_again_without_it_whatever_it_says() {
     let dir = workdir("engine-web-search-refused");
-    let completed = json!({"type": "response.completed", "response": {"status": "completed"}});
-    let reply = |text: &str| {
-        responses_body(&[
-            json!({"type": "response.output_text.delta", "delta": text}),
-            completed.clone(),
-        ])
-    };
     let model = Model::replay(vec![
-        b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
-          {\"error\":{\"message\":\"Unsupported tool type: web_search\"}}"
-            .to_vec(),
-        reply("Answered."),
-        reply("Again."),
+        answer_with("400 Bad Request", "Something is wrong."),
+        done_reply("Answered."),
+        done_reply("Again."),
     ]);
     let mut engine = Engine::start_manual_token(&dir, &model, &[]);
     engine.open_new();
@@ -3056,11 +3067,11 @@ fn a_refused_web_search_tool_is_left_out_and_the_turn_goes_on() {
     assert_eq!(said(&events), "Answered.");
     assert!(retries(&events).is_empty(), "{events:?}");
     assert!(matches!(
-        events.last(),
-        Some(Event::TurnEnd {
+        ended(&events),
+        Event::TurnEnd {
             reason: TurnEnd::Done,
             error: None
-        })
+        }
     ));
     let events = responses_turn(&mut engine, &model, "n2", "hi again");
     assert_eq!(said(&events), "Again.");
@@ -3072,6 +3083,71 @@ fn a_refused_web_search_tool_is_left_out_and_the_turn_goes_on() {
     assert_eq!(tool_types(&requests[1]), ["namespace"]);
     assert_eq!(tool_types(&requests[2]), ["namespace"]);
     assert_eq!(requests[0]["input"], requests[1]["input"]);
+}
+
+#[test]
+fn a_400_that_the_request_without_web_search_gets_too_is_the_providers_and_the_tool_stays() {
+    let dir = workdir("engine-web-search-both-refused");
+    let model = Model::replay(vec![
+        answer_with("400 Bad Request", "Bad input."),
+        answer_with("400 Bad Request", "Bad input."),
+        done_reply("Fine."),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+
+    let events = responses_turn(&mut engine, &model, "n1", "hi");
+    let Event::TurnEnd {
+        reason: TurnEnd::Error,
+        error: Some(error),
+    } = ended(&events)
+    else {
+        panic!("{events:?}")
+    };
+    assert!(
+        error.contains("400") && error.contains("Bad input."),
+        "{error}"
+    );
+    let events = responses_turn(&mut engine, &model, "n2", "hi again");
+    assert_eq!(said(&events), "Fine.");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(tool_types(&requests[0]), ["namespace", "web_search"]);
+    assert_eq!(tool_types(&requests[1]), ["namespace"]);
+    assert_eq!(tool_types(&requests[2]), ["namespace", "web_search"]);
+}
+
+#[test]
+fn a_401_or_a_quota_429_to_a_request_with_web_search_is_not_asked_again_without_it() {
+    let dir = workdir("engine-web-search-other-4xx");
+    let model = Model::replay(vec![
+        answer_with("401 Unauthorized", "Sign in again."),
+        answer_with("429 Too Many Requests", "insufficient_quota"),
+        done_reply("Fine."),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    for (nonce, why) in [("n1", "401"), ("n2", "429")] {
+        let events = responses_turn(&mut engine, &model, nonce, "hi");
+        let Event::TurnEnd {
+            reason: TurnEnd::Error,
+            error: Some(error),
+        } = ended(&events)
+        else {
+            panic!("{events:?}")
+        };
+        assert!(error.contains(why), "{error}");
+    }
+    let events = responses_turn(&mut engine, &model, "n3", "hi");
+    assert_eq!(said(&events), "Fine.");
+
+    // One request each, all with the tool.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert_eq!(tool_types(request), ["namespace", "web_search"]);
+    }
 }
 
 #[test]
