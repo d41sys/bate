@@ -484,9 +484,13 @@ fn send(s: &Session, body: &[u8]) -> Answer {
     if body.contains(&b'\n') || body.contains(&b'\r') {
         return Answer::error(400, "one line, with no line break");
     }
-    if let Ok(f) = serde_json::from_slice::<Value>(body)
+    let mut frame = serde_json::from_slice::<Value>(body).ok();
+    if let Some(f) = &frame
         && let Some(cmd) = f.get("type").and_then(Value::as_str)
-        && FORBIDDEN_OVER_LAN.contains(&cmd)
+        // A routine's precheck is a command that runs on this computer: only the person at
+        // its own window sets it, so a device may not add, change or clear one.
+        && (FORBIDDEN_OVER_LAN.contains(&cmd)
+            || cmd == "set_routine" && f.pointer("/routine/precheck").is_some())
     {
         let id = f.get("id").cloned().unwrap_or(Value::Null);
         let error = json!({
@@ -500,6 +504,17 @@ fn send(s: &Session, body: &[u8]) -> Answer {
         let _ = s.tx.send(error.to_string());
         return Answer::json(200, &json!({}));
     }
+    // The rest of a routine may be edited: the precheck stays as it is. The frame is sent as
+    // parsed here, so the service reads what was checked.
+    let kept;
+    let body = match &mut frame {
+        Some(f) if f.get("type").and_then(Value::as_str) == Some("set_routine") => {
+            f["keepPrecheck"] = Value::Bool(true);
+            kept = f.to_string();
+            kept.as_bytes()
+        }
+        _ => body,
+    };
     let mut to = lock(&s.to);
     match to.write_all(body).and_then(|()| to.write_all(b"\n")) {
         Ok(()) => Answer::json(200, &json!({})),

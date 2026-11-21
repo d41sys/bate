@@ -13809,7 +13809,9 @@ fn a_precheck_runs_first_in_the_bots_limits_and_decides_whether_the_bot_runs() {
 
     // Any other exit: skipped, with the first line it printed.
     let (stops, url) = make(&mut w, "Stops", "echo nothing new; echo second; exit 3");
-    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    // The precheck runs on its own: the answer is "accepted", the skip shows in the runs.
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the skip", || !runs_of(&mut w, &bot, &stops).is_empty());
     let run = runs_of(&mut w, &bot, &stops)[0].clone();
     assert_eq!(
         (&run["outcome"], &run["reason"], &run["detail"]),
@@ -13819,7 +13821,8 @@ fn a_precheck_runs_first_in_the_bots_limits_and_decides_whether_the_bot_runs() {
 
     // The folder limit holds it as it holds the bot: it cannot write outside the bot's folder.
     let (denied, url) = make(&mut w, "Denied", &format!("echo x > {}", outside.display()));
-    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the skip", || !runs_of(&mut w, &bot, &denied).is_empty());
     let run = runs_of(&mut w, &bot, &denied)[0].clone();
     assert_eq!(
         (&run["outcome"], &run["reason"]),
@@ -13829,7 +13832,9 @@ fn a_precheck_runs_first_in_the_bots_limits_and_decides_whether_the_bot_runs() {
     // Inside its folder it may.
     let (inside, url) = make(&mut w, "Inside", "echo x > made.txt && cat made.txt");
     assert_eq!(http(&url, "POST", None, head, ""), 202);
-    assert!(home.join("bots").join(&bot).join("made.txt").exists());
+    eventually("the file", || {
+        home.join("bots").join(&bot).join("made.txt").exists()
+    });
     turns_ended(&mut w, &bot, "done", 2);
 
     // The person's "never run commands" holds.
@@ -13865,4 +13870,191 @@ fn a_precheck_runs_first_in_the_bots_limits_and_decides_whether_the_bot_runs() {
             .unwrap()
             .contains("precheck could not be started")
     );
+}
+
+/// A routine whose precheck waits until the file `gate` is in the bot's folder; it writes its
+/// process id first. Returns its id and webhook address.
+fn waiting_routine(w: &mut Window, bot: &str) -> (String, String) {
+    let check = "echo $$ > pid; while [ ! -e gate ]; do sleep 0.05; done; echo open";
+    let routine = json!({"name": "Waits", "prompt": "Look at it.", "enabled": true,
+        "webhook": true, "precheck": check});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+    (
+        routine["id"].as_str().unwrap().to_owned(),
+        routine["hookUrl"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn a_precheck_that_waits_does_not_hold_up_the_service_and_the_run_starts_when_it_ends() {
+    let home = home("routine-precheck-wait");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    let (id, url) = waiting_routine(&mut w, &bot);
+    let head = "content-length: 0\r\n";
+
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    // The service answers while the precheck waits.
+    assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["id"], bot.as_str());
+    // The routine counts as starting: a second start is refused as for a run under way.
+    assert_eq!(http(&url, "POST", None, head, ""), 409);
+    assert_eq!(
+        refusal(&mut w, "run_routine", json!({"bot": bot, "routineId": id})),
+        "busy"
+    );
+    assert_eq!(prompt_count(&home, &bot), 0);
+    assert!(runs_of(&mut w, &bot, &id).is_empty());
+
+    fs::write(folder.join("gate"), "").unwrap();
+    turns_ended(&mut w, &bot, "done", 1);
+    assert_eq!(runs_of(&mut w, &bot, &id)[0]["outcome"], "sent");
+    let sent = fs::read_to_string(folder.join("prompts.log")).unwrap();
+    assert!(
+        sent.contains("open") && sent.contains("Look at it."),
+        "{sent}"
+    );
+}
+
+#[test]
+fn pausing_the_bot_or_deleting_the_routine_while_its_precheck_waits_ends_in_no_run() {
+    let home = home("routine-precheck-cancel");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    let (id, url) = waiting_routine(&mut w, &bot);
+    let head = "content-length: 0\r\n";
+    let ended = |folder: &Path| {
+        let pid = fs::read_to_string(folder.join("pid")).unwrap();
+        // `kill -0` fails once the process is gone.
+        !Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    let run = runs_of(&mut w, &bot, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"]),
+        (&json!("skipped"), &json!("paused"))
+    );
+    eventually("the command is killed", || ended(&folder));
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+
+    fs::remove_file(folder.join("pid")).unwrap();
+    assert_eq!(http(&url, "POST", None, head, ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    w.ok("delete_routine", json!({"bot": bot, "routineId": id}));
+    eventually("the command is killed", || ended(&folder));
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+    assert_eq!(prompt_count(&home, &bot), 0);
+}
+
+#[test]
+fn a_device_cannot_add_change_or_clear_a_precheck_but_can_edit_the_rest_and_the_window_can() {
+    let home = home("routine-precheck-lan");
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", "0");
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let port = w.ok("set_lan", json!({"on": true}))["port"]
+        .as_u64()
+        .unwrap();
+    let code = w.ok("pair_device", json!({}))["code"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut device = Device::new(port);
+    let body = json!({"code": code, "name": "Phone"}).to_string();
+    let (status, _, cookie) = device.call("POST", "/api/pair", &body, true);
+    assert_eq!(status, 200);
+    device.cookie = Some(cookie.unwrap().split(';').next().unwrap().to_owned());
+    let session: Value = serde_json::from_str(&device.post("/api/session", "").1).unwrap();
+    let session = session["session"].as_str().unwrap().to_owned();
+    let mut sent = 0;
+    // One frame from the device, and the answer to it.
+    let mut ask = |command: &str, mut frame: Value| -> Value {
+        sent += 1;
+        frame["id"] = sent.to_string().into();
+        frame["type"] = command.into();
+        let path = format!("/api/send?session={session}");
+        assert_eq!(device.post(&path, &frame.to_string()).0, 200);
+        for _ in 0..10 {
+            let path = format!("/api/recv?session={session}");
+            let (_, body, _) = device.call("GET", &path, "", true);
+            let lines: Vec<Value> = serde_json::from_str(&body).unwrap();
+            let id = sent.to_string();
+            if let Some(r) = lines
+                .into_iter()
+                .find(|v| v["type"] == "response" && v["id"] == id)
+            {
+                return r;
+            }
+        }
+        panic!("no answer");
+    };
+    ask("hello", json!({"protocol": 1}));
+
+    let made = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": {"name": "Checked", "prompt": "Look.", "enabled": false, "chat": true, "precheck": "echo one"}}),
+    )["routine"]
+        .clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    let row = |w: &mut Window| routine_row(w, &bot, &id);
+
+    // An edit that leaves the precheck out leaves it as it was.
+    let mut edit = made.clone();
+    edit["name"] = "Renamed".into();
+    edit.as_object_mut().unwrap().remove("precheck");
+    let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(answer["success"], true, "{answer}");
+    let now = row(&mut w);
+    assert_eq!(
+        (&now["name"], &now["precheck"]),
+        (&json!("Renamed"), &json!("echo one"))
+    );
+
+    // Adding, changing or clearing one is refused, and nothing is stored.
+    for precheck in [json!("echo two"), json!(null)] {
+        let mut edit = made.clone();
+        edit["precheck"] = precheck;
+        let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+        assert_eq!(
+            (&answer["success"], &answer["code"]),
+            (&json!(false), &json!("forbidden")),
+            "{answer}"
+        );
+    }
+    let fresh = json!({"name": "New", "prompt": "Look.", "enabled": false, "chat": true, "precheck": "echo three"});
+    let answer = ask("set_routine", json!({"bot": bot, "routine": fresh}));
+    assert_eq!(answer["code"], "forbidden", "{answer}");
+    assert_eq!(row(&mut w)["precheck"], "echo one");
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+
+    // A device may add a routine with none.
+    let plain = json!({"name": "Plain", "prompt": "Look.", "enabled": false, "chat": true});
+    let answer = ask("set_routine", json!({"bot": bot, "routine": plain}));
+    assert_eq!(answer["success"], true, "{answer}");
+    assert!(answer["data"]["routine"]["precheck"].is_null(), "{answer}");
+
+    // The window may change it and clear it.
+    let mut edit = made.clone();
+    edit["precheck"] = "echo two".into();
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(row(&mut w)["precheck"], "echo two");
+    edit.as_object_mut().unwrap().remove("precheck");
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert!(row(&mut w)["precheck"].is_null());
 }

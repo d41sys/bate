@@ -5,6 +5,7 @@ use crate::sys;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{io, thread};
@@ -22,8 +23,9 @@ pub enum Checked {
     Stopped(String),
 }
 
-/// Runs `command` to its end. An error: it could not be started.
-pub fn run(mut command: Command) -> io::Result<Checked> {
+/// Runs `command` to its end, or until `cancel` is set, which kills it. An error: it could not
+/// be started.
+pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
     let (mut reader, writer) = io::pipe()?;
     command
         .stdin(Stdio::null())
@@ -48,13 +50,16 @@ pub fn run(mut command: Command) -> io::Result<Checked> {
     let status = loop {
         match child.try_wait()? {
             Some(status) => break Some(status),
+            None if cancel.load(Ordering::Relaxed) => {
+                killpg(&child);
+                let _ = child.wait();
+                return Ok(Checked::Stopped("cancelled".into()));
+            }
             None if started.elapsed() >= WAIT => break None,
             None => thread::sleep(Duration::from_millis(20)),
         }
     };
-    // SAFETY: a signal to the group of a child that is ours; what the command left behind
-    // ends too, so the pipe closes.
-    unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
+    killpg(&child);
     let _ = child.wait();
     let out = finished
         .recv_timeout(Duration::from_secs(1))
@@ -68,6 +73,12 @@ pub fn run(mut command: Command) -> io::Result<Checked> {
         })),
         None => Checked::Stopped(format!("did not end in {} s", WAIT.as_secs())),
     })
+}
+
+/// Ends the command's whole group, so what it left behind ends too and the pipe closes.
+fn killpg(child: &std::process::Child) {
+    // SAFETY: a signal to the group of a child that is ours.
+    unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
 }
 
 fn first_line(out: &str) -> Option<String> {
