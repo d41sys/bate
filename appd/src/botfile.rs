@@ -450,6 +450,8 @@ fn check(file: BotFile, now: u64) -> Result<Checked, String> {
             anchor: None,
             next_run_ms: None,
             last_run: None,
+            precheck: None,
+            backoff: None,
         };
         let shown = short(&routine.name);
         let wrong = |e: String| format!("the routine `{shown}`: {e}");

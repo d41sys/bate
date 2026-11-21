@@ -2,15 +2,15 @@ import { useEffect, useState } from "react";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { dayTime, EVERY, when } from "./times.ts";
-import { listen, request } from "./service.ts";
+import { heldText, skipWhy } from "./routines.ts";
+import { listen, openInBrowser, request } from "./service.ts";
 import type { Frequency, Routine, RoutineRun } from "./types.ts";
 
 const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped", skipped: "Skipped" };
-const REASON: Record<string, string> = { paused: "The bot was paused." };
 
 /** The fields of the dialog; a routine with no schedule starts only from its web address or a chat. */
-const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false };
-const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat });
+const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false, precheck: "" };
+const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat, precheck: r.precheck ?? "" });
 
 /** How a run ended: a quiet badge when it went well, a plain one when the person should look. */
 const Outcome = ({ run }: { run: RoutineRun }) => <span className={run.outcome === "sent" || run.outcome === "skipped" ? "badge quiet" : "badge"}>{OUTCOME[run.outcome]}</span>;
@@ -43,7 +43,8 @@ function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
             <li key={`${x.atMs}-${i}`}>
               <span>{dayTime(x.atMs)}</span>
               {x.error && <small className="error">{x.error}</small>}
-              {x.reason && <small>{REASON[x.reason] ?? x.reason}</small>}
+              {skipWhy(x) && <small>{skipWhy(x)}</small>}
+              {x.by === "user" && <small>Started by you</small>}
               <Outcome run={x} />
             </li>
           ))}
@@ -77,11 +78,11 @@ export function Routines({ bot }: { bot: string }) {
   const open = (edit?: Routine) => (setForm(edit ? formOf(edit) : blank), setAsk({ edit }));
   const save = async () => {
     const { edit } = ask!;
-    const { name, prompt, scheduled, frequency, interval, time, webhook, chat } = form;
+    const { name, prompt, scheduled, frequency, interval, time, webhook, chat, precheck } = form;
     if (!scheduled && !webhook && !chat) throw new Error("Choose what starts it: a schedule, a web address or a chat.");
     await request("set_routine", {
       bot,
-      routine: { ...edit, name, prompt, enabled: edit?.enabled ?? true, webhook, chat, schedule: scheduled ? { ...edit?.schedule, frequency, interval, time } : undefined },
+      routine: { ...edit, name, prompt, enabled: edit?.enabled ?? true, webhook, chat, precheck: precheck.trim() || undefined, schedule: scheduled ? { ...edit?.schedule, frequency, interval, time } : undefined },
     });
     setError("");
     setSaved(true);
@@ -103,18 +104,22 @@ export function Routines({ bot }: { bot: string }) {
               <li key={r.id}>
                 <div className="what">
                   <strong>{r.name}</strong> {r.lastRun && <Outcome run={r.lastRun} />}
+                  {r.backoff && <span className="badge quiet">{heldText(r.backoff)}</span>}
                   <small>{when(r)}</small>
                   <small>
-                    {r.enabled && r.nextRunMs !== undefined && `Next: ${dayTime(r.nextRunMs)}`}
-                    {r.enabled && r.nextRunMs !== undefined && r.lastRun && " · "}
-                    {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}`}
+                    {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && `Next: ${dayTime((r.backoff?.nextRunMs ?? r.nextRunMs)!)}`}
+                    {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && r.lastRun && " · "}
+                    {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}${r.lastRun.by === "user" ? " (started by you)" : ""}`}
                   </small>
                   {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}
-                  {r.lastRun?.reason && <small>{REASON[r.lastRun.reason] ?? r.lastRun.reason}</small>}
+                  {r.lastRun && skipWhy(r.lastRun) && <small>{skipWhy(r.lastRun)}</small>}
+                  {r.lastRun?.reason === "signed_out" && r.lastRun.detail && <button className="small" onClick={() => void run(request<{ url: string }>("sign_in_connector", { bot, name: r.lastRun!.detail }).then((d) => openInBrowser(d.url)))}>Sign in to {r.lastRun.detail}</button>}
+                  {r.precheck && <small>Checks first: <code>{r.precheck}</code></small>}
                   {r.chat && <small>From a paired chat: write /run {r.name}</small>}
                   {r.hookUrl && <small>Web address: <code>{r.hookUrl}</code></small>}
                 </div>
                 <div className="actions">
+                  <button className="small" onClick={() => void run(request("run_routine", { bot, routineId: r.id }))}>Test</button>
                   <label>
                     <input type="checkbox" role="switch" aria-label={r.name} checked={r.enabled} onChange={(e) => void run(request("set_routine", { bot, routine: { ...r, enabled: e.target.checked } }), true)} />
                     {r.enabled ? "On" : "Off"}
@@ -162,6 +167,8 @@ export function Routines({ bot }: { bot: string }) {
             <label><input type="checkbox" checked={form.webhook} onChange={(e) => setForm({ ...form, webhook: e.target.checked })} /> A web address</label>
             {form.webhook && <p className="note">The address is shown under the routine. Anyone on this Mac who knows it can start the routine. For a new address, turn this off and save, then turn it on and save.</p>}
             <label><input type="checkbox" checked={form.chat} onChange={(e) => setForm({ ...form, chat: e.target.checked })} /> A paired chat (Telegram, Discord), by writing /run and its name</label>
+            <label>Check first, with a command <input maxLength={500} value={form.precheck} onChange={(e) => setForm({ ...form, precheck: e.target.value })} /></label>
+            {form.precheck.trim() && <p className="note">Runs before each run, without a model, in the bot's folder and under its limits. If it ends with 0, the bot runs and gets what it printed; any other end skips the run. Saving allows exactly this command for this routine, without asking again.</p>}
           </>
         </Sheet>
       )}

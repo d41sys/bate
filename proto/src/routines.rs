@@ -79,9 +79,28 @@ pub struct RoutineRun {
     pub outcome: RunOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Why a `skipped` run was not run, in a word: `paused`.
+    /// Why a `skipped` run was not run, in a word: `paused`, `signed_out`, `backoff` or
+    /// `precheck`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What `reason` is about: the connector that is signed out, or the first line the
+    /// precheck printed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// `user` for a run the person started with `run_routine`; missing for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+}
+
+/// Output only: a scheduled routine whose last runs failed is held to fewer runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Backoff {
+    /// Failed runs in a row.
+    pub failures: u32,
+    /// Unix ms of the next slot that will run; missing if the schedule has none left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_ms: Option<u64>,
 }
 
 /// A routine. `hook_token`, `hook_url` and the fields after them are output only: the service
@@ -105,6 +124,11 @@ pub struct Routine {
     /// Whether `/run <name>` from a chat paired on one of the bot's channels starts it too.
     #[serde(default)]
     pub chat: bool,
+    /// A command that runs before the bot, with no model. Exit 0: the bot runs, with the
+    /// output in front of its prompt. Any other exit: the run is skipped. Saving it allows
+    /// exactly this command for this routine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precheck: Option<String>,
     /// Daemon-made secret, kept while `webhook` stays on; turn it off and on for a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_token: Option<String>,
@@ -120,4 +144,7 @@ pub struct Routine {
     pub next_run_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RoutineRun>,
+    /// Output only: set while the routine is held back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff: Option<Backoff>,
 }
