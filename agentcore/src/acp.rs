@@ -287,7 +287,8 @@ impl Bridge {
             | Op::Peers { .. }
             | Op::SkillFolders { .. }
             | Op::Instructions { .. }
-            | Op::StepLimit { .. } => respond(id, Ok(())),
+            | Op::StepLimit { .. }
+            | Op::WebSearch { .. } => respond(id, Ok(())),
             Op::Steer { .. } => {
                 respond(id, Err("this agent takes no message while it works".into()))
             }

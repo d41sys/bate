@@ -1995,6 +1995,13 @@ impl Core {
                         }
                     },
                 };
+                let web_search = match f.get("webSearch").filter(|v| !v.is_null()) {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_bool()
+                            .ok_or_else(|| bad("`webSearch` must be true or false"))?,
+                    ),
+                };
                 let mut profile = self.store.profile(&bot).map_err(internal)?;
                 let text = |key: &str| {
                     f.get(key).filter(|v| !v.is_null()).map(|v| {
@@ -2043,6 +2050,13 @@ impl Core {
                     self.store.set_step_limit(&bot, steps).map_err(internal)?;
                     if self.engines.contains_key(&bot) {
                         self.send_op(&bot, Op::StepLimit { steps }, Waiter::Quiet)?;
+                    }
+                }
+                if let Some(on) = web_search {
+                    self.store.set_web_search(&bot, on).map_err(internal)?;
+                    if self.engines.contains_key(&bot) {
+                        let on = self.web_search_on(&bot).map_err(internal)?;
+                        self.send_op(&bot, Op::WebSearch { on }, Waiter::Quiet)?;
                     }
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
@@ -2533,6 +2547,7 @@ impl Core {
                 .flatten()
                 .unwrap_or(STEP_LIMIT)
         );
+        row["webSearch"] = json!(self.store.web_search(bot).unwrap_or(true));
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
         if let Ok(Some((model, effort))) = self.store.model(bot) {
@@ -2739,6 +2754,7 @@ impl Core {
         let (peers, leads) = self.peers_of(bot).map_err(internal)?;
         let instructions = self.instructions_of(bot).map_err(internal)?;
         let steps = self.store.step_limit(bot).map_err(internal)?;
+        let web_search = self.web_search_on(bot).map_err(internal)?;
         let model = self.store.model(bot).map_err(internal)?;
         let whole_disk = self.store.whole_disk(bot).map_err(internal)?;
         let agent = self.store.agent(bot).map_err(internal)?;
@@ -2886,6 +2902,7 @@ impl Core {
         if let Some(steps) = steps {
             self.send_op(bot, Op::StepLimit { steps }, Waiter::Quiet)?;
         }
+        self.send_op(bot, Op::WebSearch { on: web_search }, Waiter::Quiet)?;
         if let Some((model, effort)) = model {
             self.send_op(bot, Op::SetModel { model, effort }, Waiter::Quiet)?;
         }
@@ -2960,6 +2977,14 @@ impl Core {
         let key = sys::random_hex(16);
         self.net_keys.insert(owner, (key.clone(), hosts));
         Ok((port, key))
+    }
+
+    /// Whether the engine of `bot` is told to offer the provider's web search: the bot's switch,
+    /// and no network limit. The search runs at the provider, so it would go round the limit's
+    /// list; the switch itself is kept, and counts again once the limit is lifted. A change of the
+    /// limit stops the engine (see `set_network`), so the next one is told anew.
+    fn web_search_on(&self, bot: &str) -> rusqlite::Result<bool> {
+        Ok(self.store.web_search(bot)? && self.store.network(bot)?.is_none())
     }
 
     /// The hosts the commands of `bot` may reach: its own, its project's, and its model's

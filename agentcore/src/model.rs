@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -132,8 +133,9 @@ fn responses_done(line: &str) -> bool {
 }
 
 /// The chat-shaped conversation as Responses input items.
-// shortcut: the model's reasoning items are not kept between calls of a turn (`store` is
-// false, so the server has none either); send them back when tool-heavy turns reason anew.
+// shortcut: the model's reasoning items and its hosted searches are not kept between calls of
+// a turn (`store` is false, so the server has none either; the reply's text has what the
+// search found); send them back when tool-heavy turns reason anew.
 fn input<'a>(messages: impl Iterator<Item = &'a Value>) -> Vec<Value> {
     let mut items = Vec::new();
     for m in messages {
@@ -166,8 +168,11 @@ fn input<'a>(messages: impl Iterator<Item = &'a Value>) -> Vec<Value> {
     items
 }
 
-/// The body of a Responses request for `ask`.
-fn responses_body(ask: &Ask) -> Value {
+/// The tool the provider runs itself: its search is done at the provider, not by this app.
+const WEB_SEARCH: &str = "web_search";
+
+/// The body of a Responses request for `ask`; `search` adds the hosted web search tool.
+fn responses_body(ask: &Ask, search: bool) -> Value {
     let mut body = json!({
         "model": ask.model,
         "instructions": ask.system,
@@ -175,7 +180,7 @@ fn responses_body(ask: &Ask) -> Value {
         "store": false,
         "stream": true,
     });
-    let tools: Vec<Value> = ask
+    let mut tools: Vec<Value> = ask
         .tools
         .as_array()
         .into_iter()
@@ -186,12 +191,18 @@ fn responses_body(ask: &Ask) -> Value {
         })
         .collect();
     if !tools.is_empty() {
-        body["tools"] = json!([{
+        tools = vec![json!({
             "type": "namespace",
             "name": NAMESPACE,
             "description": "The tools of this app.",
             "tools": tools,
-        }]);
+        })];
+    }
+    if search {
+        tools.push(json!({"type": WEB_SEARCH}));
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
     }
     if let Some(effort) = ask.effort {
         body["reasoning"] = json!({"effort": effort});
@@ -201,6 +212,9 @@ fn responses_body(ask: &Ask) -> Value {
 
 pub struct Provider {
     agent: ureq::Agent,
+    /// Set once the provider refused a request for its web search tool; kept by the engine
+    /// beyond one turn, so no later request offers the tool again.
+    search_refused: Arc<AtomicBool>,
     /// How long a call may send nothing; `BATE_MODEL_IDLE_MS`.
     idle: Duration,
     /// The first wait before a retry; `BATE_MODEL_RETRY_MS`.
@@ -210,6 +224,13 @@ pub struct Provider {
 pub enum Delta<'a> {
     Text(&'a str),
     Thinking(&'a str),
+    /// The provider ran a search of the web itself (`id` names it); `query` is what it looked
+    /// for, empty when the provider did not say.
+    Search {
+        id: &'a str,
+        query: &'a str,
+        failed: bool,
+    },
     /// The call failed in a way that may pass; it is asked again after `wait`.
     Retry {
         attempt: u32,
@@ -262,6 +283,8 @@ pub struct Ask<'a> {
     /// One more message after `messages`.
     pub last: Option<&'a Value>,
     pub tools: &'a Value,
+    /// Offer the provider's web search tool; only a Responses call does.
+    pub web_search: bool,
 }
 
 /// A time from the environment in milliseconds (the tests make these short).
@@ -284,12 +307,13 @@ fn pause(wait: Duration, abort: &AtomicBool) -> bool {
 }
 
 impl Provider {
-    pub fn new() -> Provider {
+    pub fn new(search_refused: Arc<AtomicBool>) -> Provider {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .build();
         Provider {
             agent: ureq::Agent::new_with_config(config),
+            search_refused,
             idle: millis("BATE_MODEL_IDLE_MS", IDLE),
             wait: millis("BATE_MODEL_RETRY_MS", RETRY_WAIT),
         }
@@ -309,13 +333,31 @@ impl Provider {
         mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
         let mut retries = 0;
+        // The reason of a 400 that may have been the web search tool, until the request
+        // without it shows which it was.
+        let mut tried_search = None;
+        let mut search =
+            ask.web_search && api == Api::Responses && !self.search_refused.load(Ordering::Relaxed);
         loop {
             let mut streamed = false;
-            let once = self.once(base_url, key, api, ask, abort, |d| {
+            let once = self.once(base_url, key, api, search, ask, abort, |d| {
                 streamed = true;
                 on(d)
             });
+            // The request without the tool was not refused as a bad request: the tool was why.
+            if let Some(first) = tried_search.take()
+                && !matches!(&once, Err(fail) if bad_request(&fail.why))
+            {
+                self.search_refused.store(true, Ordering::Relaxed);
+                eprintln!("web search is left out: {first}");
+            }
             let fail = match once {
+                // The backend's wording is not known, so any 400 may be the tool: ask again without it.
+                Err(fail) if search && bad_request(&fail.why) => {
+                    tried_search = Some(fail.why);
+                    search = false;
+                    continue;
+                }
                 Err(fail) if fail.transient && !streamed && retries < RETRIES => fail,
                 done => return done.map_err(|fail| fail.why),
             };
@@ -342,11 +384,13 @@ impl Provider {
     // shortcut: after an abort or an idle call the reading thread and its connection stay until
     // the server next sends or closes (ureq cannot be closed from here); switch HTTP client if
     // servers keep generating into it.
+    #[allow(clippy::too_many_arguments)]
     fn once(
         &self,
         base_url: &str,
         key: Option<&str>,
         api: Api,
+        search: bool,
         ask: &Ask,
         abort: &AtomicBool,
         on: impl FnMut(Delta),
@@ -367,7 +411,8 @@ impl Provider {
                 chat(&self.lines(url, key, body, chat_done), abort, self.idle, on)
             }
             Api::Responses => {
-                let body = serde_json::to_vec(&responses_body(ask)).map_err(|e| e.to_string())?;
+                let body =
+                    serde_json::to_vec(&responses_body(ask, search)).map_err(|e| e.to_string())?;
                 let url = format!("{base}/responses");
                 let lines = self.lines(url, key, body, responses_done);
                 responses(&lines, abort, self.idle, on).map_err(|mut fail| {
@@ -466,6 +511,19 @@ impl Provider {
     }
 }
 
+/// Whether `why`, a failed call's reason, is an HTTP 400 (and no other status).
+fn bad_request(why: &str) -> bool {
+    why.starts_with("the model server answered 400")
+}
+
+/// What a hosted search looked for: its query, else the first of its queries, else the page.
+fn searched(action: &Value) -> &str {
+    [&action["query"], &action["queries"][0], &action["url"]]
+        .into_iter()
+        .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
+        .unwrap_or("")
+}
+
 /// Reads a Responses stream to its `response.completed`.
 fn responses(
     lines: &Lines,
@@ -474,6 +532,7 @@ fn responses(
     mut on: impl FnMut(Delta),
 ) -> Result<Reply, Fail> {
     let mut reply = Reply::default();
+    let mut searches = 0;
     loop {
         let line = match next(lines, abort, idle)? {
             Next::Line(line) => line,
@@ -501,6 +560,19 @@ fn responses(
                     id: field("call_id"),
                     name: field("name"),
                     arguments: field("arguments"),
+                });
+            }
+            // The provider ran it: there is no result to send back, and the item is not kept.
+            "response.output_item.done" if item["type"] == "web_search_call" => {
+                searches += 1;
+                let numbered = format!("{WEB_SEARCH}_{searches}");
+                on(Delta::Search {
+                    id: item["id"]
+                        .as_str()
+                        .filter(|i| !i.is_empty())
+                        .unwrap_or(&numbered),
+                    query: searched(&item["action"]),
+                    failed: item["status"] == "failed",
                 });
             }
             "response.completed" => return Ok(reply),

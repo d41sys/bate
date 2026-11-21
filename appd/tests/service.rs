@@ -149,6 +149,7 @@ while IFS= read -r line; do
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
     *'"type":"instructions"'*) printf '%s\n' "$line" >> instructions.log; echo "$ok" ;;
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
+    *'"type":"web_search"'*) printf '%s\n' "$line" >> web_search.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
     *'"type":"apple_result"'*) printf '%s\n' "$line" >> apple.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -8067,6 +8068,99 @@ fn a_bots_step_limit_is_kept_sent_to_the_engine_and_marked_on_a_routine_run_that
     });
     let runs = w.ok("list_routine_runs", json!({"bot": bot, "routineId": id}))["runs"].clone();
     assert_eq!(runs.as_array().unwrap().len(), 1, "{runs}");
+}
+
+#[test]
+fn a_bots_web_search_switch_is_on_by_default_kept_across_a_restart_and_sent_to_the_engine() {
+    let home = home("web-search");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let told = || {
+        fs::read_to_string(home.join("bots").join(&bot).join("web_search.log")).unwrap_or_default()
+    };
+    let on = |w: &mut Window| {
+        let bots = w.ok("list_bots", json!({}))["bots"].clone();
+        bots.as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == bot.as_str())
+            .unwrap()["webSearch"]
+            .clone()
+    };
+
+    assert_eq!(on(&mut w), true);
+    let id = w.send("set_bot", json!({"bot": bot, "webSearch": "no"}));
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["code"], "bad_request");
+    w.ok("set_bot", json!({"bot": bot, "webSearch": false}));
+    assert_eq!(on(&mut w), false);
+
+    // The engine has it from its start, and each change.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    assert!(told().contains("\"on\":false"), "{}", told());
+    w.ok("set_bot", json!({"bot": bot, "webSearch": true}));
+    eventually("the switch back on", || told().contains("\"on\":true"));
+    w.ok("set_bot", json!({"bot": bot, "webSearch": false}));
+    assert_eq!(on(&mut w), false);
+
+    drop(w);
+    service.kill();
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(on(&mut w), false);
+}
+
+#[test]
+fn a_bot_with_a_network_limit_is_told_web_search_is_off_whatever_its_switch_says() {
+    let home = home("web-search-limit");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let told = || -> Vec<bool> {
+        let log = fs::read_to_string(home.join("bots").join(&bot).join("web_search.log"))
+            .unwrap_or_default();
+        log.lines().map(|l| l.contains("\"on\":true")).collect()
+    };
+    let switch = |w: &mut Window| w.ok("list_bots", json!({}))["bots"][0]["webSearch"].clone();
+    let turn = |w: &mut Window, nonce: &str| {
+        w.ok("prompt", json!({"bot": bot, "nonce": nonce, "text": "hi"}));
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
+    };
+
+    // No limit: on, as the switch says.
+    turn(&mut w, "n1");
+    assert_eq!(told(), [true]);
+
+    // The limit goes on: the idle engine stops, and the next one is told off; the switch stays.
+    w.ok("set_network", json!({"bot": bot, "hosts": ["example.com"]}));
+    wait_for_stop(&mut w);
+    turn(&mut w, "n2");
+    assert_eq!(told(), [true, false]);
+    assert_eq!(switch(&mut w), true);
+
+    // A change of the switch under the limit is kept, and the running engine is told off again.
+    w.ok("set_bot", json!({"bot": bot, "webSearch": false}));
+    w.ok("set_bot", json!({"bot": bot, "webSearch": true}));
+    eventually("the running engine told", || told().len() == 4);
+    assert_eq!(told(), [true, false, false, false]);
+
+    // The project's hosts only add to the bot's own list: the limit is still the bot's.
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [bot], "hosts": ["example.org"]}}),
+    );
+    wait_for_stop(&mut w);
+    turn(&mut w, "n3");
+    assert_eq!(told().last(), Some(&false));
+
+    // The limit goes off: the next engine is told on again.
+    w.ok("set_network", json!({"bot": bot, "hosts": null}));
+    wait_for_stop(&mut w);
+    turn(&mut w, "n4");
+    assert_eq!(told().last(), Some(&true));
+    assert_eq!(switch(&mut w), true);
 }
 
 /// A program that serves MCP over HTTP on the unix socket the service gives it, with a tool

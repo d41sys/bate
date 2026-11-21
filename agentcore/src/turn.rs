@@ -42,6 +42,8 @@ pub struct Turn {
     pub instructions: String,
     /// Tool rounds a turn may take.
     pub steps: u32,
+    /// Offer the provider's web search tool, where the provider has one.
+    pub web_search: bool,
     /// From `answer` and `reply`, already checked against what the turn waits on.
     pub answers: Receiver<Answer>,
     pub steer: Receiver<String>,
@@ -219,6 +221,7 @@ fn event(d: Delta) -> Event {
     match d {
         Delta::Text(t) => Event::Text { delta: t.into() },
         Delta::Thinking(t) => Event::Thinking { delta: t.into() },
+        Delta::Search { .. } => unreachable!("shown as a tool call by `Turn::stream`"),
         Delta::Retry {
             attempt,
             wait,
@@ -475,6 +478,21 @@ impl Turn {
         self.provider
             .stream(url, key, api, ask, abort, |d| match d {
                 Delta::Retry { .. } => self.out.send(&event(d)),
+                // The provider ran it: shown like a tool call of ours, done at once.
+                Delta::Search { id, query, failed } => {
+                    let mut args = Map::new();
+                    args.insert("query".into(), query.into());
+                    self.out.send(&Event::ToolStart {
+                        call: id.into(),
+                        tool: "web_search".into(),
+                        args,
+                    });
+                    self.out.send(&Event::ToolEnd {
+                        call: id.into(),
+                        output: String::new(),
+                        is_error: failed,
+                    });
+                }
                 d => on(d),
             })
     }
@@ -598,6 +616,7 @@ impl Turn {
             messages,
             last,
             tools,
+            web_search: self.web_search,
         }
     }
 
@@ -622,7 +641,9 @@ impl Turn {
         // Same system text and tools as a turn, so a provider's prompt cache still applies.
         let instruction = json!({"role": "user", "content": SUMMARISE});
         let (url, key, api, model, _) = self.get_token()?;
-        let ask = self.ask_model(&model, system, &messages[..cut], Some(&instruction), tools);
+        let mut ask = self.ask_model(&model, system, &messages[..cut], Some(&instruction), tools);
+        // The summary is no place for a search.
+        ask.web_search = false;
         let reply = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;
         if reply.aborted {
             return Err("aborted".into());
