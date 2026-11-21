@@ -1,0 +1,122 @@
+{
+  "connectors": [
+    {
+      "name": "fetch",
+      "description": "Reads a web page and gives the bot its text.",
+      "author": "Model Context Protocol",
+      "home": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+      "transport": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-fetch"
+        ]
+      }
+    },
+    {
+      "name": "time",
+      "description": "Tells the bot the time in a time zone and converts a time between zones.",
+      "author": "Model Context Protocol",
+      "home": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+      "transport": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-time"
+        ]
+      }
+    },
+    {
+      "name": "sequential-thinking",
+      "description": "A tool the bot uses to work through a problem in steps it can revise.",
+      "author": "Model Context Protocol",
+      "home": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-sequential-thinking"
+        ]
+      }
+    },
+    {
+      "name": "filesystem",
+      "description": "Reads and writes files in the folders you name when you add it, and in no others.",
+      "author": "Model Context Protocol",
+      "home": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem"
+        ]
+      },
+      "fill": [
+        "A folder it may use, as the last argument"
+      ]
+    },
+    {
+      "name": "git",
+      "description": "Reads, searches and changes a Git repository: status, diffs, history, commits and branches.",
+      "author": "Model Context Protocol",
+      "home": "https://github.com/modelcontextprotocol/servers/tree/main/src/git",
+      "transport": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-git",
+          "--repository"
+        ]
+      },
+      "fill": [
+        "The repository's folder, as the last argument"
+      ]
+    },
+    {
+      "name": "linear",
+      "description": "Linear's own server, for the issues and projects of your Linear workspace. You sign in with Linear.",
+      "author": "Linear",
+      "home": "https://linear.app/docs/mcp",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.linear.app/mcp"
+      },
+      "oauth": true
+    },
+    {
+      "name": "notion",
+      "description": "Notion's own server, for the pages of your Notion workspace. You sign in with Notion.",
+      "author": "Notion",
+      "home": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.notion.com/mcp"
+      },
+      "oauth": true
+    },
+    {
+      "name": "sentry",
+      "description": "Sentry's own server, for the errors and performance problems of your Sentry account. You sign in with Sentry.",
+      "author": "Sentry",
+      "home": "https://docs.sentry.io/product/sentry-mcp/",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.sentry.dev/mcp"
+      },
+      "oauth": true
+    },
+    {
+      "name": "stripe",
+      "description": "Stripe's own server, for the objects of your Stripe account. You sign in with Stripe.",
+      "author": "Stripe",
+      "home": "https://docs.stripe.com/mcp",
+      "transport": {
+        "type": "http",
+        "url": "https://mcp.stripe.com"
+      },
+      "oauth": true
+    }
+  ]
+}

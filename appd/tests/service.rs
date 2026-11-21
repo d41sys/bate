@@ -2882,6 +2882,12 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         // So are the files a bot is made from.
         ("22", "preview_bot_file"),
         ("23", "import_bot"),
+        // The lists, and what they would install, are for the window on this Mac.
+        ("24", "list_catalog"),
+        ("25", "preview_catalog"),
+        ("26", "install_catalog"),
+        ("27", "preview_skill_catalog"),
+        ("28", "install_skill_catalog"),
     ] {
         send(
             &device,
@@ -10143,12 +10149,17 @@ fn serve(files: &Files, path: &str, body: &[u8]) {
     all.push((path.to_owned(), body.to_vec()));
 }
 
-fn serve_catalog(files: &Files, entries: Vec<Value>) {
+/// Serves the list `key` (`workplaces`, `connectors` or `skills`) as the catalog folder's file.
+fn serve_list(files: &Files, key: &str, entries: Vec<Value>) {
     serve(
         files,
-        "/catalog.json",
-        json!({"workplaces": entries}).to_string().as_bytes(),
+        &format!("/{key}.json"),
+        json!({key: entries}).to_string().as_bytes(),
     );
+}
+
+fn serve_catalog(files: &Files, entries: Vec<Value>) {
+    serve_list(files, "workplaces", entries);
 }
 
 fn changing_host() -> (FileHost, Files) {
@@ -10162,11 +10173,11 @@ fn changing_host() -> (FileHost, Files) {
     (host, files)
 }
 
-/// A service whose catalog is `/catalog.json` of `host`.
+/// A service whose catalog folder is the root of `host`.
 fn catalog_service(home: &Home, host: &FileHost) -> Service {
     Service::start_with(home, |c| {
         c.env("APPD_ENGINE", home.join("fake-engine"))
-            .env("BATE_CATALOG", host.url("/catalog.json"));
+            .env("BATE_CATALOG", host.url("/"));
     })
 }
 
@@ -10430,7 +10441,7 @@ fn the_catalog_of_the_repository_pins_what_the_pack_script_makes_of_its_workplac
 
     let text = fs::read_to_string(repo.join("catalog/workplaces.json")).unwrap();
     let (host, files) = changing_host();
-    serve(&files, "/catalog.json", text.as_bytes());
+    serve(&files, "/workplaces.json", text.as_bytes());
     let home = home("wp-catalog-repo");
     let _service = catalog_service(&home, &host);
     let mut w = Window::connect(&home);
@@ -10458,6 +10469,288 @@ fn the_catalog_of_the_repository_pins_what_the_pack_script_makes_of_its_workplac
         assert_eq!(
             (&manifest["name"], &manifest["version"]),
             (&e["name"], &e["version"])
+        );
+    }
+}
+
+/// The reply to `command`, whether it worked or not.
+fn answer(w: &mut Window, command: &str, fields: Value) -> Value {
+    let id = w.send(command, fields);
+    w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str())
+}
+
+#[test]
+fn the_connector_list_is_read_when_asked_and_a_picked_entry_saves_nothing() {
+    let home = home("connector-list");
+    let (host, files) = changing_host();
+    let entry = json!({"name": "docs", "description": "Reads docs.", "author": "Maker",
+        "home": "https://example.com/docs",
+        "transport": {"type": "stdio", "command": "npx", "args": ["-y", "docs-server"]},
+        "fill": ["A folder"]});
+    let signed_in = json!({"name": "board", "description": "d", "home": "https://example.com/board",
+        "transport": {"type": "http", "url": "https://example.com/mcp"}, "oauth": true});
+    serve_list(&files, "connectors", vec![entry, signed_in]);
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // Not read by itself.
+    assert_eq!(host.hits(), 0);
+
+    // Read on a request: the form's values and what the person must add, nothing else.
+    let listed = w.ok("list_catalog", json!({"kind": "connectors"}))["catalog"].clone();
+    assert_eq!(host.hits(), 1);
+    let [docs, board] = &listed.as_array().unwrap()[..] else {
+        panic!("{listed}")
+    };
+    assert_eq!(docs["author"], "Maker");
+    assert_eq!(docs["home"], "https://example.com/docs");
+    assert_eq!(docs["transport"]["type"], "stdio");
+    assert_eq!(docs["transport"]["command"], "npx");
+    assert_eq!(docs["transport"]["args"], json!(["-y", "docs-server"]));
+    assert_eq!(docs["transport"]["env"], json!({}));
+    assert_eq!(docs["fill"], json!(["A folder"]));
+    assert_eq!(board["transport"]["url"], "https://example.com/mcp");
+    assert_eq!(board["oauth"], true);
+    // Picking is the window's: the service saved no connector of its own accord, and installed
+    // no skill and no workplace.
+    assert_eq!(
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"],
+        json!([])
+    );
+
+    // An entry or a list that is not good is refused whole: nothing is shown from it.
+    let good = listed[0].clone();
+    let with = |f: &dyn Fn(&mut Value)| {
+        let mut e = good.clone();
+        f(&mut e);
+        e
+    };
+    let cases = [
+        (
+            "a value",
+            with(&|e| e["transport"]["env"] = json!({"KEY": "v"})),
+        ),
+        (
+            "a header",
+            with(&|e| {
+                e["transport"] =
+                    json!({"type": "http", "url": "https://example.com/mcp", "headers": {"a": "b"}})
+            }),
+        ),
+        ("a name", with(&|e| e["name"] = json!("Bad Name"))),
+        (
+            "a plain address",
+            with(&|e| e["transport"] = json!({"type": "http", "url": "ftp://example.com/mcp"})),
+        ),
+        ("sign-in for a program", with(&|e| e["oauth"] = json!(true))),
+        (
+            "no home page",
+            with(&|e| e["home"] = json!("http://example.com")),
+        ),
+        (
+            "an author of lines",
+            with(&|e| e["author"] = json!("Ada\nBo")),
+        ),
+    ];
+    for (what, bad) in cases {
+        serve_list(&files, "connectors", vec![listed[1].clone(), bad]);
+        let reply = answer(&mut w, "list_catalog", json!({"kind": "connectors"}));
+        assert_eq!(reply["code"], "catalog_failed", "{what}: {reply}");
+        assert!(reply["data"].is_null(), "{what}: {reply}");
+    }
+    serve(&files, "/connectors.json", b"[]");
+    let reply = answer(&mut w, "list_catalog", json!({"kind": "connectors"}));
+    assert_eq!(reply["code"], "catalog_failed", "{reply}");
+    // Each list is its own file: a good one does not stand in for another.
+    serve_catalog(&files, vec![]);
+    let reply = answer(&mut w, "list_catalog", json!({"kind": "connectors"}));
+    assert_eq!(reply["code"], "catalog_failed", "{reply}");
+    let reply = answer(&mut w, "list_catalog", json!({"kind": "recipes"}));
+    assert_eq!(reply["code"], "bad_request", "{reply}");
+    assert_eq!(
+        w.ok("list_connectors", json!({"bot": bot}))["connectors"],
+        json!([])
+    );
+}
+
+/// The archive of a skill folder with `SKILL.md` at its top, naming itself `name`.
+fn skill_archive(name: &str, tag: &str) -> Vec<u8> {
+    tarball(tag, &[], |dir| {
+        let text = format!("---\nname: {name}\ndescription: Fills in forms.\n---\nHow.\n");
+        fs::write(dir.join("SKILL.md"), text).unwrap();
+        vec!["SKILL.md".into()]
+    })
+}
+
+fn skill_entry(name: &str, url: &str, archive: &[u8]) -> Value {
+    json!({"name": name, "description": "d", "author": "Ada L.", "url": url,
+        "size": archive.len(), "sha256": sha256_of(archive)})
+}
+
+#[test]
+fn a_skill_of_the_list_is_installed_through_the_skill_checks_and_only_as_pinned() {
+    let home = home("skill-list");
+    let (host, files) = changing_host();
+    let archive = skill_archive("pdf-forms", "skill-ok");
+    let url = host.url("/pdf-forms.tar.gz");
+    serve(&files, "/pdf-forms.tar.gz", &archive);
+    let entry = skill_entry("pdf-forms", &url, &archive);
+    serve_list(&files, "skills", vec![entry.clone()]);
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    assert_eq!(host.hits(), 0);
+
+    let listed = w.ok("list_catalog", json!({"kind": "skills"}))["catalog"].clone();
+    assert_eq!(host.hits(), 1);
+    assert_eq!(listed, json!([entry]));
+
+    // Shown before anything is installed, and nothing is kept.
+    let preview = w.ok("preview_skill_catalog", json!({"name": "pdf-forms"}));
+    assert_eq!(preview["skill"]["name"], "pdf-forms");
+    assert_eq!(preview["entries"], 1);
+    assert_eq!(preview["entry"]["sha256"], sha256_of(&archive));
+    assert_eq!(
+        answer(&mut w, "preview_skill_catalog", json!({"name": "nope"}))["code"],
+        "no_such_catalog_entry"
+    );
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"],
+        json!([])
+    );
+
+    // Only the hash that was shown installs, for a bot that exists.
+    let ask = |hash: &str, bot: &str| json!({"bot": bot, "name": "pdf-forms", "sha256": hash});
+    let stale = answer(&mut w, "install_skill_catalog", ask(&"0".repeat(64), &bot));
+    assert_eq!(stale["code"], "catalog_changed", "{stale}");
+    let ghost = answer(
+        &mut w,
+        "install_skill_catalog",
+        ask(&sha256_of(&archive), "nobody"),
+    );
+    assert_eq!(ghost["code"], "no_such_bot", "{ghost}");
+    assert_eq!(
+        w.ok("list_skills", json!({"bot": bot}))["skills"],
+        json!([])
+    );
+    let made = w.ok("install_skill_catalog", ask(&sha256_of(&archive), &bot));
+    assert_eq!(made["skill"]["name"], "pdf-forms");
+    let skills = w.ok("list_skills", json!({"bot": bot}))["skills"].clone();
+    assert_eq!(skills[0]["name"], "pdf-forms");
+    assert_eq!(skills[0]["enabled"], true);
+    assert!(
+        home.join("bots")
+            .join(&bot)
+            .join("skills/pdf-forms/SKILL.md")
+            .exists()
+    );
+    staging_is_empty(&home);
+
+    // An archive that is not what the list pins is refused, and nothing is installed or left.
+    let other = skill_archive("other", "skill-other");
+    serve(&files, "/other.tar.gz", &other);
+    let linked = tarball("skill-link", &[], |dir| {
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: pdf-forms\ndescription: d\n---\nx\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("link")).unwrap();
+        vec!["SKILL.md".into(), "link".into()]
+    });
+    serve(&files, "/link.tar.gz", &linked);
+    let wrong = |f: &dyn Fn(&mut Value)| {
+        let mut e = entry.clone();
+        f(&mut e);
+        e
+    };
+    let cases = [
+        (
+            "wrong hash",
+            wrong(&|e| e["sha256"] = json!("0".repeat(64))),
+            "sha256",
+        ),
+        (
+            "wrong size",
+            wrong(&|e| e["size"] = json!(archive.len() + 1)),
+            "the catalog says",
+        ),
+        (
+            "another skill",
+            skill_entry("pdf-forms", &host.url("/other.tar.gz"), &other),
+            "holds the skill other",
+        ),
+        (
+            "a link",
+            skill_entry("pdf-forms", &host.url("/link.tar.gz"), &linked),
+            "not a plain file",
+        ),
+    ];
+    let bot2 = w.create_bot();
+    for (what, e, reason) in cases {
+        serve_list(&files, "skills", vec![e.clone()]);
+        for (command, fields) in [
+            ("preview_skill_catalog", json!({"name": "pdf-forms"})),
+            (
+                "install_skill_catalog",
+                ask(e["sha256"].as_str().unwrap(), &bot2),
+            ),
+        ] {
+            let reply = answer(&mut w, command, fields);
+            let error = reply["error"].as_str().unwrap_or_default();
+            assert!(
+                reply["success"] == false && error.contains(reason),
+                "{what} {command}: {reply}"
+            );
+        }
+        assert_eq!(
+            w.ok("list_skills", json!({"bot": bot2}))["skills"],
+            json!([]),
+            "{what}"
+        );
+        staging_is_empty(&home);
+    }
+
+    // A list with a bad entry is refused whole.
+    for bad in [
+        wrong(&|e| e["name"] = json!("Bad Name")),
+        wrong(&|e| e["url"] = json!("http://example.com/s.tar.gz")),
+    ] {
+        serve_list(&files, "skills", vec![bad]);
+        let reply = answer(&mut w, "list_catalog", json!({"kind": "skills"}));
+        assert_eq!(reply["code"], "catalog_failed", "{reply}");
+    }
+}
+
+#[test]
+fn the_lists_of_the_repository_are_read_as_they_are() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let (host, files) = changing_host();
+    for list in ["workplaces", "connectors", "skills"] {
+        let text = fs::read(repo.join("catalog").join(format!("{list}.json"))).unwrap();
+        serve(&files, &format!("/{list}.json"), &text);
+    }
+    let home = home("lists-repo");
+    let _service = catalog_service(&home, &host);
+    let mut w = Window::connect(&home);
+    let connectors = w.ok("list_catalog", json!({"kind": "connectors"}))["catalog"].clone();
+    let list = connectors.as_array().unwrap();
+    assert!(!list.is_empty() && list.len() <= 10, "{list:?}");
+    for e in list {
+        assert!(
+            e["author"].is_string() && e["home"].as_str().unwrap().starts_with("https://"),
+            "{e}"
+        );
+    }
+    // Skills in the list come from this repository's own releases, and no one else's.
+    let skills = w.ok("list_catalog", json!({"kind": "skills"}))["catalog"].clone();
+    for e in skills.as_array().unwrap() {
+        assert!(
+            e["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://github.com/d41sys/bate/releases/download/"),
+            "{e}"
         );
     }
 }

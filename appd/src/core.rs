@@ -80,6 +80,13 @@ pub enum Msg {
     UpdateDue,
     /// What came of reading the feed: a release staged, nothing new, or why not.
     Update(Result<Option<update::Staged>, String>),
+    /// A skill of the catalog is installed in a bot, or why not.
+    SkillInstalled {
+        client: u64,
+        id: Value,
+        bot: String,
+        result: Result<proto::skills::Skill, Refusal>,
+    },
     /// How far a workplace's downloads are.
     WorkplaceProgress {
         name: String,
@@ -1006,6 +1013,20 @@ impl Core {
                 command,
                 result,
             } => self.reply(client, &id, command, result),
+            Msg::SkillInstalled {
+                client,
+                id,
+                bot,
+                result,
+            } => {
+                let result = result.and_then(|skill| {
+                    // Installing a skill puts it on, also in place of one that was off.
+                    (self.store.set_skill_off(&bot, &skill.name, false)).map_err(internal)?;
+                    self.skills_changed(&bot);
+                    Ok(json!({"skill": skill}))
+                });
+                self.reply(client, &id, "install_skill_catalog", result);
+            }
             Msg::WorkplacePrepared {
                 client,
                 id,
@@ -1590,10 +1611,57 @@ impl Core {
                 Ok(None)
             }
             "list_catalog" => {
+                let kind = match f.get("kind") {
+                    None | Some(Value::Null) => "workplaces",
+                    Some(v) => v
+                        .as_str()
+                        .filter(|k| ["workplaces", "connectors", "skills"].contains(k))
+                        .ok_or_else(|| bad("`kind` must be workplaces, connectors or skills"))?,
+                }
+                .to_owned();
                 let installed = self.store.workplaces().map_err(internal)?;
                 self.reply_later(client, id, "list_catalog", move || {
-                    let entries = catalog::list()?;
-                    Ok(json!({"catalog": catalog::listed(&entries, &installed)}))
+                    Ok(json!({"catalog": match kind.as_str() {
+                        "connectors" => json!(catalog::connector_list()?),
+                        "skills" => json!(catalog::skill_list()?),
+                        _ => catalog::listed(&catalog::list()?, &installed),
+                    }}))
+                });
+                Ok(None)
+            }
+            "preview_skill_catalog" => {
+                let name = str_field(f, "name")?.to_owned();
+                self.reply_later(client, id, "preview_skill_catalog", move || {
+                    let entry = catalog::skill_entry(&name)?;
+                    catalog::skill_unpacked(&entry, |folder| {
+                        let (skill, entries, bytes) = skills::preview(folder)?;
+                        Ok(json!({"entry": entry, "skill": skill, "entries": entries, "bytes": bytes}))
+                    })
+                });
+                Ok(None)
+            }
+            "install_skill_catalog" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?.to_owned();
+                // The hash of the entry the person was shown: what is installed is that archive.
+                let shown = str_field(f, "sha256")?.to_owned();
+                let (tx, id) = (self.tx.clone(), id.clone());
+                thread::spawn(move || {
+                    let result = catalog::skill_entry(&name).and_then(|entry| {
+                        if entry.sha256 != shown {
+                            return Err((
+                                "catalog_changed",
+                                format!("the catalog now lists another {name} than the one shown: look at it again"),
+                            ));
+                        }
+                        catalog::skill_unpacked(&entry, |folder| skills::install(&bot, folder))
+                    });
+                    let _ = tx.send(Msg::SkillInstalled {
+                        client,
+                        id,
+                        bot,
+                        result,
+                    });
                 });
                 Ok(None)
             }

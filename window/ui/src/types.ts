@@ -136,8 +136,24 @@ export type Skill = { name: string; description: string; author?: string };
 /** A skill as `list_skills` gives it: whether it is on for that bot (off: installed, but the model is not told of it). */
 export type InstalledSkill = Skill & { enabled: boolean };
 
-/** What `preview_skill` says of a skill folder: the skill and how much an install would copy. */
-export type SkillPreview = { skill: Skill; entries: number; bytes: number };
+/** What `preview_skill` says of a skill folder: the skill and how much an install would copy. `preview_skill_catalog` adds the entry of the list it came from. */
+export type SkillPreview = { skill: Skill; entries: number; bytes: number; entry?: { sha256: string; author?: string } };
+
+/** An entry of the list of connectors (`list_catalog` with `kind: "connectors"`): what the "New connector" form is filled in with. Nothing here is a value of the person's own: `fill` names what they add. */
+export type ConnectorListed = {
+  name: string;
+  description: string;
+  /** A claim in the list, never checked. */
+  author?: string;
+  /** The maker's page the address or command was read from. */
+  home: string;
+  transport: Connector["transport"];
+  oauth?: boolean;
+  fill?: string[];
+};
+
+/** An entry of the list of skills (`list_catalog` with `kind: "skills"`). */
+export type SkillListed = { name: string; description: string; author?: string; size: number; sha256: string };
 
 /** What `preview_bot_file` says a bot file holds. `sha256` is given back to `import_bot`. */
 export type BotFilePreview = {

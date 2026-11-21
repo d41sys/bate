@@ -96,7 +96,9 @@ A workplace that cannot be used (its manifest no longer parses, its program does
 
 ## The catalog
 
-Bate's own list of workplaces is the file `catalog/workplaces.json` in this repository. In the window (Workplaces in the sidebar, Catalog) a person asks for it, reads the entries and installs one; nothing is contacted before that, and no server of the project is involved: the list is read from GitHub's raw files and the archives from wherever the entries say (GitHub releases, for Bate's own). A workplace that is not in the list is installed from a folder, as above.
+Bate's own list of workplaces is the file `catalog/workplaces.json` in this repository. In the window (Add-ons, Workplaces, Catalog) a person asks for it, reads the entries and installs one; nothing is contacted before that, and no server of the project is involved: the list is read from GitHub's raw files and the archives from wherever the entries say (GitHub releases, for Bate's own). A workplace that is not in the list is installed from a folder, as above.
+
+Beside it, `catalog/connectors.json` and `catalog/skills.json` are read the same way, on a click in the Connectors and the Skills tab. Their format is in `PROTOCOL.md` (The catalog). An entry in any of the three lists is a pointer, not a recommendation: Bate has not checked what it names. The connectors listed are only those published by the maker of the service they connect to, or the Model Context Protocol project's own reference servers (at most 10), and each entry's `home` is the page its address or command was read from; to add or change one, read that page again on the day. The skills listed are only skills whose folder lives in this repository; a skill that only works with a workplace's tools goes with that workplace instead, so the list may be empty.
 
 ```json
 {

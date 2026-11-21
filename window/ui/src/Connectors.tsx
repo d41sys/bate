@@ -1,14 +1,16 @@
 import { useState } from "react";
-import { type ConnectorForm, connectorMay, connectorOf, connectorState, connectorSummary, each, madeBy, placed } from "./addons.ts";
+import { type ConnectorForm, connectorMay, connectorOf, connectorState, connectorSummary, each, formOf, madeBy, placed } from "./addons.ts";
+import { Catalog } from "./Catalog.tsx";
 import { Choose } from "./ProjectDialog.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { usePerBot } from "./usePerBot.ts";
 import { inShell, openInBrowser, request } from "./service.ts";
-import type { Bot, Connector } from "./types.ts";
+import type { Bot, Connector, ConnectorListed } from "./types.ts";
 
 const blank: ConnectorForm = { name: "", type: "http", url: "", command: "", args: "", oauth: false };
-type Ask = { form: ConnectorForm } | { copy: Connector; from: string; has: string[] } | { remove: string; users: string[] };
+/** `listed`: the entry of Bate's list the form was filled in from. */
+type Ask = { form: ConnectorForm; listed?: ConnectorListed } | { copy: Connector; from: string; has: string[] } | { remove: string; users: string[] };
 const address = (c: Connector) => (c.transport.type === "http" ? c.transport.url : [c.transport.command, ...(c.transport.args ?? [])].join(" "));
 /** What `set_connector` takes: the output-only fields are left out. */
 const sent = ({ error, tools, signedIn, ...c }: Connector) => c;
@@ -89,17 +91,33 @@ export function Connectors({ bots }: { bots: Bot[] }) {
           );
         })}
       </ul>
+      {inShell && (
+        <Catalog<ConnectorListed>
+          kind="connectors"
+          lines={(e) => (
+            <>
+              <small><code>{address({ name: e.name, enabled: true, transport: e.transport })}</code></small>
+              <small>Read from <a href={e.home} target="_blank" rel="noreferrer">{e.home}</a></small>
+            </>
+          )}
+          action={(e) => ({ label: "Add…", run: () => (setForm(formOf(e)), setAsk({ form: formOf(e), listed: e })) })}
+          report={setError}
+        />
+      )}
       {(error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
       {ask && "form" in ask && (
         <Sheet
           title="New connector"
-          maker={madeBy.typed}
+          about={ask.listed?.description}
+          maker={ask.listed ? madeBy.connectorList : madeBy.typed}
+          author={ask.listed?.author}
           may={connectorMay(draft)}
           who={who(draft)}
           action="Add"
           go={put(draft)}
           close={() => setAsk(undefined)}
         >
+          {ask.listed?.fill?.length ? <p><strong>Fill in before you add it:</strong> {ask.listed.fill.join("; ")}.</p> : null}
           <label>Name <input required maxLength={40} pattern="[a-z0-9_\-]{1,40}" title="a-z, 0-9, _ and -" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
           <label>
             Reached
