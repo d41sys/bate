@@ -18,6 +18,7 @@ pub mod permissions;
 pub mod projects;
 pub mod quick;
 pub mod routines;
+pub mod secrets;
 pub mod signer;
 pub mod skills;
 pub mod undo;
@@ -223,6 +224,10 @@ pub enum Event {
         /// With `kind`: the exact action (the command, the path, the connector tool).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// Set when the question asks the person for a secret: the options are `Deny` only,
+        /// and the service answers `Approve` once the person has typed it and it is in the Keychain (see `secrets`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<secrets::Wanted>,
     },
     /// A message for the bot `to`. The engine waits until the service sends `reply` for
     /// `message`.

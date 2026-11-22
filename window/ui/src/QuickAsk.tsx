@@ -3,6 +3,7 @@ import { Avatar } from "./Avatar.tsx";
 import { add, type Entry, type Item, type Question } from "./chat.ts";
 import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
+import { answerCommand } from "./secret.ts";
 import { answerOf, loadUsed, message, type QuickContext, saveUsed, used, usedFirst } from "./quick.ts";
 import { hideQuick, listen, openInBate, request } from "./service.ts";
 import type { Bot } from "./types.ts";
@@ -133,10 +134,10 @@ export function QuickAsk() {
       }
     }
   };
-  const answer = (q: Question, choice: string) => {
+  const answer = (q: Question, choice: string, secret?: string) => {
     if (!asked || answering.current.has(q.question)) return;
     answering.current.add(q.question);
-    request("answer", { bot: asked.bot, conversation: asked.conversation, question: q.question, choice }).catch((e: Error) => {
+    request(...answerCommand(asked.bot, asked.conversation, q, choice, secret)).catch((e: Error) => {
       answering.current.delete(q.question);
       setError(e.message);
     });
@@ -163,7 +164,7 @@ export function QuickAsk() {
           {reply.ended?.reason === "aborted" && <p className="note">Stopped.</p>}
           {reply.ended?.reason === "error" && <p className="error" role="alert">{reply.ended.error || "The turn failed."}</p>}
         </div>
-        {questions[0] && <QuestionCard key={questions[0].question} q={questions[0]} keys={false} answer={(choice) => answer(questions[0], choice)} />}
+        {questions[0] && <QuestionCard key={questions[0].question} q={questions[0]} keys={false} answer={(choice, secret) => answer(questions[0], choice, secret)} />}
         {error && <p className="error" role="alert">{error}</p>}
         <small>Esc closes</small>
       </section>

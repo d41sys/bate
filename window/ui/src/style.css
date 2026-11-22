@@ -187,6 +187,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .question .note { font-size: var(--size-small); }
 .question .warning { color: var(--warn); font-size: var(--size-small); }
 .question pre { max-height: calc(var(--leading) * 10); overflow: auto; }
+/* The field of a secret's card takes the card's width. */
+.question input { width: 100%; margin-top: var(--space-2); }
 /* A character nobody can see, drawn as its code point so that it can be seen. */
 .hidden-char { font-family: var(--font-mono); font-size: var(--size-small); font-weight: var(--weight-strong); background: var(--warn-soft); color: var(--warn); border-radius: var(--radius-s); padding: 0 var(--space-1); white-space: nowrap; }
 /* Deny sits apart from the two that allow. */

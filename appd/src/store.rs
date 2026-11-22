@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL REFERENCES bots(id) ON DEL
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
 CREATE TABLE IF NOT EXISTS oauth(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, tokens TEXT, PRIMARY KEY(bot, name));
+CREATE TABLE IF NOT EXISTS secrets(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, name TEXT NOT NULL, site TEXT NOT NULL, PRIMARY KEY(bot, name));
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project TEXT NOT NULL, lead TEXT REFERENCES bots(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS workplaces(name TEXT PRIMARY KEY, version TEXT NOT NULL, fingerprint TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workplace_archives(name TEXT PRIMARY KEY, sha256 TEXT NOT NULL);
@@ -270,7 +271,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 21] = [
+const BOT_TABLES: [&str; 22] = [
     "ledger",
     "access",
     "network",
@@ -292,6 +293,7 @@ const BOT_TABLES: [&str; 21] = [
     "chats",
     "usage",
     "token_limits",
+    "secrets",
 ];
 
 /// The tables that hold rows of a conversation, in their `conversation` column. A database of
@@ -675,6 +677,10 @@ fn oauth_account(bot: &str, name: &str) -> String {
 
 fn channel_account(bot: &str, kind: &str) -> String {
     format!("channel:{bot}:{kind}")
+}
+
+fn secret_account(bot: &str, name: &str) -> String {
+    format!("secret:{bot}:{name}")
 }
 
 fn kc<T>(r: keychain::Result<T>) -> Result<T> {
@@ -1266,6 +1272,7 @@ impl Store {
                 channel_account as fn(&str, &str) -> String,
             ),
             ("oauth", "name", oauth_account),
+            ("secrets", "name", secret_account),
         ] {
             let mut stmt = self
                 .0
@@ -2398,6 +2405,52 @@ impl Store {
                 [bot, name],
             )
             .map(drop)
+    }
+
+    /// What the bot has been given a secret for: the name and the host. Never the value.
+    pub fn secrets(&self, bot: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT name, site FROM secrets WHERE bot = ?1 ORDER BY name")?;
+        stmt.query_map([bot], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
+    /// The value of the bot's secret `name`, from the Keychain; `None` when it has none.
+    pub fn secret_value(&self, bot: &str, name: &str) -> Result<Option<String>> {
+        kc(keychain::get(&secret_account(bot, name)))
+    }
+
+    /// Keeps a secret the person typed, for `site`, and forgets an earlier one of that name.
+    /// The value goes to the Keychain and nowhere else: unlike `keep`, a Keychain that refuses
+    /// it fails the call, since a value in `app.db` is what this must never be.
+    pub fn put_secret(&self, bot: &str, name: &str, site: &str, value: &str) -> Result<()> {
+        kc(keychain::put(&secret_account(bot, name), value))?;
+        self.0
+            .execute(
+                "INSERT INTO secrets(bot, name, site) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(bot, name) DO UPDATE SET site = ?3",
+                [bot, name, site],
+            )
+            .map(drop)
+    }
+
+    /// Forgets one secret. False when the bot has none of that name.
+    pub fn delete_secret(&self, bot: &str, name: &str) -> Result<bool> {
+        let known = self.0.query_row(
+            "SELECT 1 FROM secrets WHERE bot = ?1 AND name = ?2",
+            [bot, name],
+            |_| Ok(()),
+        );
+        if known.optional()?.is_none() {
+            return Ok(false);
+        }
+        kc(keychain::delete(&secret_account(bot, name)))?;
+        self.0.execute(
+            "DELETE FROM secrets WHERE bot = ?1 AND name = ?2",
+            [bot, name],
+        )?;
+        Ok(true)
     }
 
     /// The names of the bot's skills that are switched off, by name.

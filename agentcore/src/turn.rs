@@ -109,6 +109,8 @@ const BROWSER: &str = "browser";
 const DESKTOP: &str = "desktop";
 /// The tool that states a task's steps; the window shows them as a checklist.
 const PLAN: &str = "plan";
+/// The tool that asks the person for a secret for a site.
+const REQUEST_SECRET: &str = "request_secret";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
 /// and `message_bot` when there is a bot to message.
@@ -123,12 +125,20 @@ fn tool_list(mcp: &Servers, blocked: &[String], depth: usize, peers: bool) -> Va
                 "url": {"type": "string", "description": "For `open`: an http or https address"},
                 "element": {"type": "integer", "description": "For `click`, `type` and `select`, and optionally `press`: the element's number"},
                 "text": {"type": "string", "description": "For `type`: what to put in the field"},
+                "secret": {"type": "string", "description": "For `type`, instead of `text`: the name of a secret the person gave you with request_secret; the service types its value, and only on the site it was saved for, and only into a password field (shown as `password field`; never a text field, a text area or an editable page). You never see it, and it is hidden if the page shows it back."},
                 "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"},
                 "direction": {"type": "string", "enum": ["up", "down"], "description": "For `scroll`"},
                 "key": {"type": "string", "enum": ["Enter", "Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"], "description": "For `press`"},
                 "option": {"type": "string", "description": "For `select`: the option's visible text"},
                 "seconds": {"type": "integer", "minimum": 1, "maximum": 10, "description": "For `wait`"}},
                 "required": ["action"]}}}));
+        list.push(json!({"type": "function", "function": {"name": REQUEST_SECRET,
+            "description": "Ask the person for a secret, such as a password, to use on one site. They type it in a card; it goes to the Keychain and you never see it. You are told only whether it was saved. Then use the browser's `type` with `secret` set to the name. Ask only when a page needs a sign-in that you cannot do otherwise.",
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "What you will call it: letters, digits, `-`, `_`, `.`"},
+                "site": {"type": "string", "description": "The site's host name, such as example.com: the secret is typed only on that host"},
+                "why": {"type": "string", "description": "What it is for, in a sentence the person reads"}},
+                "required": ["name", "site", "why"]}}}));
         list.push(json!({"type": "function", "function": {"name": DESKTOP,
             "description": "See and control other apps on this Mac without taking the focus from the user. `apps` lists the apps and their windows (window ids). `look` reads a window as a tree of numbered elements; `press` or `set_value` act on an element by its number from the latest `look` of that window, and `type` types text into an element or into whatever has the focus. `screenshot` saves a picture of a window in your folder and gives its path. Look again after any action: the numbers change. If the user lacks a macOS permission, the result says which.",
             "parameters": {"type": "object", "properties": {
@@ -710,6 +720,9 @@ impl Turn {
         if tool == PLAN {
             return plan(args);
         }
+        if tool == REQUEST_SECRET {
+            return self.request_secret(args);
+        }
         if tool == BROWSER {
             return self.browse(args);
         }
@@ -753,11 +766,18 @@ impl Turn {
             "open" => format!("Browser: open {}", arg("url")),
             "look" => "Browser: look at the page".to_owned(),
             "click" => format!("Browser: click element {}", arg("element")),
-            "type" => format!(
-                "Browser: type into element {}: {}",
-                arg("element"),
-                arg("text")
-            ),
+            "type" => match args.get("secret") {
+                Some(_) => format!(
+                    "Browser: type the secret {} into element {}",
+                    arg("secret"),
+                    arg("element")
+                ),
+                None => format!(
+                    "Browser: type into element {}: {}",
+                    arg("element"),
+                    arg("text")
+                ),
+            },
             "back" => "Browser: go back".to_owned(),
             "forward" => "Browser: go forward".to_owned(),
             "reload" => "Browser: reload the page".to_owned(),
@@ -867,10 +887,49 @@ impl Turn {
             options: OPTIONS.map(String::from).to_vec(),
             kind: Some(kind),
             target: Some(target),
+            secret: None,
         });
         match self.answer(&id) {
             Some(Ok(choice)) if choice == APPROVE => Ok(()),
             Some(_) => Err("The user denied this action.".into()),
+            None => Err("Aborted by the user".into()),
+        }
+    }
+
+    /// Asks the person to type the value of a secret for a site: a card of its own, which the
+    /// service answers `Approve` once the value is in the Keychain. The value never comes here.
+    fn request_secret(&self, args: &Map<String, Value>) -> Result<String, String> {
+        let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").trim();
+        let (name, site, why) = (text("name"), text("site"), text("why"));
+        if !proto::secrets::name_ok(name) {
+            return Err("`name` must be 1 to 64 letters, digits, `-`, `_` or `.`.".into());
+        }
+        let Some(host) = proto::secrets::host(site) else {
+            return Err(
+                "`site` must be the site's host name, such as example.com, or its web address."
+                    .into(),
+            );
+        };
+        if why.is_empty() {
+            return Err("`why` must say what the secret is for: the person reads it.".into());
+        }
+        let id = self.wait_on("q");
+        self.out.send(&Event::Question {
+            question: id.clone(),
+            title: why.to_owned(),
+            options: vec![DENY.to_owned()],
+            kind: None,
+            target: None,
+            secret: Some(proto::secrets::Wanted {
+                name: name.to_owned(),
+                site: site.to_owned(),
+            }),
+        });
+        match self.answer(&id) {
+            Some(Ok(choice)) if choice == APPROVE => Ok(format!(
+                "Saved. You never see the value. Give the browser's `type` action `secret: \"{name}\"` instead of `text`; it types the value only on {host}, and only into a password field."
+            )),
+            Some(_) => Err("The person refused to give the secret.".into()),
             None => Err("Aborted by the user".into()),
         }
     }

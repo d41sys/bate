@@ -293,6 +293,7 @@ fn the_agents_permission_request_is_a_question_the_service_decides() {
             options: vec!["Approve".into(), "Deny".into()],
             kind: Some(Kind::Run),
             target: Some("ls -la".into()),
+            secret: None,
         };
         assert_eq!(bridge.next(), question);
         let wrong = Op::Answer {

@@ -594,6 +594,7 @@ impl Bridge {
             options: vec![APPROVE.into(), DENY.into()],
             target: kind.map(|_| target),
             kind,
+            secret: None,
         });
     }
 }

@@ -53,6 +53,14 @@ const WORLD: &str = "bate";
 const WATCH: &str = "for (const t of ['pointerdown', 'mousedown', 'keydown', 'touchstart']) \
     addEventListener(t, e => { if (e.isTrusted) bateUser(t) }, true);";
 
+/// What a `type` action puts in a field.
+#[derive(Debug, PartialEq)]
+pub enum Typed {
+    Text(String),
+    /// The name of a secret of the bot; the service types its value, only on its site.
+    Secret(String),
+}
+
 /// What the bot may do. Checked here: the engine is the bot's.
 #[derive(Debug, PartialEq)]
 pub enum Action {
@@ -61,7 +69,7 @@ pub enum Action {
     Click(u32),
     Type {
         element: u32,
-        text: String,
+        text: Typed,
         submit: bool,
     },
     Back,
@@ -101,14 +109,24 @@ impl Action {
             Some("look") => Ok(Action::Look),
             Some("click") => Ok(Action::Click(element()?)),
             Some("type") => {
-                let text = args.get("text").and_then(Value::as_str).unwrap_or("");
-                if text.chars().count() > MAX_TYPED {
-                    return Err(format!("`text` may be {MAX_TYPED} characters"));
-                }
+                let typed = match (args.get("text"), args.get("secret")) {
+                    (Some(_), Some(_)) => return Err("give `text` or `secret`, not both".into()),
+                    (_, Some(name)) => match name.as_str() {
+                        Some(name) if proto::secrets::name_ok(name) => Typed::Secret(name.to_owned()),
+                        _ => return Err("`secret` must be the name of a secret you were given".into()),
+                    },
+                    (text, None) => {
+                        let text = text.and_then(Value::as_str).unwrap_or("");
+                        if text.chars().count() > MAX_TYPED {
+                            return Err(format!("`text` may be {MAX_TYPED} characters"));
+                        }
+                        Typed::Text(text.to_owned())
+                    }
+                };
                 let submit = args.get("submit").and_then(Value::as_bool).unwrap_or(false);
                 Ok(Action::Type {
                     element: element()?,
-                    text: text.to_owned(),
+                    text: typed,
                     submit,
                 })
             }
@@ -174,6 +192,52 @@ fn program() -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
+/// A secret of a bot as the browser needs it. No `Debug`: a value must not get into a log.
+pub struct Secret {
+    pub name: String,
+    /// The host it may be typed on.
+    pub site: String,
+    pub value: String,
+}
+
+/// `value` as a form or an address writes it: letters, digits and a few marks as they are,
+/// the rest as `%XX`, and a space as `+` in a form.
+fn percent(value: &str, form: bool) -> String {
+    let mut out = String::new();
+    for b in value.bytes() {
+        match b {
+            b'*' if form => out.push('*'),
+            b'~' if !form => out.push('~'),
+            b' ' if form => out.push('+'),
+            b'-' | b'.' | b'_' => out.push(b as char),
+            b if b.is_ascii_alphanumeric() => out.push(b as char),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// `text` with each secret's value, as it is and as a form or an address would write it,
+/// replaced by a marker: text that goes back to the model must not hold one.
+// shortcut: other forms (base64, a value split by markup) are not recognised; upgrade if a
+// page is seen to show one back.
+pub fn redact(text: &str, secrets: &[Secret]) -> String {
+    let mut longest_first: Vec<&Secret> = secrets.iter().filter(|s| !s.value.is_empty()).collect();
+    longest_first.sort_by_key(|s| std::cmp::Reverse(s.value.len()));
+    let mut text = text.to_owned();
+    for s in longest_first {
+        let marker = proto::secrets::marker(&s.name);
+        for form in [
+            s.value.clone(),
+            percent(&s.value, true),
+            percent(&s.value, false),
+        ] {
+            text = text.replace(&form, &marker);
+        }
+    }
+    text
+}
+
 /// One action, and whom to tell what came of it.
 pub struct Job {
     pub request: String,
@@ -181,6 +245,9 @@ pub struct Job {
     pub action: Action,
     /// Set when the engine no longer waits (its turn ended): a job not begun is dropped.
     pub cancelled: Arc<AtomicBool>,
+    /// The bot's secrets with their values: for a `type` that names one, and for hiding any
+    /// of them that a page shows back.
+    pub secrets: Vec<Secret>,
 }
 
 enum Work {
@@ -282,7 +349,10 @@ impl Browser {
         if job.cancelled.load(Ordering::SeqCst) {
             return;
         }
-        let result = self.act(&job.action);
+        let result = self
+            .act(&job.action, &job.secrets)
+            .map(|page| redact(&page, &job.secrets))
+            .map_err(|why| redact(&why, &job.secrets));
         let _ = self.tx.send(Msg::Browsed {
             bot: self.bot.clone(),
             generation: job.generation,
@@ -291,7 +361,7 @@ impl Browser {
         });
     }
 
-    fn act(&mut self, action: &Action) -> Result<String, String> {
+    fn act(&mut self, action: &Action, secrets: &[Secret]) -> Result<String, String> {
         let gone = self
             .chrome
             .as_ref()
@@ -312,7 +382,7 @@ impl Browser {
                 chrome.page()?
             }
         };
-        chrome.act(&page, action)
+        chrome.act(&page, action, secrets)
     }
 
     fn launch(&self) -> Result<Chrome, String> {
@@ -611,7 +681,7 @@ impl Chrome {
         }
     }
 
-    fn act(&mut self, page: &str, action: &Action) -> Result<String, String> {
+    fn act(&mut self, page: &str, action: &Action, secrets: &[Secret]) -> Result<String, String> {
         match action {
             Action::Open(url) => {
                 let went = self.call(Some(page), "Page.navigate", json!({"url": url}))?;
@@ -632,8 +702,36 @@ impl Chrome {
                 text,
                 submit,
             } => {
-                let text = serde_json::to_string(text).expect("a string");
-                let done = self.eval(page, &format!("(() => {{ const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return false; e.focus(); if (e.isContentEditable) {{ e.textContent = {text}; }} else {{ const kind = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : e instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement; const set = Object.getOwnPropertyDescriptor(kind.prototype, 'value').set; set.call(e, {text}); }} e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); if ({submit}) {{ if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})); }} return true; }})()"))?;
+                // The host and the kind of field are checked in the page, in the same script that
+                // types, so that no navigation can come between them. `===` and `||` only: nothing
+                // the page can replace (a method of `String`, of `Array`) decides. A secret goes only
+                // into a password field, whose value is never shown back or put back by the browser;
+                // the field is marked, so that `look` never reports its value, whatever the page
+                // makes of its type later (a "show password" button).
+                let (value, guard, mark, site) = match text {
+                    Typed::Text(text) => (text.as_str(), "true".to_owned(), String::new(), ""),
+                    Typed::Secret(name) => {
+                        let secret = secrets.iter().find(|s| s.name == *name).ok_or_else(|| {
+                            format!("You have no secret named {name}. Ask the person for it with request_secret.")
+                        })?;
+                        let host = serde_json::to_string(&secret.site).expect("a string");
+                        let guard = format!(
+                            "location.hostname === {host} && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')"
+                        );
+                        let mark = "if (!(e.tagName === 'INPUT' && e.type === 'password')) return 'not password'; (window.__bateSecret = window.__bateSecret || new WeakSet()).add(e);".to_owned();
+                        (secret.value.as_str(), guard, mark, secret.site.as_str())
+                    }
+                };
+                let text = serde_json::to_string(value).expect("a string");
+                let done = self.eval(page, &format!("(() => {{ if (!({guard})) return 'other site'; const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return false; {mark} e.focus(); if (e.isContentEditable) {{ e.textContent = {text}; }} else {{ const kind = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : e instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement; const set = Object.getOwnPropertyDescriptor(kind.prototype, 'value').set; set.call(e, {text}); }} e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); if ({submit}) {{ if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})); }} return true; }})()"))?;
+                if done == "other site" {
+                    return Err(format!(
+                        "Nothing was typed: this page is not on {site} with https, the one place that secret may be typed."
+                    ));
+                }
+                if done == "not password" {
+                    return Err("Nothing was typed: a secret goes only into a password field (an element shown as `password field`), never into a text field, a text area or an editable page.".into());
+                }
                 if done != true {
                     return Err(gone(*element));
                 }
@@ -665,6 +763,13 @@ impl Chrome {
                     if done != true {
                         return Err(gone(*n));
                     }
+                }
+                // Deleting a letter of a secret leaves all but one of its letters in the field, which
+                // a form sent with Enter would put in the address.
+                if *key == "Backspace"
+                    && self.eval(page, "(window.__bateSecret && window.__bateSecret.has(document.activeElement)) === true")? == true
+                {
+                    return Err("Nothing was pressed: the field holds a secret, and Backspace would change it. Type the secret again to replace it.".into());
                 }
                 let &(_, code, text) = KEYS.iter().find(|k| k.0 == *key).expect("parsed");
                 // The page cannot tell this key from a person's: the watch must not take it
@@ -705,7 +810,7 @@ impl Chrome {
             const all = [...document.querySelectorAll('a[href], button, input, textarea, select, summary, [role=button], [role=link], [contenteditable=true]')];
             const shown = all.filter(e => {{ const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !e.disabled && e.type !== 'hidden'; }}).slice(0, {MAX_ELEMENTS});
             window.__bate = shown;
-            const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code';
+            const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code' || (window.__bateSecret && window.__bateSecret.has(e)) === true;
             const name = e => (e.getAttribute('aria-label') || e.innerText || (secret(e) ? '' : e.value) || e.placeholder || e.title || e.name || e.getAttribute('href') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
             const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' + (e.multiple || !e.selectedOptions.length ? '' : ' (' + e.selectedOptions[0].text.trim().replace(/\\s+/g, ' ') + ')') : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : secret(e) ? 'password field' : 'field') : 'button';
             const text = (document.body ? document.body.innerText : '').replace(/\\n{{3,}}/g, '\\n\\n');
@@ -875,5 +980,42 @@ mod tests {
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_secret_is_named_not_given_and_hidden_where_a_page_shows_it_back() {
+        let parse = |value: Value| Action::parse(&args(value));
+        assert_eq!(
+            parse(json!({"action": "type", "element": 2, "secret": "shop", "submit": true})),
+            Ok(Action::Type {
+                element: 2,
+                text: Typed::Secret("shop".into()),
+                submit: true
+            })
+        );
+        for bad in [
+            json!({"action": "type", "element": 2, "text": "x", "secret": "shop"}),
+            json!({"action": "type", "element": 2, "secret": 5}),
+            json!({"action": "type", "element": 2, "secret": "a b"}),
+            json!({"action": "type", "element": 2, "secret": ""}),
+        ] {
+            assert!(parse(bad.clone()).is_err(), "{bad}");
+        }
+
+        let secret = |name: &str, value: &str| Secret {
+            name: name.into(),
+            site: "example.com".into(),
+            value: value.into(),
+        };
+        let secrets = [secret("pin", "1234"), secret("shop", "p a&ss!1")];
+        // As typed, as a form sends it, as an address writes it; a longer value goes first.
+        let shown =
+            "https://example.com/?q=p+a%26ss%211 p%20a%26ss%211 p a&ss!1 and 1234 and 12345";
+        assert_eq!(
+            redact(shown, &secrets),
+            "https://example.com/?q=[secret shop] [secret shop] [secret shop] and [secret pin] and [secret pin]5"
+        );
+        // A value that is empty hides nothing (and cannot loop).
+        assert_eq!(redact("text", &[secret("none", "")]), "text");
     }
 }

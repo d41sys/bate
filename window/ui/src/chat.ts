@@ -39,6 +39,8 @@ export type Question = {
   options: string[];
   kind?: string;
   target?: string;
+  /** Set when the bot asks the person to type a secret: the name it will use and the site's host (the service made it). */
+  secret?: { name: string; site: string };
   /** Where a file or a command would act: the bot's folder, or its project's. */
   folder?: string;
   /** The bots that asked for the work the question is about, nearest first. Absent for the user's own. */

@@ -488,6 +488,9 @@ const FORBIDDEN_OVER_LAN: &[&str] = &[
     "set_channel",
     "pair_channel",
     "remove_chat",
+    "answer_secret",
+    "list_secrets",
+    "remove_secret",
 ];
 
 fn send(s: &Session, body: &[u8]) -> Answer {

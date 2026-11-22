@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { Avatar } from "./Avatar.tsx";
 import { QuestionCard } from "./Question.tsx";
+import { answerCommand } from "./secret.ts";
 import { ago, answered, changesAttention, grouped, said, type AttentionItem } from "./attention.ts";
 import type { Question } from "./chat.ts";
 import type { Bot } from "./types.ts";
@@ -38,10 +39,10 @@ export function Attention({ bots, open }: { bots: Bot[]; open: (bot: string, con
     };
   }, []);
 
-  const answer = (i: AttentionItem, q: Question, choice: string) => {
+  const answer = (i: AttentionItem, q: Question, choice: string, secret?: string) => {
     if (answering.current.has(q.question)) return;
     answering.current.add(q.question);
-    request("answer", { bot: i.bot, conversation: i.conversation, question: q.question, choice }).then(
+    request(...answerCommand(i.bot, i.conversation, q, choice, secret)).then(
       () => setItems((all) => all && answered(all, i.conversation, q.question)),
       (e: Error) => {
         answering.current.delete(q.question);
@@ -74,7 +75,7 @@ export function Attention({ bots, open }: { bots: Bot[]; open: (bot: string, con
                       </span>
                       <small className="when">{ago(i.atMs, now)}</small>
                     </button>
-                    {i.questions.map((q) => <QuestionCard key={q.question} q={q} keys={false} answer={(choice) => answer(i, q, choice)} />)}
+                    {i.questions.map((q) => <QuestionCard key={q.question} q={q} keys={false} answer={(choice, secret) => answer(i, q, choice, secret)} />)}
                   </li>
                 )
               );
