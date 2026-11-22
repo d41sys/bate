@@ -167,7 +167,9 @@ fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8
     };
     let wins = ax::windows();
     let needs_accessibility = !matches!(call, Call::Apps | Call::Screenshot { .. });
+    // Asked here too: a helper started for Quick Ask has not asked for everything at its start.
     if needs_accessibility && !ax::trusted() {
+        ax::ask_accessibility();
         return Err(NO_ACCESSIBILITY.into());
     }
     // The numbers of the last `look`, if it was of this window.
@@ -190,6 +192,7 @@ fn run(call: Call, tree: &mut Option<ax::Tree>) -> Result<(String, Option<Vec<u8
         }
         Call::Screenshot { app, window } => {
             if !ax::can_capture() {
+                ax::ask_screen_recording();
                 return Err(NO_SCREEN.into());
             }
             let win = ax::find(&wins, &app, window)?;
