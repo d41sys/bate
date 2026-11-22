@@ -121,6 +121,8 @@ pub fn markdown(name: &str, history: &[Value]) -> String {
                 let tool = entry["tool"].as_str().unwrap_or("a tool");
                 out.push_str(&format!("\n_Used `{}`_\n", tool.replace('`', "")));
             }
+            // An answer the check found fault with and the one after it are two.
+            "checked" => flush(&mut out, &mut reply),
             "turn_end" if entry["reason"] != "done" => {
                 flush(&mut out, &mut reply);
                 let what = if entry["reason"] == "aborted" {

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { AdapterRow } from "./AdapterRow.tsx";
 import { agentChoice, OTHER, OWN, type Agent, type Found } from "./agents.ts";
+import { checkFields, checkValue } from "./check.ts";
 import { Confirm } from "./Confirm.tsx";
 import { CodeBlock, Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
 import { Revealed } from "./Reveal.tsx";
@@ -44,6 +45,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   useEffect(() => void lookForAgents(), []);
   const saves = useSaves();
   const { run, edit, saved, error } = saves;
+  // What can check this bot's answers: the models on offer, and the other bots of its project.
+  const [models, setModels] = useState<string[]>([]);
+  const [mates, setMates] = useState<Bot[]>([]);
+  useEffect(() => {
+    if (!inShell || bot.agent) return;
+    const load = () => {
+      request<{ models: string[] }>("list_models").then((d) => setModels(d.models), () => setModels([]));
+      request<{ bots: Bot[] }>("list_bots").then((d) => setMates(d.bots.filter((b) => b.id !== bot.id && !b.agent && b.project?.id === bot.project?.id && bot.project)), () => setMates([]));
+    };
+    load();
+    return listen((frame) => (frame.type === "bots_changed" || frame.type === "projects_changed" || frame.type === "chatgpt_changed") && load());
+  }, [bot.id, bot.project?.id, bot.agent]);
   // Whether bots run on the ChatGPT plan; only Bate's own window may read the sign-in, as in Model.
   const [onPlan, setOnPlan] = useState<boolean>();
   useEffect(() => {
@@ -128,6 +141,36 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
             <Problem text={error("look")} />
           </div>
         </form>
+      </Group>
+      <Group title="Check">
+        {bot.agent ? (
+          <p className="note">This bot runs on an installed agent, which runs its own loop: its answers are not checked.</p>
+        ) : (
+          <Setting
+            id="bot-check"
+            inline
+            title="Check answers before the turn ends"
+            hint={inShell ? "After a reply that used tools or is long, a model reads it once more, with no tools. If it finds something wrong, the bot works on it again (checked twice at most). It uses this bot's tokens; routines and other bots' messages are not checked." : "Only Bate's own window changes this."}
+            saved={saved("check")}
+            error={bot.checkBroken ? `Not checked: ${bot.checkBroken}. Choose again.` : error("check")}
+          >
+            <select
+              value={checkValue(bot)}
+              disabled={!inShell}
+              onChange={(e) => run("check", request("set_bot", { bot: bot.id, ...checkFields(e.target.value) }))}
+            >
+              <option value="off">Off</option>
+              <option value="own">{bot.model ? `Its own model (${bot.model})` : "Its own model"}</option>
+              {[...new Set([...models, ...(bot.check === "model" ? [bot.checkModel] : [])])].map((m) => (
+                <option key={m} value={`model:${m}`}>Model {m}</option>
+              ))}
+              {mates.map((b) => (
+                <option key={b.id} value={`bot:${b.id}`}>Bot {b.name}</option>
+              ))}
+              {bot.check === "bot" && !mates.some((b) => b.id === bot.checkBot) && <option value={`bot:${bot.checkBot}`}>A bot that cannot check</option>}
+            </select>
+          </Setting>
+        )}
       </Group>
       <Group title="Tokens">
         {usage && (

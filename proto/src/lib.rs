@@ -59,7 +59,15 @@ pub enum Op {
     /// Reopen an earlier conversation.
     Open { bot: String, session: String },
     /// Send a user message. `nonce` is the prompt ledger's key, echoed in `turn_start`.
-    Prompt { nonce: String, text: String },
+    ///
+    /// `check`: the turn is one the person started, and the bot's check is on: the engine has
+    /// the answer checked before the turn ends (see `Event::Checked`).
+    Prompt {
+        nonce: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check: bool,
+    },
     /// Add a message to the turn that is running.
     Steer { text: String },
     /// End the running turn now.
@@ -145,6 +153,9 @@ pub enum Op {
         /// The model's context size in tokens, when the server names one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<usize>,
+        /// For the request of a check (`Event::Token` with `check`) that another bot makes: who.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checker: Option<Checker>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -274,6 +285,10 @@ pub enum Event {
     /// The engine waits until the service sends `token` for `request`.
     Token {
         request: String,
+        /// The request is for the check of an answer (see `Event::Checked`): the service may
+        /// answer with the model that checks, and who.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check: bool,
     },
     /// A model call failed in a way that may pass; the engine asks again after `wait_ms`.
     /// This is retry `attempt` of at most `of`.
@@ -283,11 +298,42 @@ pub enum Event {
         wait_ms: u64,
         error: String,
     },
+    /// What the check of the bot's answer said, with the check's own words in `note`, and the
+    /// `by` that made it: a model's name, or a bot's (empty when none was reached). Part of the transcript, between the
+    /// bot's text and the end of the turn; never the bot's text.
+    Checked {
+        result: CheckResult,
+        note: String,
+        #[serde(default)]
+        by: String,
+    },
     TurnEnd {
         reason: TurnEnd,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// The bot that makes a check: its name, and its own instructions, which the check's request
+/// has after the rules of the check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checker {
+    pub name: String,
+    pub instructions: String,
+}
+
+/// How a check of an answer went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckResult {
+    /// The check found nothing to fix.
+    Passed,
+    /// The check found something: its notes go to the bot, which works once more.
+    Failed,
+    /// The last check the turn allows found something: the turn ends with the answer as it is.
+    NotPassed,
+    /// The check could not be made (`note` says why): the turn ends as if it had no check.
+    NotChecked,
 }
 
 /// Tokens a model server said were used. `input` counts all the request's input, and `cached`

@@ -20,6 +20,12 @@ export type Bot = {
   stepLimit: number;
   /** Whether the model provider's own web search is offered (it exists only on the ChatGPT plan). */
   webSearch: boolean;
+  /** What checks the bot's answers to you before the turn ends: `off`; `own`, its own model; `model`, the one in `checkModel`; `bot`, the bot `checkBot` of its project (`check`). */
+  check: "off" | "own" | "model" | "bot";
+  checkModel: string;
+  checkBot: string;
+  /** Why the bot in `checkBot` cannot check now (gone, left the project, signed out); then the bot's answers are not checked. */
+  checkBroken?: string;
   /** A few characters, such as an emoji; empty: none. */
   avatar: string;
   /** `#rrggbb`; empty: none. */

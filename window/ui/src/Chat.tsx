@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
-import { add, aim, build, changedFiles, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
@@ -667,6 +667,8 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
         );
       }
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
+    case "checked":
+      return <p>{checkText(item.result, item.note, item.by)}</p>;
     case "steered":
       return <p className="steered">You steered: {item.text}</p>;
     case "forked":

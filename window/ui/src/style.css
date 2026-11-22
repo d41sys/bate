@@ -333,7 +333,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .item .from b { color: var(--fg); font-weight: var(--weight-strong); }
 .item.user .bubble { background: var(--bubble-user); color: var(--on-bubble-user); max-width: 80%; white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
-.item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
+.item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.checked, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
 .item.working p { margin: 0; }
 .item.arriving { animation: arrive var(--slow) var(--ease); }
 /* A run of calls: one line (a mark, what happened, a chevron) that opens to a row for each call, named by what it acted on. */

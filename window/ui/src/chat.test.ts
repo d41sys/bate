@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, aim, build, changedFiles, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
+import { checkFields, checkValue } from "./check.ts";
+import { add, aim, build, changedFiles, checkText, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -120,6 +121,46 @@ test("a steer stays in the chat where the bot took it and splits the reply aroun
     { id: 4, kind: "reply", text: "Left." },
   ]);
   assert.deepEqual(rows.reduce(add, []), build(rows));
+});
+
+test("a check that found something is its own line between the first answer and the second, not the bot's text", () => {
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "go" },
+    { type: "text", delta: "First." },
+    { type: "checked", result: "failed", note: "A file was not read.", by: "m-check" },
+    { type: "text", delta: "Second." },
+    { type: "checked", result: "passed", note: "", by: "Reviewer" },
+    { type: "turn_end", reason: "done" },
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  assert.deepEqual(build(rows), [
+    { id: 1, kind: "user", text: "go", nonce: "n1" },
+    { id: 2, kind: "reply", text: "First." },
+    { id: 3, kind: "checked", result: "failed", note: "A file was not read.", by: "m-check" },
+    { id: 4, kind: "reply", text: "Second." },
+    { id: 5, kind: "checked", result: "passed", note: "", by: "Reviewer" },
+  ]);
+  assert.deepEqual(rows.reduce(add, []), build(rows));
+});
+
+test("each result of a check says plainly what happened", () => {
+  assert.equal(checkText("passed", ""), "Checked: nothing to fix.");
+  assert.equal(checkText("failed", "No test ran."), "Checked: something to fix. No test ran. The bot is working on it.");
+  assert.match(checkText("not_passed", "Still wrong."), /did not pass.*Still wrong\./);
+  assert.equal(checkText("not_checked", "the model server answered 401"), "Not checked: the model server answered 401");
+});
+
+test("a check says who made it: the model or the bot", () => {
+  assert.equal(checkText("passed", "", "Reviewer"), "Checked by Reviewer: nothing to fix.");
+  assert.match(checkText("failed", "No test ran.", "m-check"), /^Checked by m-check: something to fix\./);
+});
+
+test("the check select holds what the bot has and sends it back whole", () => {
+  assert.equal(checkValue({ check: "off", checkModel: "", checkBot: "" }), "off");
+  assert.equal(checkValue({ check: "model", checkModel: "gpt:x", checkBot: "" }), "model:gpt:x");
+  assert.deepEqual(checkFields("model:gpt:x"), { check: "model", checkModel: "gpt:x" });
+  assert.deepEqual(checkFields(checkValue({ check: "bot", checkModel: "", checkBot: "ab12" })), { check: "bot", checkBot: "ab12" });
+  assert.deepEqual(checkFields("own"), { check: "own" });
 });
 
 test("a retry and a turn that hit its step limit each get a line", () => {
