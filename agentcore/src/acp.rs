@@ -317,6 +317,10 @@ impl Bridge {
                 id,
                 Err("this agent summarises its context by itself".into()),
             ),
+            Op::CallTool { .. } => respond(
+                id,
+                Err("this agent runs its connectors itself, so the service cannot call one".into()),
+            ),
             Op::Reply { message, .. } => respond(id, Err(format!("message {message} is not open"))),
             Op::BrowserResult { request, .. }
             | Op::DesktopResult { request, .. }

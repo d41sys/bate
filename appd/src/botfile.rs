@@ -194,6 +194,7 @@ pub fn export(
         // A start after another bot names a bot of this Mac: it does not travel, and a routine
         // with nothing else to start it would not load.
         routines: (store.routines(bot).map_err(err)?.into_iter())
+            // A routine that only a watch starts reads a connector of this Mac: it does not travel.
             .filter(|r| r.schedule.is_some() || r.webhook || r.chat)
             .map(|r| FileRoutine {
                 name: r.name,
@@ -454,8 +455,10 @@ fn check(file: BotFile, now: u64) -> Result<Checked, String> {
             next_run_ms: None,
             last_run: None,
             precheck: None,
+            watch: None,
             backoff: None,
             after: None,
+            last_check: None,
         };
         let shown = short(&routine.name);
         let wrong = |e: String| format!("the routine `{shown}`: {e}");

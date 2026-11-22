@@ -88,6 +88,15 @@ pub enum Op {
     Rewind { entry: String, fork: bool },
     /// Summarise the working context now.
     Compact,
+    /// Call one tool of a connector (`tool` as the model names it, `<connector>__<tool>`) with `args`, with no model and no
+    /// turn, and give up after 30 s. The response comes when the call is over: an error if it failed,
+    /// the tool refused it, the connector's tool is blocked, or the engine is busy with a turn. The
+    /// answer is sent as `call_output` before it. The service decides beforehand whether the bot may call
+    /// the tool without asking.
+    CallTool {
+        tool: String,
+        args: Map<String, Value>,
+    },
     /// The bot's MCP servers: the whole list each time. The engine uses the enabled ones from its next turn on.
     Connectors {
         connectors: Vec<connectors::Connector>,
@@ -292,6 +301,12 @@ pub enum Event {
     ConnectorLoaded {
         name: String,
         names: Vec<String>,
+    },
+    /// What the open `call_tool` request got: the tool's answer, cut at 64 KiB. Sent before the
+    /// request's response, and only when the call went through. Not part of the transcript.
+    CallOutput {
+        request: String,
+        output: String,
     },
     /// What one model request used, as the model server reported it. Sent after each request
     /// that was answered, also when the server reported nothing (`reported` false, the numbers

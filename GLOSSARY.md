@@ -83,6 +83,10 @@ _Avoid_: reminder, timer, scheduled message
 A command a routine runs before the bot, with no model, under the bot's own limits. If it ends well, the bot runs with its output; if not, the run is skipped. Saving the routine is the person's approval of that exact command.
 _Avoid_: hook, guard
 
+**Watch**:
+A routine trigger: every few minutes Bate calls one tool of a connector, with no model, and starts the routine when the answer is not the one before. Only a tool the bot may use without asking can be watched.
+_Avoid_: poll, monitor
+
 ### The app
 
 **Channel**:

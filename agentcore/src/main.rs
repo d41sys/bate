@@ -36,11 +36,16 @@ impl Out {
 
 const NO_SESSION: &str = "no conversation is open: send start or open first";
 
+/// How long a `call_tool` may take.
+const CALL_TOOL: std::time::Duration = std::time::Duration::from_secs(30);
+
 enum Input {
     Op(Request),
     /// The worker thread is done (a turn, or `compact`) and hands its state back, with the
     /// event that ends its work: `turn_end`, or the response to `compact`.
     Idle(Work, Event),
+    /// A `call_tool` is over: the servers come back, with the events that end it.
+    Called(mcp::Servers, Vec<Event>),
     Closed,
 }
 
@@ -181,6 +186,11 @@ fn main() {
                 engine.out.send(&end);
             }
             Input::Closed => break,
+            Input::Called(mcp, events) => {
+                engine.running = None;
+                engine.mcp = mcp;
+                events.iter().for_each(|e| engine.out.send(e));
+            }
         }
     }
     if let Some(r) = &engine.running {
@@ -361,6 +371,45 @@ impl Engine {
                 }
                 Err(e) => self.respond(id, Err(e)),
             },
+            // No model and no turn: the servers go to a thread, as in a turn, so `abort` and `stop` reach it.
+            Op::CallTool { tool, args } => match self.idle() {
+                Ok(()) if self.blocked_tools.contains(&tool) => self.respond(
+                    id,
+                    Err("This tool is blocked: the user does not allow it.".into()),
+                ),
+                Ok(()) => {
+                    let control = Arc::new(Control::default());
+                    let (answers, _) = mpsc::channel();
+                    let (steer, _) = mpsc::channel();
+                    self.running = Some(Running {
+                        control: control.clone(),
+                        answers,
+                        steer,
+                    });
+                    let mut mcp = std::mem::take(&mut self.mcp);
+                    let (out, inputs) = (self.out.clone(), self.inputs.clone());
+                    let (connectors, dir) = (self.connectors.clone(), self.dir.clone());
+                    thread::spawn(move || {
+                        for (name, names) in mcp.sync(&connectors, &dir, &control) {
+                            out.send(&Event::ConnectorLoaded { name, names });
+                        }
+                        let mut events = Vec::new();
+                        let error = match mcp.call_within(&tool, &args, &control, CALL_TOOL) {
+                            Ok(output) => {
+                                events.push(Event::CallOutput {
+                                    request: id.clone(),
+                                    output,
+                                });
+                                None
+                            }
+                            Err(e) => Some(e),
+                        };
+                        events.push(Event::Response { id, error });
+                        let _ = inputs.send(Input::Called(mcp, events));
+                    });
+                }
+                Err(e) => self.respond(id, Err(e)),
+            },
             Op::Connectors { connectors } => {
                 self.connectors = connectors;
                 self.respond(id, Ok(()));
@@ -498,6 +547,7 @@ impl Engine {
         while let Ok(input) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
             match input {
                 Input::Idle(_, end) => return self.out.send(&end),
+                Input::Called(_, events) => return events.iter().for_each(|e| self.out.send(e)),
                 Input::Op(Request { id, .. }) => {
                     self.respond(id, Err("the engine is stopping".into()))
                 }
