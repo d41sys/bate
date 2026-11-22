@@ -249,6 +249,7 @@ CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) 
 CREATE TABLE IF NOT EXISTS paused(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS web_search(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
+CREATE TABLE IF NOT EXISTS quick_ask(id INTEGER PRIMARY KEY CHECK (id = 1), shortcut TEXT NOT NULL, selection INTEGER NOT NULL, screenshot INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
@@ -1065,6 +1066,38 @@ impl Store {
             .execute(
                 "INSERT INTO providers (id, url, key) VALUES (1, ?1, ?2) ON CONFLICT(id) DO UPDATE SET url = ?1, key = ?2",
                 params![url, kept],
+            )
+            .map(drop)
+    }
+
+    /// What the person set for Quick Ask; everything off until they do.
+    pub fn quick_ask(&self) -> Result<proto::quick::Settings> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT shortcut, selection, screenshot FROM quick_ask WHERE id = 1",
+                [],
+                |r| {
+                    Ok(proto::quick::Settings {
+                        shortcut: Some(r.get::<_, String>(0)?).filter(|s| !s.is_empty()),
+                        selection: r.get(1)?,
+                        screenshot: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_quick_ask(&self, quick: &proto::quick::Settings) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO quick_ask (id, shortcut, selection, screenshot) VALUES (1, ?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET shortcut = ?1, selection = ?2, screenshot = ?3",
+                params![
+                    quick.shortcut.as_deref().unwrap_or_default(),
+                    quick.selection,
+                    quick.screenshot
+                ],
             )
             .map(drop)
     }

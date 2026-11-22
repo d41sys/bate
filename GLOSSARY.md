@@ -82,3 +82,7 @@ A messaging service outside Bate, such as Telegram or Discord, through which peo
 
 **Device**:
 Another computer or phone, paired with this Mac, that uses Bate through its page.
+
+**Quick Ask**:
+A small floating window that a global shortcut opens over any app, to ask one bot one question; the answer shows there, and it can go on in the bot's own window.
+_Avoid_: popup, launcher

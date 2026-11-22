@@ -3,15 +3,16 @@ import { Devices } from "./Devices.tsx";
 import { Group, Problem, Saved, Setting, useSaves } from "./Form.tsx";
 import { Helper } from "./Helper.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
+import { QuickSettings } from "./QuickSettings.tsx";
 import { Updates } from "./Updates.tsx";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
 
 /** The app's own settings, in one scroll. `settings-<key>` is the id of a section's heading, which the list and the palette focus. */
-const SECTIONS = { chatgpt: "ChatGPT", model: "Model server", devices: "Other devices", helper: "Bate Helper", updates: "Updates", report: "Bug report" };
+const SECTIONS = { chatgpt: "ChatGPT", model: "Model server", devices: "Other devices", helper: "Bate Helper", quick: "Quick Ask", updates: "Updates", report: "Bug report" };
 export type SettingsSection = keyof typeof SECTIONS;
-const PAGES: Record<SettingsSection, () => React.JSX.Element> = { chatgpt: ChatGpt, model: ModelServer, devices: Devices, helper: Helper, updates: Updates, report: Report };
-/** Another device on the network may not read the sign-in, the model server, the devices or the helper. */
-const SHELL_ONLY: SettingsSection[] = ["chatgpt", "model", "devices", "helper"];
+const PAGES: Record<SettingsSection, () => React.JSX.Element> = { chatgpt: ChatGpt, model: ModelServer, devices: Devices, helper: Helper, quick: QuickSettings, updates: Updates, report: Report };
+/** Another device on the network may not read the sign-in, the model server, the devices, the helper or Quick Ask. */
+const SHELL_ONLY: SettingsSection[] = ["chatgpt", "model", "devices", "helper", "quick"];
 export const settingsSections = (Object.keys(SECTIONS) as SettingsSection[]).filter((s) => inShell || !SHELL_ONLY.includes(s));
 
 /** What belongs to the app, not to a bot: the sign-in, the model server, devices, the helper, updates and the bug report. */

@@ -3,6 +3,7 @@
 //! Everything but `find` and `apps_text` is a macOS call that needs the user's permission,
 //! so only those two are tested.
 
+use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
@@ -16,6 +17,7 @@ use core_foundation_sys::data::{
 use core_foundation_sys::dictionary::CFDictionaryGetValue;
 use std::ffi::c_void;
 use std::ptr::null;
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 /// Most elements one `look` lists; the rest of a big window is cut.
@@ -65,6 +67,9 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Raw;
     fn CGWindowListCreateImage(bounds: CGRect, option: u32, window: u32, image: u32) -> Raw;
+    fn CGWindowListCreateImageFromArray(bounds: CGRect, windows: Raw, option: u32) -> Raw;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGEventCreateKeyboardEvent(source: Raw, key: u16, down: bool) -> Raw;
     fn CGEventKeyboardSetUnicodeString(event: Raw, length: usize, text: *const u16);
     fn CGEventSetFlags(event: Raw, flags: u64);
@@ -95,19 +100,29 @@ pub fn can_capture() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }
 
-/// Makes macOS list the helper under Accessibility and Screen Recording (and ask the user,
-/// once) where it lacks them.
-pub fn ask_for_permissions() {
-    if !trusted() {
-        let key = CFString::new("AXTrustedCheckOptionPrompt");
-        let options = CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
-        // SAFETY: a valid dictionary for the call.
-        unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as Raw) };
-    }
-    if !can_capture() {
-        // SAFETY: no arguments.
-        unsafe { CGRequestScreenCaptureAccess() };
-    }
+/// Makes macOS list the helper under Accessibility and asks the user, where it lacks it. Once in a
+/// run of the helper: macOS asks once, and a refusal is not asked again at every call.
+pub fn ask_accessibility() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if !trusted() {
+            let key = CFString::new("AXTrustedCheckOptionPrompt");
+            let options = CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
+            // SAFETY: a valid dictionary for the call.
+            unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as Raw) };
+        }
+    });
+}
+
+/// The same for Screen Recording.
+pub fn ask_screen_recording() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if !can_capture() {
+            // SAFETY: no arguments.
+            unsafe { CGRequestScreenCaptureAccess() };
+        }
+    });
 }
 
 /// A window on screen.
@@ -493,7 +508,18 @@ fn key(pid: i32, code: u16, units: &[u16]) {
 
 /// A PNG of the window, even where other windows cover it.
 pub fn screenshot(win: &Win) -> Result<Vec<u8>, String> {
-    let all = CGRect {
+    // Only this window (8), without its shadow (1).
+    // SAFETY: plain call; the image is ours and `encode` releases it.
+    let image = unsafe { CGWindowListCreateImage(null_rect(), 8, win.id, 1) };
+    if image.is_null() {
+        return Err(format!("Could not take a picture of window {}.", win.id));
+    }
+    encode(image)
+}
+
+/// The rectangle that means "as big as what is listed".
+fn null_rect() -> CGRect {
+    CGRect {
         origin: CGPoint {
             x: f64::INFINITY,
             y: f64::INFINITY,
@@ -502,13 +528,87 @@ pub fn screenshot(win: &Win) -> Result<Vec<u8>, String> {
             width: 0.0,
             height: 0.0,
         },
-    };
-    // Only this window (8), without its shadow (1).
-    // SAFETY: plain call; the image is ours and released below.
-    let image = unsafe { CGWindowListCreateImage(all, 8, win.id, 1) };
-    if image.is_null() {
-        return Err(format!("Could not take a picture of window {}.", win.id));
     }
+}
+
+/// A PNG of the main display, drawn from every window on screen but Bate's own: Quick Ask's
+/// panel, which is up while it asks, is not in the picture.
+pub fn screen() -> Result<Vec<u8>, String> {
+    // On screen only (1): the desktop and the menu bar are listed too.
+    // SAFETY: plain call; the list is ours (create rule).
+    let list = unsafe { CGWindowListCopyWindowInfo(1, 0) };
+    if list.is_null() {
+        return Err("Could not list the windows.".into());
+    }
+    // SAFETY: the copy is ours (create rule).
+    let list = unsafe { CFType::wrap_under_create_rule(list as CFTypeRef) };
+    // SAFETY: `list` is a CFArray, which that call returns.
+    let count = unsafe { CFArrayGetCount(list.as_CFTypeRef().cast()) };
+    let mut ids = Vec::new();
+    for i in 0..count {
+        // SAFETY: `i` is in range; the entries are dictionaries.
+        let entry = unsafe { CFArrayGetValueAtIndex(list.as_CFTypeRef().cast(), i) };
+        if string(get(entry, "kCGWindowOwnerName")).is_some_and(|owner| is_bate(&owner)) {
+            continue;
+        }
+        if let Some(id) = int(get(entry, "kCGWindowNumber")) {
+            ids.push(CFNumber::from(id as i32));
+        }
+    }
+    let ids = CFArray::from_CFTypes(&ids);
+    // SAFETY: plain calls; the array outlives the call, the image is ours and `encode` releases it.
+    let image = unsafe {
+        CGWindowListCreateImageFromArray(
+            CGDisplayBounds(CGMainDisplayID()),
+            ids.as_concrete_TypeRef().cast(),
+            0,
+        )
+    };
+    if image.is_null() {
+        return Err("Could not take a picture of the screen.".into());
+    }
+    encode(image)
+}
+
+/// Bate's own windows: the app, its Quick Ask panel.
+fn is_bate(owner: &str) -> bool {
+    owner.eq_ignore_ascii_case("bate")
+}
+
+/// The windows on screen that are not Bate's, one to a line: `id`, app and title, with tabs between.
+pub fn windows_list(wins: &[Win]) -> String {
+    wins.iter()
+        .filter(|w| !is_bate(&w.owner))
+        .map(|w| format!("{}\t{}\t{}\n", w.id, clip(&w.owner), clip(&w.title)))
+        .collect()
+}
+
+/// The text selected in the app in front of Bate's windows, or none (empty). Never the selection
+/// of a password field.
+pub fn selection(wins: &[Win]) -> String {
+    let Some(front) = wins.iter().find(|w| !is_bate(&w.owner)) else {
+        return String::new();
+    };
+    // SAFETY: plain call; the application element is ours (create rule).
+    let app = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(front.pid)) };
+    // An app that hangs must not hang the helper with it.
+    // SAFETY: valid element.
+    unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 2.0) };
+    let Some(focus) = attr(&app, "AXFocusedUIElement") else {
+        return String::new();
+    };
+    if text(&focus, "AXSubrole").as_deref() == Some("AXSecureTextField") {
+        return String::new();
+    }
+    text(&focus, "AXSelectedText")
+        .unwrap_or_default()
+        .chars()
+        .take(proto::desktop::MAX_TEXT)
+        .collect()
+}
+
+/// Takes `image` (which it releases) as a PNG.
+fn encode(image: Raw) -> Result<Vec<u8>, String> {
     let png = CFString::new("public.png");
     // SAFETY: the data, type, image and destination are valid for each call; all are released.
     let bytes = unsafe {
@@ -578,5 +678,17 @@ mod tests {
             apps_text(&wins),
             "TextEdit\n  window 7 \"Un titled\" 500x400\n  window 9 \"B\" 500x400\nSafari\n  window 5 \"A\" 500x400\n"
         );
+    }
+
+    #[test]
+    fn the_pickers_list_has_one_line_per_window_and_none_of_bates_own() {
+        let wins = [
+            win(3, "Bate", "Quick Ask"),
+            win(7, "TextEdit", "Un\ttitled"),
+            win(5, "bate", "Bate"),
+            win(9, "Safari", ""),
+        ];
+        assert_eq!(windows_list(&wins), "7\tTextEdit\tUn titled\n9\tSafari\t\n");
+        assert_eq!(selection(&[win(3, "Bate", "x")]), "");
     }
 }

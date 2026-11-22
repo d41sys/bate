@@ -1,7 +1,8 @@
 import { type ReactNode, StrictMode, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { inShell, listen, newWindow, notifyWaiting, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
+import { inQuickPanel, inShell, listen, newWindow, notifyWaiting, openAtStart, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
+import { QuickAsk } from "./QuickAsk.tsx";
 import { Pair } from "./Devices.tsx";
 import type { Bot, Project } from "./types.ts";
 import { Model } from "./Model.tsx";
@@ -89,7 +90,8 @@ function App() {
   const [state, setState] = useState("Connecting to the service…");
   const [bots, setBots] = useState<Bot[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [view, setView] = useState<View>();
+  // A window the shell opens for "Open in Bate" starts on that bot's chat.
+  const [view, setView] = useState<View | undefined>(openAtStart ? { page: "bot", id: openAtStart, tab: "chat" } : undefined);
   const [error, setError] = useState("");
   // On another device that has not paired yet.
   const [unpaired, setUnpaired] = useState(false);
@@ -574,6 +576,6 @@ addEventListener("click", (e) => {
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
-    <App />
+    {inQuickPanel ? <QuickAsk /> : <App />}
   </StrictMode>,
 );

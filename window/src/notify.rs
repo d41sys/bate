@@ -21,7 +21,7 @@ use objc2_user_notifications::{
 };
 use serde_json::{Value, json};
 use std::sync::OnceLock;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// The category of a notification with buttons, and the buttons' own identifiers.
 const CATEGORY: &str = "bate.question";
@@ -102,7 +102,7 @@ fn answered(app: &AppHandle, identifier: &str, action: &str) {
 
 /// The Dock's badge with no window open; a window's page sets it itself.
 fn count(app: &AppHandle, n: usize) {
-    if !app.webview_windows().is_empty() {
+    if !crate::windows(app).is_empty() {
         return;
     }
     let _ = app.run_on_main_thread(move || {
@@ -115,23 +115,11 @@ fn count(app: &AppHandle, n: usize) {
     });
 }
 
-/// A click: an open window comes forward and opens the bot.
+/// A click: an open window comes forward and opens the bot; with none open, one opens on it.
 fn clicked(app: &AppHandle, identifier: &str) {
-    let Some(bot) = target(identifier) else {
-        return;
-    };
-    let Some(window) = app.webview_windows().into_values().next() else {
-        // No window is open: Bate opens one; the person finds the bot in its list.
-        let _ = crate::open_window(app);
-        return;
-    };
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
-    // `bot` is checked by `target`: nothing from outside goes into the script.
-    let _ = window.eval(format!(
-        "dispatchEvent(new CustomEvent('bate-open-bot', {{ detail: '{bot}' }}))"
-    ));
+    if let Some(bot) = target(identifier) {
+        crate::open_bot(app, bot);
+    }
 }
 
 struct Ivars {
