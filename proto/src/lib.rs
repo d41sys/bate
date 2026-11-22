@@ -70,6 +70,7 @@ pub enum Op {
         text: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         check: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         check_back: bool,
     },
     /// Add a message to the turn that is running.

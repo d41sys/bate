@@ -16888,3 +16888,49 @@ fn a_routine_after_another_bot_starts_at_most_twenty_times_an_hour() {
     });
     assert_eq!(prompt_count(&home, &b), 20);
 }
+
+#[test]
+fn a_turn_from_a_later_note_is_stopped_by_a_token_limit_that_holds_unattended_work() {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("later-limit");
+    let mut service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok("set_token_limit", json!({"bot": bot, "day": 100}));
+    let conversation = w.ok("open_bot", json!({"bot": bot}))["conversation"].clone();
+
+    // While the service is down two notes fall due: the first plans, so it needs a second
+    // model request, which the limit refuses; the second falls due too and waits its turn.
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    for (note, due) in [("PLANNING it", 2000), ("again", 1000)] {
+        db.execute(
+            "INSERT INTO later(bot, conversation, due_ms, note, chain) VALUES (?1, ?2, ?3, ?4, 1)",
+            rusqlite::params![bot, conversation.as_str().unwrap(), now_ms() - due, note],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    turns_ended(&mut w, &bot, "limit", 1);
+    assert_eq!(model.requests(), 1);
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].clone();
+    let end = history.as_array().unwrap().last().unwrap()["entry"].clone();
+    let error = end["error"].as_str().unwrap();
+    assert!(error.contains("limit of 100 tokens for today"), "{end}");
+
+    // The turn ran once and ended `limit`: its row is gone. The next note is not started
+    // while the limit holds: it stays waiting, and no model request is made for it.
+    let waiting = later_rows(&mut w, &bot);
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["note"], "again");
+
+    // The person's own prompt in the same conversation still runs, and the note still waits.
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    turns_ended(&mut w, &bot, "done", 1);
+    assert_eq!(model.requests(), 2);
+    assert_eq!(later_rows(&mut w, &bot).len(), 1);
+}
