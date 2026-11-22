@@ -29,7 +29,7 @@ Each request is `{"id":"…","type":"<op>",…fields}`. `id` is a string chosen 
 |---|---|---|
 | `start` | `bot` | Begin a new conversation. The engine sends `session`. The engine works in `BATE_WORK_DIR`, without it in its working directory, the bot's folder. |
 | `open` | `bot`, `session` | Reopen an earlier conversation. The engine sends `session`. |
-| `prompt` | `nonce`, `text` | Send a user message. `nonce` is the prompt ledger's key and comes back in `turn_start`. |
+| `prompt` | `nonce`, `text`, `check?` | Send a user message. `nonce` is the prompt ledger's key and comes back in `turn_start`. `check` (true; left out when false): the turn is one the person started and the bot's check is on, so the engine has its answer checked (see Check before done). An installed agent ignores it. |
 | `steer` | `text` | Add a message to the turn that is running. The engine puts it into the conversation (and so into the saved session) before its next model call, and then sends `steered`. Without a turn it answers an error. |
 | `abort` | none | End the running turn now. It ends with `turn_end` reason `aborted`. |
 | `answer` | `question`, `choice` | Answer an open `question`. `choice` is one of its `options`. |
@@ -62,6 +62,7 @@ An engine also exits when its standard input closes: the service has stopped or 
 | `session` | `session` | The conversation now open. |
 | `turn_start` | `nonce` | The prompt with this nonce started a turn. |
 | `steered` | `text` | The running turn took a `steer` message into the conversation, at this point of the turn. |
+| `checked` | `result`, `note` | What the check of the bot's answer said (see Check before done): `result` is `passed`, `failed` (the bot works on `note` and answers again), `not_passed` (the last check the turn allows found something, and the turn ends with the answer as it is) or `not_checked` (the check could not be made, `note` says why). Part of the transcript. |
 | `text` | `delta` | Reply text, appended to the current reply. |
 | `thinking` | `delta` | Thinking text, appended to the current thinking. |
 | `tool_start` | `call`, `tool`, `args` | A tool call began. `args` is a JSON object. |
@@ -123,7 +124,7 @@ Quick Ask's `quick_shot` fails with `helper_failed` (the message is the helper's
 | `hello` | `protocol` | `{protocol}` |
 | `list_bots` | none | `{bots:[Bot]}` |
 | `create_bot` | `name` (1 to 80 characters) | `{bot: Bot}` |
-| `set_bot` | `bot`, `name?`, `instructions?` (at most 8000 characters), `stepLimit?` (a whole number, 1 to 1000), `avatar?` (at most 8 characters, such as an emoji), `color?` (`#rrggbb` or empty) | `{}`; what is given changes; `bots_changed` follows. A `stepLimit` is sent to a running engine as `step_limit`. `webSearch?` (true or false) is kept and sent as `web_search`. |
+| `set_bot` | `bot`, `name?`, `instructions?` (at most 8000 characters), `stepLimit?` (a whole number, 1 to 1000), `avatar?` (at most 8 characters, such as an emoji), `color?` (`#rrggbb` or empty) | `{}`; what is given changes; `bots_changed` follows. A `stepLimit` is sent to a running engine as `step_limit`. `webSearch?` (true or false) is kept and sent as `web_search`. `check?` (true or false) is kept: see Check before done; it is refused `no_check` for a bot on an installed agent, and from a device on the network `forbidden`. |
 | `order_bots` | `bots`: every bot's id once, in the new order | `{}`; `list_bots` lists them so from then on |
 | `delete_bot` | `bot` | `{}`: its engine and browser stop, it leaves its project, everything stored for it is forgotten, and its folder and browser profile move to the Trash, as Finder moves them (Put Back works). When its folder cannot be moved, nothing is deleted: `trash_failed` |
 | `search` | `text` (1 to 200 bytes), `bot?`, `conversation?` (with `bot`), `limit?` (default 50, at most 200) | `{hits: [{bot, conversation, seq, atMs, kind, snippet}]}`: prompts (`kind` `user`) and replies (`reply`) holding `text` in any case, of one conversation, of `bot` or of all bots, newest first; `atMs` is when the entry was written. A reply is searched whole, as the chat joins its pieces; `seq` is its first piece's, the chat item's `id`. |
@@ -239,7 +240,7 @@ Quick Ask's `quick_shot` fails with `helper_failed` (the message is the helper's
 | `pair_channel` | `bot`, `kind` | `{code, expiresAt}`: a 6-digit code that lets one chat in; it lasts 5 minutes or 5 wrong guesses. Code `no_channel` without a token |
 | `remove_chat` | `bot`, `kind`, `chat` | `{}`: the chat is no longer let in. Code `no_such_chat` |
 
-`Bot` is `{id, name, createdAt, running, busy, paused, wholeDisk, network, agent, browserTaken, instructions, stepLimit, webSearch, avatar, color, model, effort, project}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true; `project`, `{id, name}`, only for a bot in a project): `stepLimit` is the tool rounds a turn may take, 100 unless set; `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes, and `projects_changed` each time `project` does. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the last `session` of the conversation the operation is for (see Conversations). If the engine refuses `open`, the service forgets that session and sends `start`.
+`Bot` is `{id, name, createdAt, running, busy, paused, wholeDisk, network, agent, browserTaken, instructions, stepLimit, webSearch, check, avatar, color, model, effort, project}` (`model` and `effort` only once chosen) (`agent` only when set; `browserTaken` only when true; `project`, `{id, name}`, only for a bot in a project): `stepLimit` is the tool rounds a turn may take, 100 unless set; `running` while the bot has an engine, `busy` between `turn_start` and `turn_end`, and while a `compact` is unanswered. `bots_changed` is sent each time it changes, and `projects_changed` each time `project` does. Every engine operation starts the bot's engine if it has none; the service then sends `start`, or `open` with the last `session` of the conversation the operation is for (see Conversations). If the engine refuses `open`, the service forgets that session and sends `start`.
 
 A `Bot` also has `waiting`: `true` while a question is open in any of its conversations (see Questions), so a list shows which bots need the person without opening each one. `bots_changed` is sent when a question opens and when it closes.
 
@@ -322,7 +323,19 @@ The engine sends `usage` after each model call (see Events); the service adds it
 
 `set_token_limit` gives a bot a limit per day and per month, and what it stops. A limit counts `input` plus `output` (`cached` is part of `input`) and is reached at the number. `stops` `unattended` (the default) stops a routine run (a slot, a webhook, `/run`, `run_routine`) and a turn begun by another bot (mail, an answer, a bot's call) or a channel message; the person's own prompt in the window, and a Room message, still run. `everything` stops those too.
 
-It is checked before each model call, through the `token` request: over the limit, the service answers `error` with the reason, "the bot used its limit of N tokens for today; it counts again from midnight" (or "... for this month; it counts again on the 1st"). A turn in progress therefore ends with `turn_end` reason `limit` and that reason as `error`, and keeps what it wrote. One call may go past the number: it is counted when it is over. A routine is checked again before its start (check 4 in Routines), so one over the limit is recorded `skipped` with reason `limit` and no turn; one that crosses it mid-run ends with outcome `limit`. The window shows both on the routine's row and, for a turn that ended `limit`, in the Activity screen; a routine skipped before it started has no conversation, so only its row shows it.
+It is checked before each model call, through the `token` request: over the limit, the service answers `error` with the reason, "the bot used its limit of N tokens for today; it counts again from midnight" (or "... for this month; it counts again on the 1st"). A turn in progress therefore ends with `turn_end` reason `limit` and that reason as `error`, and keeps what it wrote. One call may go past the number: it is counted when it is over. The requests of a check (see Check before done) are model calls like these. A routine is checked again before its start (check 4 in Routines), so one over the limit is recorded `skipped` with reason `limit` and no turn; one that crosses it mid-run ends with outcome `limit`. The window shows both on the routine's row and, for a turn that ended `limit`, in the Activity screen; a routine skipped before it started has no conversation, so only its row shows it.
+
+### Check before done
+
+Per bot, off by default (`set_bot` `check`, `Bot.check`): the answer to a turn the person started is read once more by the model before the turn ends. The service sends `check` true on a `prompt` only when the switch is on, the bot has its own engine (not an installed agent) and the prompt is the person's: typed at a window, sent from a device on the network, a message in a project's room, or a message in a chat of a channel, also when it waited in the queue. A routine's run, a message or answer of another bot and a routine's chat message are not checked.
+
+The engine makes the check when the turn is about to end (the bot's last reply called no tool) and the reply is not empty, and the turn used a tool or the reply is at least 600 characters; a short answer with no tool use is not checked and has no line. It is a second model request of the same engine, with the same model, effort and sign-in, made like any other (`token`, `usage`, a retry that is shown): it counts and is held to the bot's token limit, and a request the limit refuses is a check that could not be made. It has no tools (and no web search) and changes nothing. It is given the person's request of this turn, what the turn did (each tool call's name, its arguments cut at 300 characters and its result cut at 600, in all 12,000 characters, the rest said by count) and the reply; it is told to treat all of it as data and to answer with a first line of `OK` or `FIX`, then notes. Its notes are kept to 1,000 characters.
+
+- **`OK`:** `checked` `passed`; the turn ends as it would have.
+- **`FIX`:** `checked` `failed` with the notes; the notes go into the conversation as the bot's next input, in the same turn, and the bot goes on (its tool rounds count as the turn's own, and may reach the step limit). Its next reply is checked again. At most 2 checks are made in a turn, so a second `FIX` is `checked` `not_passed` with its notes and the turn ends `done`: the answer stands as it is, and the line says plainly that it did not pass.
+- **Not made:** a request that fails (network, the server, the limit), a first line that is neither `OK` nor `FIX`, or time: all checking of a turn is given up 10 minutes (`BATE_CHECK_MS` in tests) after its first check began, also a request in flight. `checked` `not_checked` with the reason, and the turn ends as it would have without a check. A check never makes a turn fail. An abort ends the turn `aborted` with no line.
+
+The service puts each `checked` into the transcript, between the bot's text and the end of the turn, so it shows again after a restart and on the page for other devices; the window shows it as a quiet line of its own, not as the bot's text or the person's. The answer that a `failed` check found fault with is not the reply that goes back into a room or a chat: that is the last one. Settings show the switch in Bate's own window only: `set_bot` with `check` is refused `forbidden` from a device on the network, so a device can neither turn a check off nor on, but sees the lines. For a bot on an installed agent, which runs its own loop, Settings say there is no check instead of a switch.
 
 ### Bots together
 
@@ -766,6 +779,7 @@ A bot whose command is exactly one of these (and installed) shows as that agent;
 - Not offered to the agent: reading or writing files and running terminals through Bate (it does these itself). Refused by this engine: `steer`, `rewind`, `compact`. `set_model` is accepted and has no effect; choose the model in the agent. Memory, skills and messages between bots are Bate's own engine's and are not given to an agent.
 - If the agent fails to open a conversation, the error names the agent's own ways to sign in.
 - The agent's `usage` in the answer to `session/prompt` (`inputTokens`, `outputTokens`, `cachedReadTokens`) becomes the turn's `usage` event; an agent that gives none is `reported: false`, and the bot shows "not counted". The agent's model calls are not seen, so a token limit is not enforced for it.
+- The agent runs its own loop, so a bot on it has no check: `check` on `prompt` is ignored and `set_bot` `check: true` is refused.
 - A turn that was aborted ends `aborted` however the agent ends it. A tool call the agent did not finish by the end of its turn gets a `tool_end` with `isError`. A tool's output is cut at 64 KiB.
 
 #### Adapters Bate installs
@@ -788,6 +802,7 @@ The same page is reachable from the user's own Tailscale network (no relay of Ba
 - Removing a device in Settings terminates its sessions and revokes its cookie immediately.
 - Files (`botfile://`) and surfaces open in the pane of Bate's native window only and are not served to LAN devices.
 - A device cannot read, set or remove a secret: `answer_secret`, `list_secrets` and `remove_secret` are refused to it. It can only `answer` a secret card with `Deny` (the service refuses any other choice to a secret card, whoever sends it), and its card says that the value is typed in Bate's window on this Mac.
+- A device may not change a bot's check (`set_bot` with `check`, refused `forbidden`), as it may not change a precheck: only the person at the window decides whether answers are checked.
 
 ### Speech (the window, not the service)
 

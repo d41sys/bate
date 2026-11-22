@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { add, aim, build, changedFiles, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -120,6 +120,33 @@ test("a steer stays in the chat where the bot took it and splits the reply aroun
     { id: 4, kind: "reply", text: "Left." },
   ]);
   assert.deepEqual(rows.reduce(add, []), build(rows));
+});
+
+test("a check that found something is its own line between the first answer and the second, not the bot's text", () => {
+  const entries: Entry[] = [
+    { type: "prompt", nonce: "n1", text: "go" },
+    { type: "text", delta: "First." },
+    { type: "checked", result: "failed", note: "A file was not read." },
+    { type: "text", delta: "Second." },
+    { type: "checked", result: "passed", note: "" },
+    { type: "turn_end", reason: "done" },
+  ];
+  const rows = entries.map((entry, i) => ({ seq: i + 1, entry }));
+  assert.deepEqual(build(rows), [
+    { id: 1, kind: "user", text: "go", nonce: "n1" },
+    { id: 2, kind: "reply", text: "First." },
+    { id: 3, kind: "checked", result: "failed", note: "A file was not read." },
+    { id: 4, kind: "reply", text: "Second." },
+    { id: 5, kind: "checked", result: "passed", note: "" },
+  ]);
+  assert.deepEqual(rows.reduce(add, []), build(rows));
+});
+
+test("each result of a check says plainly what happened", () => {
+  assert.equal(checkText("passed", ""), "Checked: nothing to fix.");
+  assert.equal(checkText("failed", "No test ran."), "Checked: something to fix. No test ran. The bot is working on it.");
+  assert.match(checkText("not_passed", "Still wrong."), /did not pass.*Still wrong\./);
+  assert.equal(checkText("not_checked", "the model server answered 401"), "Not checked: the model server answered 401");
 });
 
 test("a retry and a turn that hit its step limit each get a line", () => {

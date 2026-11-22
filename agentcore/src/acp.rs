@@ -235,7 +235,7 @@ impl Bridge {
                     Err("this agent cannot reopen an earlier conversation".into()),
                 )
             }
-            Op::Prompt { nonce, text } => {
+            Op::Prompt { nonce, text, .. } => {
                 let ready = match (&self.session, self.turn) {
                     (_, true) => Err("the engine is busy with a turn".to_owned()),
                     _ if self.opening => Err("a conversation is being opened".to_owned()),

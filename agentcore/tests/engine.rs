@@ -3,7 +3,7 @@
 use proto::connectors::{Connector, Transport};
 use proto::permissions::Kind;
 use proto::projects::Peer;
-use proto::{Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, Tokens, TurnEnd};
+use proto::{CheckResult, Event, MAX_EVENT_FRAME, MAX_OP_FRAME, Op, Request, Tokens, TurnEnd};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -310,9 +310,19 @@ impl Engine {
     }
 
     fn prompt_as(&mut self, nonce: &str, text: &str) {
+        self.prompt_with(nonce, text, false);
+    }
+
+    /// A prompt of the person's, in a bot that has its check on.
+    fn prompt_checked(&mut self, text: &str) {
+        self.prompt_with("n1", text, true);
+    }
+
+    fn prompt_with(&mut self, nonce: &str, text: &str, check: bool) {
         let op = Op::Prompt {
             nonce: nonce.into(),
             text: text.into(),
+            check,
         };
         assert_eq!(self.request(op), None);
         assert_eq!(
@@ -743,6 +753,7 @@ fn a_conversation_that_cannot_be_opened_leaves_none_open() {
     let prompt = Op::Prompt {
         nonce: "n1".into(),
         text: "hello".into(),
+        check: false,
     };
     let error = engine.request(prompt).unwrap();
     assert!(error.contains("no conversation is open"), "{error}");
@@ -3519,4 +3530,262 @@ fn a_write_or_edit_keeps_the_earlier_text_under_an_id_the_tool_end_names_and_a_l
         .position(|e| matches!(e, Event::ToolEnd { .. }))
         .unwrap();
     assert!(first_kept < first_end);
+}
+
+/// The tool that does nothing, so a turn "uses a tool" without a question to answer.
+fn a_plan_call() -> Value {
+    call(
+        "c1",
+        "plan",
+        json!({"steps": [{"step": "look", "status": "done"}]}),
+    )
+}
+
+/// The turn's `checked` events, in order.
+fn checks(events: &[Event]) -> Vec<(CheckResult, &str)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Checked { result, note } => Some((*result, note.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn done() -> Event {
+    Event::TurnEnd {
+        reason: TurnEnd::Done,
+        error: None,
+    }
+}
+
+#[test]
+fn a_check_that_passes_is_shown_and_sees_the_request_the_work_and_the_answer_with_no_tools() {
+    let dir = workdir("check-pass");
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("All looked at.")],
+        vec![text("OK\nThe answer fits the request.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_checked("look at everything");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        checks(&events),
+        [(CheckResult::Passed, "The answer fits the request.")]
+    );
+    assert_eq!(ended(&events), &done());
+    // The check is the last thing before the end, and is not the bot's text.
+    assert!(matches!(&events[events.len() - 2], Event::Checked { .. }));
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    let check = &requests[2];
+    assert!(check.get("tools").is_none(), "{check}");
+    assert_eq!(check["messages"].as_array().unwrap().len(), 2);
+    let said = check["messages"][1]["content"].as_str().unwrap();
+    for part in ["look at everything", "plan", "All looked at."] {
+        assert!(said.contains(part), "{said}");
+    }
+    // Counted like the turn's own requests.
+    assert_eq!(engine.usage.try_iter().count(), 3);
+}
+
+#[test]
+fn a_check_that_finds_something_gives_the_bot_its_notes_and_one_more_round() {
+    let dir = workdir("check-fix");
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("First answer.")],
+        vec![text("FIX\nThe second file was never read.")],
+        vec![text("Second answer.")],
+        vec![text("OK")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_checked("read both files");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        checks(&events),
+        [
+            (CheckResult::Failed, "The second file was never read."),
+            (CheckResult::Passed, "")
+        ]
+    );
+    // The bot's words, the check's, the bot's again, the check's.
+    let kinds: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Text { .. } | Event::Checked { .. }))
+        .collect();
+    assert!(matches!(
+        kinds.as_slice(),
+        [
+            Event::Text { .. },
+            Event::Checked { .. },
+            Event::Text { .. },
+            Event::Checked { .. }
+        ]
+    ));
+    assert_eq!(ended(&events), &done());
+    // The bot's next request ends with the notes, as the person's side of the conversation.
+    let again = &model.requests()[3]["messages"];
+    let last = again.as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap()
+            .contains("The second file was never read.")
+    );
+    assert_eq!(model.requests().len(), 5);
+}
+
+#[test]
+fn a_second_check_that_finds_something_ends_the_turn_saying_it_did_not_pass() {
+    let dir = workdir("check-bound");
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("A.")],
+        vec![text("FIX\nOne.")],
+        vec![text("B.")],
+        vec![text("FIX\nStill wrong.")],
+        vec![text("never asked")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_checked("do it");
+    let events = engine.until(is_turn_end);
+    assert_eq!(
+        checks(&events),
+        [
+            (CheckResult::Failed, "One."),
+            (CheckResult::NotPassed, "Still wrong.")
+        ]
+    );
+    assert_eq!(ended(&events), &done());
+    assert_eq!(model.requests().len(), 5);
+}
+
+#[test]
+fn a_check_that_cannot_be_had_never_fails_the_turn() {
+    let dir = workdir("check-errors");
+    let model = Model::replay(vec![
+        stream_body(vec![a_plan_call()]),
+        whole("Answer one."),
+        refusal("401 Unauthorized", ""),
+        stream_body(vec![a_plan_call()]),
+        whole("Answer two."),
+        whole("Looks fine to me."),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_checked("first");
+    let events = engine.until(is_turn_end);
+    let [(CheckResult::NotChecked, why)] = checks(&events)[..] else {
+        panic!("{events:?}")
+    };
+    assert!(why.contains("401"), "{why}");
+    assert_eq!(ended(&events), &done());
+
+    // No verdict is as good as no answer.
+    engine.prompt_with("n2", "second", true);
+    let events = engine.until(is_turn_end);
+    let [(CheckResult::NotChecked, why)] = checks(&events)[..] else {
+        panic!("{events:?}")
+    };
+    assert!(why.contains("neither OK nor FIX"), "{why}");
+    assert_eq!(ended(&events), &done());
+}
+
+#[test]
+fn a_check_the_limit_refuses_is_not_made_and_the_turn_ends_as_it_would_have() {
+    let dir = workdir("check-limit");
+    let model = Model::serve(vec![vec![a_plan_call()], vec![text("Answer.")]]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt_checked("go");
+    let mut events = Vec::new();
+    let mut tokens = 0;
+    loop {
+        match engine.next() {
+            Event::Token { request } => {
+                tokens += 1;
+                // The service refuses the third model request of the turn: the check's.
+                let refused = tokens == 3;
+                let op = Op::Token {
+                    request,
+                    url: (!refused).then(|| model.url.clone()),
+                    key: None,
+                    api: None,
+                    model: None,
+                    context: None,
+                    error: refused.then(|| "the bot used its limit".into()),
+                };
+                assert_eq!(engine.request(op), None);
+            }
+            e if is_turn_end(&e) => {
+                events.push(e);
+                break;
+            }
+            e => events.push(e),
+        }
+    }
+    assert_eq!(
+        checks(&events),
+        [(CheckResult::NotChecked, "the bot used its limit")]
+    );
+    assert_eq!(ended(&events), &done());
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[test]
+fn a_check_that_takes_too_long_is_given_up_on_and_the_answer_stands() {
+    let dir = workdir("check-time");
+    // The check's reply never ends.
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("Answer.")],
+        vec![Value::Null],
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_CHECK_MS", "300")]);
+    engine.open_new();
+    engine.prompt_checked("go");
+    let events = engine.until(is_turn_end);
+    let [(CheckResult::NotChecked, why)] = checks(&events)[..] else {
+        panic!("{events:?}")
+    };
+    assert!(why.contains("time allowed"), "{why}");
+    assert_eq!(ended(&events), &done());
+}
+
+#[test]
+fn an_answer_with_no_tool_use_is_checked_only_when_it_is_long_and_a_turn_without_the_setting_never()
+{
+    let dir = workdir("check-short");
+    let long = "word ".repeat(200);
+    let model = Model::serve(vec![
+        vec![text("Short.")],
+        vec![text(&long)],
+        vec![text("OK")],
+        vec![a_plan_call()],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    // Short and no tool: nothing to check, and no line about it.
+    engine.prompt_with("n1", "hi", true);
+    let events = engine.until(is_turn_end);
+    assert!(checks(&events).is_empty());
+    assert_eq!(model.requests().len(), 1);
+    // Long: checked.
+    engine.prompt_with("n2", "tell me more", true);
+    let events = engine.until(is_turn_end);
+    assert_eq!(checks(&events), [(CheckResult::Passed, "")]);
+    assert_eq!(model.requests().len(), 3);
+    // A tool, but the person did not start it or the check is off: not checked.
+    engine.prompt_with("n3", "go", false);
+    let events = engine.until(is_turn_end);
+    assert!(checks(&events).is_empty());
+    assert_eq!(model.requests().len(), 5);
 }

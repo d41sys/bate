@@ -20,6 +20,8 @@ export type Bot = {
   stepLimit: number;
   /** Whether the model provider's own web search is offered (it exists only on the ChatGPT plan). */
   webSearch: boolean;
+  /** Whether the bot's answers to you are checked by its model before the turn ends (`check`). */
+  check: boolean;
   /** A few characters, such as an emoji; empty: none. */
   avatar: string;
   /** `#rrggbb`; empty: none. */

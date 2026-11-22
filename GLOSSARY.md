@@ -18,6 +18,10 @@ _Avoid_: disabled, muted, stopped
 What a bot may use per day and per month, in tokens. It stops unattended work (routines, other bots' messages, channels) or everything.
 _Avoid_: budget, quota, spend cap
 
+**Check**:
+A second model request, with no tools, that reads a bot's answer to the person before the turn ends and says `OK` or `FIX`. On `FIX` the bot gets the notes and works once more. Off unless the person turns it on for the bot.
+_Avoid_: review, verify, double-check
+
 **Conversation**:
 One exchange between the person and a bot: the prompts, the replies and what the bot did, in order. A bot has many.
 _Avoid_: chat, thread, session

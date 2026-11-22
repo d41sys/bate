@@ -129,6 +129,22 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
           </div>
         </form>
       </Group>
+      <Group title="Check">
+        {bot.agent ? (
+          <p className="note">This bot runs on an installed agent, which runs its own loop: its answers are not checked.</p>
+        ) : (
+          <Setting
+            id="bot-check"
+            inline
+            title="Check answers before the turn ends"
+            hint={inShell ? "After a reply to you that used tools or is long, the bot's model reads it once more, with no tools. If it finds something wrong, the bot works on it again (once more at most). What it says shows in the chat. It uses tokens, and it is not run for routines or other bots." : "Only Bate's own window changes this."}
+            saved={saved("check")}
+            error={error("check")}
+          >
+            <input type="checkbox" role="switch" checked={bot.check} disabled={!inShell} onChange={(e) => run("check", request("set_bot", { bot: bot.id, check: e.target.checked }))} />
+          </Setting>
+        )}
+      </Group>
       <Group title="Tokens">
         {usage && (
           <>

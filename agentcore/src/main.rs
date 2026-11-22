@@ -263,7 +263,7 @@ impl Engine {
                     Err(e) => self.opening_failed(id, e),
                 }
             }
-            Op::Prompt { nonce, text } => match self.begin_turn() {
+            Op::Prompt { nonce, text, check } => match self.begin_turn(check) {
                 Ok((turn, mut work)) => {
                     // The response goes first: the service records the prompt before the turn's events.
                     self.respond(id, Ok(()));
@@ -343,7 +343,7 @@ impl Engine {
                 }
             }
             // A model call, so it runs like a turn: `abort` and `stop` reach it, and the response comes when it is done.
-            Op::Compact => match self.begin_turn() {
+            Op::Compact => match self.begin_turn(false) {
                 Ok((turn, mut work)) => {
                     let inputs = self.inputs.clone();
                     thread::spawn(move || {
@@ -488,7 +488,7 @@ impl Engine {
         }
     }
 
-    fn begin_turn(&mut self) -> Result<(turn::Turn, Work), String> {
+    fn begin_turn(&mut self, check: bool) -> Result<(turn::Turn, Work), String> {
         self.idle()?;
         let model = self.model.clone();
         let provider =
@@ -527,6 +527,7 @@ impl Engine {
             instructions: self.instructions.clone(),
             steps: self.steps,
             web_search: self.web_search,
+            check,
             control,
             answers: answers_rx,
             steer: steer_rx,

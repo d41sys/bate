@@ -634,6 +634,20 @@ enum Caller {
     },
 }
 
+/// Whether the prompt that `waiter` carries is one the person wrote (at a window, or in a room
+/// or a chat of a channel), not a routine's or another bot's.
+fn person_started(waiter: &Waiter) -> bool {
+    match waiter {
+        Waiter::Window { .. } => true,
+        Waiter::Queued { caller, .. } => matches!(caller, None | Some(Caller::Room { .. })),
+        Waiter::Peer { caller, .. } => matches!(
+            caller,
+            Caller::Room { .. } | Caller::Chat { routine: None, .. }
+        ),
+        _ => false,
+    }
+}
+
 /// A message sent to a bot from outside its windows, while the bot works on it.
 struct Call {
     caller: Caller,
@@ -2802,6 +2816,21 @@ impl Core {
                             .ok_or_else(|| bad("`webSearch` must be true or false"))?,
                     ),
                 };
+                let check = match f.get("check").filter(|v| !v.is_null()) {
+                    None => None,
+                    Some(v) => Some(
+                        v.as_bool()
+                            .ok_or_else(|| bad("`check` must be true or false"))?,
+                    ),
+                };
+                // An installed agent runs its own loop: there is no turn of ours to check.
+                if check == Some(true) && self.store.agent(&bot).map_err(internal)?.is_some() {
+                    return Err((
+                        "no_check",
+                        "an installed agent runs its own loop: its answers cannot be checked"
+                            .into(),
+                    ));
+                }
                 let mut profile = self.store.profile(&bot).map_err(internal)?;
                 let text = |key: &str| {
                     f.get(key).filter(|v| !v.is_null()).map(|v| {
@@ -2844,6 +2873,9 @@ impl Core {
                         let on = self.web_search_on(&bot).map_err(internal)?;
                         self.send_op(&bot, Op::WebSearch { on }, Waiter::Quiet)?;
                     }
+                }
+                if let Some(on) = check {
+                    self.store.set_check(&bot, on).map_err(internal)?;
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
@@ -3353,6 +3385,7 @@ impl Core {
                 .unwrap_or(STEP_LIMIT)
         );
         row["webSearch"] = json!(self.store.web_search(bot).unwrap_or(true));
+        row["check"] = json!(self.store.check(bot).unwrap_or(false));
         row["paused"] = json!(self.is_paused(bot));
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
@@ -3407,17 +3440,24 @@ impl Core {
                 false => format!("[Bate] The user undid your change to {path}: it has its earlier content again.\n"),
             })
             .collect();
+        let text = if notice.is_empty() {
+            prompt.text.clone()
+        } else {
+            format!("{notice}\n{}", prompt.text)
+        };
+        let waiter = waiter(prompt);
+        // Only the answer to a person is checked: not a routine's, nor another bot's.
+        let check = person_started(&waiter)
+            && self.store.check(bot).unwrap_or(false)
+            && self.store.agent(bot).ok().flatten().is_none();
         let op = Op::Prompt {
             nonce: nonce.clone(),
-            text: if notice.is_empty() {
-                prompt.text.clone()
-            } else {
-                format!("{notice}\n{}", prompt.text)
-            },
+            text,
+            check,
         };
         let sent = self
             .focus(bot, &conversation)
-            .and_then(|()| self.send_op(bot, op, waiter(prompt)));
+            .and_then(|()| self.send_op(bot, op, waiter));
         match &sent {
             // The engine never started, so it cannot have the prompt.
             Err(_) => {
@@ -6133,6 +6173,14 @@ impl Core {
         match (&ev, &mut r.call) {
             (Event::Text { delta }, Some(call)) => call.reply.push_str(delta),
             (Event::ToolStart { .. }, Some(call)) => call.reply.clear(),
+            // The answer the check found fault with is not the one that goes on.
+            (
+                Event::Checked {
+                    result: proto::CheckResult::Failed,
+                    ..
+                },
+                Some(call),
+            ) => call.reply.clear(),
             _ => {}
         }
         match &ev {

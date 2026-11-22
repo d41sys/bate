@@ -152,7 +152,14 @@ impl Bridge {
 
     fn turn(&mut self, text: &str) {
         let (nonce, text) = ("n".to_owned(), text.to_owned());
-        assert_eq!(self.request(Op::Prompt { nonce, text }), None);
+        assert_eq!(
+            self.request(Op::Prompt {
+                nonce,
+                text,
+                check: false
+            }),
+            None
+        );
         assert_eq!(self.next(), Event::TurnStart { nonce: "n".into() });
     }
 
@@ -335,6 +342,7 @@ fn abort_cancels_the_agents_turn_and_what_it_asked() {
     let busy = Op::Prompt {
         nonce: "n2".into(),
         text: "more".into(),
+        check: false,
     };
     assert!(bridge.request(busy).is_some());
     assert_eq!(bridge.request(Op::Abort), None);
@@ -447,7 +455,15 @@ fn an_agent_that_is_not_signed_in_says_how_to() {
         "{error}"
     );
     let (nonce, text) = ("n".to_owned(), "hi".to_owned());
-    assert!(bridge.request(Op::Prompt { nonce, text }).is_some());
+    assert!(
+        bridge
+            .request(Op::Prompt {
+                nonce,
+                text,
+                check: false
+            })
+            .is_some()
+    );
 }
 
 #[test]
@@ -514,7 +530,14 @@ fn a_prompt_that_comes_before_the_agent_has_opened_the_conversation_is_refused()
         },
     );
     let (nonce, text) = ("n".to_owned(), "hello".to_owned());
-    let prompt = send(&mut bridge, Op::Prompt { nonce, text });
+    let prompt = send(
+        &mut bridge,
+        Op::Prompt {
+            nonce,
+            text,
+            check: false,
+        },
+    );
     // The agent still holds the first conversation: the prompt is not run in it.
     match bridge.next() {
         Event::Response { id, error } if id == prompt => {
@@ -564,7 +587,13 @@ fn a_conversation_the_agent_cannot_reopen_leaves_no_conversation_open() {
     assert!(error.contains("Resource not found"), "{error}");
     // Not the first conversation either: a prompt would be run in the wrong one.
     let (nonce, text) = ("n".to_owned(), "hello".to_owned());
-    let error = bridge.request(Op::Prompt { nonce, text }).unwrap();
+    let error = bridge
+        .request(Op::Prompt {
+            nonce,
+            text,
+            check: false,
+        })
+        .unwrap();
     assert!(error.contains("no conversation is open"), "{error}");
     assert!(!bridge.log().contains("session/prompt"), "{}", bridge.log());
 }

@@ -264,6 +264,8 @@ pub struct Call {
 struct Body<'a> {
     model: &'a str,
     messages: Messages<'a>,
+    /// Left out when empty: some servers refuse an empty list (a check offers no tool).
+    #[serde(skip_serializing_if = "no_tools")]
     tools: &'a Value,
     stream: bool,
     /// Without this a chat stream carries no `usage`; a server that refuses it is asked without.
@@ -271,6 +273,10 @@ struct Body<'a> {
     stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+}
+
+fn no_tools(tools: &&Value) -> bool {
+    tools.as_array().is_some_and(Vec::is_empty)
 }
 
 #[derive(Serialize)]
@@ -301,7 +307,7 @@ pub struct Ask<'a> {
 }
 
 /// A time from the environment in milliseconds (the tests make these short).
-fn millis(var: &str, default: Duration) -> Duration {
+pub fn millis(var: &str, default: Duration) -> Duration {
     let set = std::env::var(var).ok().and_then(|v| v.parse().ok());
     set.map_or(default, Duration::from_millis)
 }

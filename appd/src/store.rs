@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS skills_off(bot TEXT NOT NULL REFERENCES bots(id) ON D
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS checks(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paused(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS web_search(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
@@ -288,6 +289,7 @@ const BOT_TABLES: [&str; 22] = [
     "models",
     "step_limits",
     "web_search",
+    "checks",
     "paused",
     "channels",
     "chats",
@@ -946,6 +948,27 @@ impl Store {
         self.0
             .execute(
                 "INSERT INTO web_search(bot, enabled) VALUES (?1, ?2) \
+                 ON CONFLICT(bot) DO UPDATE SET enabled = ?2",
+                params![bot, enabled],
+            )
+            .map(drop)
+    }
+
+    /// Whether the bot's answers are checked; off unless turned on.
+    pub fn check(&self, bot: &str) -> Result<bool> {
+        let row = self
+            .0
+            .query_row("SELECT enabled FROM checks WHERE bot = ?1", [bot], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(row.unwrap_or(false))
+    }
+
+    pub fn set_check(&self, bot: &str, enabled: bool) -> Result<()> {
+        self.0
+            .execute(
+                "INSERT INTO checks(bot, enabled) VALUES (?1, ?2) \
                  ON CONFLICT(bot) DO UPDATE SET enabled = ?2",
                 params![bot, enabled],
             )

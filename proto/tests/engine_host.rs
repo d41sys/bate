@@ -48,6 +48,7 @@ fn the_service_runs_the_engine_named_by_appd_engine_over_stdio() {
             &Op::Prompt {
                 nonce: "n1".into(),
                 text: "ping".into(),
+                check: false,
             },
         )
         .unwrap();

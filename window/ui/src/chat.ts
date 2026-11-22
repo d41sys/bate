@@ -13,7 +13,12 @@ export type Entry =
   | { type: "retry"; attempt: number; of: number; waitMs: number; error: string }
   | { type: "turn_end"; reason: string; error?: string }
   | { type: "steered"; text: string }
+  // What the check of the bot's answer said; `note` is the check's own words.
+  | { type: "checked"; result: CheckResult; note: string }
   | { type: "fork"; nonce: string };
+
+/** `failed`: the bot goes on with the notes; `not_passed`: the last check allowed found something; `not_checked`: it could not be made. */
+export type CheckResult = "passed" | "failed" | "not_passed" | "not_checked";
 
 /** An entry as the service numbers it. */
 export type Row = { seq: number; entry: Entry };
@@ -29,6 +34,7 @@ export type Item = { id: number } & (
   | { kind: "ended"; reason: string; error?: string }
   // A message the user put into the running turn; the bot saw it at this point.
   | { kind: "steered"; text: string }
+  | { kind: "checked"; result: CheckResult; note: string }
   | { kind: "retrying"; attempt: number; of: number; waitMs: number; error: string }
   | { kind: "forked" }
 );
@@ -56,6 +62,9 @@ function put(items: Item[], { seq: id, entry }: Row) {
       break;
     case "steered":
       items.push({ id, kind: "steered", text: entry.text });
+      break;
+    case "checked":
+      items.push({ id, kind: "checked", result: entry.result, note: entry.note });
       break;
     case "text":
     case "thinking": {
@@ -115,6 +124,21 @@ function put(items: Item[], { seq: id, entry }: Row) {
       }
       items.push({ id, kind: "forked" });
       break;
+  }
+}
+
+/** The quiet line for what a check said. */
+export function checkText(result: CheckResult, note: string): string {
+  const said = note ? ` ${note}` : "";
+  switch (result) {
+    case "passed":
+      return `Checked: nothing to fix.${said}`;
+    case "failed":
+      return `Checked: something to fix.${said} The bot is working on it.`;
+    case "not_passed":
+      return `Checked: this did not pass, and the answer stands as it is.${said}`;
+    case "not_checked":
+      return `Not checked: ${note}`;
   }
 }
 
