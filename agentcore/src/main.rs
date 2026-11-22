@@ -84,6 +84,7 @@ struct Engine {
     web_search: bool,
     /// Set once the provider refused that tool: it stays out until the engine ends.
     search_refused: Arc<AtomicBool>,
+    usage_refused: Arc<AtomicBool>,
     running: Option<Running>,
     model: Option<String>,
     effort: Option<String>,
@@ -158,6 +159,7 @@ fn main() {
         steps: proto::STEP_LIMIT,
         web_search: true,
         search_refused: Arc::default(),
+        usage_refused: Arc::default(),
         running: None,
         model: default_model(),
         effort: None,
@@ -489,7 +491,8 @@ impl Engine {
     fn begin_turn(&mut self) -> Result<(turn::Turn, Work), String> {
         self.idle()?;
         let model = self.model.clone();
-        let provider = model::Provider::new(self.search_refused.clone());
+        let provider =
+            model::Provider::new(self.search_refused.clone(), self.usage_refused.clone());
         let context = match std::env::var("BATE_MODEL_CONTEXT") {
             Ok(tokens) => Some(
                 tokens

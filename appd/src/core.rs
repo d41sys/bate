@@ -12,6 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use jiff::tz::TimeZone;
 use proto::connectors::{Connector, Transport};
 use proto::permissions::{ALWAYS, APPROVE, CONVERSATION, DENY, Grant, Kind, Level};
 use proto::projects::{Peer, Project, ProjectConnector};
@@ -31,6 +32,7 @@ use crate::keychain;
 use crate::proxy::{self, Upstream};
 use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
+use crate::tokens;
 use crate::{
     adapters, apple, botfile, browser, catalog, changes, desktop, egress, oauth, project_server,
     surfaces, workplaces,
@@ -570,6 +572,12 @@ struct Running {
     call: Option<Call>,
     /// The routine whose prompt the running turn answers: its run is marked if the turn stops at its step limit.
     routine: Option<String>,
+    /// Set when the engine's model request was refused for the bot's token limit, with the
+    /// reason: the turn then ends as `limit`, not as an error.
+    limited: Option<String>,
+    /// What the running turn's model requests used, as the servers reported it; `None` until
+    /// one did.
+    used: Option<proto::Tokens>,
     /// The browser action the running turn waits on: set when the turn ends, so that an
     /// action still waiting for the user's hand-back is not run.
     browsing: Option<Arc<AtomicBool>>,
@@ -1537,6 +1545,60 @@ impl Core {
                     self.set_paused(bot, paused)?;
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
+                Ok(Some(json!({})))
+            }
+            "get_usage" => {
+                let bot = self.bot_of(f)?;
+                let (today, first) = tokens::days(now_ms(), &TimeZone::system());
+                // Each period's tokens, and how many of its requests the server said nothing of.
+                let tally = |from: &str, to: &str, conversation: Option<&str>| {
+                    let (used, unreported) = self
+                        .store
+                        .usage(&bot, from, to, conversation)
+                        .map_err(internal)?;
+                    let mut tally = json!(used);
+                    tally["unreported"] = json!(unreported);
+                    Ok::<_, Refusal>(tally)
+                };
+                let limit = self.store.token_limit(&bot).map_err(internal)?;
+                let mut data = json!({
+                    "today": tally(&today, &today, None)?,
+                    "month": tally(&first, &today, None)?,
+                    "limit": {
+                        "day": limit.day,
+                        "month": limit.month,
+                        "stops": if limit.everything { "everything" } else { "unattended" },
+                    },
+                });
+                if matches!(f.get("conversation"), Some(v) if !v.is_null()) {
+                    let conversation = self.conversation_of(f, &bot)?;
+                    data["conversation"] = tally("0000-00-00", "9999-12-31", Some(&conversation))?;
+                }
+                Ok(Some(data))
+            }
+            "set_token_limit" => {
+                let bot = self.bot_of(f)?;
+                let mut limit = self.store.token_limit(&bot).map_err(internal)?;
+                let number = |key: &str, now: Option<u64>| match f.get(key) {
+                    None => Ok(now),
+                    Some(Value::Null) => Ok(None),
+                    Some(v) => match v.as_u64() {
+                        Some(n) if (1..=tokens::MAX_LIMIT).contains(&n) => Ok(Some(n)),
+                        _ => Err(bad(format!(
+                            "`{key}` must be a whole number of tokens, 1 to {}, or null",
+                            tokens::MAX_LIMIT
+                        ))),
+                    },
+                };
+                limit.day = number("day", limit.day)?;
+                limit.month = number("month", limit.month)?;
+                limit.everything = match f.get("stops").map(Value::as_str) {
+                    None => limit.everything,
+                    Some(Some("unattended")) => false,
+                    Some(Some("everything")) => true,
+                    _ => return Err(bad("`stops` must be `unattended` or `everything`")),
+                };
+                self.store.set_token_limit(&bot, &limit).map_err(internal)?;
                 Ok(Some(json!({})))
             }
             "abort" | "set_model" | "rewind" | "compact" => {
@@ -3482,6 +3544,8 @@ impl Core {
                 compacting: 0,
                 call: None,
                 routine: None,
+                limited: None,
+                used: None,
                 browsing: None,
                 steered: Vec::new(),
                 conversation: conversation.clone(),
@@ -5631,6 +5695,31 @@ impl Core {
             }
             return;
         }
+        if let Event::Usage { reported, tokens } = &ev {
+            // Not for the transcript.
+            return self.count_usage(bot, *reported, *tokens);
+        }
+        if let Event::Token { request } = &ev
+            && let Some(why) = self.token_stop(bot, self.unattended(bot))
+        {
+            // The engine ends its turn with this reason; the service marks that end `limit`.
+            if let Some(r) = self.engines.get_mut(bot).filter(|r| r.busy) {
+                r.limited = Some(why.clone());
+            }
+            let op = Op::Token {
+                request: request.clone(),
+                url: None,
+                key: None,
+                api: None,
+                model: None,
+                context: None,
+                error: Some(why),
+            };
+            if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                log!("bot {bot}: token response not sent: {e}");
+            }
+            return;
+        }
         if let Event::Token { request } = &ev {
             // A ChatGPT sign-in comes before a model server.
             // A sign-in that cannot be read is no sign-in to pass over: the bot is told why.
@@ -5802,6 +5891,15 @@ impl Core {
             }
             entry
         };
+        // A turn whose next model request was refused for the limit ends with `limit`, not as
+        // a failure: its error is the reason the service gave.
+        if let Event::TurnEnd { reason, error } = &mut ev
+            && let Some(why) = self.engines.get_mut(bot).and_then(|r| r.limited.take())
+            && *reason == proto::TurnEnd::Error
+            && error.as_deref() == Some(why.as_str())
+        {
+            *reason = proto::TurnEnd::Limit;
+        }
         let r = self.engines.get_mut(bot).expect("checked by generation");
         match (&ev, &mut r.call) {
             (Event::Text { delta }, Some(call)) => call.reply.push_str(delta),
@@ -5837,11 +5935,16 @@ impl Core {
             }
             Event::TurnStart { .. } | Event::TurnEnd { .. } => {
                 r.busy = matches!(ev, Event::TurnStart { .. });
+                if r.busy {
+                    r.limited = None;
+                    r.used = None;
+                }
                 if let Some(browsing) = r.browsing.take() {
                     browsing.store(true, Ordering::SeqCst);
                 }
                 let answered = if r.busy { None } else { r.call.take() };
                 let routine = if r.busy { None } else { r.routine.take() };
+                let used = if r.busy { None } else { r.used.take() };
                 if !r.busy {
                     // A question the turn asked cannot outlive it (an aborted turn leaves it unanswered).
                     let conversation = r.conversation.clone();
@@ -5863,20 +5966,22 @@ impl Core {
                     };
                     self.answer_caller(bot, call.caller, reply);
                 }
-                if let (
-                    Some(id),
-                    Event::TurnEnd {
+                if let Some(id) = &routine {
+                    if let Event::TurnEnd {
                         reason: proto::TurnEnd::Limit,
                         error,
-                    },
-                ) = (routine, &ev)
-                {
-                    self.routine_ended(
-                        bot,
-                        &id,
-                        RunOutcome::Limit,
-                        error.clone().unwrap_or_default(),
-                    );
+                    } = &ev
+                    {
+                        self.routine_ended(
+                            bot,
+                            id,
+                            RunOutcome::Limit,
+                            error.clone().unwrap_or_default(),
+                        );
+                    }
+                    if let Some(used) = used {
+                        self.routine_tokens(bot, id, used);
+                    }
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
             }
@@ -6544,6 +6649,10 @@ impl Core {
                 return Gate::Skip("backoff", None);
             }
         }
+        // The routine is unattended work, so the limit always holds it.
+        if let Some(why) = self.token_stop(bot, true) {
+            return Gate::Skip("limit", Some(why));
+        }
         let Some(command) = r.precheck.as_deref() else {
             return Gate::Go(None);
         };
@@ -6947,6 +7056,74 @@ impl Core {
         self.record_run(bot, &r, true);
     }
 
+    /// Adds the tokens of the turn that just ended to the newest run of routine `id`.
+    fn routine_tokens(&mut self, bot: &str, id: &str, used: proto::Tokens) {
+        let Ok(routines) = self.store.routines(bot) else {
+            return;
+        };
+        let Some(mut r) = routines.into_iter().find(|r| r.id.as_deref() == Some(id)) else {
+            return;
+        };
+        let Some(run) = r.last_run.as_mut() else {
+            return;
+        };
+        run.tokens = Some(used);
+        self.record_run(bot, &r, true);
+    }
+
+    /// Counts one answered model request of `bot` into today, in the conversation its engine
+    /// has open, and into the turn's total.
+    fn count_usage(&mut self, bot: &str, reported: bool, used: proto::Tokens) {
+        let Some(r) = self.engines.get_mut(bot) else {
+            return;
+        };
+        if reported {
+            *r.used.get_or_insert_default() += used;
+        }
+        let (day, _) = tokens::days(now_ms(), &TimeZone::system());
+        if let Err(e) = self
+            .store
+            .add_usage(bot, &day, &r.conversation, reported, used)
+        {
+            log!("bot {bot}: tokens not counted: {e}");
+        }
+    }
+
+    /// Whether the turn `bot`'s engine runs was not started by the person at a window: a
+    /// routine, a message from another bot or from a chat of a channel.
+    fn unattended(&self, bot: &str) -> bool {
+        self.engines.get(bot).is_some_and(|r| {
+            r.routine.is_some()
+                || r.call
+                    .as_ref()
+                    .is_some_and(|c| !matches!(c.caller, Caller::Room { .. }))
+        })
+    }
+
+    /// Why `bot` may not make a model request now, if it used up its token limit and the limit
+    /// holds this work: unattended work (`unattended`), or all work when the limit says so.
+    fn token_stop(&self, bot: &str, unattended: bool) -> Option<String> {
+        let limit = match self.store.token_limit(bot) {
+            Ok(limit) => limit,
+            Err(e) => {
+                log!("bot {bot}: token limit not read: {e}");
+                return None;
+            }
+        };
+        if (limit.day.is_none() && limit.month.is_none()) || !(unattended || limit.everything) {
+            return None;
+        }
+        let (today, first) = tokens::days(now_ms(), &TimeZone::system());
+        let used = |from: &str| match self.store.usage(bot, from, &today, None) {
+            Ok((used, _)) => used.total(),
+            Err(e) => {
+                log!("bot {bot}: tokens used not read: {e}");
+                0
+            }
+        };
+        tokens::reached(&limit, used(&today), used(&first))
+    }
+
     /// Stores a routine whose `last_run` was just set, adds that run to its history (or puts it
     /// in the newest one's place) and tells the windows.
     fn record_run(&mut self, bot: &str, routine: &Routine, replace_last: bool) {
@@ -7096,6 +7273,7 @@ fn run_of(outcome: RunOutcome, error: Option<String>) -> RoutineRun {
         reason: None,
         detail: None,
         by: None,
+        tokens: None,
     }
 }
 
@@ -7113,6 +7291,7 @@ fn skip_text(reason: &str, detail: Option<&str>) -> String {
     let detail = detail.unwrap_or_default();
     match reason {
         "signed_out" => format!("the connector {detail} needs a sign-in"),
+        "limit" => detail.to_owned(),
         _ => format!("the precheck stopped it: {detail}"),
     }
 }

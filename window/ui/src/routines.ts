@@ -12,6 +12,8 @@ export function skipWhy({ reason, detail }: Pick<RoutineRun, "reason" | "detail"
       return `The connector ${detail} needs a sign-in.`;
     case "backoff":
       return "Held back: the last runs failed.";
+    case "limit":
+      return `The token limit stopped it: ${detail}.`;
     case "precheck":
       return `The precheck stopped it: ${detail}`;
     default:

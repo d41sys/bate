@@ -48,6 +48,8 @@ test("groups come in order, an empty one is left out, each with its newest first
 test("a card says why it failed, or the last line", () => {
   assert.equal(said(item({ ended: "error", error: "model refused" })), "model refused");
   assert.equal(said(item({ ended: "limit" })), "Stopped at its step limit.");
+  assert.equal(said(item({ ended: "limit", error: "the bot used its limit of 50 tokens for today; it counts again from midnight" })), "The bot used its limit of 50 tokens for today; it counts again from midnight.");
+  assert.equal(said(item({ ended: "limit", error: "stopped after 100 tool rounds" })), "Stopped after 100 tool rounds.");
   assert.equal(said(item({ ended: "error" })), "Stopped with an error.");
   assert.equal(said(item({ ended: "done", line: "All set." })), "All set.");
   assert.equal(said(item({ busy: true })), "Working…");

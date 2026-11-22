@@ -256,6 +256,14 @@ pub enum Event {
         name: String,
         names: Vec<String>,
     },
+    /// What one model request used, as the model server reported it. Sent after each request
+    /// that was answered, also when the server reported nothing (`reported` false, the numbers
+    /// 0). Not part of the transcript.
+    Usage {
+        reported: bool,
+        #[serde(flatten)]
+        tokens: Tokens,
+    },
     /// The engine asks the service for the endpoint and token before a model call.
     /// The engine waits until the service sends `token` for `request`.
     Token {
@@ -276,13 +284,41 @@ pub enum Event {
     },
 }
 
+/// Tokens a model server said were used. `input` counts all the request's input, and `cached`
+/// is the part of it that came from the server's cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tokens {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub cached: u64,
+    #[serde(default)]
+    pub output: u64,
+}
+
+impl Tokens {
+    /// What a limit counts: input and output.
+    pub fn total(&self) -> u64 {
+        self.input.saturating_add(self.output)
+    }
+}
+
+impl std::ops::AddAssign for Tokens {
+    fn add_assign(&mut self, other: Tokens) {
+        self.input = self.input.saturating_add(other.input);
+        self.cached = self.cached.saturating_add(other.cached);
+        self.output = self.output.saturating_add(other.output);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEnd {
     Done,
     Aborted,
     Error,
-    /// The turn used up its tool rounds; `error` says how many.
+    /// A limit stopped the turn; `error` says which: the tool rounds it used up, or the
+    /// bot's token limit.
     Limit,
 }
 

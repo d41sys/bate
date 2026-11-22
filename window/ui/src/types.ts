@@ -33,8 +33,17 @@ export type Bot = {
 
 export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 
-/** `reason`: why a skipped run was not run (`paused`, `signed_out`, `backoff`, `precheck`); `detail`: the connector, or the first line the precheck printed; `by`: `user` for a run the person started. */
-export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string; detail?: string; by?: string };
+/** What a model server said its requests used. `input` is all the input; `cached` is the part of it that came from the server's cache. */
+export type Tokens = { input: number; cached: number; output: number };
+
+/** `reason`: why a skipped run was not run (`paused`, `signed_out`, `backoff`, `limit`, `precheck`); `detail`: the connector, the token limit's words, or the first line the precheck printed; `by`: `user` for a run the person started; `tokens`: what the run's requests used, when the server said. */
+export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string; detail?: string; by?: string; tokens?: Tokens };
+
+/** Tokens used over a period, and how many of its requests the server said nothing of (`get_usage`). */
+export type Tally = Tokens & { unreported: number };
+
+/** What `get_usage` says: a limit that is `null` is not set. `stops`: which work the limit holds. */
+export type Usage = { today: Tally; month: Tally; limit: { day: number | null; month: number | null; stops: "unattended" | "everything" } };
 
 /** Output only: a scheduled routine whose last runs failed is held to fewer runs. */
 export type Backoff = { failures: number; nextRunMs?: number };

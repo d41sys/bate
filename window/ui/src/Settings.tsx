@@ -6,7 +6,8 @@ import { CodeBlock, Group, Problem, Saved, Setting, useSaves } from "./Form.tsx"
 import { Revealed } from "./Reveal.tsx";
 import { inShell, listen, request } from "./service.ts";
 import { hostLines, hostsHint } from "./network.ts";
-import { KINDS, type Bot, type Kind, type Level, type Permissions } from "./types.ts";
+import { usedText } from "./usage.ts";
+import { KINDS, type Bot, type Kind, type Level, type Permissions, type Usage } from "./types.ts";
 
 const ACTIONS: Record<Kind, string> = {
   read: "Read files",
@@ -61,6 +62,17 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
     });
   }, [bot.id]);
 
+  const [usage, setUsage] = useState<Usage>();
+  const [caps, setCaps] = useState({ day: "", month: "", stops: "unattended" as Usage["limit"]["stops"] });
+  // `fill`: the limit boxes take what the service has (the bot changed, or the limits were just saved); else only the counts are renewed.
+  const loadUsage = (fill: boolean) =>
+    request<Usage>("get_usage", { bot: bot.id }).then((u) => {
+      setUsage(u);
+      if (fill) setCaps({ day: u.limit.day?.toString() ?? "", month: u.limit.month?.toString() ?? "", stops: u.limit.stops });
+    }, (e: Error) => saves.fail("usage", e.message));
+  useEffect(() => void loadUsage(true), [bot.id]);
+  // A turn that ended has counted.
+  useEffect(() => void loadUsage(false), [bot.busy]);
   const words = agent.trim().split(/\s+/).filter(Boolean);
   const choice = other ? OTHER : agentChoice(bot.agent, found?.agents ?? []);
   const chosen = found?.agents.find((a) => a.label === choice);
@@ -104,6 +116,42 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
             <Problem text={error("look")} />
           </div>
         </form>
+      </Group>
+      <Group title="Tokens">
+        {usage && (
+          <>
+            {(["today", "month"] as const).map((period) => (
+              <Setting key={period} title={period === "today" ? "Used today" : "Used this month"} hint={usedText(usage[period]).hint}>
+                <span>{usedText(usage[period]).value}</span>
+              </Setting>
+            ))}
+            {bot.agent && <p className="note">This bot runs on an installed agent: it is counted only if the agent says what it used, and a limit does not stop it.</p>}
+            {inShell ? (
+              <form onSubmit={(e) => { e.preventDefault(); run("limits", request("set_token_limit", { bot: bot.id, day: caps.day.trim() ? Number(caps.day) : null, month: caps.month.trim() ? Number(caps.month) : null, stops: caps.stops }).then(() => loadUsage(true))); }}>
+                <Setting id="bot-limit-day" title="Limit per day" hint="Input and output tokens, counted from midnight. Empty: no limit.">
+                  <input className="short" type="number" min={1} step={1} placeholder="No limit" value={caps.day} onChange={(e) => (edit("limits"), setCaps({ ...caps, day: e.target.value }))} />
+                </Setting>
+                <Setting id="bot-limit-month" title="Limit per month" hint="Counted from the 1st. Empty: no limit.">
+                  <input className="short" type="number" min={1} step={1} placeholder="No limit" value={caps.month} onChange={(e) => (edit("limits"), setCaps({ ...caps, month: e.target.value }))} />
+                </Setting>
+                <Setting id="bot-limit-stops" title="The limit stops" hint="Unattended work is routines and messages from other bots and from channels. A turn that reaches the limit ends with the reason; a routine is skipped.">
+                  <select value={caps.stops} onChange={(e) => (edit("limits"), setCaps({ ...caps, stops: e.target.value as Usage["limit"]["stops"] }))}>
+                    <option value="unattended">Unattended work</option>
+                    <option value="everything">Everything, your messages too</option>
+                  </select>
+                </Setting>
+                <div className="actions">
+                  <button>Save limits</button>
+                  <Saved on={saved("limits")} />
+                  <Problem text={error("limits")} />
+                </div>
+              </form>
+            ) : (
+              <p className="note">{usage.limit.day === null && usage.limit.month === null ? "No limit is set." : "A limit is set."} Limits are set in Bate's own window.</p>
+            )}
+          </>
+        )}
+        <Problem text={error("usage")} />
       </Group>
       <Group title="What the bot may do">
         {!permissions && !error("load") && <p className="note">Loading…</p>}

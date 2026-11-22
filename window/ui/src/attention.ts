@@ -48,7 +48,9 @@ export function grouped(items: AttentionItem[]): { id: Section; title: string; i
 /** What a card says under the name: the question asks for itself, the rest give the last line or why it failed. */
 export function said(i: AttentionItem): string {
   const section = sectionOf(i);
-  if (section === "failed") return i.error || (i.ended === "limit" ? "Stopped at its step limit." : "Stopped with an error.");
+  // The reason of a limit is a clause (a token limit's, or "stopped after 100 tool rounds"): made a sentence.
+  if (i.ended === "limit" && section === "failed") return i.error ? i.error[0].toUpperCase() + i.error.slice(1) + (/[.!?]$/.test(i.error) ? "" : ".") : "Stopped at its step limit.";
+  if (section === "failed") return i.error || "Stopped with an error.";
   return i.line || (section === "working" ? "Working…" : "Finished.");
 }
 

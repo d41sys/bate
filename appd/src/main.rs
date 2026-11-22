@@ -38,6 +38,7 @@ mod skills;
 mod store;
 mod surfaces;
 mod sys;
+mod tokens;
 mod undo;
 mod update;
 mod workplaces;

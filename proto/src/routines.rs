@@ -63,7 +63,7 @@ pub struct Schedule {
 pub enum RunOutcome {
     Sent,
     Failed,
-    /// The bot's turn stopped at its step limit.
+    /// The bot's turn stopped at its step limit, or at its token limit.
     Limit,
     /// The slot passed while the service could not run it and is too old to catch up.
     Missed,
@@ -79,8 +79,8 @@ pub struct RoutineRun {
     pub outcome: RunOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Why a `skipped` run was not run, in a word: `paused`, `signed_out`, `backoff` or
-    /// `precheck`.
+    /// Why a `skipped` run was not run, in a word: `paused`, `signed_out`, `backoff`, `precheck`
+    /// or `limit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// What `reason` is about: the connector that is signed out, or the first line the
@@ -90,6 +90,9 @@ pub struct RoutineRun {
     /// `user` for a run the person started with `run_routine`; missing for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// What the run's model requests used, when the model server reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<crate::Tokens>,
 }
 
 /// Output only: a scheduled routine whose last runs failed is held to fewer runs.
