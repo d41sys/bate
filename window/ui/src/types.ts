@@ -57,6 +57,12 @@ export type Backoff = { failures: number; nextRunMs?: number };
 /** A routine that starts when a turn of the bot `bot` (its id) ends this way: `failed` is an error or a stop at a limit. */
 export type After = { bot: string; outcome: "done" | "failed" | "any" };
 
+/** A routine that starts when a tool of one of the bot's connectors answers differently: the service calls `tool` (the connector's own name for it) with `arguments` every `every` minutes (5 to 1440), with no model. */
+export type Watch = { connector: string; tool: string; arguments: Record<string, unknown>; every: number };
+
+/** Output only: the last check of a watch. `changed`: the answer was not the one before; `error`: why it made no call, or the call failed; `last`: the answer kept, cut to 4096 bytes. */
+export type Check = { atMs: number; changed: boolean; error?: string; hash: string; last: string };
+
 export type Routine = {
   id?: string;
   name: string;
@@ -67,10 +73,12 @@ export type Routine = {
   webhook: boolean;
   chat: boolean;
   precheck?: string;
+  watch?: Watch;
   hookUrl?: string;
   nextRunMs?: number;
   lastRun?: RoutineRun;
   backoff?: Backoff;
+  lastCheck?: Check;
 };
 
 export type Connector = {

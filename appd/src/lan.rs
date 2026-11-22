@@ -500,10 +500,14 @@ fn send(s: &Session, body: &[u8]) -> Answer {
     let mut frame = serde_json::from_slice::<Value>(body).ok();
     if let Some(f) = &frame
         && let Some(cmd) = f.get("type").and_then(Value::as_str)
-        // A routine's precheck is a command that runs on this computer: only the person at
-        // its own window sets it, so a device may not add, change or clear one.
+        // A routine's precheck is a command that runs on this computer, and its watch calls a
+        // connector by itself: only the person at its own window sets them, so a device may not
+        // add, change or clear one.
         && (FORBIDDEN_OVER_LAN.contains(&cmd)
-            || cmd == "set_routine" && f.pointer("/routine/precheck").is_some()
+            || cmd == "set_routine"
+                && ["precheck", "watch"]
+                    .iter()
+                    .any(|k| f.pointer(&format!("/routine/{k}")).is_some())
             // The person at the window decides whether answers are checked: a device cannot turn it off.
             || cmd == "set_bot"
                 && ["check", "checkModel", "checkBot"].iter().any(|k| f.get(*k).is_some()))
@@ -520,8 +524,8 @@ fn send(s: &Session, body: &[u8]) -> Answer {
         let _ = s.tx.send(error.to_string());
         return Answer::json(200, &json!({}));
     }
-    // The rest of a routine may be edited: the precheck stays as it is. The frame is sent as
-    // parsed here, so the service reads what was checked.
+    // The rest of a routine may be edited: the precheck and the watch stay as they are. The frame is
+    // sent as parsed here, so the service reads what was checked.
     let kept;
     let body = match &mut frame {
         Some(f) if f.get("type").and_then(Value::as_str) == Some("set_routine") => {

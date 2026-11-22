@@ -2,6 +2,7 @@
 //! `list_routines` and `set_routine`; the rules are in `PROTOCOL.md`.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 fn one() -> u32 {
     1
@@ -124,6 +125,44 @@ pub struct After {
     pub outcome: AfterOutcome,
 }
 
+/// The service itself calls a tool of one of the bot's connectors, with no model, every `every`
+/// minutes; the routine starts when the answer is not the one before, and the run it makes has
+/// `by` `watch`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Watch {
+    /// A connector the bot has and that is on.
+    pub connector: String,
+    /// The connector's own name for the tool, not `<connector>__<tool>`. The bot must be able to
+    /// call it without asking, and it must not be blocked.
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: Map<String, Value>,
+    /// Minutes between checks, 5 to 1440.
+    pub every: u32,
+}
+
+/// Output only: the last check of a `watch`, and the answer the next one is compared with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Check {
+    /// Unix milliseconds when the service last looked.
+    pub at_ms: u64,
+    /// The answer was not the one before, so the routine was started (or a start that the
+    /// routine's other rules held back was recorded).
+    #[serde(default)]
+    pub changed: bool,
+    /// Why the last check made no call, or the call failed. The answer kept stays as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// SHA-256 (hex) of `last`; empty until the first call was answered.
+    #[serde(default)]
+    pub hash: String,
+    /// The last answer, cut to 4096 bytes.
+    #[serde(default)]
+    pub last: String,
+}
+
 /// A routine. `hook_token`, `hook_url` and the fields after them are output only: the service
 /// ignores them in `set_routine`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +192,10 @@ pub struct Routine {
     /// exactly this command for this routine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck: Option<String>,
+    /// Starts the routine when a connector's answer changes: see `Watch`. Only Bate's own window
+    /// sets it, as it does a precheck.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
     /// Daemon-made secret, kept while `webhook` stays on; turn it off and on for a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_token: Option<String>,
@@ -171,4 +214,7 @@ pub struct Routine {
     /// Output only: set while the routine is held back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<Backoff>,
+    /// Output only: what the service saw at the last check of `watch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<Check>,
 }

@@ -39,6 +39,7 @@ use serde_json::{Value, json};
 /// (`engine_held`): what a test does "while the engine opens it" does not depend on how fast
 /// the machine is.
 /// Each `blocked_tools` operation is logged to `blocked.log`.
+/// A `call_tool` is logged to `calls.log` and answered with the text of the file `answer`, or, while the file `call-error` is there, refused with its text.
 /// A prompt `checking` is a turn whose first answer a check found fault with, and whose second it passed.
 /// What a bot's message (`[Message from the bot …]` or an answer, `[Answer from the bot …]`, a routine's
 /// `[Routine: …]`, and a first line) says after that line is run as if the user had typed it: `do run ls` asks about the action,
@@ -58,6 +59,10 @@ while IFS= read -r line; do
   printf '%s\n' "$line" | sed 's/^{"id":"[^"]*","type":"\([a-z_]*\)".*/\1/' >> ops.log
   printf '%s\n' "$line" >> input.log
   case "$line" in
+    *'"type":"call_tool"'*)
+      printf '%s\n' "$line" >> calls.log
+      if [ -e call-error ]; then echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"$(cat call-error)\"}"
+      else echo "{\"type\":\"call_output\",\"request\":\"$id\",\"output\":\"$(cat answer)\"}"; echo "$ok"; fi ;;
     *'"type":"start"'*)
       if [ -e refuse-start ]; then echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot start\"}"; continue; fi
       echo new >> starts.log; printf 'bad \377 byte\n' >&2; echo "engine says hi" >&2; echo "$ok"
@@ -15067,7 +15072,8 @@ fn pausing_the_bot_or_deleting_the_routine_while_its_precheck_waits_ends_in_no_r
 }
 
 #[test]
-fn a_device_cannot_add_change_or_clear_a_precheck_but_can_edit_the_rest_and_the_window_can() {
+fn a_device_cannot_add_change_or_clear_a_precheck_or_a_watch_but_can_edit_the_rest_and_the_window_can()
+ {
     let home = home("routine-precheck-lan");
     let _service = Service::start_with(&home, |c| {
         c.env("APPD_LAN_PORT", "0");
@@ -15164,6 +15170,322 @@ fn a_device_cannot_add_change_or_clear_a_precheck_but_can_edit_the_rest_and_the_
     edit.as_object_mut().unwrap().remove("precheck");
     w.ok("set_routine", json!({"bot": bot, "routine": edit}));
     assert!(row(&mut w)["precheck"].is_null());
+
+    // The same holds for a watch, which makes the service call a connector tool by itself.
+    let connector = json!({"name": "works", "enabled": true,
+        "transport": {"type": "stdio", "command": "serve", "args": []}});
+    w.ok("set_connector", json!({"bot": bot, "connector": connector}));
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    let watch = json!({"connector": "works", "tool": "a", "arguments": {}, "every": 5});
+    let watched = json!({"name": "Watched", "prompt": "Look.", "enabled": false, "watch": watch});
+    let watched = w.ok("set_routine", json!({"bot": bot, "routine": watched}))["routine"].clone();
+    let id = watched["id"].as_str().unwrap().to_owned();
+    // An edit that leaves the watch out leaves it as it was, though nothing else starts the routine.
+    let mut edit = watched.clone();
+    edit["name"] = "Renamed".into();
+    edit.as_object_mut().unwrap().remove("watch");
+    let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(answer["success"], true, "{answer}");
+    let now = routine_row(&mut w, &bot, &id);
+    assert_eq!((&now["name"], &now["watch"]), (&json!("Renamed"), &watch));
+    // Adding, changing or clearing one is refused, and nothing is stored.
+    for changed in [
+        json!({"connector": "works", "tool": "b", "every": 5}),
+        json!(null),
+    ] {
+        let mut edit = watched.clone();
+        edit["watch"] = changed;
+        let answer = ask("set_routine", json!({"bot": bot, "routine": edit}));
+        assert_eq!(answer["code"], "forbidden", "{answer}");
+    }
+    let fresh = json!({"name": "New", "prompt": "Look.", "enabled": false, "watch": watch});
+    let answer = ask("set_routine", json!({"bot": bot, "routine": fresh}));
+    assert_eq!(answer["code"], "forbidden", "{answer}");
+    assert_eq!(routine_row(&mut w, &bot, &id)["watch"], watch);
+    let listed = w.ok("list_routines", json!({"bot": bot}))["routines"].clone();
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["name"] != "New"),
+        "{listed}"
+    );
+    // The window may change it and clear it.
+    let mut edit = watched.clone();
+    edit["watch"]["tool"] = "b".into();
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert_eq!(routine_row(&mut w, &bot, &id)["watch"]["tool"], "b");
+    edit["chat"] = true.into();
+    edit.as_object_mut().unwrap().remove("watch");
+    w.ok("set_routine", json!({"bot": bot, "routine": edit}));
+    assert!(routine_row(&mut w, &bot, &id)["watch"].is_null());
+}
+
+/// While the service is down a watch's next check is made due (and its past runs `age_ms` older), and
+/// the service starts again. This is how the tests move time. The row is returned once the
+/// watch has looked again.
+fn look_again(
+    home: &Path,
+    service: &mut Service,
+    w: &mut Window,
+    bot: &str,
+    id: &str,
+    age_ms: i64,
+) -> Value {
+    let since = routine_row(w, bot, id)["lastCheck"]["atMs"].as_u64();
+    service.kill();
+    make_due(home, id, age_ms);
+    *service = Service::start(home);
+    *w = Window::connect(home);
+    let mut row = Value::Null;
+    eventually("the next check", || {
+        row = routine_row(w, bot, id);
+        row["lastCheck"]["atMs"].as_u64() > since
+    });
+    row
+}
+
+/// A bot with a connector `works` that its level lets it use without asking, and what the fake
+/// engine gives a call: the text in its folder's file `answer`.
+fn watching_bot(home: &Path, w: &mut Window) -> (String, PathBuf) {
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    fs::create_dir_all(&folder).unwrap();
+    let connector = json!({"name": "works", "enabled": true,
+        "transport": {"type": "stdio", "command": "serve", "args": []}});
+    w.ok("set_connector", json!({"bot": bot, "connector": connector}));
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    fs::write(folder.join("answer"), "three open").unwrap();
+    (bot, folder)
+}
+
+fn watching(name: &str) -> Value {
+    json!({"name": name, "prompt": "Say what changed.", "enabled": true,
+        "watch": {"connector": "works", "tool": "a", "arguments": {"state": "open"}, "every": 5}})
+}
+
+fn calls_made(folder: &Path) -> usize {
+    let log = fs::read_to_string(folder.join("calls.log")).unwrap_or_default();
+    log.lines().count()
+}
+
+#[test]
+fn a_watch_starts_its_routine_once_per_change_and_an_error_never_does() {
+    let home = home("watch");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, folder) = watching_bot(&home, &mut w);
+    let made = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": watching("Look")}),
+    )["routine"]
+        .clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    assert!(made["nextRunMs"].as_u64().unwrap() > 0 && made["lastCheck"].is_null());
+
+    // The first answer is only kept: it is the one later answers are compared with.
+    eventually("the first check", || {
+        !routine_row(&mut w, &bot, &id)["lastCheck"].is_null()
+    });
+    let first = routine_row(&mut w, &bot, &id)["lastCheck"].clone();
+    assert_eq!(
+        (&first["changed"], &first["last"]),
+        (&json!(false), &json!("three open"))
+    );
+    assert_eq!(first["hash"].as_str().unwrap().len(), 64);
+    let log = fs::read_to_string(folder.join("calls.log")).unwrap();
+    assert!(
+        log.contains(r#""tool":"works__a","args":{"state":"open"}"#),
+        "{log}"
+    );
+    assert_eq!(prompt_count(&home, &bot), 0);
+
+    // The same answer again, after a restart: nothing starts, though the service is new.
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], false);
+    assert_eq!(calls_made(&folder), 2);
+    assert_eq!(prompt_count(&home, &bot), 0);
+
+    // A different answer starts it once, with the answer in front of the prompt, as data.
+    fs::write(folder.join("answer"), "four open").unwrap();
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], true);
+    assert_eq!(row["lastCheck"]["last"], "four open");
+    eventually("the routine's prompt", || prompt_count(&home, &bot) == 1);
+    let sent = fs::read_to_string(folder.join("prompts.log")).unwrap();
+    let (at_answer, at_prompt) = (
+        sent.find("four open").unwrap(),
+        sent.find("Say what changed.").unwrap(),
+    );
+    assert!(
+        sent.contains("watch called a connector tool") && at_answer < at_prompt,
+        "{sent}"
+    );
+    assert!(!sent.contains("three open"), "{sent}");
+    let run = runs_of(&mut w, &bot, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["by"]),
+        (&json!("sent"), &json!("watch"))
+    );
+    turns_ended(&mut w, &bot, "done", 1);
+
+    // The answer it started with is the one kept: the same one again starts nothing.
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], false);
+    assert_eq!(prompt_count(&home, &bot), 1);
+
+    // An error is not a change: it shows in the row, is a failed run, and starts nothing.
+    fs::write(folder.join("call-error"), "server down").unwrap();
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["error"], "server down");
+    assert_eq!(row["lastCheck"]["last"], "four open");
+    let run = runs_of(&mut w, &bot, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["error"]),
+        (&json!("failed"), &json!("server down"))
+    );
+    assert_eq!(prompt_count(&home, &bot), 1);
+    // It counts for the back-off: after three in a row the watch is not called until an hour has passed.
+    for _ in 0..2 {
+        look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    }
+    let calls = calls_made(&folder);
+    service.kill();
+    make_due(&home, &id, 0);
+    service = Service::start(&home);
+    w = Window::connect(&home);
+    eventually("the hold", || {
+        runs_of(&mut w, &bot, &id)[0]["reason"] == "backoff"
+    });
+    assert_eq!(calls_made(&folder), calls);
+    // An hour on, it is called again; the answer that comes back is the one kept, so nothing starts.
+    fs::remove_file(folder.join("call-error")).unwrap();
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 2 * 3_600_000);
+    assert_eq!(
+        (&row["lastCheck"]["error"], &row["lastCheck"]["changed"]),
+        (&json!(null), &json!(false))
+    );
+    assert_eq!(calls_made(&folder), calls + 1);
+    assert_eq!(prompt_count(&home, &bot), 1);
+}
+
+#[test]
+fn a_watch_calls_only_what_the_bot_may_call_without_asking_and_not_while_paused() {
+    let home = home("watch-rules");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (bot, folder) = watching_bot(&home, &mut w);
+    let set = |w: &mut Window| {
+        w.send(
+            "set_routine",
+            json!({"bot": bot, "routine": watching("Look")}),
+        )
+    };
+    let refused = |w: &mut Window, id: String, why: &str| {
+        let answer = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+        assert_eq!(answer["code"], "invalid_routine", "{answer}");
+        let error = answer["error"].as_str().unwrap().to_owned();
+        assert!(error.contains(why), "{error}");
+    };
+
+    // A tool that would ask is refused when the routine is saved, and so is one that is blocked.
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "ask"}),
+    );
+    let id = set(&mut w);
+    refused(&mut w, id, "would ask");
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": true}),
+    );
+    let id = set(&mut w);
+    refused(&mut w, id, "blocked");
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": false}),
+    );
+    // A bot on an installed agent runs its connectors itself.
+    w.ok("set_agent", json!({"bot": bot, "command": ["some-agent"]}));
+    let id = set(&mut w);
+    refused(&mut w, id, "installed agent");
+    w.ok("set_agent", json!({"bot": bot, "command": null}));
+    let made = w.ok(
+        "set_routine",
+        json!({"bot": bot, "routine": watching("Look")}),
+    )["routine"]
+        .clone();
+    let id = made["id"].as_str().unwrap().to_owned();
+    eventually("the first check", || {
+        !routine_row(&mut w, &bot, &id)["lastCheck"].is_null()
+    });
+
+    // It is checked at every call too: the level or a block that changed since stops the call.
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "ask"}),
+    );
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert!(
+        row["lastCheck"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("would ask"),
+        "{row}"
+    );
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": true}),
+    );
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert!(
+        row["lastCheck"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("blocked"),
+        "{row}"
+    );
+    assert_eq!(calls_made(&folder), 1);
+    // A refused call is not a failed run.
+    assert!(runs_of(&mut w, &bot, &id).is_empty());
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": false}),
+    );
+
+    // A paused bot is skipped: no call, and the routine says so.
+    w.ok("set_paused", json!({"bot": bot, "paused": true}));
+    service.kill();
+    make_due(&home, &id, 0);
+    service = Service::start(&home);
+    w = Window::connect(&home);
+    eventually("the skip", || {
+        runs_of(&mut w, &bot, &id)
+            .first()
+            .is_some_and(|r| r["reason"] == "paused")
+    });
+    assert_eq!(calls_made(&folder), 1);
+    // When it runs again, a change made meanwhile starts it.
+    fs::write(folder.join("answer"), "five open").unwrap();
+    w.ok("set_paused", json!({"bot": bot, "paused": false}));
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], true);
+    eventually("the routine's prompt", || prompt_count(&home, &bot) == 1);
 }
 
 /// A package as the registry serves it: a tarball of a folder `package/` with `files` and this

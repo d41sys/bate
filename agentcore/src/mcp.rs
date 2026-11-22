@@ -154,6 +154,17 @@ impl Servers {
         args: &Map<String, Value>,
         control: &Control,
     ) -> Result<String, String> {
+        self.call_within(tool, args, control, CALL)
+    }
+
+    /// As `call`, but gives up after `timeout`.
+    pub fn call_within(
+        &mut self,
+        tool: &str,
+        args: &Map<String, Value>,
+        control: &Control,
+        timeout: Duration,
+    ) -> Result<String, String> {
         for server in self.0.iter_mut().filter_map(|(_, server)| server.as_mut()) {
             if let Some(name) = server
                 .tools
@@ -161,7 +172,7 @@ impl Servers {
                 .find(|t| t.exposed == tool)
                 .map(|t| t.name.clone())
             {
-                return server.call(&name, args, control);
+                return server.call(&name, args, control, timeout);
             }
         }
         Err(format!("there is no tool `{tool}`"))
@@ -407,11 +418,12 @@ impl Server {
         name: &str,
         args: &Map<String, Value>,
         control: &Control,
+        timeout: Duration,
     ) -> Result<String, String> {
         let result = self.request(
             "tools/call",
             json!({"name": name, "arguments": args}),
-            CALL,
+            timeout,
             control,
         )?;
         let mut text = String::new();

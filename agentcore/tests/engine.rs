@@ -1174,6 +1174,54 @@ fn a_blocked_connector_tool_is_not_offered_and_a_call_to_it_is_refused_unasked()
     assert!(!dir.join("calls.log").exists());
 }
 
+#[test]
+fn call_tool_calls_a_connector_tool_with_no_turn_and_refuses_a_blocked_one() {
+    let dir = workdir("mcp-call-tool");
+    let script = dir.join("fake-mcp");
+    fs::write(&script, FAKE_MCP).unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // No model request is made: the server has nothing to answer.
+    let model = Model::serve(Vec::new());
+    let mut engine = Engine::start(&dir, &model);
+    let connectors = vec![connector("fake", stdio(&script))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+
+    let call = |tool: &str| Op::CallTool {
+        tool: tool.into(),
+        args: serde_json::from_value(json!({"text": "hi"})).unwrap(),
+    };
+    let id = engine.send(call("fake__echo"));
+    let events = engine.until(|e| matches!(e, Event::Response { .. }));
+    let said = events.iter().find_map(|e| match e {
+        Event::CallOutput { request, output } if *request == id => Some(output.as_str()),
+        _ => None,
+    });
+    assert_eq!(said, Some("echoed"), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ConnectorLoaded { name, .. } if name == "fake"))
+    );
+    assert!(
+        matches!(events.last(), Some(Event::Response { error: None, .. })),
+        "{events:?}"
+    );
+
+    // A tool that is not there is an error, not an answer.
+    let error = engine.request(call("fake__nothing")).unwrap();
+    assert!(error.contains("there is no tool"), "{error}");
+
+    // A blocked one is refused without a call.
+    let blocked = Op::BlockedTools {
+        names: vec!["fake__echo".to_owned()],
+    };
+    assert_eq!(engine.request(blocked), None);
+    let error = engine.request(call("fake__echo")).unwrap();
+    assert!(error.contains("blocked"), "{error}");
+    let log = fs::read_to_string(dir.join("calls.log")).unwrap();
+    assert_eq!(log.lines().count(), 1, "{log}");
+}
+
 /// Reads one HTTP request: its header block in lower case, and its JSON body.
 fn read_http(stream: &std::net::TcpStream) -> (String, Value) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
