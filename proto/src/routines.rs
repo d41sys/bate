@@ -155,7 +155,7 @@ pub struct Check {
     /// Why the last check made no call, or the call failed. The answer kept stays as it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// SHA-256 (hex) of `last`; empty until the first call was answered.
+    /// SHA-256 (hex) of the whole answer; empty until the first call was answered.
     #[serde(default)]
     pub hash: String,
     /// The last answer, cut to 4096 bytes.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { afterText, checkText, heldText, skipWhy, watchArguments, watchText } from "./routines.ts";
+import { afterText, checkText, heldText, skipWhy, watchArguments, watchText, watchTools } from "./routines.ts";
 import { dayTime } from "./times.ts";
 
 test("a skipped run says why, and names the connector or the precheck's line", () => {
@@ -43,4 +43,17 @@ test("the arguments of a watch are a JSON object, or empty for none", () => {
   assert.throws(() => watchArguments("{state"), /must be JSON/);
   assert.throws(() => watchArguments("[1]"), /must be a JSON object/);
   assert.throws(() => watchArguments("null"), /must be a JSON object/);
+});
+
+test("the tools to watch are the connector's own, each marked when the bot would not be let call it alone", () => {
+  const issues = { name: "issues", enabled: true, transport: { type: "stdio" as const, command: "serve" }, toolNames: ["issues__list", "issues__close", "issues__get"], blocked: ["issues__close"] };
+  const allow = (level: "always" | "ask" | "never", grants: { kind: "connector"; target: string; atMs: number }[] = []) => ({ levels: { connector: level } as never, grants });
+  assert.deepEqual(watchTools(issues, "", allow("always"))?.map((t) => t.label), ["close (blocked)", "get", "list"]);
+  assert.deepEqual(watchTools(issues, "", allow("ask", [{ kind: "connector", target: "issues__get", atMs: 1 }]))?.map((t) => t.label), ["close (blocked)", "get", "list (would ask)"]);
+  assert.deepEqual(watchTools(issues, "", allow("never"))?.map((t) => t.label), ["close (blocked)", "get (not allowed)", "list (not allowed)"]);
+  assert.equal(watchTools(issues, "")?.[2].label, "list");
+  // A tool already set that the engine did not list stays in the list; a connector never loaded has no list.
+  assert.equal(watchTools(issues, "gone", allow("always"))?.some((t) => t.own === "gone"), true);
+  assert.equal(watchTools({ ...issues, toolNames: undefined }, "", allow("always")), undefined);
+  assert.equal(watchTools(undefined, ""), undefined);
 });

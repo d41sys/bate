@@ -219,7 +219,7 @@ fn split<T>(part: Option<Result<T, String>>) -> (Option<T>, Option<String>) {
 /// Longest piece of engine stderr logged as one line.
 const MAX_STDERR_LINE: u64 = 64 << 10;
 const MAX_ROUTINES: usize = 50;
-/// Most bytes of a watch's answer that are kept, compared and put in front of the prompt.
+/// Most bytes of a watch's answer that are kept and put in front of the prompt.
 const MAX_WATCHED: usize = 4096;
 /// Most bytes of a watch's arguments.
 const MAX_WATCH_ARGS: usize = 4096;
@@ -7851,9 +7851,12 @@ impl Core {
             Ok(answer) => answer,
             Err(why) => return self.watch_failed(bot, r, why, true),
         };
-        // shortcut: a change after the first 4 KiB is not seen; raise the bound if one has to be.
+        // The whole answer, as the engine gives it (it caps it at 64 KiB), is what is compared; only
+        // the copy kept and shown to the bot is cut.
+        let hash =
+            crate::download::hex(digest::digest(&digest::SHA256, answer.as_bytes()).as_ref());
+        let cut = answer.len() > MAX_WATCHED;
         let seen = &answer[..answer.floor_char_boundary(MAX_WATCHED)];
-        let hash = crate::download::hex(digest::digest(&digest::SHA256, seen.as_bytes()).as_ref());
         let before = r.last_check.take().unwrap_or_default();
         let changed = !before.hash.is_empty() && before.hash != hash;
         r.last_check = Some(Check {
@@ -7867,9 +7870,14 @@ impl Core {
             return self.store_routine(bot, &r);
         }
         // The start records its run with the routine as it is here, so the new answer is kept with it.
+        let shown = if cut {
+            format!("{seen}\n[The answer is longer: it was cut here.]")
+        } else {
+            seen.to_owned()
+        };
         let start = Start {
             scheduled: true,
-            seen: Some(seen.to_owned()),
+            seen: Some(shown),
             ..Start::new(r, Some("watch"), "watch", "watch", "", None, Notify::None)
         };
         self.start_routine(bot, start);

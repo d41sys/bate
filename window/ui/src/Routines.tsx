@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { dayTime, EVERY, when } from "./times.ts";
-import { afterText, checkText, heldText, skipWhy, watchArguments, watchText } from "./routines.ts";
+import { afterText, checkText, heldText, skipWhy, watchArguments, watchText, watchTools } from "./routines.ts";
 import { tokenCount } from "./usage.ts";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
-import type { After, Bot, Connector, Frequency, Routine, RoutineRun } from "./types.ts";
+import type { After, Bot, Connector, Frequency, Permissions, Routine, RoutineRun } from "./types.ts";
 import { useLater } from "./useLater.ts";
 
 const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped", skipped: "Skipped" };
@@ -13,9 +13,6 @@ const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "
 /** The fields of the dialog; a routine with no schedule starts only from its web address or a chat. */
 const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", after: false, afterBot: "", afterOutcome: "done" as After["outcome"], webhook: false, chat: false, precheck: "", watching: false, connector: "", tool: "", args: "{}", every: 5 };
 const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, after: !!r.after, afterBot: r.after?.bot ?? "", afterOutcome: r.after?.outcome ?? blank.afterOutcome, webhook: r.webhook, chat: r.chat, precheck: r.precheck ?? "", watching: !!r.watch, connector: r.watch?.connector ?? "", tool: r.watch?.tool ?? "", args: JSON.stringify(r.watch?.arguments ?? {}), every: r.watch?.every ?? blank.every });
-
-/** The tools of a connector as the connector names them, when the bot's engine has loaded it (the model's name has `<connector>__` in front). */
-const toolsOf = (c?: Connector) => (c?.toolNames ?? []).map((n) => n.slice(c!.name.length + 2));
 
 /** A device on the network may not set a precheck or a watch: its frames leave them out and the service keeps the ones there are. */
 const frame = (r: Routine): Routine => (inShell ? r : { ...r, precheck: undefined, watch: undefined });
@@ -74,6 +71,8 @@ export function Routines({ bot }: { bot: string }) {
   const [bots, setBots] = useState<Bot[]>([]);
   const { later } = useLater(bot);
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [permissions, setPermissions] = useState<Permissions>();
+  const tools = watchTools(connectors.find((c) => c.name === form.connector), form.tool, permissions);
 
   useEffect(() => {
     const load = () =>
@@ -90,7 +89,10 @@ export function Routines({ bot }: { bot: string }) {
 
   /** The bot's connectors, for the dialog's choice of what to watch. */
   useEffect(() => {
-    if (ask && inShell) void request<{ connectors: Connector[] }>("list_connectors", { bot }).then((d) => setConnectors(d.connectors), () => setConnectors([]));
+    if (ask && inShell) {
+      void request<{ connectors: Connector[] }>("list_connectors", { bot }).then((d) => setConnectors(d.connectors), () => setConnectors([]));
+      void request<Permissions>("get_permissions", { bot }).then(setPermissions, () => setPermissions(undefined));
+    }
   }, [ask, bot]);
 
   /** Whether it worked; if not, the error shows. */
@@ -241,13 +243,20 @@ export function Routines({ bot }: { bot: string }) {
                     {[...new Set([...connectors.filter((c) => c.enabled).map((c) => c.name), ...(form.connector ? [form.connector] : [])])].map((n) => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </label>
-                <label>
-                  Tool
-                  <input required list="watch-tools" maxLength={64} value={form.tool} onChange={(e) => setForm({ ...form, tool: e.target.value })} />
-                  <datalist id="watch-tools">
-                    {toolsOf(connectors.find((c) => c.name === form.connector)).map((t) => <option key={t} value={t} />)}
-                  </datalist>
-                </label>
+                {tools ? (
+                  <label>
+                    Tool
+                    <select required value={form.tool} onChange={(e) => setForm({ ...form, tool: e.target.value })}>
+                      <option value="" disabled>Choose…</option>
+                      {tools.map((t) => <option key={t.own} value={t.own}>{t.label}</option>)}
+                    </select>
+                  </label>
+                ) : (
+                  <>
+                    <label>Tool <input required maxLength={64} value={form.tool} onChange={(e) => setForm({ ...form, tool: e.target.value })} /></label>
+                    {form.connector && <p className="note">{form.connector} has not been loaded yet, so its tools are not known. Type the tool's name; its tools are listed here once the bot has used the connector.</p>}
+                  </>
+                )}
                 <label>Arguments, as JSON <textarea rows={2} value={form.args} onChange={(e) => setForm({ ...form, args: e.target.value })} /></label>
                 <label>Look every, in minutes <input type="number" min={5} max={1440} required value={form.every} onChange={(e) => setForm({ ...form, every: Number(e.target.value) })} /></label>
                 <p className="note">Bate calls the tool itself, without a model, and starts the routine when the answer is not the one before, with the answer in front of the prompt. The first answer is only kept. The bot must be able to use this tool without asking (its level for connectors is Always, or the tool is allowed) and it must not be blocked; a tool that would ask is refused. A call that fails never starts the routine.</p>

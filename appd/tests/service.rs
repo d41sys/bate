@@ -15374,6 +15374,26 @@ fn a_watch_starts_its_routine_once_per_change_and_an_error_never_does() {
     );
     assert_eq!(calls_made(&folder), calls + 1);
     assert_eq!(prompt_count(&home, &bot), 1);
+
+    // The whole answer is compared, not the first 4 KiB: a list that grows at its end starts it.
+    let long = |tail: &str| format!("{}{tail}", "open ".repeat(1500));
+    fs::write(folder.join("answer"), long("tail-a")).unwrap();
+    look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    eventually("the long answer's prompt", || {
+        prompt_count(&home, &bot) == 2
+    });
+    turns_ended(&mut w, &bot, "done", 2);
+    let sent = fs::read_to_string(folder.join("prompts.log")).unwrap();
+    assert!(sent.contains("it was cut here"), "{sent}");
+    fs::write(folder.join("answer"), long("tail-b")).unwrap();
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], true);
+    assert_eq!(row["lastCheck"]["last"].as_str().unwrap().len(), 4096);
+    eventually("the tail's prompt", || prompt_count(&home, &bot) == 3);
+    turns_ended(&mut w, &bot, "done", 3);
+    let row = look_again(&home, &mut service, &mut w, &bot, &id, 0);
+    assert_eq!(row["lastCheck"]["changed"], false);
+    assert_eq!(prompt_count(&home, &bot), 3);
 }
 
 #[test]
