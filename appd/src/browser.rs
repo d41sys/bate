@@ -702,11 +702,14 @@ impl Chrome {
                 text,
                 submit,
             } => {
-                // The host is compared in the page, in the same script that types, so that no
-                // navigation can come between the two. `===` and `||` only: nothing the page can
-                // replace (a method of `String`, of `Array`) decides.
-                let (value, guard, site) = match text {
-                    Typed::Text(text) => (text.as_str(), "true".to_owned(), ""),
+                // The host and the kind of field are checked in the page, in the same script that
+                // types, so that no navigation can come between them. `===` and `||` only: nothing
+                // the page can replace (a method of `String`, of `Array`) decides. A secret goes only
+                // into a password field, whose value is never shown back or put back by the browser;
+                // the field is marked, so that `look` never reports its value, whatever the page
+                // makes of its type later (a "show password" button).
+                let (value, guard, mark, site) = match text {
+                    Typed::Text(text) => (text.as_str(), "true".to_owned(), String::new(), ""),
                     Typed::Secret(name) => {
                         let secret = secrets.iter().find(|s| s.name == *name).ok_or_else(|| {
                             format!("You have no secret named {name}. Ask the person for it with request_secret.")
@@ -715,15 +718,19 @@ impl Chrome {
                         let guard = format!(
                             "location.hostname === {host} && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')"
                         );
-                        (secret.value.as_str(), guard, secret.site.as_str())
+                        let mark = "if (!(e.tagName === 'INPUT' && e.type === 'password')) return 'not password'; (window.__bateSecret = window.__bateSecret || new WeakSet()).add(e);".to_owned();
+                        (secret.value.as_str(), guard, mark, secret.site.as_str())
                     }
                 };
                 let text = serde_json::to_string(value).expect("a string");
-                let done = self.eval(page, &format!("(() => {{ if (!({guard})) return 'other site'; const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return false; e.focus(); if (e.isContentEditable) {{ e.textContent = {text}; }} else {{ const kind = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : e instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement; const set = Object.getOwnPropertyDescriptor(kind.prototype, 'value').set; set.call(e, {text}); }} e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); if ({submit}) {{ if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})); }} return true; }})()"))?;
+                let done = self.eval(page, &format!("(() => {{ if (!({guard})) return 'other site'; const e = (window.__bate || [])[{element} - 1]; if (!e || !e.isConnected) return false; {mark} e.focus(); if (e.isContentEditable) {{ e.textContent = {text}; }} else {{ const kind = e instanceof HTMLTextAreaElement ? HTMLTextAreaElement : e instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement; const set = Object.getOwnPropertyDescriptor(kind.prototype, 'value').set; set.call(e, {text}); }} e.dispatchEvent(new Event('input', {{bubbles: true}})); e.dispatchEvent(new Event('change', {{bubbles: true}})); if ({submit}) {{ if (e.form) e.form.requestSubmit(); else e.dispatchEvent(new KeyboardEvent('keydown', {{key: 'Enter', bubbles: true}})); }} return true; }})()"))?;
                 if done == "other site" {
                     return Err(format!(
                         "Nothing was typed: this page is not on {site} with https, the one place that secret may be typed."
                     ));
+                }
+                if done == "not password" {
+                    return Err("Nothing was typed: a secret goes only into a password field (an element shown as `password field`), never into a text field, a text area or an editable page.".into());
                 }
                 if done != true {
                     return Err(gone(*element));
@@ -756,6 +763,13 @@ impl Chrome {
                     if done != true {
                         return Err(gone(*n));
                     }
+                }
+                // Deleting a letter of a secret leaves all but one of its letters in the field, which
+                // a form sent with Enter would put in the address.
+                if *key == "Backspace"
+                    && self.eval(page, "(window.__bateSecret && window.__bateSecret.has(document.activeElement)) === true")? == true
+                {
+                    return Err("Nothing was pressed: the field holds a secret, and Backspace would change it. Type the secret again to replace it.".into());
                 }
                 let &(_, code, text) = KEYS.iter().find(|k| k.0 == *key).expect("parsed");
                 // The page cannot tell this key from a person's: the watch must not take it
@@ -796,7 +810,7 @@ impl Chrome {
             const all = [...document.querySelectorAll('a[href], button, input, textarea, select, summary, [role=button], [role=link], [contenteditable=true]')];
             const shown = all.filter(e => {{ const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !e.disabled && e.type !== 'hidden'; }}).slice(0, {MAX_ELEMENTS});
             window.__bate = shown;
-            const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code';
+            const secret = e => e.type === 'password' || e.autocomplete === 'one-time-code' || (window.__bateSecret && window.__bateSecret.has(e)) === true;
             const name = e => (e.getAttribute('aria-label') || e.innerText || (secret(e) ? '' : e.value) || e.placeholder || e.title || e.name || e.getAttribute('href') || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
             const kind = e => e.tagName === 'A' ? 'link' : e.tagName === 'SELECT' ? 'select' + (e.multiple || !e.selectedOptions.length ? '' : ' (' + e.selectedOptions[0].text.trim().replace(/\\s+/g, ' ') + ')') : e.tagName === 'TEXTAREA' || e.isContentEditable ? 'field' : e.tagName === 'INPUT' ? (['submit', 'button', 'reset', 'image'].includes(e.type) ? 'button' : ['checkbox', 'radio'].includes(e.type) ? e.type + (e.checked ? ' (checked)' : '') : secret(e) ? 'password field' : 'field') : 'button';
             const text = (document.body ? document.body.innerText : '').replace(/\\n{{3,}}/g, '\\n\\n');

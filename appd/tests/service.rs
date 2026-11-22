@@ -6705,6 +6705,8 @@ fn web_site() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             log.lock().unwrap().push(path.clone());
             let page = match path.as_str() {
                 "/" => "<title>Front</title><h1>Hello there</h1><a href='/two'>Next page</a><form action='/sent'><input name='q' placeholder='Query'><input type='password' name='pw'><button>Go</button></form>".to_owned(),
+                // A page that shows a password: its script turns the field into a plain one as soon as it is typed in.
+                "/show" => "<title>Show</title><script>addEventListener('input', e => { if (e.target.id === 'p') e.target.type = 'text'; })</script><input id=p type=password><input id=t><textarea id=ta></textarea><div id=ce contenteditable=true>edit here</div>".to_owned(),
                 // Reports how far it was scrolled and what has the focus in its title, what was
                 // chosen in its text, and how often it was fetched.
                 "/tools" => {
@@ -7311,12 +7313,12 @@ fn the_real_engine_asks_for_a_secret_and_the_service_types_it_only_on_its_site_w
         call(
             "c5",
             "browser",
-            json!({"action": "type", "element": 2, "secret": "other", "submit": true}),
+            json!({"action": "type", "element": 3, "secret": "other", "submit": true}),
         ),
         call(
             "c6",
             "browser",
-            json!({"action": "type", "element": 2, "secret": "shop", "submit": true}),
+            json!({"action": "type", "element": 3, "secret": "shop", "submit": true}),
         ),
         call("c7", "browser", json!({"action": "look"})),
         json!({"choices": [{"index": 0, "delta": {"content": "Done."}}]}),
@@ -7398,15 +7400,15 @@ fn the_real_engine_asks_for_a_secret_and_the_service_types_it_only_on_its_site_w
     );
     let typed = result("c6");
     assert!(
-        typed.contains(&format!("Address: {site}/sent?q=[secret shop]&pw=\n"))
-            && typed.contains("You are at /sent?q=[secret shop]&pw="),
+        typed.contains(&format!("Address: {site}/sent?q=&pw=[secret shop]\n"))
+            && typed.contains("You are at /sent?q=&pw=[secret shop]"),
         "{typed}"
     );
     // A later read of the page hides it too.
     assert!(result("c7").contains("[secret shop]") && !result("c7").contains(&shop));
     // The page did get the one it was meant to, and never the other.
     let paths = seen.lock().unwrap().clone();
-    assert!(paths.contains(&format!("/sent?q={shop}&pw=")), "{paths:?}");
+    assert!(paths.contains(&format!("/sent?q=&pw={shop}")), "{paths:?}");
     assert!(!paths.iter().any(|p| p.contains(&elsewhere)), "{paths:?}");
 
     // Nowhere else: frames, transcript, database, logs, the engine's own files.
@@ -7430,6 +7432,166 @@ fn the_real_engine_asks_for_a_secret_and_the_service_types_it_only_on_its_site_w
         .map(|s| s["name"].clone())
         .collect();
     assert_eq!(names, [json!("other"), json!("shop")]);
+}
+
+#[test]
+fn a_secret_goes_only_into_a_password_field_and_a_page_that_unmasks_it_does_not_give_it_to_the_model()
+ {
+    build_engine();
+    let (site, _seen) = web_site();
+    let short = made_up("short");
+    // Longer than the 80 characters `look` shows of a field, with no piece repeated.
+    let long = (0..8)
+        .map(|i| format!("{i}-{}", made_up("long")))
+        .collect::<Vec<_>>()
+        .join("/");
+    assert!(long.len() > 100);
+    let call = |id: &str, tool: &str, args: Value| {
+        json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": id, "type": "function",
+            "function": {"name": tool, "arguments": args.to_string()}}]}}]})
+    };
+    let browser = |id: &str, args: Value| call(id, "browser", args);
+    let open = json!({"action": "open", "url": format!("{site}/show")});
+    let (url, requests) = scripted_model(vec![
+        call(
+            "c1",
+            "request_secret",
+            json!({"name": "short", "site": "127.0.0.1", "why": "A test"}),
+        ),
+        call(
+            "c2",
+            "request_secret",
+            json!({"name": "long", "site": "127.0.0.1", "why": "A test"}),
+        ),
+        browser("c3", open.clone()),
+        // The page's text field, text area and editable text: nothing is typed in them.
+        browser(
+            "c4",
+            json!({"action": "type", "element": 2, "secret": "short"}),
+        ),
+        browser(
+            "c5",
+            json!({"action": "type", "element": 3, "secret": "short"}),
+        ),
+        browser(
+            "c6",
+            json!({"action": "type", "element": 4, "secret": "short"}),
+        ),
+        browser("c7", json!({"action": "look"})),
+        // The password field, which the page turns into a text field as soon as it is typed in.
+        browser(
+            "c8",
+            json!({"action": "type", "element": 1, "secret": "short"}),
+        ),
+        browser(
+            "c9",
+            json!({"action": "press", "key": "Backspace", "element": 1}),
+        ),
+        browser("c10", json!({"action": "look"})),
+        browser("c11", open),
+        browser(
+            "c12",
+            json!({"action": "type", "element": 1, "secret": "long"}),
+        ),
+        browser("c13", json!({"action": "look"})),
+        json!({"choices": [{"index": 0, "delta": {"content": "Done."}}]}),
+    ]);
+    let home = home("secret-password");
+    let chrome = headless_chrome(&home);
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env_remove("BATE_MODEL_API_KEY")
+            .env("BATE_MODEL_BASE_URL", &url)
+            .env("APPD_CHROME", &chrome);
+    });
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "go"}));
+    loop {
+        let f = w.wait_for(|f| {
+            f["type"] == "transcript"
+                && matches!(f["entry"]["type"].as_str(), Some("question" | "turn_end"))
+        });
+        let entry = &f["entry"];
+        if entry["type"] == "turn_end" {
+            assert_eq!(entry["reason"], "done", "{f}");
+            break;
+        }
+        let value = match entry["secret"]["name"].as_str() {
+            Some("short") => &short,
+            Some("long") => &long,
+            _ => panic!("a question nobody expected: {f}"),
+        };
+        w.send(
+            "answer_secret",
+            json!({"bot": bot, "question": entry["question"], "value": value}),
+        );
+    }
+
+    let shown: Vec<Value> = requests.try_iter().collect();
+    assert_eq!(shown.len(), 14);
+    let result = |id: &str| {
+        let tool = shown[13]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == id);
+        tool.unwrap_or_else(|| panic!("no result for {id}"))["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for id in ["c4", "c5", "c6"] {
+        assert!(
+            result(id).starts_with("Nothing was typed: a secret goes only into a password field"),
+            "{id}: {}",
+            result(id)
+        );
+    }
+    // The fields were not written to: the page, read after, shows them empty.
+    let page = result("c7");
+    for line in [
+        "[2] field \"\"",
+        "[3] field \"\"",
+        "[4] field \"edit here\"",
+    ] {
+        assert!(page.contains(line), "{page}");
+    }
+    // The page unmasked the field, and the model is told it is still the password field, empty.
+    assert!(
+        result("c8").contains("[1] password field \"\""),
+        "{}",
+        result("c8")
+    );
+    // A letter deleted from it would leave the rest of the secret in the page.
+    assert!(
+        result("c9").starts_with("Nothing was pressed: the field holds a secret"),
+        "{}",
+        result("c9")
+    );
+    assert!(
+        result("c10").contains("[1] password field \"\""),
+        "{}",
+        result("c10")
+    );
+    assert!(
+        result("c13").contains("[1] password field \"\""),
+        "{}",
+        result("c13")
+    );
+
+    // Nothing the model was shown holds the secrets, nor the short one less a letter, nor a
+    // piece of the long one as long as 20 characters.
+    let all = shown[13].to_string();
+    assert!(!all.contains(&short[..short.len() - 1]), "{all}");
+    for piece in long.as_bytes().windows(20) {
+        assert!(!all.contains(std::str::from_utf8(piece).unwrap()), "{all}");
+    }
 }
 
 #[test]

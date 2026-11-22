@@ -125,7 +125,7 @@ fn tool_list(mcp: &Servers, blocked: &[String], depth: usize, peers: bool) -> Va
                 "url": {"type": "string", "description": "For `open`: an http or https address"},
                 "element": {"type": "integer", "description": "For `click`, `type` and `select`, and optionally `press`: the element's number"},
                 "text": {"type": "string", "description": "For `type`: what to put in the field"},
-                "secret": {"type": "string", "description": "For `type`, instead of `text`: the name of a secret the person gave you with request_secret; the service types its value, and only on the site it was saved for. You never see it, and it is hidden if the page shows it back."},
+                "secret": {"type": "string", "description": "For `type`, instead of `text`: the name of a secret the person gave you with request_secret; the service types its value, and only on the site it was saved for, and only into a password field (shown as `password field`; never a text field, a text area or an editable page). You never see it, and it is hidden if the page shows it back."},
                 "submit": {"type": "boolean", "description": "For `type`: send the form afterwards"},
                 "direction": {"type": "string", "enum": ["up", "down"], "description": "For `scroll`"},
                 "key": {"type": "string", "enum": ["Enter", "Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"], "description": "For `press`"},
@@ -927,7 +927,7 @@ impl Turn {
         });
         match self.answer(&id) {
             Some(Ok(choice)) if choice == APPROVE => Ok(format!(
-                "Saved. You never see the value. Give the browser's `type` action `secret: \"{name}\"` instead of `text`; it types the value only on {host}."
+                "Saved. You never see the value. Give the browser's `type` action `secret: \"{name}\"` instead of `text`; it types the value only on {host}, and only into a password field."
             )),
             Some(_) => Err("The person refused to give the secret.".into()),
             None => Err("Aborted by the user".into()),
