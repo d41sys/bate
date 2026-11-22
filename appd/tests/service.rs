@@ -43,6 +43,10 @@ use serde_json::{Value, json};
 /// What a bot's message (`[Message from the bot …]` or an answer, `[Answer from the bot …]`, a routine's
 /// `[Routine: …]`, and a first line) says after that line is run as if the user had typed it: `do run ls` asks about the action,
 /// `tell <bot> do run ls` passes it on, `say <words>` answers with the words.
+/// A turn that starts from a bot's own note (`[A turn you set yourself …]`) or from another bot's
+/// end (`[The bot … ended a turn …]` in a routine) runs the same way, after those lines.
+/// `check_back <minutes> <note>` (or `at=<time>` for the minutes) calls the `check_back` tool; what the service
+/// answers is logged to `later.log`, and the turn ends.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> args.log
 printf '%s\n' "$PATH" >> path.log
@@ -64,7 +68,7 @@ while IFS= read -r line; do
     *'"type":"prompt"'*)
       printf '%s\n' "$line" >> prompts.log
       nonce=$(printf '%s' "$line" | sed 's/.*"nonce":"\([^"]*\)".*/\1/')
-      line=$(printf '%s' "$line" | sed -e 's/"text":"\[Message from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Answer from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Routine: [^]]*\]\\n/"text":"/')
+      line=$(printf '%s' "$line" | sed -e 's/"text":"\[Message from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Answer from the bot [^]]*\]\\n/"text":"/' -e 's/"text":"\[Routine: [^]]*\]\\n/"text":"/' -e 's/"text":"\[A turn you set yourself[^]]*\]\\n/"text":"/' -e 's/"text":"\[The bot [^]]*\]\\n--- last [0-9a-f]* ---\\n.*--- last [0-9a-f]* ---\\n\\n/"text":"/')
       case "$line" in
         *'limit-turn'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -92,6 +96,12 @@ while IFS= read -r line; do
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"text\",\"delta\":\"$r\"}"; echo '{"type":"turn_end","reason":"done"}' ;;
+        *'"text":"check_back '*)
+          set -- $(printf '%s' "$line" | sed 's/.*"text":"check_back \([^"]*\)".*/\1/')
+          when=$1; shift; note="$*"
+          case "$when" in at=*) args="\"at\":\"${when#at=}\"" ;; *) args="\"minutes\":$when" ;; esac
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"check_back\",\"request\":\"l-$nonce\",\"args\":{$args,\"note\":\"$note\"}}" ;;
         *'"text":"do '*)
           kind=$(printf '%s' "$line" | sed 's/.*"text":"do \([a-z_]*\) .*/\1/')
           target=$(printf '%s' "$line" | sed 's/.*"text":"do [a-z_]* \([^"]*\)".*/\1/')
@@ -198,6 +208,7 @@ while IFS= read -r line; do
     *'"type":"step_limit"'*) printf '%s\n' "$line" >> step_limits.log; echo "$ok" ;;
     *'"type":"web_search"'*) printf '%s\n' "$line" >> web_search.log; echo "$ok" ;;
     *'"type":"set_model"'*) printf '%s\n' "$line" >> models.log; echo "$ok" ;;
+    *'"type":"check_back_result"'*) printf '%s\n' "$line" >> later.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"apple_result"'*) printf '%s\n' "$line" >> apple.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"browser_result"'*) printf '%s\n' "$line" >> browser.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
     *'"type":"desktop_result"'*) printf '%s\n' "$line" >> desktop.log; echo "$ok"; echo '{"type":"turn_end","reason":"done"}' ;;
@@ -16459,4 +16470,421 @@ fn a_check_by_another_bot_of_the_project_uses_its_model_and_instructions_only_an
     turns_ended(&mut w, &a, "done", 4);
     assert_eq!(checked_lines(&mut w, &a)[3].0, "not_checked");
     assert_eq!(model.requests(), before + 4);
+}
+
+/// What the service told the bot's `check_back` calls, oldest first (the fake engine logs it).
+fn told_of(home: &Path, bot: &str) -> Vec<String> {
+    let log = fs::read_to_string(home.join("bots").join(bot).join("later.log"));
+    log.unwrap_or_default().lines().map(str::to_owned).collect()
+}
+
+/// Waits for the `count`th answer to a `check_back` call and returns it.
+fn told(home: &Path, bot: &str, count: usize) -> String {
+    let mut said = String::new();
+    eventually("the answer to check_back", || {
+        let all = told_of(home, bot);
+        if all.len() == count {
+            said = all[count - 1].clone();
+        }
+        all.len() == count
+    });
+    said
+}
+
+fn later_rows(w: &mut Window, bot: &str) -> Vec<Value> {
+    w.ok("list_later", json!({"bot": bot}))["later"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// While the service is down: every waiting later turn is due at `due_ms`.
+fn move_later(home: &Path, due_ms: i64) {
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute("UPDATE later SET due_ms = ?1", [due_ms])
+        .unwrap();
+}
+
+/// While the service is down: `count` more later turns of the bot, in the conversation.
+fn fill_later(home: &Path, bot: &str, conversation: &Value, count: usize) {
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    for _ in 0..count {
+        db.execute(
+            "INSERT INTO later(bot, conversation, due_ms, note, chain) VALUES (?1, ?2, ?3, 'x', 1)",
+            rusqlite::params![bot, conversation.as_str().unwrap(), now_ms() + 3_600_000],
+        )
+        .unwrap();
+    }
+}
+
+/// `hours` from now, as the time a bot writes in `at`.
+fn iso_in(hours: i64) -> String {
+    let at = (now_ms() / 1000 + hours * 3600).to_string();
+    let out = Command::new("date")
+        .args(["-u", "-r", &at, "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn a_later_turn_runs_once_when_due_even_after_a_restart_and_the_time_passed_while_down() {
+    let home = home("later-restart");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "check_back 5 say tea"}),
+    );
+    assert!(told(&home, &bot, 1).contains("A later turn is set for"));
+    // The person's own turn was offered the tool.
+    assert!(prompts_log(&home, &bot).contains("\"checkBack\":true"));
+    turns_ended(&mut w, &bot, "done", 1);
+    let rows = later_rows(&mut w, &bot);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["note"], "say tea");
+    assert!(rows[0]["dueMs"].as_i64().unwrap() > now_ms() + 3 * 60_000);
+    let (id, conversation) = (
+        rows[0]["id"].as_i64().unwrap(),
+        rows[0]["conversation"].clone(),
+    );
+    let nonce = format!("later-{id}");
+
+    // A restart before its time leaves it waiting.
+    service.kill();
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert_eq!(later_rows(&mut w, &bot).len(), 1);
+    assert_eq!(prompts_received(&home, &bot, &nonce), 0);
+
+    // Its time passes while the service is down: it runs once, late, in its own conversation.
+    service.kill();
+    move_later(&home, now_ms() - 3_600_000);
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    eventually("the later turn", || {
+        prompts_received(&home, &bot, &nonce) == 1
+    });
+    turns_ended(&mut w, &bot, "done", 2);
+    assert!(later_rows(&mut w, &bot).is_empty());
+    let got = prompts_log(&home, &bot);
+    assert!(
+        got.contains("[A turn you set yourself with check_back."),
+        "{got}"
+    );
+    assert!(got.contains("\\nsay tea\""), "{got}");
+
+    // Were it left behind by a crash after the engine took it, it is dropped, not run again.
+    service.kill();
+    let db = rusqlite::Connection::open(home.join("app.db")).unwrap();
+    db.execute(
+        "INSERT INTO later(id, bot, conversation, due_ms, note, chain) VALUES (?1, ?2, ?3, ?4, 'say tea', 1)",
+        rusqlite::params![id, bot, conversation.as_str().unwrap(), now_ms() - 1000],
+    )
+    .unwrap();
+    drop(db);
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    eventually("the leftover to be dropped", || {
+        later_rows(&mut w, &bot).is_empty()
+    });
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "say ok"}),
+    );
+    turns_ended(&mut w, &bot, "done", 3);
+    assert_eq!(prompts_received(&home, &bot, &nonce), 1);
+}
+
+#[test]
+fn later_turns_are_bounded_in_time_per_conversation_and_per_bot_and_can_be_cancelled() {
+    let home = home("later-bounds");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let first = conversations(&mut w, &bot)[0]["id"].clone();
+    let mut asked = 0;
+    // What the service says to a `check_back` call the bot makes in `conversation`.
+    let mut ask = |w: &mut Window, conversation: &Value, when: &str| -> String {
+        asked += 1;
+        let text = format!("check_back {when} note");
+        let nonce = format!("n{asked}");
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "conversation": conversation, "text": text}),
+        );
+        told(&home, &bot, asked)
+    };
+
+    for (when, why) in [
+        ("0", "from 1 minute to 90 days"),
+        ("129601", "from 1 minute to 90 days"),
+        ("at=2000-01-01T00:00:00Z", "from 1 minute to 90 days"),
+        ("at=nonsense", "`at` must be a date and time"),
+    ] {
+        assert!(ask(&mut w, &first, when).contains(why), "{when}");
+    }
+    assert!(later_rows(&mut w, &bot).is_empty());
+
+    // Both ends and both ways to say the time are taken.
+    assert!(ask(&mut w, &first, "1").contains("A later turn is set"));
+    assert!(ask(&mut w, &first, &format!("at={}", iso_in(2))).contains("A later turn is set"));
+    let rows = later_rows(&mut w, &bot);
+    assert_eq!(rows.len(), 2);
+    let two_hours = now_ms() + 2 * 3_600_000;
+    assert!((rows[1]["dueMs"].as_i64().unwrap() - two_hours).abs() < 20_000);
+
+    // A person cancels them; one that is not waiting is refused.
+    for row in &rows {
+        w.ok("cancel_later", json!({"bot": bot, "later": row["id"]}));
+    }
+    assert!(later_rows(&mut w, &bot).is_empty());
+    assert_eq!(
+        refusal(
+            &mut w,
+            "cancel_later",
+            json!({"bot": bot, "later": rows[0]["id"]})
+        ),
+        "no_such_later"
+    );
+
+    // At most 10 wait in a conversation and 50 for a bot (49 are there; the first has 9).
+    let more: Vec<Value> = (0..4)
+        .map(|_| w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone())
+        .collect();
+    let empty = w.ok("new_conversation", json!({"bot": bot}))["conversation"].clone();
+    service.kill();
+    fill_later(&home, &bot, &first, 9);
+    for conversation in &more {
+        fill_later(&home, &bot, conversation, 10);
+    }
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    assert!(ask(&mut w, &first, "5").contains("A later turn is set"));
+    assert!(ask(&mut w, &first, "5").contains("at most 10"));
+    assert!(ask(&mut w, &empty, "5").contains("at most 50"));
+    let waiting = w.ok("list_later", json!({"bot": bot, "conversation": more[0]}))["later"].clone();
+    w.ok(
+        "cancel_later",
+        json!({"bot": bot, "later": waiting[0]["id"]}),
+    );
+    assert!(ask(&mut w, &empty, "5").contains("A later turn is set"));
+    assert_eq!(later_rows(&mut w, &bot).len(), 50);
+}
+
+#[test]
+fn a_later_turn_may_set_another_three_times_in_a_row_and_each_needs_the_person_after_that() {
+    let home = home("later-chain");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    // The person's turn sets one whose note sets one, and so on: each note is the next call.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "check_back 5 check_back 5 check_back 5 check_back 5 end"}),
+    );
+    assert!(told(&home, &bot, 1).contains("A later turn is set"));
+    turns_ended(&mut w, &bot, "done", 1);
+    for step in 2..=4 {
+        service.kill();
+        move_later(&home, now_ms() - 60_000);
+        service = Service::start(&home);
+        w = Window::connect(&home);
+        let said = told(&home, &bot, step);
+        // The fourth call in a row is the third later turn's: it is refused.
+        let refused = said.contains("not available");
+        assert_eq!(refused, step == 4, "{said}");
+        turns_ended(&mut w, &bot, "done", step);
+    }
+    assert!(later_rows(&mut w, &bot).is_empty());
+    // The person's turn and the first two later turns were offered the tool; the third was not.
+    assert_eq!(
+        prompts_log(&home, &bot)
+            .matches("\"checkBack\":true")
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn check_back_is_refused_in_a_routine_and_in_work_for_another_bot() {
+    let home = home("later-not-offered");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    w.ok(
+        "set_project",
+        json!({"project": {"name": "Team", "bots": [a, b], "lead": a}}),
+    );
+    let hook =
+        json!({"name": "Hook", "prompt": "check_back 5 nope", "enabled": true, "webhook": true});
+    let routine = w.ok("set_routine", json!({"bot": a, "routine": hook}))["routine"].clone();
+    assert_eq!(
+        http(
+            routine["hookUrl"].as_str().unwrap(),
+            "POST",
+            None,
+            "content-length: 0\r\n",
+            ""
+        ),
+        202
+    );
+    assert!(told(&home, &a, 1).contains("not available"));
+    turns_ended(&mut w, &a, "done", 1);
+    assert!(!prompts_log(&home, &a).contains("checkBack"));
+
+    // A message from another bot is work for that bot, not a chat with the person.
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n1", "text": format!("tell {b} check_back 5 nope")}),
+    );
+    assert!(told(&home, &b, 1).contains("not available"));
+    assert!(!prompts_log(&home, &b).contains("checkBack"));
+    assert!(prompts_log(&home, &a).contains("\"nonce\":\"n1\",\"text\":\"tell"));
+    assert_eq!(
+        prompts_log(&home, &a).matches("\"checkBack\":true").count(),
+        1
+    );
+    assert!(later_rows(&mut w, &a).is_empty() && later_rows(&mut w, &b).is_empty());
+}
+
+#[test]
+fn a_routine_after_another_bot_starts_on_the_outcome_it_names_with_the_last_line_in_front() {
+    let home = home("after-outcomes");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bots: Vec<String> = (0..4).map(|_| w.create_bot()).collect();
+    let (a, done, failed, any) = (&bots[0], &bots[1], &bots[2], &bots[3]);
+    let mut routines = Vec::new();
+    for (bot, outcome) in [(done, "done"), (failed, "failed"), (any, "any")] {
+        let r = json!({"name": "Follow", "prompt": "say next", "enabled": true,
+            "after": {"bot": a, "outcome": outcome}});
+        let r = w.ok("set_routine", json!({"bot": bot, "routine": r}))["routine"].clone();
+        assert_eq!(r["after"], json!({"bot": a, "outcome": outcome}));
+        routines.push(r["id"].as_str().unwrap().to_owned());
+    }
+    // A routine has one way to start, and the bot it follows must exist.
+    let both = json!({"name": "Both", "prompt": "p", "enabled": true, "after": {"bot": a, "outcome": "any"},
+        "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}});
+    assert_eq!(
+        refusal(&mut w, "set_routine", json!({"bot": done, "routine": both})),
+        "invalid_routine"
+    );
+    let nobody = json!({"name": "Nobody", "prompt": "p", "enabled": true, "after": {"bot": "nobody", "outcome": "any"}});
+    assert_eq!(
+        refusal(
+            &mut w,
+            "set_routine",
+            json!({"bot": done, "routine": nobody})
+        ),
+        "invalid_routine"
+    );
+
+    // A turn that finishes starts `done` and `any`, with its last line in front of the prompt.
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n1", "text": "say all good"}),
+    );
+    eventually("the routines that follow a finished turn", || {
+        prompt_count(&home, done) == 1 && prompt_count(&home, any) == 1
+    });
+    turns_ended(&mut w, any, "done", 1);
+    let got = prompts_log(&home, done);
+    assert!(
+        got.contains("ended a turn. How it ended and its last line lie between"),
+        "{got}"
+    );
+    assert!(got.contains("It finished.\\nall good\\n--- last"), "{got}");
+    assert!(got.contains("\\n\\nsay next\""), "{got}");
+    assert_eq!(runs_of(&mut w, done, &routines[0])[0]["by"], "after");
+
+    // A turn that stops at its limit is a failure: `failed` and `any` start, `done` does not.
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n2", "text": "limit-turn"}),
+    );
+    eventually("the routines that follow a failed turn", || {
+        prompt_count(&home, failed) == 1 && prompt_count(&home, any) == 2
+    });
+    turns_ended(&mut w, any, "done", 2);
+    assert!(prompts_log(&home, failed).contains("It failed: stopped after 3 tool rounds"));
+
+    // A turn the person stops starts only `any`.
+    w.ok("prompt", json!({"bot": a, "nonce": "n3", "text": "work"}));
+    eventually("the turn", || prompts_received(&home, a, "n3") == 1);
+    w.ok("abort", json!({"bot": a}));
+    eventually("the routine that follows any end", || {
+        prompt_count(&home, any) == 3
+    });
+    turns_ended(&mut w, any, "done", 3);
+    assert_eq!(
+        (prompt_count(&home, done), prompt_count(&home, failed)),
+        (1, 1)
+    );
+
+    // A paused bot is not started: the run is recorded as skipped.
+    w.ok("set_paused", json!({"bot": any, "paused": true}));
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n4", "text": "say again"}),
+    );
+    eventually("the skipped start", || {
+        let newest = runs_of(&mut w, any, &routines[2])[0].clone();
+        newest["outcome"] == "skipped" && newest["reason"] == "paused" && newest["by"] == "after"
+    });
+    assert_eq!(prompt_count(&home, any), 3);
+}
+
+#[test]
+fn starts_after_another_bot_stop_at_depth_three() {
+    let home = home("after-depth");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bots: Vec<String> = (0..5).map(|_| w.create_bot()).collect();
+    // Each bot's routine follows the one before: a, b, c, d, e.
+    for pair in bots.windows(2) {
+        let r = json!({"name": "Next", "prompt": "say go", "enabled": true,
+            "after": {"bot": pair[0], "outcome": "any"}});
+        w.ok("set_routine", json!({"bot": pair[1], "routine": r}));
+    }
+    w.ok(
+        "prompt",
+        json!({"bot": bots[0], "nonce": "n1", "text": "say go"}),
+    );
+    w.wait_for(|f| f["bot"] == bots[3].as_str() && f["entry"]["type"] == "turn_end");
+    // The core answers in order: once it has, it has dealt with the end of the fourth bot's turn.
+    w.ok("list_bots", json!({}));
+    let counts: Vec<usize> = bots.iter().map(|b| prompt_count(&home, b)).collect();
+    assert_eq!(counts, [1, 1, 1, 1, 0]);
+}
+
+#[test]
+fn a_routine_after_another_bot_starts_at_most_twenty_times_an_hour() {
+    let home = home("after-rate");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let (a, b) = (w.create_bot(), w.create_bot());
+    let r = json!({"name": "Follow", "prompt": "say go", "enabled": true, "after": {"bot": a, "outcome": "any"}});
+    let id = w.ok("set_routine", json!({"bot": b, "routine": r}))["routine"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for i in 1..=20 {
+        w.ok(
+            "prompt",
+            json!({"bot": a, "nonce": format!("n{i}"), "text": "say go"}),
+        );
+        w.wait_for(|f| f["bot"] == b.as_str() && f["entry"]["type"] == "turn_end");
+    }
+    assert_eq!(prompt_count(&home, &b), 20);
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n21", "text": "say go"}),
+    );
+    eventually("the start that is held back", || {
+        let newest = runs_of(&mut w, &b, &id)[0].clone();
+        newest["outcome"] == "skipped" && newest["reason"] == "rate" && newest["by"] == "after"
+    });
+    assert_eq!(prompt_count(&home, &b), 20);
 }

@@ -235,6 +235,7 @@ impl Bridge {
                     Err("this agent cannot reopen an earlier conversation".into()),
                 )
             }
+            // An installed agent has its own tools: `check_back` is never offered to it.
             Op::Prompt { nonce, text, .. } => {
                 let ready = match (&self.session, self.turn) {
                     (_, true) => Err("the engine is busy with a turn".to_owned()),
@@ -319,7 +320,8 @@ impl Bridge {
             Op::Reply { message, .. } => respond(id, Err(format!("message {message} is not open"))),
             Op::BrowserResult { request, .. }
             | Op::DesktopResult { request, .. }
-            | Op::AppleResult { request, .. } => {
+            | Op::AppleResult { request, .. }
+            | Op::CheckBackResult { request, .. } => {
                 respond(id, Err(format!("request {request} is not open")))
             }
             Op::Token { .. } => respond(

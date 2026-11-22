@@ -42,7 +42,7 @@ export type Frequency = "minutes" | "hourly" | "daily" | "weekly" | "monthly" | 
 /** What a model server said its requests used. `input` is all the input; `cached` is the part of it that came from the server's cache. */
 export type Tokens = { input: number; cached: number; output: number };
 
-/** `reason`: why a skipped run was not run (`paused`, `signed_out`, `backoff`, `limit`, `precheck`); `detail`: the connector, the token limit's words, or the first line the precheck printed; `by`: `user` for a run the person started; `tokens`: what the run's requests used, when the server said. */
+/** `reason`: why a skipped run was not run (`paused`, `signed_out`, `backoff`, `limit`, `busy`, `rate`, `precheck`); `detail`: the connector, the token limit's words, or the first line the precheck printed; `by`: `user` for a run the person started, `after` for one that began when another bot's turn ended; `tokens`: what the run's requests used, when the server said. */
 export type RoutineRun = { atMs: number; outcome: "sent" | "failed" | "missed" | "limit" | "skipped"; error?: string; reason?: string; detail?: string; by?: string; tokens?: Tokens };
 
 /** Tokens used over a period, and how many of its requests the server said nothing of (`get_usage`). */
@@ -54,12 +54,16 @@ export type Usage = { today: Tally; month: Tally; limit: { day: number | null; m
 /** Output only: a scheduled routine whose last runs failed is held to fewer runs. */
 export type Backoff = { failures: number; nextRunMs?: number };
 
+/** A routine that starts when a turn of the bot `bot` (its id) ends this way: `failed` is an error or a stop at a limit. */
+export type After = { bot: string; outcome: "done" | "failed" | "any" };
+
 export type Routine = {
   id?: string;
   name: string;
   prompt: string;
   enabled: boolean;
   schedule?: { frequency: Frequency; interval: number; time: string; timezone?: string };
+  after?: After;
   webhook: boolean;
   chat: boolean;
   precheck?: string;
@@ -199,6 +203,9 @@ export type BotFilePreview = {
 
 /** A prompt the service holds until the bot is free. */
 export type QueuedPrompt = { nonce: string; text: string };
+
+/** A turn the bot set for itself with `check_back`, waiting for its time. */
+export type Later = { id: number; conversation: string; dueMs: number; note: string };
 
 /** One of a bot's conversations (`list_conversations`). */
 export type Conversation = {

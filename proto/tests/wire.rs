@@ -10,6 +10,7 @@ fn a_prompt_request_is_one_flat_json_object() {
             nonce: "n1".into(),
             text: "hi".into(),
             check: false,
+            check_back: false,
         },
     };
     assert_eq!(
