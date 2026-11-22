@@ -153,6 +153,9 @@ pub enum Op {
         /// The model's context size in tokens, when the server names one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<usize>,
+        /// For the request of a check (`Event::Token` with `check`) that another bot makes: who.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checker: Option<Checker>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -282,6 +285,10 @@ pub enum Event {
     /// The engine waits until the service sends `token` for `request`.
     Token {
         request: String,
+        /// The request is for the check of an answer (see `Event::Checked`): the service may
+        /// answer with the model that checks, and who.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check: bool,
     },
     /// A model call failed in a way that may pass; the engine asks again after `wait_ms`.
     /// This is retry `attempt` of at most `of`.
@@ -291,17 +298,28 @@ pub enum Event {
         wait_ms: u64,
         error: String,
     },
-    /// What the check of the bot's answer said, with the check's own words in `note`. Part of
-    /// the transcript, between the bot's text and the end of the turn; never the bot's text.
+    /// What the check of the bot's answer said, with the check's own words in `note`, and the
+    /// `by` that made it: a model's name, or a bot's (empty when none was reached). Part of the transcript, between the
+    /// bot's text and the end of the turn; never the bot's text.
     Checked {
         result: CheckResult,
         note: String,
+        #[serde(default)]
+        by: String,
     },
     TurnEnd {
         reason: TurnEnd,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// The bot that makes a check: its name, and its own instructions, which the check's request
+/// has after the rules of the check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checker {
+    pub name: String,
+    pub instructions: String,
 }
 
 /// How a check of an answer went.

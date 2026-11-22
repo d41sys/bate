@@ -98,6 +98,18 @@ fn conversation_row(r: &rusqlite::Row) -> Result<Conversation> {
     })
 }
 
+/// What checks a bot's answers (see Check before done in PROTOCOL.md).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CheckWith {
+    Off,
+    /// The bot's own model.
+    Own,
+    /// A model by name, on the bot's own sign-in or key.
+    Model(String),
+    /// Another bot of the project, by id: its model and its instructions.
+    Bot(String),
+}
+
 /// A prompt that waits for its bot to be free.
 pub struct Queued {
     pub conversation: String,
@@ -247,7 +259,7 @@ CREATE TABLE IF NOT EXISTS skills_off(bot TEXT NOT NULL REFERENCES bots(id) ON D
 CREATE TABLE IF NOT EXISTS profiles(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, instructions TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '', position INTEGER);
 CREATE TABLE IF NOT EXISTS models(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, model TEXT NOT NULL, effort TEXT);
 CREATE TABLE IF NOT EXISTS step_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, steps INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS checks(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS checks(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, with_what TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS paused(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS web_search(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, enabled INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, key TEXT);
@@ -272,7 +284,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 22] = [
+const BOT_TABLES: [&str; 23] = [
     "ledger",
     "access",
     "network",
@@ -954,23 +966,39 @@ impl Store {
             .map(drop)
     }
 
-    /// Whether the bot's answers are checked; off unless turned on.
-    pub fn check(&self, bot: &str) -> Result<bool> {
-        let row = self
+    /// What checks the bot's answers; off unless chosen.
+    pub fn check(&self, bot: &str) -> Result<CheckWith> {
+        let row: Option<(String, String)> = self
             .0
-            .query_row("SELECT enabled FROM checks WHERE bot = ?1", [bot], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT kind, with_what FROM checks WHERE bot = ?1",
+                [bot],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?;
-        Ok(row.unwrap_or(false))
+        Ok(match row {
+            Some((kind, with)) => match kind.as_str() {
+                "own" => CheckWith::Own,
+                "model" => CheckWith::Model(with),
+                "bot" => CheckWith::Bot(with),
+                _ => CheckWith::Off,
+            },
+            None => CheckWith::Off,
+        })
     }
 
-    pub fn set_check(&self, bot: &str, enabled: bool) -> Result<()> {
+    pub fn set_check(&self, bot: &str, with: &CheckWith) -> Result<()> {
+        let (kind, what) = match with {
+            CheckWith::Off => ("off", ""),
+            CheckWith::Own => ("own", ""),
+            CheckWith::Model(m) => ("model", m.as_str()),
+            CheckWith::Bot(b) => ("bot", b.as_str()),
+        };
         self.0
             .execute(
-                "INSERT INTO checks(bot, enabled) VALUES (?1, ?2) \
-                 ON CONFLICT(bot) DO UPDATE SET enabled = ?2",
-                params![bot, enabled],
+                "INSERT INTO checks(bot, kind, with_what) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(bot) DO UPDATE SET kind = ?2, with_what = ?3",
+                params![bot, kind, what],
             )
             .map(drop)
     }

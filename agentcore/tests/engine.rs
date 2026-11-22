@@ -210,7 +210,7 @@ impl Engine {
                 {
                     continue;
                 }
-                if auto_token && let Event::Token { ref request } = event {
+                if auto_token && let Event::Token { ref request, .. } = event {
                     let op = Request {
                         id: "auto-tok".into(),
                         op: Op::Token {
@@ -220,6 +220,7 @@ impl Engine {
                             api: None,
                             model: None,
                             context,
+                            checker: None,
                             error: None,
                         },
                     };
@@ -2456,7 +2457,7 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
     engine.open_new();
     engine.prompt("Hi");
     let req = match engine.next() {
-        Event::Token { request } => request,
+        Event::Token { request, .. } => request,
         other => panic!("expected Token, got {other:?}"),
     };
     // The service answers with the model endpoint and an authorization key.
@@ -2468,6 +2469,7 @@ fn the_engine_asks_for_the_token_before_each_model_call() {
             api: None,
             model: None,
             context: None,
+            checker: None,
             error: None,
         }),
         None
@@ -2505,7 +2507,7 @@ fn responses_body(events: &[Value]) -> Vec<u8> {
 /// Answers the engine's next `token` request with a server that speaks the Responses API.
 fn give_responses_token(engine: &mut Engine, model: &Model) {
     let request = match engine.next() {
-        Event::Token { request } => request,
+        Event::Token { request, .. } => request,
         other => panic!("expected Token, got {other:?}"),
     };
     let op = Op::Token {
@@ -2515,6 +2517,7 @@ fn give_responses_token(engine: &mut Engine, model: &Model) {
         api: Some("responses".into()),
         model: None,
         context: None,
+        checker: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2553,7 +2556,7 @@ fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
         "{events:?}"
     );
     let request = match events.last() {
-        Some(Event::Token { request }) => request.clone(),
+        Some(Event::Token { request, .. }) => request.clone(),
         other => panic!("expected a second Token, got {other:?}"),
     };
     let op = Op::Token {
@@ -2563,6 +2566,7 @@ fn a_turn_runs_on_the_responses_api_when_the_token_says_so() {
         api: Some("responses".into()),
         model: None,
         context: None,
+        checker: None,
         error: None,
     };
     assert_eq!(engine.request(op), None);
@@ -2677,7 +2681,7 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
     engine.open_new();
     engine.prompt("Hi");
     let req = match engine.next() {
-        Event::Token { request } => request,
+        Event::Token { request, .. } => request,
         other => panic!("expected Token, got {other:?}"),
     };
     // The service answers with an error.
@@ -2689,6 +2693,7 @@ fn a_refused_or_failing_token_request_ends_the_turn_with_error() {
             api: None,
             model: None,
             context: None,
+            checker: None,
             error: Some("no model server configured".into()),
         }),
         None
@@ -2714,7 +2719,7 @@ fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment
     engine.open_new();
     engine.prompt("Hi");
     let req = match engine.next() {
-        Event::Token { request } => request,
+        Event::Token { request, .. } => request,
         other => panic!("expected Token, got {other:?}"),
     };
     assert_eq!(
@@ -2725,6 +2730,7 @@ fn a_token_without_a_key_sends_none_though_the_engine_has_one_in_its_environment
             api: None,
             model: None,
             context: None,
+            checker: None,
             error: None,
         }),
         None
@@ -3546,7 +3552,7 @@ fn checks(events: &[Event]) -> Vec<(CheckResult, &str)> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Checked { result, note } => Some((*result, note.as_str())),
+            Event::Checked { result, note, .. } => Some((*result, note.as_str())),
             _ => None,
         })
         .collect()
@@ -3709,7 +3715,7 @@ fn a_check_the_limit_refuses_is_not_made_and_the_turn_ends_as_it_would_have() {
     let mut tokens = 0;
     loop {
         match engine.next() {
-            Event::Token { request } => {
+            Event::Token { request, .. } => {
                 tokens += 1;
                 // The service refuses the third model request of the turn: the check's.
                 let refused = tokens == 3;
@@ -3720,6 +3726,7 @@ fn a_check_the_limit_refuses_is_not_made_and_the_turn_ends_as_it_would_have() {
                     api: None,
                     model: None,
                     context: None,
+                    checker: None,
                     error: refused.then(|| "the bot used its limit".into()),
                 };
                 assert_eq!(engine.request(op), None);
@@ -3737,6 +3744,149 @@ fn a_check_the_limit_refuses_is_not_made_and_the_turn_ends_as_it_would_have() {
     );
     assert_eq!(ended(&events), &done());
     assert_eq!(model.requests().len(), 2);
+}
+
+/// A turn whose model requests are answered with `model`'s server; the service names `checker`
+/// (its model and its bot) for the check's request alone. Stops at the end of the turn.
+fn run_checked(
+    engine: &mut Engine,
+    model: &Model,
+    checker: Option<(&str, &str, &str)>,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    loop {
+        match engine.next() {
+            Event::Token { request, check } => {
+                let named = checker.filter(|_| check);
+                let op = Op::Token {
+                    request,
+                    url: Some(model.url.clone()),
+                    key: None,
+                    api: None,
+                    model: named.map(|(model, ..)| model.to_owned()),
+                    context: None,
+                    checker: named.map(|(_, name, instructions)| proto::Checker {
+                        name: name.to_owned(),
+                        instructions: instructions.to_owned(),
+                    }),
+                    error: None,
+                };
+                assert_eq!(engine.request(op), None);
+            }
+            e if is_turn_end(&e) => {
+                events.push(e);
+                return events;
+            }
+            e => events.push(e),
+        }
+    }
+}
+
+#[test]
+fn a_check_by_another_model_or_bot_asks_that_model_with_its_instructions_and_the_turn_keeps_its_own()
+ {
+    let dir = workdir("check-other");
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("Done.")],
+        vec![text("OK")],
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt_checked("go");
+    let events = run_checked(
+        &mut engine,
+        &model,
+        Some(("m-check", "Reviewer", "Be strict about tests.\nAnd brief.")),
+    );
+    assert_eq!(ended(&events), &done());
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Checked { result: CheckResult::Passed, by, .. } if by == "Reviewer"
+        )),
+        "{events:?}"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    // The turn's own requests carry the bot's model; the check's, the checker's.
+    assert_eq!(requests[0]["model"], requests[1]["model"]);
+    assert_ne!(requests[2]["model"], requests[0]["model"]);
+    assert_eq!(requests[2]["model"], "m-check");
+    // The rules come first, then who checks and what that bot follows, in full.
+    let system = requests[2]["messages"][0]["content"].as_str().unwrap();
+    let rules = system.find("You check another assistant").expect(system);
+    let own = system
+        .find("Be strict about tests.\nAnd brief.")
+        .expect(system);
+    assert!(rules < own, "{system}");
+    assert!(system.contains("You check as Reviewer"), "{system}");
+    assert!(requests[2].get("tools").is_none(), "{}", requests[2]);
+}
+
+#[test]
+fn a_check_by_a_model_the_server_refuses_is_not_checked_and_the_turn_is_not_failed() {
+    let dir = workdir("check-refused-model");
+    let model = Model::replay(vec![
+        stream_body(vec![a_plan_call()]),
+        whole("Answer."),
+        refusal("404 Not Found", ""),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt_checked("go");
+    let events = run_checked(&mut engine, &model, Some(("no-such-model", "", "")));
+    let [(CheckResult::NotChecked, why)] = checks(&events)[..] else {
+        panic!("{events:?}")
+    };
+    assert!(why.contains("404"), "{why}");
+    assert_eq!(ended(&events), &done());
+    assert_eq!(model.requests().len(), 3);
+    assert_eq!(model.requests()[2]["model"], "no-such-model");
+}
+
+#[test]
+fn a_persons_abort_during_a_check_ends_the_turn_aborted_with_no_second_round() {
+    let dir = workdir("check-abort");
+    // The check's reply never ends.
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("Answer.")],
+        vec![Value::Null],
+        vec![text("never asked")],
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    engine.open_new();
+    engine.prompt_checked("go");
+    let mut events = Vec::new();
+    loop {
+        match engine.next() {
+            Event::Token { request, check } => {
+                let op = Op::Token {
+                    request,
+                    url: Some(model.url.clone()),
+                    key: None,
+                    api: None,
+                    model: None,
+                    context: None,
+                    checker: None,
+                    error: None,
+                };
+                assert_eq!(engine.request(op), None);
+                // The check's request is on its way: the person stops the turn.
+                if check {
+                    assert_eq!(engine.request(Op::Abort), None);
+                }
+            }
+            e if is_turn_end(&e) => {
+                events.push(e);
+                break;
+            }
+            e => events.push(e),
+        }
+    }
+    assert_eq!(events.last(), Some(&aborted()));
+    assert!(checks(&events).is_empty(), "{events:?}");
 }
 
 #[test]

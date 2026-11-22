@@ -1141,6 +1141,11 @@ impl UsageModel {
     fn requests(&self) -> usize {
         self.bodies.lock().unwrap().len()
     }
+
+    /// The requests so far, as the server got them.
+    fn bodies(&self) -> Vec<Value> {
+        self.bodies.lock().unwrap().clone()
+    }
 }
 
 fn usage_model(reports: bool) -> UsageModel {
@@ -1168,8 +1173,13 @@ fn usage_model(reports: bool) -> UsageModel {
                 reader.read_exact(&mut body).unwrap();
                 let body: Value = serde_json::from_slice(&body).unwrap();
                 let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+                // A check of another bot's answer quotes the prompt, so it is told apart first.
+                let checking = body["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("You check another assistant"));
                 seen.lock().unwrap().push(body);
-                let planning = last["role"] == "user"
+                let planning = !checking
+                    && last["role"] == "user"
                     && last["content"]
                         .as_str()
                         .is_some_and(|t| t.contains("PLANNING"));
@@ -1184,7 +1194,9 @@ fn usage_model(reports: bool) -> UsageModel {
                         ),
                     ]
                 } else {
-                    vec![delta(json!({"content": "Hello."}))]
+                    vec![delta(
+                        json!({"content": if checking { "OK" } else { "Hello." }}),
+                    )]
                 };
                 if reports {
                     chunks.push(json!({"choices": [], "usage": {"prompt_tokens": 100,
@@ -16038,40 +16050,39 @@ fn answer_lines(entries: &[Value]) -> Vec<String> {
 }
 
 #[test]
-fn a_bots_check_switch_is_off_by_default_kept_across_a_restart_and_not_offered_to_an_installed_agent()
- {
+fn a_bots_check_is_off_by_default_kept_across_a_restart_and_not_offered_to_an_installed_agent() {
     let home = home("check-switch");
     let mut service = Service::start(&home);
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
-    assert_eq!(bot_row(&mut w, &bot)["check"], false);
+    assert_eq!(bot_row(&mut w, &bot)["check"], "off");
 
     let id = w.send("set_bot", json!({"bot": bot, "check": "yes"}));
     let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(reply["code"], "bad_request", "{reply}");
-    w.ok("set_bot", json!({"bot": bot, "check": true}));
-    assert_eq!(bot_row(&mut w, &bot)["check"], true);
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
+    assert_eq!(bot_row(&mut w, &bot)["check"], "own");
 
     // The engine is told with each prompt of the person's, while the switch is on.
     w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
     w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
-    w.ok("set_bot", json!({"bot": bot, "check": false}));
-    w.ok("set_bot", json!({"bot": bot, "check": true}));
+    w.ok("set_bot", json!({"bot": bot, "check": "off"}));
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
     w.ok("prompt", json!({"bot": bot, "nonce": "n2", "text": "hi"}));
     w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
-    w.ok("set_bot", json!({"bot": bot, "check": false}));
+    w.ok("set_bot", json!({"bot": bot, "check": "off"}));
     w.ok("prompt", json!({"bot": bot, "nonce": "n3", "text": "hi"}));
     w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
     let log = prompts_log(&home, &bot);
     let sent: Vec<bool> = log.lines().map(|l| l.contains("\"check\":true")).collect();
     assert_eq!(sent, [true, true, false], "{log}");
 
-    w.ok("set_bot", json!({"bot": bot, "check": true}));
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
     drop(w);
     service.kill();
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
-    assert_eq!(bot_row(&mut w, &bot)["check"], true);
+    assert_eq!(bot_row(&mut w, &bot)["check"], "own");
 
     // An installed agent runs its own loop: nothing of ours to check.
     let agent = w.create_bot();
@@ -16079,11 +16090,11 @@ fn a_bots_check_switch_is_off_by_default_kept_across_a_restart_and_not_offered_t
         "set_agent",
         json!({"bot": agent, "command": ["opencode", "acp"]}),
     );
-    let id = w.send("set_bot", json!({"bot": agent, "check": true}));
+    let id = w.send("set_bot", json!({"bot": agent, "check": "own"}));
     let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
     assert_eq!(reply["code"], "no_check", "{reply}");
-    assert_eq!(bot_row(&mut w, &agent)["check"], false);
-    w.ok("set_bot", json!({"bot": agent, "check": false}));
+    assert_eq!(bot_row(&mut w, &agent)["check"], "off");
+    w.ok("set_bot", json!({"bot": agent, "check": "off"}));
 }
 
 #[test]
@@ -16092,7 +16103,7 @@ fn what_a_check_says_is_its_own_line_in_the_transcript_kept_after_a_restart() {
     let mut service = Service::start(&home);
     let mut w = Window::connect(&home);
     let bot = w.create_bot();
-    w.ok("set_bot", json!({"bot": bot, "check": true}));
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
     w.ok(
         "prompt",
         json!({"bot": bot, "nonce": "n1", "text": "checking"}),
@@ -16124,7 +16135,7 @@ fn only_what_the_person_started_is_checked_and_the_reply_to_a_room_is_the_one_th
     let mut w = Window::connect(&home);
     let (a, b) = (w.create_bot(), w.create_bot());
     for bot in [&a, &b] {
-        w.ok("set_bot", json!({"bot": bot, "check": true}));
+        w.ok("set_bot", json!({"bot": bot, "check": "own"}));
     }
     let project = w.ok(
         "set_project",
@@ -16221,16 +16232,25 @@ fn a_device_on_the_network_cannot_change_a_bots_check_but_sees_what_it_said() {
     };
     ask("hello", json!({"protocol": 1}));
 
-    w.ok("set_bot", json!({"bot": bot, "check": true}));
-    for check in [false, true] {
-        let answer = ask("set_bot", json!({"bot": bot, "check": check}));
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
+    let b = w.create_bot();
+    for fields in [
+        json!({"check": "off"}),
+        json!({"check": "own"}),
+        json!({"check": "model", "checkModel": "m-other"}),
+        json!({"check": "bot", "checkBot": b}),
+        json!({"checkModel": "m-other"}),
+    ] {
+        let mut frame = fields.clone();
+        frame["bot"] = json!(bot);
+        let answer = ask("set_bot", frame);
         assert_eq!(
             (&answer["success"], &answer["code"]),
             (&json!(false), &json!("forbidden")),
             "{answer}"
         );
     }
-    assert_eq!(bot_row(&mut w, &bot)["check"], true);
+    assert_eq!(bot_row(&mut w, &bot)["check"], "own");
     // The rest of the bot's settings are the device's to change.
     let answer = ask("set_bot", json!({"bot": bot, "name": "Renamed"}));
     assert_eq!(answer["success"], true, "{answer}");
@@ -16248,4 +16268,195 @@ fn a_device_on_the_network_cannot_change_a_bots_check_but_sees_what_it_said() {
         .map(|r| r["entry"].clone())
         .collect();
     assert_eq!(answer_lines(&entries).len(), 4, "{opened}");
+}
+
+/// The `checked` lines of the bot's conversation: result, who checked, the note.
+fn checked_lines(w: &mut Window, bot: &str) -> Vec<(String, String, String)> {
+    let said = |e: &Value, k: &str| e[k].as_str().unwrap_or_default().to_owned();
+    history(w, bot)
+        .iter()
+        .filter(|e| e["type"] == "checked")
+        .map(|e| (said(e, "result"), said(e, "by"), said(e, "note")))
+        .collect()
+}
+
+#[test]
+fn a_check_by_the_bots_own_model_counts_for_the_bot_and_a_limit_reached_before_it_gives_not_checked_with_no_request()
+ {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("check-tokens");
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok("set_bot", json!({"bot": bot, "check": "own"}));
+
+    // Two requests for the turn, one for the check: all three are the bot's.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &bot, "done", 1);
+    assert_eq!(model.requests(), 3);
+    assert_eq!(
+        w.ok("get_usage", json!({"bot": bot}))["today"],
+        tally(300, 120, 60, 0)
+    );
+    let lines = checked_lines(&mut w, &bot);
+    assert_eq!(lines, [("passed".into(), "m1".into(), "".into())]);
+    // The check was a request with no tools.
+    assert!(model.bodies()[2].get("tools").is_none());
+
+    // The limit is reached by the turn's own two requests: the third is not made.
+    let limited = w.create_bot();
+    w.ok("set_model", json!({"bot": limited, "model": "m1"}));
+    w.ok("set_bot", json!({"bot": limited, "check": "own"}));
+    w.ok(
+        "set_token_limit",
+        json!({"bot": limited, "day": 240, "stops": "everything"}),
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": limited, "nonce": "n2", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &limited, "done", 1);
+    assert_eq!(model.requests(), 5);
+    let lines = checked_lines(&mut w, &limited);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].0, "not_checked");
+    assert!(lines[0].2.to_lowercase().contains("limit"), "{lines:?}");
+}
+
+#[test]
+fn a_check_by_another_bot_of_the_project_uses_its_model_and_instructions_only_and_a_lost_checker_is_not_checked()
+ {
+    build_engine();
+    let model = usage_model(true);
+    let home = home("check-bot");
+    let mut service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    let (a, b, outsider) = (w.create_bot(), w.create_bot(), w.create_bot());
+    w.ok("set_model", json!({"bot": a, "model": "m1"}));
+    w.ok(
+        "set_bot",
+        json!({"bot": b, "name": "Reviewer", "instructions": "Refuse any answer that skips tests."}),
+    );
+    w.ok("set_model", json!({"bot": b, "model": "m2"}));
+    let project = w.ok(
+        "set_project",
+        json!({"project": {"name": "Site", "bots": [a, b]}}),
+    )["project"]
+        .clone();
+
+    // Refused: itself, a bot of no project, one that is not there.
+    for with in [&a, &outsider, &"nobody".to_owned()] {
+        let code = refusal(
+            &mut w,
+            "set_bot",
+            json!({"bot": a, "check": "bot", "checkBot": with}),
+        );
+        assert_eq!(code, "bad_request", "{with}");
+    }
+    let code = refusal(&mut w, "set_bot", json!({"bot": a, "check": "model"}));
+    assert_eq!(code, "bad_request");
+    assert_eq!(bot_row(&mut w, &a)["check"], "off");
+
+    w.ok("set_bot", json!({"bot": a, "check": "bot", "checkBot": b}));
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n1", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &a, "done", 1);
+    let bodies = model.bodies();
+    assert_eq!(bodies.len(), 3);
+    // The turn asks the bot's model; only the check asks the other bot's, with its instructions.
+    assert_eq!(
+        (&bodies[0]["model"], &bodies[1]["model"]),
+        (&json!("m1"), &json!("m1"))
+    );
+    assert_eq!(bodies[2]["model"], "m2");
+    let system = bodies[2]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("Refuse any answer that skips tests."),
+        "{system}"
+    );
+    assert!(system.contains("Reviewer"), "{system}");
+    assert!(!system.contains("Hello."), "{system}");
+    // Nothing of it is in the checker's conversation, and it is the asking bot that is counted.
+    assert!(history(&mut w, &b).iter().all(|e| e["type"] != "prompt"));
+    assert_eq!(
+        w.ok("get_usage", json!({"bot": b}))["today"],
+        tally(0, 0, 0, 0)
+    );
+    assert_eq!(
+        w.ok("get_usage", json!({"bot": a}))["today"],
+        tally(300, 120, 60, 0)
+    );
+    assert_eq!(
+        checked_lines(&mut w, &a),
+        [("passed".into(), "Reviewer".into(), "".into())]
+    );
+
+    // A named model is asked the same way; the row says what was chosen.
+    w.ok(
+        "set_bot",
+        json!({"bot": a, "check": "model", "checkModel": "m3"}),
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n2", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &a, "done", 2);
+    assert_eq!(model.bodies()[5]["model"], "m3");
+    assert_eq!(checked_lines(&mut w, &a)[1].1, "m3");
+
+    // Kept across a restart.
+    w.ok("set_bot", json!({"bot": a, "check": "bot", "checkBot": b}));
+    drop(w);
+    service.kill();
+    let _service = start_with_usage_model(&home, &model);
+    let mut w = Window::connect(&home);
+    eventually("the choice after the restart", || {
+        let row = bot_row(&mut w, &a);
+        row["check"] == "bot" && row["checkBot"] == b.as_str() && row.get("checkBroken").is_none()
+    });
+
+    // The checker leaves the project: the choice is shown as broken, the next turn is not
+    // checked and no request is made for it.
+    let before = model.requests();
+    w.ok(
+        "set_project",
+        json!({"project": {"id": project["id"], "name": "Site", "bots": [a]}}),
+    );
+    assert!(
+        bot_row(&mut w, &a)["checkBroken"]
+            .as_str()
+            .unwrap()
+            .contains("project")
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n3", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &a, "done", 3);
+    assert_eq!(model.requests(), before + 2);
+    let lines = checked_lines(&mut w, &a);
+    assert_eq!(lines[2].0, "not_checked", "{lines:?}");
+
+    // The checker is deleted: the asker's turn is the same.
+    w.ok("delete_bot", json!({"bot": b}));
+    assert!(
+        bot_row(&mut w, &a)["checkBroken"]
+            .as_str()
+            .unwrap()
+            .contains("gone")
+    );
+    w.ok(
+        "prompt",
+        json!({"bot": a, "nonce": "n4", "text": "PLANNING it"}),
+    );
+    turns_ended(&mut w, &a, "done", 4);
+    assert_eq!(checked_lines(&mut w, &a)[3].0, "not_checked");
+    assert_eq!(model.requests(), before + 4);
 }

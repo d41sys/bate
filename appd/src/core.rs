@@ -30,7 +30,7 @@ use crate::clients::ClientHandle;
 use crate::hooks::{self, Hit};
 use crate::keychain;
 use crate::proxy::{self, Upstream};
-use crate::store::{Conversation, Kept, Ledger, Owner, Queued, Store};
+use crate::store::{CheckWith, Conversation, Kept, Ledger, Owner, Queued, Store};
 use crate::sys::{self, log, now_ms};
 use crate::tokens;
 use crate::{
@@ -585,6 +585,9 @@ struct Running {
     /// Set when the engine's model request was refused for the bot's token limit, with the
     /// reason: the turn then ends as `limit`, not as an error.
     limited: Option<String>,
+    /// Who checks the running turn's answer, as set by the last `token` request that was for a
+    /// check; taken by the answer to it.
+    checking: Option<Checking>,
     /// What the running turn's model requests used, as the servers reported it; `None` until
     /// one did.
     used: Option<proto::Tokens>,
@@ -669,6 +672,14 @@ pub enum ChatGptNews {
 }
 
 /// What is asked of the ChatGPT sign-in: a bot's `token` request, or a window's `list_models`.
+/// What a `token` answer for a check carries besides the bot's own: the model that checks,
+/// when it is not the bot's own, and the bot that checks.
+#[derive(Default)]
+struct Checking {
+    model: Option<String>,
+    checker: Option<proto::Checker>,
+}
+
 enum PlanAsk {
     Token { bot: String, request: String },
     Models { client: u64, id: Value },
@@ -2818,13 +2829,31 @@ impl Core {
                 };
                 let check = match f.get("check").filter(|v| !v.is_null()) {
                     None => None,
-                    Some(v) => Some(
-                        v.as_bool()
-                            .ok_or_else(|| bad("`check` must be true or false"))?,
-                    ),
+                    Some(v) => Some(match v.as_str() {
+                        Some("off") => CheckWith::Off,
+                        Some("own") => CheckWith::Own,
+                        Some("model") => {
+                            let model = f.get("checkModel").and_then(Value::as_str).unwrap_or("");
+                            // As the model picker takes one.
+                            check_model(model, None).map_err(bad)?;
+                            if model.is_empty() {
+                                return Err(bad("`checkModel` must be a model's name"));
+                            }
+                            CheckWith::Model(model.to_owned())
+                        }
+                        Some("bot") => {
+                            let id = f.get("checkBot").and_then(Value::as_str).unwrap_or("");
+                            let with = CheckWith::Bot(id.to_owned());
+                            self.checking_of(&bot, &with).map_err(bad)?;
+                            with
+                        }
+                        _ => return Err(bad("`check` must be off, own, model or bot")),
+                    }),
                 };
                 // An installed agent runs its own loop: there is no turn of ours to check.
-                if check == Some(true) && self.store.agent(&bot).map_err(internal)?.is_some() {
+                if check.as_ref().is_some_and(|c| *c != CheckWith::Off)
+                    && self.store.agent(&bot).map_err(internal)?.is_some()
+                {
                     return Err((
                         "no_check",
                         "an installed agent runs its own loop: its answers cannot be checked"
@@ -2874,8 +2903,8 @@ impl Core {
                         self.send_op(&bot, Op::WebSearch { on }, Waiter::Quiet)?;
                     }
                 }
-                if let Some(on) = check {
-                    self.store.set_check(&bot, on).map_err(internal)?;
+                if let Some(with) = check {
+                    self.store.set_check(&bot, &with).map_err(internal)?;
                 }
                 self.broadcast(&json!({"type": "bots_changed"}));
                 Ok(Some(json!({})))
@@ -3385,7 +3414,17 @@ impl Core {
                 .unwrap_or(STEP_LIMIT)
         );
         row["webSearch"] = json!(self.store.web_search(bot).unwrap_or(true));
-        row["check"] = json!(self.store.check(bot).unwrap_or(false));
+        let with = self.store.check(bot).unwrap_or(CheckWith::Off);
+        (row["check"], row["checkModel"], row["checkBot"]) = match &with {
+            CheckWith::Off => (json!("off"), json!(""), json!("")),
+            CheckWith::Own => (json!("own"), json!(""), json!("")),
+            CheckWith::Model(m) => (json!("model"), json!(m), json!("")),
+            CheckWith::Bot(b) => (json!("bot"), json!(""), json!(b)),
+        };
+        // A bot that checks and cannot now: the person is told, and may choose again.
+        if let Err(why) = self.checking_of(bot, &with) {
+            row["checkBroken"] = json!(why);
+        }
         row["paused"] = json!(self.is_paused(bot));
         row["avatar"] = json!(profile.avatar);
         row["color"] = json!(profile.color);
@@ -3448,7 +3487,7 @@ impl Core {
         let waiter = waiter(prompt);
         // Only the answer to a person is checked: not a routine's, nor another bot's.
         let check = person_started(&waiter)
-            && self.store.check(bot).unwrap_or(false)
+            && self.store.check(bot).unwrap_or(CheckWith::Off) != CheckWith::Off
             && self.store.agent(bot).ok().flatten().is_none();
         let op = Op::Prompt {
             nonce: nonce.clone(),
@@ -3762,6 +3801,7 @@ impl Core {
                 call: None,
                 routine: None,
                 limited: None,
+                checking: None,
                 used: None,
                 browsing: None,
                 steered: Vec::new(),
@@ -5762,6 +5802,51 @@ impl Core {
         }
     }
 
+    /// Who checks the answers of `asker` when `with` is chosen, or why that cannot be now: the
+    /// bot may be gone, out of the project, or on an installed agent.
+    fn checking_of(&self, asker: &str, with: &CheckWith) -> Result<Checking, String> {
+        let read = |e: rusqlite::Error| internal(e).1;
+        let id = match with {
+            CheckWith::Off | CheckWith::Own => return Ok(Checking::default()),
+            CheckWith::Model(model) => {
+                return Ok(Checking {
+                    model: Some(model.clone()),
+                    checker: None,
+                });
+            }
+            CheckWith::Bot(id) => id,
+        };
+        if id == asker {
+            return Err("a bot cannot check its own answers as another bot".into());
+        }
+        let Some(row) = self.store.bot(id).map_err(read)? else {
+            return Err("the bot that checks is gone".into());
+        };
+        let together = match (
+            self.project_of(asker).map_err(read)?,
+            self.project_of(id).map_err(read)?,
+        ) {
+            (Some(a), Some(b)) => a.id == b.id,
+            _ => false,
+        };
+        if !together {
+            return Err(format!("{} is not in this bot's project", row.name));
+        }
+        if self.store.agent(id).map_err(read)?.is_some() {
+            return Err(format!(
+                "{} runs on an installed agent, which cannot check",
+                row.name
+            ));
+        }
+        Ok(Checking {
+            model: self.model_of(id),
+            checker: Some(proto::Checker {
+                name: row.name,
+                instructions: self.store.profile(id).map_err(read)?.instructions,
+            }),
+        })
+    }
+
     /// The model `bot`'s engine calls: the one chosen for it, else the environment's.
     fn model_of(&self, bot: &str) -> Option<String> {
         let chosen = self.store.model(bot).ok().flatten().map(|(model, _)| model);
@@ -5816,6 +5901,11 @@ impl Core {
         key: Result<String, String>,
         model: Option<String>,
     ) {
+        // A check by another model or bot is named in the answer to its own request.
+        let checking = (self.engines.get_mut(bot))
+            .and_then(|r| r.checking.take())
+            .unwrap_or_default();
+        let model = checking.model.or(model);
         let context = (self.plan_models.iter().flatten())
             .find(|(listed, _)| Some(listed) == model.as_ref())
             .and_then(|(_, context)| *context);
@@ -5825,6 +5915,7 @@ impl Core {
             api: Some("responses".into()),
             model,
             context,
+            checker: checking.checker,
             error: key.as_ref().err().cloned(),
             key: key.ok(),
         };
@@ -5937,7 +6028,7 @@ impl Core {
             // Not for the transcript.
             return self.count_usage(bot, *reported, *tokens);
         }
-        if let Event::Token { request } = &ev
+        if let Event::Token { request, .. } = &ev
             && let Some(why) = self.token_stop(bot, self.unattended(bot))
         {
             // The engine ends its turn with this reason; the service marks that end `limit`.
@@ -5951,6 +6042,7 @@ impl Core {
                 api: None,
                 model: None,
                 context: None,
+                checker: None,
                 error: Some(why),
             };
             if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
@@ -5958,11 +6050,41 @@ impl Core {
             }
             return;
         }
-        if let Event::Token { request } = &ev {
+        if let Event::Token { request, check } = &ev {
+            // A check may be made by another model or bot; that is settled for this request alone.
+            let checking = match *check {
+                false => Ok(Checking::default()),
+                true => {
+                    let with = self.store.check(bot).unwrap_or(CheckWith::Off);
+                    self.checking_of(bot, &with)
+                }
+            };
+            let checking = match checking {
+                Ok(checking) => checking,
+                Err(why) => {
+                    let op = Op::Token {
+                        request: request.clone(),
+                        url: None,
+                        key: None,
+                        api: None,
+                        model: None,
+                        context: None,
+                        checker: None,
+                        error: Some(why),
+                    };
+                    if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {
+                        log!("bot {bot}: token response not sent: {e}");
+                    }
+                    return;
+                }
+            };
             // A ChatGPT sign-in comes before a model server.
             // A sign-in that cannot be read is no sign-in to pass over: the bot is told why.
             let unread = match self.store.chatgpt() {
                 Ok(Some(saved)) if saved.signed_in() => {
+                    if let Some(r) = self.engines.get_mut(bot) {
+                        r.checking = Some(checking);
+                    }
                     let ask = PlanAsk::Token {
                         bot: bot.to_owned(),
                         request: request.clone(),
@@ -5984,7 +6106,7 @@ impl Core {
                     ),
                 ),
                 // A model server lists in no order: the user chooses.
-                Ok(_) if self.model_of(bot).is_none() => (
+                Ok(_) if self.model_of(bot).is_none() && checking.model.is_none() => (
                     None,
                     None,
                     Some(
@@ -6001,10 +6123,11 @@ impl Core {
                 url,
                 key,
                 api: None,
-                model: None,
+                model: checking.model,
                 // shortcut: a model server is not asked how much its model holds, so the
                 // engine's default stands; read its `/models` when one is compacted too early.
                 context: None,
+                checker: checking.checker,
                 error,
             };
             if let Err((_, e)) = self.send_op(bot, op, Waiter::Quiet) {

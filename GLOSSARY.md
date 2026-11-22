@@ -19,7 +19,7 @@ What a bot may use per day and per month, in tokens. It stops unattended work (r
 _Avoid_: budget, quota, spend cap
 
 **Check**:
-A second model request, with no tools, that reads a bot's answer to the person before the turn ends and says `OK` or `FIX`. On `FIX` the bot gets the notes and works once more. Off unless the person turns it on for the bot.
+A second model request, with no tools, that reads a bot's answer to the person before the turn ends and says `OK` or `FIX`. On `FIX` the bot gets the notes and works once more. The person chooses who reads it: the bot's own model, another model, or another bot of its project (its model and instructions only). Off unless chosen.
 _Avoid_: review, verify, double-check
 
 **Conversation**:

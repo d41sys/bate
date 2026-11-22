@@ -312,6 +312,27 @@ enum After {
     Fix(String),
 }
 
+/// What a `token` answer holds: the server, its key, the API, the model the service names (or
+/// empty), and the size of its context.
+fn parse_token(token: &str) -> (&str, Option<String>, Api, &str, Option<usize>) {
+    let mut parts = token.split('\n');
+    let mut part = || parts.next().unwrap_or("");
+    let (url, key, api, named, context) = (part(), part(), part(), part(), part());
+    let api = match api {
+        "responses" => Api::Responses,
+        _ => Api::Chat,
+    };
+    let key = (!key.is_empty()).then(|| key.to_owned());
+    (url, key, api, named, context.parse().ok())
+}
+
+/// The bot that checks and its own instructions, which follow the five lines of `parse_token`
+/// (the instructions may have lines of their own); empty when the bot's own model checks.
+fn checker(token: &str) -> (&str, &str) {
+    let mut parts = token.splitn(7, '\n').skip(5);
+    (parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+}
+
 fn clip(text: &str, max: usize) -> String {
     let end = text.floor_char_boundary(max);
     match text.len() > end {
@@ -508,8 +529,10 @@ impl Turn {
         let until = *check
             .until
             .get_or_insert_with(|| Instant::now() + millis("BATE_CHECK_MS", CHECK_TIME));
+        // Who checks, as far as is known.
+        let mut by = String::new();
         let said = match Instant::now() < until {
-            true => self.ask_check(check, answer, until),
+            true => self.ask_check(check, answer, until, &mut by),
             false => Err("the time allowed for checking is used up".into()),
         };
         if self.control.aborted() {
@@ -524,6 +547,7 @@ impl Turn {
         self.out.send(&Event::Checked {
             result,
             note: note.clone(),
+            by,
         });
         match result {
             CheckResult::Failed => After::Fix(note),
@@ -533,13 +557,35 @@ impl Turn {
 
     /// One request to the model, with no tools: whether the answer passed, and the notes.
     /// Counted and held to the bot's limit like the turn's own requests. Given up at `until`.
+    /// `by` becomes who was asked: the other bot, or the model.
     fn ask_check(
         &self,
         check: &Check,
         answer: &str,
         until: Instant,
+        by: &mut String,
     ) -> Result<(bool, String), String> {
-        let (url, key, api, model, _) = self.get_token()?;
+        let token = self.token(true)?;
+        let (url, key, api, named, ..) = parse_token(&token);
+        // The service names the model that checks, or leaves it to the bot's own.
+        let model = match (named.is_empty(), &self.model) {
+            (false, _) => named.to_owned(),
+            (true, Some(own)) => own.clone(),
+            (true, None) => return Err("no model chosen".into()),
+        };
+        let (who, rules) = checker(&token);
+        *by = if who.is_empty() {
+            model.clone()
+        } else {
+            who.to_owned()
+        };
+        let system = match rules.trim() {
+            "" => CHECKER.to_owned(),
+            rules => format!(
+                "{CHECKER}\n\nYou check as {who}. Their own instructions follow; the rules above \
+                 come first.\n{rules}"
+            ),
+        };
         let more = match check.omitted {
             0 => String::new(),
             n => format!("(and {n} more tool calls, not shown)\n"),
@@ -549,8 +595,12 @@ impl Turn {
             check.request, check.work
         )});
         let none = json!([]);
-        let mut ask = self.ask_model(&model, CHECKER, std::slice::from_ref(&message), None, &none);
+        let mut ask = self.ask_model(&model, &system, std::slice::from_ref(&message), None, &none);
         ask.web_search = false;
+        // The bot's effort is for the bot's model: another one may refuse it.
+        if self.model.as_deref() != Some(&model) {
+            ask.effort = None;
+        }
         // A flag of its own: set by the person's abort and by the end of the time allowed.
         let stop = AtomicBool::new(false);
         let over = AtomicBool::new(false);
@@ -564,7 +614,7 @@ impl Turn {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             });
-            let reply = self.stream_until(&stop, &url, key.as_deref(), api, &ask, |_| {});
+            let reply = self.stream_until(&stop, url, key.as_deref(), api, &ask, |_| {});
             over.store(true, Ordering::SeqCst);
             reply
         })?;
@@ -1140,28 +1190,26 @@ impl Turn {
     /// Asks the service for the model server and key of the coming model call. Its ids count
     /// apart from questions', so a turn's question ids stay what they were without it.
     fn get_token(&self) -> Result<Token, String> {
+        let token = self.token(false)?;
+        let (url, key, api, named, context) = parse_token(&token);
+        let model = (self.model.clone())
+            .or_else(|| (!named.is_empty()).then(|| named.to_owned()))
+            .ok_or("no model chosen")?;
+        Ok((url.to_owned(), key, api, model, context))
+    }
+
+    /// The service's answer to a `token` request, as the engine joined it: see `parse_token`.
+    /// `check`: the request is for a check, which the service may answer with another model.
+    fn token(&self, check: bool) -> Result<String, String> {
         static TOK: AtomicU64 = AtomicU64::new(0);
         let id = format!("tok{}", TOK.fetch_add(1, Ordering::Relaxed) + 1);
         *lock(&self.control.question) = Some(id.clone());
         self.out.send(&Event::Token {
             request: id.clone(),
+            check,
         });
         match self.answer(&id) {
-            Some(Ok(val)) => {
-                let mut parts = val.split('\n');
-                let mut part = || parts.next().unwrap_or("");
-                let (url, key, api, named, context) = (part(), part(), part(), part(), part());
-                let model = (self.model.clone())
-                    .or_else(|| (!named.is_empty()).then(|| named.to_owned()))
-                    .ok_or("no model chosen")?;
-                let key = (!key.is_empty()).then(|| key.to_owned());
-                let api = match api {
-                    "responses" => Api::Responses,
-                    _ => Api::Chat,
-                };
-                Ok((url.to_owned(), key, api, model, context.parse().ok()))
-            }
-            Some(Err(e)) => Err(e),
+            Some(answer) => answer,
             None => Err("Aborted by the user".into()),
         }
     }

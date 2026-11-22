@@ -668,7 +668,7 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
       }
       return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
     case "checked":
-      return <p>{checkText(item.result, item.note)}</p>;
+      return <p>{checkText(item.result, item.note, item.by)}</p>;
     case "steered":
       return <p className="steered">You steered: {item.text}</p>;
     case "forked":

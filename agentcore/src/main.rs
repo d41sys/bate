@@ -438,6 +438,7 @@ impl Engine {
                 api,
                 model,
                 context,
+                checker,
                 error,
             } => {
                 let open = self.running.as_ref().map(|r| lock(&r.control.question));
@@ -455,7 +456,11 @@ impl Engine {
                                 let a = api.unwrap_or_default();
                                 let m = model.unwrap_or_default();
                                 let c = context.map(|c| c.to_string()).unwrap_or_default();
-                                Ok(format!("{u}\n{k}\n{a}\n{m}\n{c}"))
+                                let (who, rules) = match checker {
+                                    Some(c) => (c.name.replace('\n', " "), c.instructions),
+                                    None => Default::default(),
+                                };
+                                Ok(format!("{u}\n{k}\n{a}\n{m}\n{c}\n{who}\n{rules}"))
                             }
                             (_, Some(e)) => Err(e),
                             _ => Err("no model server is set up".into()),

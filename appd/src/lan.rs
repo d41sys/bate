@@ -505,7 +505,8 @@ fn send(s: &Session, body: &[u8]) -> Answer {
         && (FORBIDDEN_OVER_LAN.contains(&cmd)
             || cmd == "set_routine" && f.pointer("/routine/precheck").is_some()
             // The person at the window decides whether answers are checked: a device cannot turn it off.
-            || cmd == "set_bot" && f.get("check").is_some())
+            || cmd == "set_bot"
+                && ["check", "checkModel", "checkBot"].iter().any(|k| f.get(*k).is_some()))
     {
         let id = f.get("id").cloned().unwrap_or(Value::Null);
         let error = json!({
