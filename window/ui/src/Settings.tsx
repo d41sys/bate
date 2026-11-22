@@ -73,6 +73,18 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
   useEffect(() => void loadUsage(true), [bot.id]);
   // A turn that ended has counted.
   useEffect(() => void loadUsage(false), [bot.busy]);
+
+  // Only Bate's own window may list or remove a bot's secrets, as only it may type one.
+  const [secrets, setSecrets] = useState<{ name: string; site: string }[]>([]);
+  useEffect(() => {
+    if (!inShell) return;
+    const load = () => request<{ secrets: { name: string; site: string }[] }>("list_secrets", { bot: bot.id }).then((d) => setSecrets(d.secrets), (e) => saves.fail("secrets", e.message));
+    load();
+    return listen((frame) => {
+      if (frame.type === "secrets_changed" && frame.bot === bot.id) load();
+    });
+  }, [bot.id]);
+
   const words = agent.trim().split(/\s+/).filter(Boolean);
   const choice = other ? OTHER : agentChoice(bot.agent, found?.agents ?? []);
   const chosen = found?.agents.find((a) => a.label === choice);
@@ -196,6 +208,17 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
             </Setting>
           ))}
           <Problem text={error("blocked")} />
+        </Group>
+      )}
+      {inShell && (
+        <Group title="Secrets">
+          {secrets.length === 0 && <p className="note">Nothing yet. A bot asks for one in a card when a page needs a sign-in.</p>}
+          {secrets.map((s) => (
+            <Setting key={s.name} title={s.name} hint={<>For <code>{s.site}</code>. The bot types it there and never sees it.</>}>
+              <button type="button" className="small" aria-label={`Remove the secret ${s.name} for ${s.site}`} onClick={() => run("secrets", request("remove_secret", { bot: bot.id, name: s.name }))}>Remove</button>
+            </Setting>
+          ))}
+          <Problem text={error("secrets")} />
         </Group>
       )}
       <Group title="Files and network">

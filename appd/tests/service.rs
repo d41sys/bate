@@ -27,6 +27,8 @@ use serde_json::{Value, json};
 /// service for that action in the bot's browser; the `browser_result` is logged to
 /// `browser.log` and ends the turn. The arguments it was started with are logged to `args.log`, one line per start; each `start`
 /// operation adds a line to `starts.log`.
+/// A prompt `secret <name> <site>` asks the person for that secret (a `question` with `secret`, options `Deny` only);
+/// `browse fill <n> <name> [go]` types it into element n. Every line the engine is given is logged to `input.log`.
 /// A prompt `change <path> <word>` writes `<word>` to the file (a full path), as the engine's `write`
 /// does: it sends `kept` with the text the file had (`null`: none) and a hash of the new one, then the
 /// call's `tool_end` naming the copy `k-<nonce>`.
@@ -49,6 +51,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed 's/^{"id":"\([^"]*\)".*/\1/')
   ok="{\"type\":\"response\",\"id\":\"$id\"}"
   printf '%s\n' "$line" | sed 's/^{"id":"[^"]*","type":"\([a-z_]*\)".*/\1/' >> ops.log
+  printf '%s\n' "$line" >> input.log
   case "$line" in
     *'"type":"start"'*)
       if [ -e refuse-start ]; then echo "{\"type\":\"response\",\"id\":\"$id\",\"error\":\"cannot start\"}"; continue; fi
@@ -137,11 +140,17 @@ while IFS= read -r line; do
             wait) action="{\"action\":\"wait\",\"seconds\":$2}" ;;
             type) submit=false; [ "$4" = go ] && submit=true
               action="{\"action\":\"type\",\"element\":$2,\"text\":\"$3\",\"submit\":$submit}" ;;
+            fill) submit=false; [ "$4" = go ] && submit=true
+              action="{\"action\":\"type\",\"element\":$2,\"secret\":\"$3\",\"submit\":$submit}" ;;
             *) action="{\"action\":\"$1\"}" ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo "{\"type\":\"browser\",\"request\":\"b-$nonce\",\"action\":$action}" ;;
         *'fall over'*) exit 1 ;;
+        *'"text":"secret '*)
+          set -- $(printf '%s' "$line" | sed 's/.*"text":"secret \([^"]*\)".*/\1/')
+          echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
+          echo "{\"type\":\"question\",\"question\":\"s-$nonce\",\"title\":\"Sign in\",\"options\":[\"Deny\"],\"secret\":{\"name\":\"$1\",\"site\":\"$2\"}}" ;;
         *'"text":"ask"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"question","question":"q1","title":"Write file?","options":["Approve","Deny"]}' ;;
@@ -3674,6 +3683,10 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         ("36", "set_quick_ask"),
         ("37", "quick_context"),
         ("38", "quick_shot"),
+        // Secrets are typed in the window on this Mac: a device can neither read, set nor remove one.
+        ("39", "answer_secret"),
+        ("40", "list_secrets"),
+        ("41", "remove_secret"),
     ] {
         send(
             &device,
@@ -7023,6 +7036,434 @@ fn a_bot_scrolls_presses_keys_chooses_from_a_dropdown_goes_forward_reloads_and_w
         assert_eq!(browse(&mut w, what)["error"], error, "{what}");
     }
     drop(service);
+}
+
+/// A word for a secret that no code could have in it: made when the test runs.
+fn made_up(what: &str) -> String {
+    ["kettle", what, &std::process::id().to_string()].join("-")
+}
+
+/// Every frame the service has sent a window up to now. A request is answered after the frames
+/// that came before it, so asking for something gathers them all, with no waiting.
+fn frames_so_far(w: &mut Window) -> String {
+    let id = w.send("list_bots", json!({}));
+    let mut all = String::new();
+    loop {
+        let f = w.frame();
+        all.push_str(&f.to_string());
+        if f["type"] == "response" && f["id"] == id.as_str() {
+            return all;
+        }
+    }
+}
+
+/// The files under `dir` that hold `needle`: the database, its log, the service's log, every
+/// bot's folder (the engine's input and session included). Not a Chrome profile, which keeps
+/// what a page was sent as any browser does, and not the keychain file.
+fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == "browsers" || name == "keychain" {
+            continue;
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => found.extend(files_holding(&path, needle)),
+            Ok(m) if m.is_file() => {
+                let bytes = fs::read(&path).unwrap_or_default();
+                if bytes.windows(needle.len()).any(|w| w == needle.as_bytes()) {
+                    found.push(path);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// The keychain file's items, as `security` lists them (names only, never a value).
+fn keychain_items(home: &Path) -> String {
+    let out = Command::new("security")
+        .args(["dump-keychain"])
+        .arg(home.join("keychain"))
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn input_of(home: &Path, bot: &str) -> String {
+    fs::read_to_string(home.join("bots").join(bot).join("input.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_secret_is_typed_in_its_card_and_goes_to_the_keychain_and_nowhere_else() {
+    let home = home("secret-card");
+    // A Trash of the test's own, for deleting the bot at the end.
+    let trash = home.join("trash");
+    fs::create_dir(&trash).unwrap();
+    let start = || {
+        Service::start_with(&home, |c| {
+            c.env("APPD_ENGINE", home.join("fake-engine"))
+                .env("APPD_TRASH", &trash);
+        })
+    };
+    let service = start();
+    let mut w = Window::connect(&home);
+    // Another window shows the same card and sees every frame.
+    let mut other = Window::connect(&home);
+    let bot = w.create_bot();
+    let value = made_up("card");
+    let item = format!("secret:{bot}:shop");
+
+    // The card names the host as the service reads it, and only a refusal is a plain answer.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "secret shop HTTPS://Shop.Example.com:8443/login"}),
+    );
+    let card =
+        w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question")["entry"]
+            .clone();
+    assert_eq!(
+        card["secret"],
+        json!({"name": "shop", "site": "shop.example.com"})
+    );
+    assert_eq!(card["options"], json!(["Deny"]));
+    assert!(
+        card.get("kind").is_none() && card.get("target").is_none(),
+        "{card}"
+    );
+    let question = card["question"].clone();
+    let answer = |choice: &str| json!({"bot": bot, "question": question, "choice": choice});
+    assert_eq!(refused(&mut w, "answer", answer("Approve")), "bad_request");
+    for odd in ["", "two\nlines"] {
+        let fields = json!({"bot": bot, "question": question, "value": odd});
+        assert_eq!(refused(&mut w, "answer_secret", fields), "bad_request");
+    }
+    assert!(!keychain_items(&home).contains(&item));
+
+    let id = w.send(
+        "answer_secret",
+        json!({"bot": bot, "question": question, "value": value}),
+    );
+    let reply = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    assert_eq!(reply["success"], true, "{reply}");
+    assert!(!reply.to_string().contains(&value), "{reply}");
+    // The engine was told yes, and nothing else.
+    let input = input_of(&home, &bot);
+    assert!(
+        input.contains("\"type\":\"answer\"") && input.contains("\"choice\":\"Approve\""),
+        "{input}"
+    );
+    assert_eq!(
+        w.ok("open_bot", json!({"bot": bot}))["questions"],
+        json!([])
+    );
+    assert_eq!(
+        w.ok("list_secrets", json!({"bot": bot})),
+        json!({"secrets": [{"name": "shop", "site": "shop.example.com"}]})
+    );
+    assert!(keychain_items(&home).contains(&item));
+
+    // Nowhere: not in a frame of either window, the database, a log, or what the engine got.
+    let seen = format!("{}{}", frames_so_far(&mut other), frames_so_far(&mut w));
+    assert!(
+        seen.contains("\"secret\"") && seen.contains("secrets_changed"),
+        "the frames that should be searched are not there: {seen}"
+    );
+    assert!(!seen.contains(&value), "{seen}");
+    assert!(!db_holds(&home, &value));
+    assert_eq!(files_holding(&home, &value), Vec::<PathBuf>::new());
+
+    // Still there after a restart; removing it works once.
+    drop((w, other, service));
+    let _service = start();
+    let mut w = Window::connect(&home);
+    assert_eq!(
+        w.ok("list_secrets", json!({"bot": bot}))["secrets"][0]["name"],
+        "shop"
+    );
+    w.ok("remove_secret", json!({"bot": bot, "name": "shop"}));
+    assert_eq!(
+        w.ok("list_secrets", json!({"bot": bot})),
+        json!({"secrets": []})
+    );
+    assert_eq!(
+        refused(&mut w, "remove_secret", json!({"bot": bot, "name": "shop"})),
+        "no_such_secret"
+    );
+    assert!(!keychain_items(&home).contains(&item));
+
+    // A card the person refuses is told to the bot; a card the engine made odd is never shown.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n2", "text": "secret again example.org"}),
+    );
+    let card = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    w.ok(
+        "answer",
+        json!({"bot": bot, "question": card["entry"]["question"], "choice": "Deny"}),
+    );
+    eventually("the refusal to reach the engine", || {
+        input_of(&home, &bot).contains("\"choice\":\"Deny\"")
+    });
+    for (nonce, odd) in [("n3", "bad ftp://example.org"), ("n4", "a:b example.org")] {
+        let before = input_of(&home, &bot).matches("\"choice\":\"Deny\"").count();
+        w.ok(
+            "prompt",
+            json!({"bot": bot, "nonce": nonce, "text": format!("secret {odd}")}),
+        );
+        eventually("the engine to be refused for the person", || {
+            input_of(&home, &bot).matches("\"choice\":\"Deny\"").count() > before
+        });
+        assert_eq!(
+            w.ok("open_bot", json!({"bot": bot}))["questions"],
+            json!([])
+        );
+    }
+    assert_eq!(
+        w.ok("list_secrets", json!({"bot": bot})),
+        json!({"secrets": []})
+    );
+
+    // Removing the bot removes its secrets from the keychain too.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n5", "text": "secret kept example.org"}),
+    );
+    let card = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    w.ok(
+        "answer_secret",
+        json!({"bot": bot, "question": card["entry"]["question"], "value": value}),
+    );
+    assert!(keychain_items(&home).contains(&format!("secret:{bot}:kept")));
+    w.ok("delete_bot", json!({"bot": bot}));
+    assert!(!keychain_items(&home).contains("secret:"));
+}
+
+/// A model server that gives one streamed reply to each request, in order, and hands over every
+/// request body: what the model is shown.
+fn scripted_model(script: Vec<Value>) -> (String, std::sync::mpsc::Receiver<Value>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (tx, requests) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for chunk in script {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            tx.send(serde_json::from_slice(&body).unwrap()).unwrap();
+            let end = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"
+            )
+            .unwrap();
+        }
+    });
+    (url, requests)
+}
+
+#[test]
+fn the_real_engine_asks_for_a_secret_and_the_service_types_it_only_on_its_site_with_the_model_never_seeing_it()
+ {
+    build_engine();
+    let (site, seen) = web_site();
+    let (shop, elsewhere) = (made_up("shop"), made_up("elsewhere"));
+    let call = |id: &str, tool: &str, args: Value| {
+        json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": id, "type": "function",
+            "function": {"name": tool, "arguments": args.to_string()}}]}}]})
+    };
+    let (url, requests) = scripted_model(vec![
+        call(
+            "c1",
+            "request_secret",
+            json!({"name": "shop", "site": "127.0.0.1", "why": "Sign in to the test shop"}),
+        ),
+        call(
+            "c2",
+            "request_secret",
+            json!({"name": "other", "site": "example.com", "why": "Another site"}),
+        ),
+        call(
+            "c3",
+            "request_secret",
+            json!({"name": "nope", "site": "example.net", "why": "A third"}),
+        ),
+        call(
+            "c4",
+            "browser",
+            json!({"action": "open", "url": format!("{site}/")}),
+        ),
+        // Another site's secret on this page: refused, nothing typed.
+        call(
+            "c5",
+            "browser",
+            json!({"action": "type", "element": 2, "secret": "other", "submit": true}),
+        ),
+        call(
+            "c6",
+            "browser",
+            json!({"action": "type", "element": 2, "secret": "shop", "submit": true}),
+        ),
+        call("c7", "browser", json!({"action": "look"})),
+        json!({"choices": [{"index": 0, "delta": {"content": "Done."}}]}),
+    ]);
+    let home = home("secret-engine");
+    let chrome = headless_chrome(&home);
+    let _service = Service::start_with(&home, |c| {
+        c.env_remove("APPD_ENGINE")
+            .env_remove("BATE_MODEL_API_KEY")
+            .env("BATE_MODEL_BASE_URL", &url)
+            .env("APPD_CHROME", &chrome);
+    });
+    let mut w = Window::connect(&home);
+    let mut other = Window::connect(&home);
+    let bot = w.create_bot();
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "always"}),
+    );
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "go"}));
+    // The person gives two secrets and refuses the third.
+    loop {
+        let f = w.wait_for(|f| {
+            f["type"] == "transcript"
+                && matches!(f["entry"]["type"].as_str(), Some("question" | "turn_end"))
+        });
+        let entry = &f["entry"];
+        if entry["type"] == "turn_end" {
+            assert_eq!(entry["reason"], "done", "{f}");
+            break;
+        }
+        let question = &entry["question"];
+        match entry["secret"]["name"].as_str() {
+            Some("shop") => w.send(
+                "answer_secret",
+                json!({"bot": bot, "question": question, "value": shop}),
+            ),
+            Some("other") => w.send(
+                "answer_secret",
+                json!({"bot": bot, "question": question, "value": elsewhere}),
+            ),
+            Some("nope") => w.send(
+                "answer",
+                json!({"bot": bot, "question": question, "choice": "Deny"}),
+            ),
+            _ => panic!("a question nobody expected: {f}"),
+        };
+    }
+
+    // What the model was shown: eight requests, none with either value.
+    let shown: Vec<Value> = requests.try_iter().collect();
+    assert_eq!(shown.len(), 8);
+    for request in &shown {
+        let text = request.to_string();
+        assert!(
+            !text.contains(&shop) && !text.contains(&elsewhere),
+            "{text}"
+        );
+    }
+    let result = |id: &str| {
+        let tool = shown[7]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == id);
+        tool.unwrap_or_else(|| panic!("no result for {id}"))["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(result("c1").starts_with("Saved. "), "{}", result("c1"));
+    // A refusal on the card is told to the bot.
+    assert_eq!(result("c3"), "The person refused to give the secret.");
+    assert!(
+        result("c5").starts_with("Nothing was typed: this page is not on example.com"),
+        "{}",
+        result("c5")
+    );
+    let typed = result("c6");
+    assert!(
+        typed.contains(&format!("Address: {site}/sent?q=[secret shop]&pw=\n"))
+            && typed.contains("You are at /sent?q=[secret shop]&pw="),
+        "{typed}"
+    );
+    // A later read of the page hides it too.
+    assert!(result("c7").contains("[secret shop]") && !result("c7").contains(&shop));
+    // The page did get the one it was meant to, and never the other.
+    let paths = seen.lock().unwrap().clone();
+    assert!(paths.contains(&format!("/sent?q={shop}&pw=")), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains(&elsewhere)), "{paths:?}");
+
+    // Nowhere else: frames, transcript, database, logs, the engine's own files.
+    let history = w.ok("open_bot", json!({"bot": bot}))["history"].to_string();
+    let frames = format!("{}{}", frames_so_far(&mut other), frames_so_far(&mut w));
+    for text in [&history, &frames] {
+        assert!(
+            !text.contains(&shop) && !text.contains(&elsewhere),
+            "{text}"
+        );
+    }
+    assert!(history.contains("[secret shop]") && frames.contains("\"secret\""));
+    for value in [&shop, &elsewhere] {
+        assert!(!db_holds(&home, value));
+        assert_eq!(files_holding(&home, value), Vec::<PathBuf>::new());
+    }
+    let names: Vec<Value> = w.ok("list_secrets", json!({"bot": bot}))["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("other"), json!("shop")]);
+}
+
+#[test]
+fn a_fill_while_macos_asks_about_the_secret_says_so_and_is_not_no_such_secret() {
+    let home = home("secret-waits");
+    let _service = start_asking(&home, |_| {});
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let account = format!("secret:{bot}:shop");
+    say_yes(&home, &account);
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "n1", "text": "secret shop 127.0.0.1"}),
+    );
+    let card = w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+    w.ok(
+        "answer_secret",
+        json!({"bot": bot, "question": card["entry"]["question"], "value": made_up("asks")}),
+    );
+    forget_yes(&home, &account);
+
+    // No browser is started: the secret is read first, and macOS is asking.
+    let result = browse(&mut w, &home, &bot, "n2", "fill 2 shop");
+    assert_eq!(
+        result["error"],
+        "macOS is asking whether Bate may read its secrets. Answer it, then try again."
+    );
+    eventually("the child to ask", || asked(&home, &account) == 1);
+    assert_eq!(
+        w.ok("list_secrets", json!({"bot": bot}))["secrets"][0]["name"],
+        "shop"
+    );
+    say_yes(&home, &account);
+    w.wait_for(|f| f["type"] == "keychain_changed");
 }
 
 #[test]

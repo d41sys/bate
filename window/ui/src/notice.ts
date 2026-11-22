@@ -24,6 +24,8 @@ export function noticeFor(bot: string, q: Question): Notice {
   if (hasHidden(bot, q.title, q.target, q.folder, ...(q.askedBy ?? []))) {
     return { title: "A bot needs you", body: "Open Bate to read what it asks: some characters in it cannot be seen.", actions: false };
   }
+  // A secret is typed in the card, never answered from a notification; the why is the bot's text, so it stays in the window.
+  if (q.secret) return { title: "Needs you", body: `${bot} asks for a secret for ${q.secret.site}. Open Bate to give or refuse it.`, actions: false };
   const flat = (q.target ?? "").replace(/\s+/g, " ").trim();
   const letters = Array.from(flat);
   const cut = letters.length > TARGET;

@@ -5,6 +5,7 @@ import { add, aim, build, changedFiles, describe, fold, WORKING, type Entry, typ
 import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
+import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { upload } from "./upload.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
@@ -284,10 +285,10 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const stop = () => run(request("abort", { bot: bot.id }));
   // One answer per question: a second click or Esc before the service closes it would be refused.
   const answering = useRef(new Set<string>());
-  const answer = (q: Question, choice: string) => {
+  const answer = (q: Question, choice: string, secret?: string) => {
     if (answering.current.has(q.question)) return Promise.resolve();
     answering.current.add(q.question);
-    return request("answer", { bot: bot.id, conversation, question: q.question, choice }).catch((e) => {
+    return request(...answerCommand(bot.id, conversation, q, choice, secret)).catch((e) => {
       answering.current.delete(q.question);
       throw e;
     });
@@ -481,7 +482,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         </div>
       </div>
       {questions.map((q, i) => (
-        <QuestionCard key={q.question} q={q} keys={i === 0} answer={(choice) => run(answer(q, choice))} />
+        <QuestionCard key={q.question} q={q} keys={i === 0} answer={(choice, secret) => run(answer(q, choice, secret))} />
       ))}
       {error && <p className="error" role="alert">{error}</p>}
       <KeychainNotice />

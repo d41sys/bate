@@ -1462,6 +1462,11 @@ impl Core {
                         format!("question `{question}` is not open"),
                     ));
                 };
+                if asked.get("secret").is_some() && choice != DENY {
+                    return Err(bad(
+                        "a secret is given with `answer_secret`; here it can only be refused with `Deny`",
+                    ));
+                }
                 // "Always" and "Conversation" are the service's own choices: the engine gets
                 // "Approve", and exactly the action the question named is remembered once the
                 // engine has taken it (for good, or for this conversation). A question about work
@@ -1499,6 +1504,71 @@ impl Core {
                     },
                 )?;
                 Ok(None)
+            }
+            // The value goes from the window that typed it to the Keychain and nowhere else: it
+            // is in no frame, row or log, and the engine is only told `Approve`.
+            "answer_secret" => {
+                let bot = self.bot_of(f)?;
+                let conversation = self.working_conversation(f, &bot)?;
+                let (question, value) = (str_field(f, "question")?, str_field(f, "value")?);
+                let open = self.store.questions(&conversation).map_err(internal)?;
+                let Some(asked) = open.iter().find(|q| q["question"] == question) else {
+                    return Err((
+                        "no_such_question",
+                        format!("question `{question}` is not open"),
+                    ));
+                };
+                let wanted = asked["secret"]["name"]
+                    .as_str()
+                    .zip(asked["secret"]["site"].as_str());
+                let Some((name, site)) = wanted else {
+                    return Err(bad("this question does not ask for a secret"));
+                };
+                if value.is_empty()
+                    || value.chars().count() > proto::secrets::MAX_VALUE
+                    || value.contains(char::is_control)
+                {
+                    return Err(bad(format!(
+                        "`value` must be one line of 1 to {} characters",
+                        proto::secrets::MAX_VALUE
+                    )));
+                }
+                self.store
+                    .put_secret(&bot, name, site, value)
+                    .map_err(internal)?;
+                self.broadcast(&json!({"type": "secrets_changed", "bot": bot}));
+                let op = Op::Answer {
+                    question: question.into(),
+                    choice: APPROVE.into(),
+                };
+                self.send_op(
+                    &bot,
+                    op,
+                    Waiter::Window {
+                        client,
+                        id: id.clone(),
+                        command: command.into(),
+                        settles: Settles::Question(question.into(), None),
+                    },
+                )?;
+                Ok(None)
+            }
+            "list_secrets" => {
+                let bot = self.bot_of(f)?;
+                let secrets: Vec<Value> = (self.store.secrets(&bot).map_err(internal)?)
+                    .into_iter()
+                    .map(|(name, site)| json!({"name": name, "site": site}))
+                    .collect();
+                Ok(Some(json!({"secrets": secrets})))
+            }
+            "remove_secret" => {
+                let bot = self.bot_of(f)?;
+                let name = str_field(f, "name")?;
+                if !self.store.delete_secret(&bot, name).map_err(internal)? {
+                    return Err(("no_such_secret", format!("no secret named `{name}`")));
+                }
+                self.broadcast(&json!({"type": "secrets_changed", "bot": bot}));
+                Ok(Some(json!({})))
             }
             "steer" => {
                 let bot = self.bot_of(f)?;
@@ -5367,12 +5437,13 @@ impl Core {
         if !self.engines.contains_key(bot) {
             return;
         }
-        let action = browser::Action::parse(action).and_then(|action| {
+        let prepared = browser::Action::parse(action).and_then(|action| {
+            let secrets = self.secrets_of(bot)?;
             self.start_browser(bot)?;
-            Ok(action)
+            Ok((action, secrets))
         });
-        let action = match action {
-            Ok(action) => action,
+        let (action, secrets) = match prepared {
+            Ok(prepared) => prepared,
             Err(e) => {
                 let op = Op::BrowserResult {
                     request,
@@ -5396,7 +5467,22 @@ impl Core {
             generation,
             action,
             cancelled,
+            secrets,
         });
+    }
+
+    /// The bot's secrets with their values, read from the Keychain. A Keychain that cannot be
+    /// read now (macOS is asking, or the person refused) is said in plain words: the action is
+    /// not done, and the bot is never told that a secret does not exist.
+    fn secrets_of(&self, bot: &str) -> Result<Vec<browser::Secret>, String> {
+        let failed = |e| internal(e).1;
+        let mut all = Vec::new();
+        for (name, site) in self.store.secrets(bot).map_err(failed)? {
+            if let Some(value) = self.store.secret_value(bot, &name).map_err(failed)? {
+                all.push(browser::Secret { name, site, value });
+            }
+        }
+        Ok(all)
     }
 
     /// The engine asks for an action in other apps: checked here, done by the helper app on a
@@ -5406,8 +5492,10 @@ impl Core {
             return;
         };
         let generation = r.generation;
-        let call = match proto::desktop::Call::parse(action) {
-            Ok(call) => call,
+        let prepared =
+            proto::desktop::Call::parse(action).and_then(|call| Ok((call, self.secrets_of(bot)?)));
+        let (call, secrets) = match prepared {
+            Ok(prepared) => prepared,
             Err(e) => {
                 let op = Op::DesktopResult {
                     request,
@@ -5423,7 +5511,10 @@ impl Core {
         let full_path = self.full_attachment_paths(bot);
         let (link, tx, bot) = (self.desktop.clone(), self.tx.clone(), bot.to_owned());
         std::thread::spawn(move || {
-            let result = link.call(&bot, call, full_path);
+            // A window of the bot's own browser may show a secret back.
+            let result = link
+                .call(&bot, call, full_path)
+                .map(|text| browser::redact(&text, &secrets));
             let _ = tx.send(Msg::Desktopped {
                 bot,
                 generation,
@@ -5880,6 +5971,37 @@ impl Core {
                 log!("bot {bot}: token response not sent: {e}");
             }
             return;
+        }
+        if let Event::Question {
+            question,
+            options,
+            kind,
+            target,
+            secret: Some(wanted),
+            ..
+        } = &mut ev
+        {
+            // The card shows the host, as the page's host will be compared with it. A card the
+            // engine made odd is refused for the person, who is never asked.
+            (*kind, *target) = (None, None);
+            match proto::secrets::host(&wanted.site)
+                .filter(|_| proto::secrets::name_ok(&wanted.name))
+            {
+                Some(host) => {
+                    wanted.site = host;
+                    *options = vec![DENY.to_owned()];
+                }
+                None => {
+                    let op = Op::Answer {
+                        question: question.clone(),
+                        choice: DENY.into(),
+                    };
+                    if let Err((_, e)) = self.send_op(bot, op, Waiter::Decision) {
+                        log!("bot {bot}: refusal of a secret not sent: {e}");
+                    }
+                    return;
+                }
+            }
         }
         if let Event::Question {
             question,

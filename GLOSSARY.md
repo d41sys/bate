@@ -86,3 +86,7 @@ Another computer or phone, paired with this Mac, that uses Bate through its page
 **Quick Ask**:
 A small floating window that a global shortcut opens over any app, to ask one bot one question; the answer shows there, and it can go on in the bot's own window.
 _Avoid_: popup, launcher
+
+**Secret**:
+A value, such as a password, that a person types into Bate for one site and a bot's browser may type there for it. The model is never shown it.
+_Avoid_: credential, key, token (a token is a channel's or a sign-in's)
