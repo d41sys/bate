@@ -9512,8 +9512,9 @@ fn a_bots_desktop_actions_go_to_the_helper_app_and_its_answers_come_back() {
         "prompt",
         json!({"bot": bot, "nonce": "n1", "text": "desktop apps"}),
     );
+    // The file is there before its line is: wait for the whole line.
     eventually("the helper to be started", || {
-        home.join("open.log").exists()
+        fs::read_to_string(home.join("open.log")).is_ok_and(|log| log.ends_with('\n'))
     });
     let started = fs::read_to_string(home.join("open.log")).unwrap();
     assert!(
@@ -15934,7 +15935,7 @@ fn a_quick_prompt_with_a_quote_and_a_picture_goes_through_the_helper_and_starts_
     // needed and not both at once, and the quote and the windows come back, on a thread of their own.
     let id = w.send("quick_context", json!({}));
     eventually("the helper to be started", || {
-        home.join("open.log").exists()
+        fs::read_to_string(home.join("open.log")).is_ok_and(|log| log.ends_with('\n'))
     });
     let started = fs::read_to_string(home.join("open.log")).unwrap();
     assert!(started.trim_end().ends_with("--ask-when-used"), "{started}");
