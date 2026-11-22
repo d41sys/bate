@@ -30,6 +30,8 @@ pub struct Turn {
     /// comes with the `token` answer; with neither, `CONTEXT`. Compaction starts at four
     /// fifths of it.
     pub context: Option<usize>,
+    /// Whether the turn is offered `check_back`, which the service decides.
+    pub check_back: bool,
     /// The bot's MCP servers as last sent by the service.
     pub connectors: Vec<Connector>,
     pub control: Arc<Control>,
@@ -136,10 +138,18 @@ const DESKTOP: &str = "desktop";
 const PLAN: &str = "plan";
 /// The tool that asks the person for a secret for a site.
 const REQUEST_SECRET: &str = "request_secret";
+/// The tool that sets the bot a later turn in this conversation; the service stores it.
+const CHECK_BACK: &str = "check_back";
 
 /// The engine's own tools, then the connectors', then `agent` while `depth` allows one more,
-/// and `message_bot` when there is a bot to message.
-fn tool_list(mcp: &Servers, blocked: &[String], depth: usize, peers: bool) -> Value {
+/// `message_bot` when there is a bot to message and `check_back` when the service offers it.
+fn tool_list(
+    mcp: &Servers,
+    blocked: &[String],
+    depth: usize,
+    peers: bool,
+    check_back: bool,
+) -> Value {
     let mut tools = tools::definitions();
     if let Value::Array(list) = &mut tools {
         list.extend(mcp.definitions(blocked).cloned());
@@ -190,6 +200,15 @@ fn tool_list(mcp: &Servers, blocked: &[String], depth: usize, peers: bool) -> Va
                     "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
                 "required": ["step", "status"]}}},
                 "required": ["steps"]}}}));
+        if check_back {
+            list.push(json!({"type": "function", "function": {"name": CHECK_BACK,
+                "description": "Set yourself one later turn in this conversation, to look at something again. It starts with your `note`, which tells your later self what to check and why. Say when with `minutes` (1 to 129600, which is 90 days) or `at` (a full date and time with its UTC offset, like 2026-11-23T09:00:00+01:00; run `date` to learn the time now), not both. It runs once, when you are free; the user sees it waiting and can cancel it. At most 10 wait in this conversation and 50 for you. A turn that began from your own note can set at most 3 in a row before the user writes again.",
+                "parameters": {"type": "object", "properties": {
+                    "minutes": {"type": "integer", "minimum": 1, "maximum": 129600},
+                    "at": {"type": "string"},
+                    "note": {"type": "string", "description": "What your later self should do"}},
+                    "required": ["note"]}}}));
+        }
         if depth < MAX_DEPTH {
             list.push(json!({"type": "function", "function": {"name": AGENT,
                 "description": "Hand one self-contained task to a sub-agent: a copy of you with the same tools and working folder that knows nothing of this conversation. It works alone; its final answer comes back as the result. Put everything it needs to know in `task`.",
@@ -791,7 +810,13 @@ impl Turn {
     }
 
     fn tools(&self, mcp: &Servers, depth: usize) -> Value {
-        tool_list(mcp, &self.blocked_tools, depth, !self.peers.is_empty())
+        tool_list(
+            mcp,
+            &self.blocked_tools,
+            depth,
+            !self.peers.is_empty(),
+            self.check_back,
+        )
     }
 
     fn system(&self) -> String {
@@ -968,6 +993,9 @@ impl Turn {
         }
         if tool == MESSAGE && !self.peers.is_empty() {
             return self.message(args);
+        }
+        if tool == CHECK_BACK && self.check_back {
+            return self.set_later(args);
         }
         // Nothing to ask about: a plan changes nothing.
         if tool == PLAN {
@@ -1183,6 +1211,20 @@ impl Turn {
                 "Saved. You never see the value. Give the browser's `type` action `secret: \"{name}\"` instead of `text`; it types the value only on {host}, and only into a password field."
             )),
             Some(_) => Err("The person refused to give the secret.".into()),
+            None => Err("Aborted by the user".into()),
+        }
+    }
+
+    /// Has the service store a later turn. Nothing is asked: it is only a note to the bot
+    /// itself, which the person sees waiting and can cancel.
+    fn set_later(&self, args: &Map<String, Value>) -> Result<String, String> {
+        let id = self.wait_on("c");
+        self.out.send(&Event::CheckBack {
+            request: id.clone(),
+            args: args.clone(),
+        });
+        match self.answer(&id) {
+            Some(result) => result,
             None => Err("Aborted by the user".into()),
         }
     }

@@ -49,6 +49,7 @@ fn the_service_runs_the_engine_named_by_appd_engine_over_stdio() {
                 nonce: "n1".into(),
                 text: "ping".into(),
                 check: false,
+                check_back: false,
             },
         )
         .unwrap();

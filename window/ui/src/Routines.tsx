@@ -2,16 +2,17 @@ import { useEffect, useState } from "react";
 import { RowMenu } from "./RowMenu.tsx";
 import { Sheet } from "./Sheet.tsx";
 import { dayTime, EVERY, when } from "./times.ts";
-import { heldText, skipWhy } from "./routines.ts";
+import { afterText, heldText, skipWhy } from "./routines.ts";
 import { tokenCount } from "./usage.ts";
 import { inShell, listen, openInBrowser, request } from "./service.ts";
-import type { Frequency, Routine, RoutineRun } from "./types.ts";
+import type { After, Bot, Frequency, Routine, RoutineRun } from "./types.ts";
+import { useLater } from "./useLater.ts";
 
 const OUTCOME: Record<RoutineRun["outcome"], string> = { sent: "Sent", failed: "Failed", missed: "Missed", limit: "Stopped", skipped: "Skipped" };
 
 /** The fields of the dialog; a routine with no schedule starts only from its web address or a chat. */
-const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", webhook: false, chat: false, precheck: "" };
-const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, webhook: r.webhook, chat: r.chat, precheck: r.precheck ?? "" });
+const blank = { name: "", prompt: "", scheduled: true, frequency: "daily" as Frequency, interval: 1, time: "09:00", after: false, afterBot: "", afterOutcome: "done" as After["outcome"], webhook: false, chat: false, precheck: "" };
+const formOf = (r: Routine): typeof blank => ({ name: r.name, prompt: r.prompt, scheduled: !!r.schedule, frequency: r.schedule?.frequency ?? blank.frequency, interval: r.schedule?.interval ?? 1, time: r.schedule?.time ?? blank.time, after: !!r.after, afterBot: r.after?.bot ?? "", afterOutcome: r.after?.outcome ?? blank.afterOutcome, webhook: r.webhook, chat: r.chat, precheck: r.precheck ?? "" });
 
 /** A device on the network may not set a precheck: its frames leave it out and the service keeps the one there is. */
 const frame = (r: Routine): Routine => (inShell ? r : { ...r, precheck: undefined });
@@ -49,6 +50,7 @@ function PastRuns({ bot, routineId }: { bot: string; routineId: string }) {
               {x.error && <small className="error">{x.error}</small>}
               {skipWhy(x) && <small>{skipWhy(x)}</small>}
               {x.by === "user" && <small>Started by you</small>}
+              {x.by === "after" && <small>Started after another bot</small>}
               <Outcome run={x} />
             </li>
           ))}
@@ -66,6 +68,8 @@ export function Routines({ bot }: { bot: string }) {
   const [form, setForm] = useState(blank);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [bots, setBots] = useState<Bot[]>([]);
+  const { later } = useLater(bot);
 
   useEffect(() => {
     const load = () =>
@@ -76,17 +80,22 @@ export function Routines({ bot }: { bot: string }) {
     });
   }, [bot]);
 
+  useEffect(() => {
+    request<{ bots: Bot[] }>("list_bots").then((d) => setBots(d.bots), () => {});
+  }, []);
+
   /** Whether it worked; if not, the error shows. */
   const run = (p: Promise<unknown>, done = false) =>
     p.then(() => (setError(""), setSaved(done), true), (e: Error) => (setError(e.message), setSaved(false), false));
   const open = (edit?: Routine) => (setForm(edit ? formOf(edit) : blank), setAsk({ edit }));
   const save = async () => {
     const { edit } = ask!;
-    const { name, prompt, scheduled, frequency, interval, time, webhook, chat, precheck } = form;
-    if (!scheduled && !webhook && !chat) throw new Error("Choose what starts it: a schedule, a web address or a chat.");
+    const { name, prompt, scheduled, frequency, interval, time, after, afterBot, afterOutcome, webhook, chat, precheck } = form;
+    if (!scheduled && !after && !webhook && !chat) throw new Error("Choose what starts it: a schedule, another bot, a web address or a chat.");
+    if (after && !afterBot) throw new Error("Choose the bot it follows.");
     await request("set_routine", {
       bot,
-      routine: frame({ ...edit, name, prompt, enabled: edit?.enabled ?? true, webhook, chat, precheck: precheck.trim() || undefined, schedule: scheduled ? { ...edit?.schedule, frequency, interval, time } : undefined }),
+      routine: frame({ ...edit, name, prompt, enabled: edit?.enabled ?? true, webhook, chat, precheck: precheck.trim() || undefined, schedule: scheduled ? { ...edit?.schedule, frequency, interval, time } : undefined, after: after ? { bot: afterBot, outcome: afterOutcome } : undefined }),
     });
     setError("");
     setSaved(true);
@@ -109,11 +118,11 @@ export function Routines({ bot }: { bot: string }) {
                 <div className="what">
                   <strong>{r.name}</strong> {r.lastRun && <Outcome run={r.lastRun} />}
                   {r.backoff && <span className="badge quiet">{heldText(r.backoff)}</span>}
-                  <small>{when(r)}</small>
+                  <small>{r.after ? afterText(r.after, bots.find((b) => b.id === r.after!.bot)?.name) : when(r)}</small>
                   <small>
                     {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && `Next: ${dayTime((r.backoff?.nextRunMs ?? r.nextRunMs)!)}`}
                     {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && r.lastRun && " · "}
-                    {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}${r.lastRun.by === "user" ? " (started by you)" : ""}`}
+                    {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}${r.lastRun.by === "user" ? " (started by you)" : r.lastRun.by === "after" ? " (after another bot)" : ""}`}
                   </small>
                   {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}
                   {r.lastRun && skipWhy(r.lastRun) && <small>{skipWhy(r.lastRun)}</small>}
@@ -148,13 +157,32 @@ export function Routines({ bot }: { bot: string }) {
         </>
       )}
       {error && <p className="error" role="alert">{error}</p>}
+      {later.length > 0 && (
+        <>
+          <h3>Later turns</h3>
+          <p className="note">Turns the bot set for itself. Each runs once, when it is due, or when the bot is free after that.</p>
+          <ul className="rows">
+            {later.map((l) => (
+              <li key={l.id}>
+                <div className="what">
+                  <strong>{dayTime(l.dueMs)}</strong>
+                  <small>{l.note}</small>
+                </div>
+                <div className="actions">
+                  <button className="small" aria-label={`Cancel the later turn: ${l.note}`} onClick={() => void run(request("cancel_later", { bot, later: l.id }))}>Cancel</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {ask && (
         <Sheet title={ask.edit ? "Edit routine" : "New routine"} action={ask.edit ? "Save" : "Add"} go={save} close={() => setAsk(undefined)}>
           <label>Name <input required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
           <label>Prompt <textarea required rows={4} maxLength={8000} value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} /></label>
           <>
             <h3>What starts it</h3>
-            <label><input type="checkbox" checked={form.scheduled} onChange={(e) => setForm({ ...form, scheduled: e.target.checked })} /> A schedule</label>
+            <label><input type="checkbox" checked={form.scheduled} onChange={(e) => setForm({ ...form, scheduled: e.target.checked, after: e.target.checked ? false : form.after })} /> A schedule</label>
             {form.scheduled && (
               <>
                 <div className="field">
@@ -167,6 +195,27 @@ export function Routines({ bot }: { bot: string }) {
                   </div>
                 </div>
                 <label>From <input type="time" required value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} /></label>
+              </>
+            )}
+            <label><input type="checkbox" checked={form.after} onChange={(e) => setForm({ ...form, after: e.target.checked, scheduled: e.target.checked ? false : form.scheduled })} /> After another bot</label>
+            {form.after && (
+              <>
+                <div className="field">
+                  <label htmlFor="routine-after">Bot</label>
+                  <select id="routine-after" value={form.afterBot} onChange={(e) => setForm({ ...form, afterBot: e.target.value })}>
+                    <option value="">Choose a bot</option>
+                    {bots.filter((b) => b.id !== bot).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="routine-outcome">When its turn</label>
+                  <select id="routine-outcome" value={form.afterOutcome} onChange={(e) => setForm({ ...form, afterOutcome: e.target.value as After["outcome"] })}>
+                    <option value="done">finishes</option>
+                    <option value="failed">fails</option>
+                    <option value="any">ends either way</option>
+                  </select>
+                </div>
+                <p className="note">The routine gets the bot's last line in front of its prompt. A chain of these starts stops after 3 steps, and the routine starts at most 20 times an hour. A bot that is paused or busy is skipped.</p>
               </>
             )}
             <label><input type="checkbox" checked={form.webhook} onChange={(e) => setForm({ ...form, webhook: e.target.checked })} /> A web address</label>

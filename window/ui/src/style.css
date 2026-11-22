@@ -384,6 +384,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .attached, .queue { list-style: none; padding: 0; margin: var(--space-1) auto; display: flex; flex-wrap: wrap; gap: var(--space-1); font-size: var(--size-small); }
 .attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: 2px 2px 2px var(--space-3); border-radius: var(--radius-pill); background: var(--bg-soft); }
 .attached button, .queue button, .mention button { min-height: 20px; padding: 0 var(--space-2); border-color: transparent; background: none; }
+.queue strong { white-space: nowrap; }
 
 /* The composer is one pill: what to add, the words, what to do with them. */
 .composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-1); border: 1px solid var(--border-strong); border-radius: calc(var(--control-h) / 2 + var(--space-1)); background: var(--bg-raised); }

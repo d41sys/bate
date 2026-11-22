@@ -324,6 +324,7 @@ impl Engine {
             nonce: nonce.into(),
             text: text.into(),
             check,
+            check_back: false,
         };
         assert_eq!(self.request(op), None);
         assert_eq!(
@@ -755,6 +756,7 @@ fn a_conversation_that_cannot_be_opened_leaves_none_open() {
         nonce: "n1".into(),
         text: "hello".into(),
         check: false,
+        check_back: false,
     };
     let error = engine.request(prompt).unwrap();
     assert!(error.contains("no conversation is open"), "{error}");
@@ -2037,6 +2039,65 @@ fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
     assert!(
         system.contains("You lead this project") && system.contains("cannot stop or redirect"),
         "{system}"
+    );
+}
+
+#[test]
+fn check_back_is_offered_only_when_the_prompt_says_so_and_the_service_carries_it_out() {
+    let dir = workdir("check-back");
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "check_back",
+            json!({"minutes": 10, "note": "look again"}),
+        )],
+        vec![text("noted")],
+        vec![call(
+            "c2",
+            "check_back",
+            json!({"minutes": 10, "note": "x"}),
+        )],
+        vec![text("refused")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let offered_prompt = Op::Prompt {
+        nonce: "n1".into(),
+        text: "set one".into(),
+        check: false,
+        check_back: true,
+    };
+    assert_eq!(engine.request(offered_prompt), None);
+    let asked = engine.until(|e| matches!(e, Event::CheckBack { .. }));
+    let Some(Event::CheckBack { request, args }) = asked.last() else {
+        unreachable!()
+    };
+    assert_eq!(args["note"], "look again");
+    // Only its own request takes the result.
+    let result = |request: &str, output: Option<&str>, error: Option<&str>| Op::CheckBackResult {
+        request: request.into(),
+        output: output.map(str::to_owned),
+        error: error.map(str::to_owned),
+    };
+    assert!(engine.request(result("c999", Some("x"), None)).is_some());
+    assert_eq!(engine.request(result(request, Some("Stored."), None)), None);
+    engine.until(is_turn_end);
+
+    // A prompt that does not say so: not offered, and a call to it is refused without a request.
+    engine.prompt_as("n2", "again");
+    let events = engine.until(is_turn_end);
+    assert!(!events.iter().any(|e| matches!(e, Event::CheckBack { .. })));
+
+    let requests = model.requests();
+    assert!(offered(&requests[0]).contains(&"check_back"));
+    assert!(!offered(&requests[2]).contains(&"check_back"));
+    let result_of =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result_of(1), "Stored.");
+    assert!(
+        result_of(3).as_str().unwrap().contains("check_back"),
+        "{}",
+        result_of(3)
     );
 }
 

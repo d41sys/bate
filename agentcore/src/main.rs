@@ -213,12 +213,14 @@ impl Engine {
     }
 
     fn handle(&mut self, id: String, op: Op) {
-        // What a `reply`, a `browser_result`, a `desktop_result` or an `apple_result` may answer: a
-        // message, or a browser, desktop or Apple app request.
+        // What a `reply`, a `browser_result`, a `desktop_result`, an `apple_result` or a
+        // `check_back_result` may answer: a message, or a browser, desktop, Apple app or
+        // `check_back` request.
         let prefix = match op {
             Op::BrowserResult { .. } => 'b',
             Op::DesktopResult { .. } => 'd',
             Op::AppleResult { .. } => 'a',
+            Op::CheckBackResult { .. } => 'c',
             _ => 'm',
         };
         let saved = |e: io::Error| format!("cannot save the conversation: {e}");
@@ -263,8 +265,14 @@ impl Engine {
                     Err(e) => self.opening_failed(id, e),
                 }
             }
-            Op::Prompt { nonce, text, check } => match self.begin_turn(check) {
-                Ok((turn, mut work)) => {
+            Op::Prompt {
+                nonce,
+                text,
+                check,
+                check_back,
+            } => match self.begin_turn(check) {
+                Ok((mut turn, mut work)) => {
+                    turn.check_back = check_back;
                     // The response goes first: the service records the prompt before the turn's events.
                     self.respond(id, Ok(()));
                     let inputs = self.inputs.clone();
@@ -393,13 +401,18 @@ impl Engine {
                 text,
                 error,
             }
-            // What the browser, the desktop or an app did is waited on as a message is (`b…`, `d…` or `a…` in place of `m…`).
+            // What the browser, the desktop, an app or a later turn did is waited on as a message is (`b…`, `d…`, `a…` or `c…` in place of `m…`).
             | Op::BrowserResult {
                 request: message,
                 output: text,
                 error,
             }
             | Op::DesktopResult {
+                request: message,
+                output: text,
+                error,
+            }
+            | Op::CheckBackResult {
                 request: message,
                 output: text,
                 error,
@@ -523,6 +536,7 @@ impl Engine {
             model,
             effort: self.effort.clone(),
             context,
+            check_back: false,
             connectors: self.connectors.clone(),
             peers: self.peers.0.clone(),
             leads: self.peers.1,

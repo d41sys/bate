@@ -191,7 +191,10 @@ pub fn export(
         avatar: profile.avatar,
         color: profile.color,
         skills: skills_of(bot)?,
+        // A start after another bot names a bot of this Mac: it does not travel, and a routine
+        // with nothing else to start it would not load.
         routines: (store.routines(bot).map_err(err)?.into_iter())
+            .filter(|r| r.schedule.is_some() || r.webhook || r.chat)
             .map(|r| FileRoutine {
                 name: r.name,
                 prompt: r.prompt,
@@ -452,6 +455,7 @@ fn check(file: BotFile, now: u64) -> Result<Checked, String> {
             last_run: None,
             precheck: None,
             backoff: None,
+            after: None,
         };
         let shown = short(&routine.name);
         let wrong = |e: String| format!("the routine `{shown}`: {e}");

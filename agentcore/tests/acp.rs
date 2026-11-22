@@ -156,7 +156,8 @@ impl Bridge {
             self.request(Op::Prompt {
                 nonce,
                 text,
-                check: false
+                check: false,
+                check_back: false
             }),
             None
         );
@@ -343,6 +344,7 @@ fn abort_cancels_the_agents_turn_and_what_it_asked() {
         nonce: "n2".into(),
         text: "more".into(),
         check: false,
+        check_back: false,
     };
     assert!(bridge.request(busy).is_some());
     assert_eq!(bridge.request(Op::Abort), None);
@@ -460,7 +462,8 @@ fn an_agent_that_is_not_signed_in_says_how_to() {
             .request(Op::Prompt {
                 nonce,
                 text,
-                check: false
+                check: false,
+                check_back: false
             })
             .is_some()
     );
@@ -536,6 +539,7 @@ fn a_prompt_that_comes_before_the_agent_has_opened_the_conversation_is_refused()
             nonce,
             text,
             check: false,
+            check_back: false,
         },
     );
     // The agent still holds the first conversation: the prompt is not run in it.
@@ -592,6 +596,7 @@ fn a_conversation_the_agent_cannot_reopen_leaves_no_conversation_open() {
             nonce,
             text,
             check: false,
+            check_back: false,
         })
         .unwrap();
     assert!(error.contains("no conversation is open"), "{error}");

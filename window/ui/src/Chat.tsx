@@ -7,8 +7,10 @@ import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
 import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
-import { upload } from "./upload.ts";
+import { dayTime } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
+import { upload } from "./upload.ts";
+import { useLater } from "./useLater.ts";
 
 type Opened = { history: Row[]; more: boolean; questions: Question[]; queue: QueuedPrompt[] };
 
@@ -49,6 +51,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
 }) {
   // Prompts the service holds until the bot is free, in the order they go.
   const [waiting, setWaiting] = useState<QueuedPrompt[]>([]);
+  // Turns the bot set for itself, still waiting for their time.
+  const { later } = useLater(bot.id, conversation);
   const [items, setItems] = useState<Item[]>([]);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [text, setText] = useState(start);
@@ -520,6 +524,16 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             <li key={p.nonce}>
               {p.text}{" "}
               <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, conversation, nonce: p.nonce }))}>×</button>
+            </li>
+          ))}
+        </ol>
+      )}
+      {later.length > 0 && (
+        <ol className="queue" aria-label="Later turns">
+          {later.map((l) => (
+            <li key={l.id}>
+              <strong>{dayTime(l.dueMs)}</strong> {l.note}{" "}
+              <button type="button" aria-label={`Cancel the later turn: ${l.note}`} onClick={() => run(request("cancel_later", { bot: bot.id, later: l.id }))}>×</button>
             </li>
           ))}
         </ol>

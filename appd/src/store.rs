@@ -117,6 +117,29 @@ pub struct Queued {
     pub text: String,
 }
 
+/// A later turn a bot set itself with `check_back`: one more turn in `conversation` that starts
+/// with `note`, from `due_ms` on. `chain` counts the later turns in a row it follows from.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Later {
+    pub id: i64,
+    pub conversation: String,
+    pub due_ms: u64,
+    pub note: String,
+    #[serde(skip)]
+    pub chain: u32,
+}
+
+fn later_row(r: &rusqlite::Row) -> Result<Later> {
+    Ok(Later {
+        id: r.get(0)?,
+        conversation: r.get(1)?,
+        due_ms: r.get(2)?,
+        note: r.get(3)?,
+        chain: r.get(4)?,
+    })
+}
+
 /// A message from one bot to another, kept until it is answered and after.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,6 +259,8 @@ CREATE TABLE IF NOT EXISTS transcript(seq INTEGER PRIMARY KEY AUTOINCREMENT, con
 CREATE INDEX IF NOT EXISTS transcript_conversation ON transcript(conversation, seq);
 CREATE TABLE IF NOT EXISTS ledger(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, nonce TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(bot, nonce));
 CREATE TABLE IF NOT EXISTS queue(seq INTEGER PRIMARY KEY, conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, nonce TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(conversation, nonce));
+CREATE TABLE IF NOT EXISTS later(id INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, due_ms INTEGER NOT NULL, note TEXT NOT NULL, chain INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS later_due ON later(due_ms);
 CREATE TABLE IF NOT EXISTS questions(conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, question TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(conversation, question));
 CREATE TABLE IF NOT EXISTS access(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, whole_disk INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS network(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, hosts TEXT NOT NULL);
@@ -284,7 +309,7 @@ const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
 /// `conversations`.
-const BOT_TABLES: [&str; 23] = [
+const BOT_TABLES: [&str; 24] = [
     "ledger",
     "access",
     "network",
@@ -308,6 +333,7 @@ const BOT_TABLES: [&str; 23] = [
     "usage",
     "token_limits",
     "secrets",
+    "later",
 ];
 
 /// The tables that hold rows of a conversation, in their `conversation` column. A database of
@@ -1690,6 +1716,63 @@ impl Store {
             .optional()
     }
 
+    /// Stores a later turn; its id.
+    pub fn add_later(
+        &self,
+        bot: &str,
+        conversation: &str,
+        due_ms: u64,
+        note: &str,
+        chain: u32,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO later(bot, conversation, due_ms, note, chain) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![bot, conversation, due_ms, note, chain],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// The bot's waiting later turns, soonest first; those of one conversation if it is given.
+    pub fn later(&self, bot: &str, conversation: Option<&str>) -> Result<Vec<Later>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT id, conversation, due_ms, note, chain FROM later \
+             WHERE bot = ?1 AND (?2 IS NULL OR conversation = ?2) ORDER BY due_ms, id",
+        )?;
+        stmt.query_map(params![bot, conversation], later_row)?
+            .collect()
+    }
+
+    /// Every bot's later turns that are due at `now`, with their bot, soonest first.
+    pub fn due_later(&self, now: u64, bot: Option<&str>) -> Result<Vec<(String, Later)>> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT id, conversation, due_ms, note, chain, bot FROM later \
+             WHERE due_ms <= ?1 AND (?2 IS NULL OR bot = ?2) ORDER BY due_ms, id",
+        )?;
+        stmt.query_map(params![now, bot], |r| Ok((r.get(5)?, later_row(r)?)))?
+            .collect()
+    }
+
+    /// When the first later turn that is not due at `now` is.
+    pub fn next_later(&self, now: u64) -> Result<Option<u64>> {
+        self.0.query_row(
+            "SELECT MIN(due_ms) FROM later WHERE due_ms > ?1",
+            [now],
+            |r| r.get(0),
+        )
+    }
+
+    /// Removes a later turn of the bot; the conversation it was for, or `None` if it was not
+    /// waiting.
+    pub fn delete_later(&self, bot: &str, id: i64) -> Result<Option<String>> {
+        self.0
+            .query_row(
+                "DELETE FROM later WHERE bot = ?1 AND id = ?2 RETURNING conversation",
+                params![bot, id],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// Stores a message; its number. `parent` is the message its sender was working on, if any.
     pub fn put_mail(
         &self,
@@ -2874,6 +2957,7 @@ mod tests {
                 .unwrap();
             store.put_question(&c, "q", &serde_json::json!({})).unwrap();
             store.enqueue(&c, "n", "text", false).unwrap();
+            store.add_later(id, &c, 5, "note", 1).unwrap();
             conversation.insert(id, c);
             store.set_ledger(id, "n", Ledger::Sent, 1).unwrap();
             store.set_model(id, "m", None).unwrap();

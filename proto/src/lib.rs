@@ -62,11 +62,16 @@ pub enum Op {
     ///
     /// `check`: the turn is one the person started, and the bot's check is on: the engine has
     /// the answer checked before the turn ends (see `Event::Checked`).
+    ///
+    /// `check_back`: the turn is offered the `check_back` tool (only a turn the person started
+    /// in the bot's own chat, and the later turns that follow from it, are).
     Prompt {
         nonce: String,
         text: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         check: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        check_back: bool,
     },
     /// Add a message to the turn that is running.
     Steer { text: String },
@@ -123,6 +128,14 @@ pub enum Op {
     },
     /// What came of the open `desktop` request: what the helper saw or did, or why not.
     DesktopResult {
+        request: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// What came of the open `check_back` request: what the model is told, or why it is refused.
+    CheckBackResult {
         request: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
@@ -264,6 +277,13 @@ pub enum Event {
     Apple {
         request: String,
         tool: String,
+        args: Map<String, Value>,
+    },
+    /// The model set itself a later turn (`check_back`, with `minutes` or `at`, and `note`),
+    /// which the service stores. The engine waits until the service sends `check_back_result`
+    /// for `request`. Not part of the transcript.
+    CheckBack {
+        request: String,
         args: Map<String, Value>,
     },
     /// The connector `name` has just been loaded (started or reached) and has the tools `names`,

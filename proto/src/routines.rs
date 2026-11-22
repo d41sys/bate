@@ -79,15 +79,16 @@ pub struct RoutineRun {
     pub outcome: RunOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Why a `skipped` run was not run, in a word: `paused`, `signed_out`, `backoff`, `precheck`
-    /// or `limit`.
+    /// Why a `skipped` run was not run, in a word: `paused`, `signed_out`, `backoff`, `limit`,
+    /// `precheck`, `busy` or `rate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// What `reason` is about: the connector that is signed out, or the first line the
     /// precheck printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// `user` for a run the person started with `run_routine`; missing for the others.
+    /// `user` for a run the person started with `run_routine`, `after` for one that another
+    /// bot's turn started; missing for the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     /// What the run's model requests used, when the model server reported it.
@@ -106,9 +107,26 @@ pub struct Backoff {
     pub next_run_ms: Option<u64>,
 }
 
+/// What an `after` routine waits for: a turn of the bot that ended `done`, ended `failed` (an
+/// error, or a stop at a limit) or ended any way at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterOutcome {
+    Done,
+    Failed,
+    Any,
+}
+
+/// The bot (its id) whose turns start a routine, and how a turn must end to do so.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct After {
+    pub bot: String,
+    pub outcome: AfterOutcome,
+}
+
 /// A routine. `hook_token`, `hook_url` and the fields after them are output only: the service
 /// ignores them in `set_routine`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Routine {
     /// Daemon-made, 8 lowercase hex characters. Missing in `set_routine`: create.
@@ -118,9 +136,12 @@ pub struct Routine {
     pub prompt: String,
     /// Off: nothing starts it.
     pub enabled: bool,
-    /// Missing: only the webhook or a chat message starts it.
+    /// Missing: only `after`, the webhook or a chat message starts it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// Instead of a schedule: the routine starts when a turn of that bot ends that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<After>,
     /// Whether a request to `hook_url` starts it too.
     #[serde(default)]
     pub webhook: bool,
