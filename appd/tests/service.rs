@@ -17928,6 +17928,41 @@ fn stopping_the_worker_ends_its_running_check_which_is_then_not_run() {
 }
 
 #[test]
+fn pausing_or_deleting_the_worker_ends_its_running_check() {
+    let home = home("handoff-pause-check");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "always");
+    let pid = |file: &str| fs::read_to_string(d.work.join(file)).unwrap_or_default();
+    let alive = |pid: &str| {
+        let kill = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status();
+        kill.unwrap().success()
+    };
+
+    // Paused: the command ends, is not run, and the worker gets no second try.
+    d.hand(&mut w, "n1", "say done", "echo $$ > pid1; sleep 600");
+    eventually("the command to start", || !pid("pid1").trim().is_empty());
+    w.ok("set_paused", json!({"bot": d.bo, "paused": true}));
+    let told = d.waits_for_reply(0);
+    assert!(told.contains("was not run: the worker is paused"), "{told}");
+    assert!(!alive(&pid("pid1")), "the command still runs");
+    assert_eq!(d.check(&mut w, 0)["state"], "not_run");
+    assert_eq!(prompts_received(&home, &d.bo, "check-1"), 0);
+    w.ok("set_paused", json!({"bot": d.bo, "paused": false}));
+
+    // Deleted: the asker is told at once, and the command ends.
+    d.hand(&mut w, "n2", "say done", "echo $$ > pid2; sleep 600");
+    eventually("the command to start", || !pid("pid2").trim().is_empty());
+    w.ok("delete_bot", json!({"bot": d.bo}));
+    let told = d.waits_for_reply(1);
+    assert!(told.contains("the bot was deleted"), "{told}");
+    eventually("the command to end", || !alive(&pid("pid2")));
+}
+
+#[test]
 fn a_worker_that_is_stopped_or_paused_runs_no_check() {
     let home = home("handoff-stopped");
     let _service = Service::start(&home);
