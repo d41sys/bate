@@ -60,6 +60,10 @@ _Avoid_: pane, panel, view, block
 A tool server that a bot can call.
 _Avoid_: integration, plugin
 
+**Read-only mark**:
+What a connector says of a tool of its own that only reads. It is the connector's claim, not checked; at the level "read-only tools without asking" a marked tool runs without a question once the person has confirmed it.
+_Avoid_: safe tool, trusted tool
+
 **Version**:
 What a file was before a change, kept so it can be put back: the text a bot's `write` or `edit` replaced, or a note before it was replaced or deleted.
 _Avoid_: backup, snapshot, revision

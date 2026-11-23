@@ -271,6 +271,7 @@ CREATE TABLE IF NOT EXISTS conversation_grants(conversation TEXT NOT NULL REFERE
 CREATE TABLE IF NOT EXISTS usage(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, day TEXT NOT NULL, conversation TEXT NOT NULL, input INTEGER NOT NULL DEFAULT 0, cached INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0, unreported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bot, day, conversation));
 CREATE TABLE IF NOT EXISTS token_limits(bot TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, day INTEGER, month INTEGER, everything INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS blocked_tools(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, tool TEXT NOT NULL, PRIMARY KEY(bot, tool));
+CREATE TABLE IF NOT EXISTS read_tools(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, tool TEXT NOT NULL, PRIMARY KEY(bot, tool));
 CREATE TABLE IF NOT EXISTS routines(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, id TEXT NOT NULL, routine TEXT NOT NULL, PRIMARY KEY(bot, id));
 CREATE TABLE IF NOT EXISTS routine_runs(seq INTEGER PRIMARY KEY AUTOINCREMENT, bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, routine TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS routine_runs_of ON routine_runs(bot, routine, seq);
@@ -318,6 +319,7 @@ const BOT_TABLES: &[&str] = &[
     "permissions",
     "grants",
     "blocked_tools",
+    "read_tools",
     "routines",
     "routine_runs",
     "oauth",
@@ -2263,8 +2265,48 @@ impl Store {
         )
     }
 
-    /// Removes the grants, for good and for one conversation, for the tools of connector `name`;
-    /// returns how many.
+    /// Whether the person confirmed connector tool `tool` as one the level "read only" covers.
+    pub fn is_confirmed_read(&self, bot: &str, tool: &str) -> Result<bool> {
+        self.0
+            .prepare_cached("SELECT 1 FROM read_tools WHERE bot = ?1 AND tool = ?2")?
+            .exists(params![bot, tool])
+    }
+
+    /// The tools the person confirmed as read-only, by name.
+    pub fn confirmed_reads(&self, bot: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .0
+            .prepare_cached("SELECT tool FROM read_tools WHERE bot = ?1 ORDER BY tool")?;
+        stmt.query_map([bot], |r| r.get(0))?.collect()
+    }
+
+    pub fn confirm_reads(&self, bot: &str, tools: &[String]) -> Result<()> {
+        let mut stmt = self
+            .0
+            .prepare_cached("INSERT OR IGNORE INTO read_tools(bot, tool) VALUES (?1, ?2)")?;
+        tools
+            .iter()
+            .try_for_each(|tool| stmt.execute(params![bot, tool]).map(drop))
+    }
+
+    /// Forgets the confirmed tools of connector `name` that are not in `keep` (what its server
+    /// marks read-only now); returns how many.
+    pub fn keep_confirmed_reads(&self, bot: &str, name: &str, keep: &[String]) -> Result<usize> {
+        let prefix = format!("{name}__");
+        let mut gone = 0;
+        for tool in self.confirmed_reads(bot)? {
+            if tool.starts_with(&prefix) && !keep.contains(&tool) {
+                gone += self.0.execute(
+                    "DELETE FROM read_tools WHERE bot = ?1 AND tool = ?2",
+                    params![bot, tool],
+                )?;
+            }
+        }
+        Ok(gone)
+    }
+
+    /// Removes the grants, for good and for one conversation, and the tools confirmed as read-only,
+    /// for the tools of connector `name`; returns how many.
     pub fn delete_connector_grants(&self, bot: &str, name: &str) -> Result<usize> {
         let prefix = format!("{name}__");
         let forever = self.0.execute(
@@ -2276,7 +2318,11 @@ impl Store {
              AND conversation IN (SELECT id FROM conversations WHERE bot = ?1)",
             params![bot, json(&Kind::Connector), prefix],
         )?;
-        Ok(forever + here)
+        let read = self.0.execute(
+            "DELETE FROM read_tools WHERE bot = ?1 AND substr(tool, 1, length(?2)) = ?2",
+            params![bot, prefix],
+        )?;
+        Ok(forever + here + read)
     }
 
     pub fn connectors(&self, bot: &str) -> Result<Vec<Connector>> {

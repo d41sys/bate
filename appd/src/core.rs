@@ -2711,8 +2711,41 @@ impl Core {
                         "a send or change in an Apple app is asked about every time: use `ask` or `never`",
                     ));
                 }
+                if level == Level::ReadOnly {
+                    if kind != Kind::Connector {
+                        return Err(bad("`read_only` is a level of `connector` only"));
+                    }
+                    if self.store.agent(&bot).map_err(internal)?.is_some() {
+                        return Err(bad(
+                            "a bot on an installed agent runs its connectors itself: `read_only` does not reach it",
+                        ));
+                    }
+                }
                 self.store.set_level(&bot, kind, level).map_err(internal)?;
                 self.broadcast(&json!({"type": "permissions_changed", "bot": bot}));
+                // A connector's row shows what is left to confirm only at this level.
+                if kind == Kind::Connector {
+                    self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
+                }
+                Ok(Some(json!({})))
+            }
+            "confirm_read_tools" => {
+                let bot = self.bot_of(f)?;
+                let tools = field::<Vec<String>>(f, "tools")?;
+                // Only what a connector of the bot is marked as having, as its engine last said.
+                let marked: Vec<&String> = self
+                    .connector_reports
+                    .get(&bot)
+                    .into_iter()
+                    .flat_map(|m| m.values().flat_map(ConnectorReport::read_only))
+                    .collect();
+                if let Some(t) = tools.iter().find(|t| !marked.contains(t)) {
+                    return Err(bad(format!(
+                        "`{t}` is not a tool that a connector of this bot marks read-only"
+                    )));
+                }
+                self.store.confirm_reads(&bot, &tools).map_err(internal)?;
+                self.broadcast(&json!({"type": "connectors_changed", "bot": bot}));
                 Ok(Some(json!({})))
             }
             "block_tool" => {
@@ -3239,6 +3272,8 @@ impl Core {
                     c.signed_in = Some(tokens.is_some());
                 }
                 let reports = self.connector_reports.get(&bot);
+                let level = self.store.level(&bot, Kind::Connector).map_err(internal)?;
+                let confirmed = self.store.confirmed_reads(&bot).map_err(internal)?;
                 let blocked = self.store.blocked_tools(&bot).map_err(internal)?;
                 let connectors: Vec<Value> = connectors
                     .iter()
@@ -3246,9 +3281,20 @@ impl Core {
                         let mut shown = json!(c);
                         match reports.and_then(|m| m.get(&c.name)) {
                             Some(ConnectorReport::Failed(why)) => shown["error"] = json!(why),
-                            Some(ConnectorReport::Loaded(names)) => {
+                            Some(ConnectorReport::Loaded { names, read_only }) => {
                                 shown["tools"] = json!(names.len());
                                 shown["toolNames"] = json!(names);
+                                if !read_only.is_empty() {
+                                    shown["readOnly"] = json!(read_only);
+                                }
+                                // Marked, not seen by the person yet, and not blocked.
+                                let fresh: Vec<_> = read_only
+                                    .iter()
+                                    .filter(|t| !confirmed.contains(t) && !blocked.contains(t))
+                                    .collect();
+                                if level == Level::ReadOnly && !fresh.is_empty() {
+                                    shown["toConfirm"] = json!(fresh);
+                                }
                             }
                             None => {}
                         }
@@ -6092,14 +6138,31 @@ impl Core {
             }
             return;
         }
-        if let Event::ConnectorLoaded { name, names } = &ev {
+        if let Event::ConnectorLoaded {
+            name,
+            names,
+            read_only,
+        } = &ev
+        {
             // Not for the transcript. Only a connector the bot still has is kept.
             let known = self
                 .store
                 .connectors(bot)
                 .is_ok_and(|all| all.iter().any(|c| c.name == *name));
             if known {
-                self.report_connector(bot, name.clone(), ConnectorReport::Loaded(names.clone()));
+                // The server's mark can change between loads: a tool that lost it asks again.
+                match self.store.keep_confirmed_reads(bot, name, read_only) {
+                    Ok(0) => {}
+                    Ok(_) => self.broadcast(&json!({"type": "permissions_changed", "bot": bot})),
+                    Err(e) => {
+                        log!("bot {bot}: confirmed tools of connector {name} not pruned: {e}")
+                    }
+                }
+                let report = ConnectorReport::Loaded {
+                    names: names.clone(),
+                    read_only: read_only.clone(),
+                };
+                self.report_connector(bot, name.clone(), report);
             }
             return;
         }
@@ -6645,8 +6708,15 @@ impl Core {
                 // Whatever the level says, such an action is shown to the user every time.
                 _ if kind.always_asks() => None,
                 Level::Always => Some(APPROVE),
-                Level::Ask if self.store.has_grant(bot, kind, target)? => Some(APPROVE),
-                Level::Ask => match conversation {
+                Level::ReadOnly
+                    if kind == Kind::Connector && self.store.is_confirmed_read(bot, target)? =>
+                {
+                    Some(APPROVE)
+                }
+                Level::Ask | Level::ReadOnly if self.store.has_grant(bot, kind, target)? => {
+                    Some(APPROVE)
+                }
+                Level::Ask | Level::ReadOnly => match conversation {
                     Some(c) if self.store.has_conversation_grant(c, kind, target)? => Some(APPROVE),
                     _ => None,
                 },
@@ -7744,7 +7814,7 @@ impl Core {
             Some(APPROVE) => Ok(tool),
             Some(_) => Err("the bot may not use connector tools".into()),
             None => Err(format!(
-                "the bot would ask before using `{}`: set its level for connectors to Always, or allow that tool first",
+                "the bot would ask before using `{}`: set its level for connectors to Always, or to Read without asking if its connector marks the tool read-only, or allow that tool first",
                 w.tool
             )),
         }
@@ -8387,9 +8457,21 @@ fn hold_ms(failures: u32) -> u64 {
 
 /// What a bot's engine said of a connector (`Event::ConnectorLoaded`, or a line on standard error).
 enum ConnectorReport {
-    /// The tools it has, by the model's name.
-    Loaded(Vec<String>),
+    /// The tools it has, by the model's name, and those of them the server marks read-only.
+    Loaded {
+        names: Vec<String>,
+        read_only: Vec<String>,
+    },
     Failed(String),
+}
+
+impl ConnectorReport {
+    fn read_only(&self) -> &[String] {
+        match self {
+            ConnectorReport::Loaded { read_only, .. } => read_only,
+            ConnectorReport::Failed(_) => &[],
+        }
+    }
 }
 
 /// `connector <name>: <why>`: how the engine reports, on stderr, a connector it could not load.

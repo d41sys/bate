@@ -98,11 +98,15 @@ export type Connector = {
   toolNames?: string[];
   /** The tools of this connector that are blocked for the bot (output only). */
   blocked?: string[];
+  /** The tools its server marks read-only, a claim of the server's (output only). */
+  readOnly?: string[];
+  /** Marked read-only and not yet confirmed by the person, while the bot's level for connectors is "read_only": they still ask (output only). */
+  toConfirm?: string[];
 };
 
 export const KINDS = ["read", "write", "run", "connector", "desktop", "apple_read", "apple_change"] as const;
 export type Kind = (typeof KINDS)[number];
-export type Level = "always" | "ask" | "never";
+export type Level = "always" | "read_only" | "ask" | "never";
 export type Permissions = {
   levels: Record<Kind, Level>;
   grants: { kind: Kind; target: string; atMs: number }[];

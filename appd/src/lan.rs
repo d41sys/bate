@@ -988,6 +988,7 @@ mod tests {
         "answer_secret",
         "list_secrets",
         "remove_secret",
+        "confirm_read_tools",
     ];
 
     /// The commands the service knows: the arms of the `match` in `Core::request`, read from its

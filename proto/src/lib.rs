@@ -296,11 +296,14 @@ pub enum Event {
         args: Map<String, Value>,
     },
     /// The connector `name` has just been loaded (started or reached) and has the tools `names`,
-    /// each as the model names it (`<connector>__<tool>`), blocked ones included. A connector that
-    /// fails is reported on standard error instead. Not part of the transcript.
+    /// each as the model names it (`<connector>__<tool>`), blocked ones included. `read_only` are
+    /// those the server marks read-only (`readOnlyHint: true`), a claim of the server's. A connector
+    /// that fails is reported on standard error instead. Not part of the transcript.
     ConnectorLoaded {
         name: String,
         names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        read_only: Vec<String>,
     },
     /// What the open `call_tool` request got: the tool's answer, cut at 64 KiB. Sent before the
     /// request's response, and only when the call went through. Not part of the transcript.

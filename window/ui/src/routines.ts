@@ -60,11 +60,13 @@ export function watchArguments(text: string): Record<string, unknown> {
 export function watchTools(c: Connector | undefined, current: string, p?: Pick<Permissions, "levels" | "grants">): { own: string; label: string }[] | undefined {
   if (!c?.toolNames) return undefined;
   const tools = connectorTools(c);
-  if (current && !tools.some((t) => t.own === current)) tools.push({ name: `${c.name}__${current}`, own: current, blocked: (c.blocked ?? []).includes(`${c.name}__${current}`) });
-  return tools.map(({ name, own, blocked }) => {
+  if (current && !tools.some((t) => t.own === current)) tools.push({ name: `${c.name}__${current}`, own: current, blocked: (c.blocked ?? []).includes(`${c.name}__${current}`), marked: false });
+  return tools.map(({ name, own, blocked, marked }) => {
     const level = p?.levels.connector;
     const granted = p?.grants.some((g) => g.kind === "connector" && g.target === name);
-    const why = blocked ? "blocked" : level === "never" ? "not allowed" : level === "ask" && !granted ? "would ask" : "";
+    // At "read_only" a tool runs alone when it is marked and the person has confirmed it (`toConfirm` holds those not yet).
+    const alone = granted || (level === "read_only" && marked && !(c.toConfirm ?? []).includes(name));
+    const why = blocked ? "blocked" : level === "never" ? "not allowed" : (level === "ask" || level === "read_only") && !alone ? "would ask" : "";
     return { own, label: why ? `${own} (${why})` : own };
   });
 }
