@@ -53,6 +53,17 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
       setError((e as Error).message);
     }
   };
+  /** A role that ships with the app, asked for by its name. */
+  const addShipped = async (shipped: string) => {
+    if (full) return;
+    try {
+      const { roles } = await request<{ roles: Role[] }>("read_roles", { shipped: [shipped] });
+      setFresh((all) => [...all, { name: roles[0].name, role: roles[0] }]);
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const save = async () => {
     setBusy(true);
@@ -69,8 +80,8 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
         setTicked(saved.bots);
         setFresh((all) => all.filter((o) => o !== f));
       }
-      const roles = fresh.filter((f) => f.role);
-      if (roles.length) await request("add_roles", { projectId: saved.id, paths: roles.map((f) => f.role!.path), raise });
+      const roles = fresh.filter((f) => f.role).map((f) => f.role!);
+      if (roles.length) await request("add_roles", { projectId: saved.id, paths: roles.filter((r) => !r.shipped).map((r) => r.path), shipped: roles.filter((r) => r.shipped).map((r) => r.shipped), raise });
       done(saved);
     } catch (e) {
       setError((e as Error).message);
@@ -138,12 +149,19 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
               <button type="button" disabled={!rolePath.trim() || full} onClick={() => void addRole(rolePath)}>Add</button>
             </div>
           </div>
+          <div className="field">
+            <label htmlFor="lead-role">Or a ready-made role</label>
+            <div className="find">
+              <button type="button" id="lead-role" disabled={full || fresh.some((f) => f.role?.shipped === "lead")} onClick={() => void addShipped("lead")}>Add a Lead</button>
+            </div>
+            <small>Lead hands work to the other bots with a command that checks it, and tells you what the check showed.</small>
+          </div>
           {fresh.length > 0 && (
             <ul className="rows" aria-label="Bots to make">
               {fresh.map((f, i) => (
                 <li key={i}>
                   <span>{f.name}</span>
-                  <small>{f.role ? "from a role file" : "new"}</small>
+                  <small>{f.role ? (f.role.shipped ? "ready-made role" : "from a role file") : "new"}</small>
                   <button type="button" className="small ghost" aria-label={`Do not make ${f.name}`} onClick={() => setFresh(fresh.filter((o) => o !== f))}>Remove</button>
                 </li>
               ))}

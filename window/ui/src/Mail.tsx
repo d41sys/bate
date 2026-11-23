@@ -1,12 +1,30 @@
 import { useEffect, useState } from "react";
 import { when } from "./conversations.ts";
+import { Revealed } from "./Reveal.tsx";
 import { listen, request } from "./service.ts";
 import type { Bot } from "./types.ts";
 
-type Mail = { seq: number; from: string; to: string; text: string; state: "waiting" | "working" | "answered"; answer?: string; error?: string; atMs: number };
+/** The acceptance command of a hand-off: `state` is none until the worker has done. `note`: how it failed, or why it was not run. */
+type Check = { command: string; state: "asking" | "running" | "retry" | "passed" | "failed" | "not_run" | null; note: string; output: string };
+type Mail = { seq: number; from: string; to: string; text: string; state: "waiting" | "working" | "answered"; answer?: string; error?: string; atMs: number; check?: Check };
 const STATE = { waiting: "Waiting", working: "In progress", answered: "Answered" };
 /** Answered with a reason instead of an answer: the other bot failed, or the message was cancelled. */
 const failed = (m: Mail) => m.state === "answered" && !!m.error;
+const CHECK = { asking: "Waiting for you", running: "Running", retry: "Failed, the bot tries again", passed: "Passed", failed: "Failed", not_run: "Not run" };
+
+/** The command that tests the work, shown in both bots' lists: its state in the summary, the whole command and what it printed once opened. */
+function CheckLine({ c }: { c: Check }) {
+  const state = c.state ? CHECK[c.state] : "Not run yet";
+  const line = c.command.split("\n")[0];
+  return (
+    <details className="check">
+      <summary className={c.state === "failed" ? "error" : undefined}>Check: <code>{line.length > 60 ? `${line.slice(0, 59)}…` : line}</code> · {state}</summary>
+      <pre><Revealed text={c.command} /></pre>
+      {c.note && <small>{c.note}</small>}
+      {c.output.trim() && <pre>{c.output}</pre>}
+    </details>
+  );
+}
 
 /** Messages between this bot and other bots: what waits, what is in progress, what was answered or got no answer. */
 export function Mail({ bot, bots }: { bot: string; bots: Bot[] }) {
@@ -40,6 +58,7 @@ export function Mail({ bot, bots }: { bot: string; bots: Bot[] }) {
                 <strong>{title}</strong>
                 <span className="note"> · {when(m.atMs)}</span>
                 <div>{m.text.slice(0, 200)}</div>
+                {m.check && <CheckLine c={m.check} />}
                 {m.state === "answered" && (failed(m) ? <small className="error">No answer: {m.error}</small> : <small>Answer: {(m.answer ?? "").slice(0, 200)}</small>)}
                 {error?.seq === m.seq && <small className="error" role="alert">{error.text}</small>}
               </div>

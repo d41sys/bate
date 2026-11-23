@@ -140,6 +140,19 @@ fn later_row(r: &rusqlite::Row) -> Result<Later> {
     })
 }
 
+/// A message to store: `parent` is the message its sender was working on, if any; `check` the
+/// acceptance command that came with it.
+#[derive(Default)]
+pub struct NewMail<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    pub text: &'a str,
+    pub state: &'a str,
+    pub at: u64,
+    pub parent: Option<i64>,
+    pub check: Option<&'a str>,
+}
+
 /// A message from one bot to another, kept until it is answered and after.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +171,23 @@ pub struct Mail {
     /// The message its sender was answering when it sent this one (see `mail_askers`).
     #[serde(skip)]
     pub parent: Option<i64>,
+    /// The acceptance command that came with it, and how it went.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<MailCheck>,
+}
+
+/// The acceptance command of a message (`message_bot`'s `check`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailCheck {
+    pub command: String,
+    /// `asking` the person, `running`, `retry` (the worker has its one more try), or the end:
+    /// `passed`, `failed` or `not_run`; none before the worker has done.
+    pub state: Option<String>,
+    /// With `failed`: how it ended (`exit code 1`); with `not_run`: why.
+    pub note: String,
+    /// What the command printed, bounded.
+    pub output: String,
 }
 
 /// One line of a project's room: what the person or a bot wrote there.
@@ -185,7 +215,7 @@ fn room_row(r: &rusqlite::Row) -> Result<RoomEntry> {
     })
 }
 
-const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at, parent FROM mail";
+const MAIL: &str = "SELECT seq, from_bot, to_bot, text, state, answer, error, at, parent, check_cmd, check_state, check_note, check_out FROM mail";
 
 fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
     Ok(Mail {
@@ -198,6 +228,12 @@ fn mail_row(r: &rusqlite::Row) -> Result<Mail> {
         error: r.get(6)?,
         at_ms: r.get(7)?,
         parent: r.get(8)?,
+        check: r.get::<_, Option<String>>(9)?.map(|command| MailCheck {
+            command,
+            state: r.get(10).ok().flatten(),
+            note: r.get(11).unwrap_or_default(),
+            output: r.get(12).unwrap_or_default(),
+        }),
     })
 }
 
@@ -293,7 +329,7 @@ CREATE TABLE IF NOT EXISTS quick_ask(id INTEGER PRIMARY KEY CHECK (id = 1), shor
 CREATE TABLE IF NOT EXISTS chatgpt(id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL, client_id TEXT NOT NULL, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS channels(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(bot, kind));
 CREATE TABLE IF NOT EXISTS chats(bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, kind TEXT NOT NULL, chat TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(bot, kind, chat));
-CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, to_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL, parent INTEGER);
+CREATE TABLE IF NOT EXISTS mail(seq INTEGER PRIMARY KEY AUTOINCREMENT, from_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, to_bot TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, text TEXT NOT NULL, state TEXT NOT NULL, answer TEXT, error TEXT, at INTEGER NOT NULL, parent INTEGER, check_cmd TEXT, check_state TEXT, check_note TEXT NOT NULL DEFAULT '', check_out TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS room(seq INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, author TEXT NOT NULL, to_bot TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS room_project ON room(project, seq);
 CREATE INDEX IF NOT EXISTS mail_to ON mail(to_bot, state, seq);
@@ -437,6 +473,17 @@ fn migrate(conn: &Connection) -> Result<()> {
     // A database of version 2 made before a message kept the one its sender was working on.
     if !has_column(&tx, "mail", "parent")? {
         tx.execute("ALTER TABLE mail ADD COLUMN parent INTEGER", [])?;
+    }
+    // And one before a message could carry an acceptance command.
+    if !has_column(&tx, "mail", "check_cmd")? {
+        for column in [
+            "check_cmd TEXT",
+            "check_state TEXT",
+            "check_note TEXT NOT NULL DEFAULT ''",
+            "check_out TEXT NOT NULL DEFAULT ''",
+        ] {
+            tx.execute(&format!("ALTER TABLE mail ADD COLUMN {column}"), [])?;
+        }
     }
     if let Some(version) = old {
         copy_old(&tx, "bots", "1")?;
@@ -1777,20 +1824,32 @@ impl Store {
     }
 
     /// Stores a message; its number. `parent` is the message its sender was working on, if any.
-    pub fn put_mail(
-        &self,
-        from: &str,
-        to: &str,
-        text: &str,
-        state: &str,
-        at: u64,
-        parent: Option<i64>,
-    ) -> Result<i64> {
+    pub fn put_mail(&self, mail: NewMail) -> Result<i64> {
         self.0.execute(
-            "INSERT INTO mail(from_bot, to_bot, text, state, at, parent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![from, to, text, state, at, parent],
+            "INSERT INTO mail(from_bot, to_bot, text, state, at, parent, check_cmd) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![mail.from, mail.to, mail.text, mail.state, mail.at, mail.parent, mail.check],
         )?;
         Ok(self.0.last_insert_rowid())
+    }
+
+    /// Keeps how the acceptance command of the message `seq` stands.
+    pub fn set_acceptance(&self, seq: i64, state: &str, note: &str, output: &str) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE mail SET check_state = ?2, check_note = ?3, check_out = ?4 WHERE seq = ?1",
+                params![seq, state, note, output],
+            )
+            .map(drop)
+    }
+
+    /// Only the state of the acceptance command, as `set_acceptance` left the rest.
+    pub fn set_acceptance_state(&self, seq: i64, state: &str) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE mail SET check_state = ?2 WHERE seq = ?1",
+                params![seq, state],
+            )
+            .map(drop)
     }
 
     /// The bots that asked for the work the message `seq` is: its sender, then the sender of the
@@ -3043,8 +3102,26 @@ mod tests {
                 )
                 .unwrap();
         }
-        store.put_mail("a", "b", "hi", "waiting", 1, None).unwrap();
-        store.put_mail("b", "a", "re", "waiting", 1, None).unwrap();
+        store
+            .put_mail(NewMail {
+                from: "a",
+                to: "b",
+                text: "hi",
+                state: "waiting",
+                at: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .put_mail(NewMail {
+                from: "b",
+                to: "a",
+                text: "re",
+                state: "waiting",
+                at: 1,
+                ..Default::default()
+            })
+            .unwrap();
         store
             .put_project(&project("p1", &["a", "b"], Some("a")))
             .unwrap();
@@ -3230,11 +3307,37 @@ mod tests {
         for id in ["a", "b", "c"] {
             store.create_bot(id, id, 1).unwrap();
         }
-        let first = store.put_mail("a", "b", "x", "answered", 1, None).unwrap();
-        let second = store
-            .put_mail("b", "c", "x", "waiting", 1, Some(first))
+        let first = store
+            .put_mail(NewMail {
+                from: "a",
+                to: "b",
+                text: "x",
+                state: "answered",
+                at: 1,
+                ..Default::default()
+            })
             .unwrap();
-        let apart = store.put_mail("c", "a", "x", "waiting", 1, None).unwrap();
+        let second = store
+            .put_mail(NewMail {
+                from: "b",
+                to: "c",
+                text: "x",
+                state: "waiting",
+                at: 1,
+                parent: Some(first),
+                ..Default::default()
+            })
+            .unwrap();
+        let apart = store
+            .put_mail(NewMail {
+                from: "c",
+                to: "a",
+                text: "x",
+                state: "waiting",
+                at: 1,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(store.mail_askers(second).unwrap(), ["b", "a"]);
         assert_eq!(store.mail_askers(first).unwrap(), ["a"]);
         assert_eq!(store.mail_askers(apart).unwrap(), ["c"]);
@@ -3247,7 +3350,15 @@ mod tests {
         let store = Store::open(&dir.join("app.db")).unwrap();
         assert_eq!(store.mail(first).unwrap().unwrap().from, "a");
         let third = store
-            .put_mail("b", "c", "x", "waiting", 1, Some(first))
+            .put_mail(NewMail {
+                from: "b",
+                to: "c",
+                text: "x",
+                state: "waiting",
+                at: 1,
+                parent: Some(first),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(store.mail_askers(third).unwrap(), ["b", "a"]);
         std::fs::remove_dir_all(&dir).unwrap();

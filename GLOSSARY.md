@@ -22,6 +22,10 @@ _Avoid_: budget, quota, spend cap
 A second model request, with no tools, that reads a bot's answer to the person before the turn ends and says `OK` or `FIX`. On `FIX` the bot gets the notes and works once more. The person chooses who reads it: the bot's own model, another model, or another bot of its project (its model and instructions only). Off unless chosen.
 _Avoid_: review, verify, double-check
 
+**Acceptance command**:
+One shell command a bot gives with work it hands to another bot (`message_bot`'s `check`). Bate runs it in the worker's folder when the worker has done; exit 0 is a pass. After a failure the worker gets the output and one more try. Not the **Check** of an answer.
+_Avoid_: test, verification
+
 **Conversation**:
 One exchange between the person and a bot: the prompts, the replies and what the bot did, in order. A bot has many.
 _Avoid_: chat, thread, session

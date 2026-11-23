@@ -187,10 +187,12 @@ fn tool_list(
         list.extend(proto::apple::APPS.iter().map(apple_tool));
         if peers {
             list.push(json!({"type": "function", "function": {"name": MESSAGE,
-                "description": "Send a message to another bot and wait for its reply. It works on the message in its own folder with its own tools and knows nothing of this conversation: put everything it needs in `text`. A bot does one thing at a time; if it is busy you are told so.",
+                "description": "Send a message to another bot and wait for its reply. It works on the message in its own folder with its own tools and knows nothing of this conversation: put everything it needs in `text`. A bot does one thing at a time; if it is busy you are told so. Give `check` for work that a command can test: when the bot has done, Bate runs the command in the bot's folder, and if it fails the bot gets its output and one more try. You get the reply together with what the command showed.",
                 "parameters": {"type": "object", "properties": {
                     "bot": {"type": "string", "description": "The bot's name"},
-                    "text": {"type": "string"}}, "required": ["bot", "text"]}}}));
+                    "text": {"type": "string"},
+                    "check": {"type": "string", "description": "One shell command, the acceptance test of the work: exit code 0 means it is done. Runs as a command of that bot, so it may be asked about, or refused."}},
+                    "required": ["bot", "text"]}}}));
         }
         list.push(json!({"type": "function", "function": {"name": PLAN,
             "description": "Show the user the steps of a task that takes three or more, and keep the list current while you work: mark a step `done` as soon as it is, before you start the next. Send the whole list every time.",
@@ -899,18 +901,36 @@ impl Turn {
             Some(text) if !text.trim().is_empty() => text,
             _ => return Err("`text` must say what the message is.".into()),
         };
+        let check = match args.get("check") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(c))
+                if !c.trim().is_empty() && c.chars().count() <= proto::MAX_CHECK =>
+            {
+                Some(c.clone())
+            }
+            Some(_) => {
+                return Err(format!(
+                    "`check` must be one command of 1 to {} characters.",
+                    proto::MAX_CHECK
+                ));
+            }
+        };
         // Another bot acts with its own permissions, so reaching it is asked about like a
         // connector's tool: once for this bot, whatever the message. The card says all of it.
-        self.allowed(
-            Kind::Connector,
-            format!("bot:{}", peer.id),
-            format!("Message {}: {text}", peer.name),
-        )?;
+        let title = match &check {
+            Some(check) => format!(
+                "Message {}: {text}\nAcceptance command, run afterwards: {check}",
+                peer.name
+            ),
+            None => format!("Message {}: {text}", peer.name),
+        };
+        self.allowed(Kind::Connector, format!("bot:{}", peer.id), title)?;
         let id = self.wait_on("m");
         self.out.send(&Event::Message {
             message: id.clone(),
             to: peer.id.clone(),
             text: text.to_owned(),
+            check,
         });
         match self.answer(&id) {
             Some(Ok(reply)) => Ok(reply),

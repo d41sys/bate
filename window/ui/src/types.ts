@@ -175,6 +175,8 @@ export type Role = {
   levels: Record<string, string>;
   /** Kinds whose level allows more than a new bot's: applied only with `raise`. */
   raises: string[];
+  /** Set for a role that ships with the app, which has no file: its name for `read_roles` and `add_roles`. */
+  shipped?: string;
 };
 
 /** `author` is what the skill's file says: a claim, never checked. */

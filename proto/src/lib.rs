@@ -33,6 +33,8 @@ pub const MAX_EVENT_FRAME: usize = 64 << 20;
 pub const STEP_LIMIT: u32 = 100;
 /// Most tool rounds a bot may be given.
 pub const MAX_STEP_LIMIT: u32 = 1000;
+/// The most characters of an acceptance command (`message_bot`'s `check`).
+pub const MAX_CHECK: usize = 1000;
 /// Window protocol version this build speaks (`hello`).
 pub const WINDOW_PROTOCOL: u32 = 1;
 /// Largest window → service frame, newline included.
@@ -263,11 +265,13 @@ pub enum Event {
         secret: Option<secrets::Wanted>,
     },
     /// A message for the bot `to`. The engine waits until the service sends `reply` for
-    /// `message`.
+    /// `message`. `check`: the acceptance command the service runs when `to` has done the work.
     Message {
         message: String,
         to: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<String>,
     },
     /// Something to do in the bot's browser, which the service runs. The engine waits until
     /// the service sends `browser_result` for `request`.
