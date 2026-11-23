@@ -308,8 +308,9 @@ CREATE TABLE IF NOT EXISTS seen(conversation TEXT PRIMARY KEY REFERENCES convers
 const SCHEMA_VERSION: i64 = 2;
 
 /// Every table that holds rows of a bot, in its `bot` column, besides `bots`, `mail` and
-/// `conversations`.
-const BOT_TABLES: [&str; 24] = [
+/// `conversations`. A test compares it with the schema: a new table with a `bot` column that is
+/// not here fails it.
+const BOT_TABLES: &[&str] = &[
     "ledger",
     "access",
     "network",
@@ -412,7 +413,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     let old = old_version(&tx)?;
     // The tables to rebuild: an older database may lack some that a still older one never made.
     let mut moved = Vec::new();
-    let all = BOT_TABLES.into_iter().chain(CONVERSATION_TABLES);
+    let all = BOT_TABLES.iter().copied().chain(CONVERSATION_TABLES);
     for table in all.chain(["mail", "projects", "bots"]) {
         if old.is_some() && has_table(&tx, table)? {
             tx.execute(&format!("ALTER TABLE {table} RENAME TO {table}_old"), [])?;
@@ -438,7 +439,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     if let Some(version) = old {
         copy_old(&tx, "bots", "1")?;
         let known = "IN (SELECT id FROM bots)";
-        for table in BOT_TABLES {
+        for &table in BOT_TABLES {
             copy_old(&tx, table, &format!("bot {known}"))?;
         }
         copy_old(&tx, "mail", &format!("from_bot {known} AND to_bot {known}"))?;
@@ -3004,7 +3005,7 @@ mod tests {
         store.put_room("p1", "a", "", "hello", 1).unwrap();
 
         store.delete_bot("a").unwrap();
-        for table in BOT_TABLES {
+        for &table in BOT_TABLES {
             assert_eq!(count(&store, table, "bot", "a"), 0, "{table}");
         }
         assert_eq!(count(&store, "conversations", "bot", "a"), 0);
@@ -3203,6 +3204,32 @@ mod tests {
             .put_mail("b", "c", "x", "waiting", 1, Some(first))
             .unwrap();
         assert_eq!(store.mail_askers(third).unwrap(), ["b", "a"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_table_with_a_bot_column_is_deleted_with_its_bot() {
+        let dir = std::env::temp_dir().join(format!("appd-store-schema-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("app.db")).unwrap();
+        let mut with_bot: Vec<String> = store
+            .0
+            .prepare(
+                "SELECT m.name FROM sqlite_master m JOIN pragma_table_info(m.name) c \
+                 WHERE m.type = 'table' AND c.name = 'bot' ORDER BY m.name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        // Three are handled by name where a bot is deleted; `file_copies` holds a project's rows
+        // too (its `bot` may be empty) and came after the last rebuild of the tables.
+        let apart = ["bots", "mail", "conversations", "file_copies"];
+        with_bot.retain(|t| !apart.contains(&t.as_str()));
+        let mut listed: Vec<String> = BOT_TABLES.iter().map(|t| (*t).to_owned()).collect();
+        listed.sort();
+        assert_eq!(with_bot, listed);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
