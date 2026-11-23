@@ -11,8 +11,12 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{io, thread};
 
-/// How long it may run before it is killed.
-const WAIT: Duration = Duration::from_secs(20);
+/// How long a routine's precheck may run before it is killed: it runs before every start.
+pub const WAIT: Duration = Duration::from_secs(20);
+
+/// How long a hand-off's acceptance command may run: a test run takes minutes. As long as the
+/// engine gives a bot's own check before done.
+pub const HANDOFF_WAIT: Duration = Duration::from_secs(600);
 
 /// How much of its output is kept; the rest is read and dropped.
 const MAX_OUTPUT: usize = 4096;
@@ -20,14 +24,14 @@ const MAX_OUTPUT: usize = 4096;
 pub enum Checked {
     /// Exit 0, with what it printed (standard output and error together).
     Passed(String),
-    /// Any other end: how it ended (`exit code 1`, `ended by a signal`, `did not end in 20 s`)
-    /// and what it printed.
+    /// Any other end: how it ended (`exit code 1`, `ended by a signal`, `did not end in 20 s`,
+    /// `cancelled`) and what it printed.
     Stopped { how: String, output: String },
 }
 
-/// Runs `command` to its end, or until `cancel` is set, which kills it. An error: it could not
-/// be started.
-pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
+/// Runs `command` to its end, or until `cancel` is set or `wait` is over, which kill it. An
+/// error: it could not be started.
+pub fn run(mut command: Command, cancel: &AtomicBool, wait: Duration) -> io::Result<Checked> {
     let (mut reader, writer) = io::pipe()?;
     command
         .stdin(Stdio::null())
@@ -60,7 +64,7 @@ pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
                     output: String::new(),
                 });
             }
-            None if started.elapsed() >= WAIT => break None,
+            None if started.elapsed() >= wait => break None,
             None => thread::sleep(Duration::from_millis(20)),
         }
     };
@@ -80,7 +84,7 @@ pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
             output: out,
         },
         None => Checked::Stopped {
-            how: format!("did not end in {} s", WAIT.as_secs()),
+            how: format!("did not end in {} s", wait.as_secs()),
             output: out,
         },
     })
@@ -96,4 +100,34 @@ fn killpg(child: &std::process::Child) {
 pub fn first_line(out: &str) -> Option<String> {
     let line = out.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.chars().take(200).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_is_killed_at_its_bound_and_one_that_ends_before_it_passes() {
+        let pid = std::env::temp_dir().join(format!("appd-precheck-{}", std::process::id()));
+        let sh = |script: String| {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]);
+            command
+        };
+        let off = AtomicBool::new(false);
+        let script = format!("echo $$ > {}; sleep 600", pid.display());
+        let Checked::Stopped { how, .. } = run(sh(script), &off, Duration::from_secs(1)).unwrap()
+        else {
+            panic!("a command that does not end passed");
+        };
+        assert_eq!(how, "did not end in 1 s");
+        let written = std::fs::read_to_string(&pid).unwrap();
+        std::fs::remove_file(&pid).unwrap();
+        // SAFETY: signal 0 sends nothing: it asks whether the process is there.
+        let gone = unsafe { libc::kill(written.trim().parse().unwrap(), 0) } != 0;
+        assert!(gone, "the command still runs");
+
+        let passed = run(sh("echo ok".into()), &off, WAIT).unwrap();
+        assert!(matches!(passed, Checked::Passed(out) if out == "ok\n"));
+    }
 }

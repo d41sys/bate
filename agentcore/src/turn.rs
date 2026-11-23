@@ -191,7 +191,7 @@ fn tool_list(
                 "parameters": {"type": "object", "properties": {
                     "bot": {"type": "string", "description": "The bot's name"},
                     "text": {"type": "string"},
-                    "check": {"type": "string", "description": "One shell command, the acceptance test of the work: exit code 0 means it is done. Runs as a command of that bot, so it may be asked about, or refused."}},
+                    "check": {"type": "string", "description": "One shell command, the acceptance test of the work: exit code 0 means it is done. It must end within 10 minutes. Runs as a command of that bot, so it may be asked about, or refused."}},
                     "required": ["bot", "text"]}}}));
         }
         list.push(json!({"type": "function", "function": {"name": PLAN,

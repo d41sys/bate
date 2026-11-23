@@ -17877,27 +17877,54 @@ fn a_check_that_prints_a_lot_keeps_a_bounded_output() {
 }
 
 #[test]
-fn a_check_that_does_not_end_is_killed_at_the_time_bound_and_fails() {
-    let home = home("handoff-time");
+fn a_check_that_takes_longer_than_a_routines_precheck_still_passes() {
+    let home = home("handoff-slow");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "always");
+
+    // A routine's precheck is killed at 20 seconds; a test run takes longer than that.
+    d.hand(&mut w, "n1", "say done", "sleep 21; echo slow and green");
+    within(Duration::from_secs(120), "the reply to Ann", || {
+        !d.told(0).is_empty()
+    });
+    let told = d.told(0);
+    assert!(told.contains("passed"), "{told}");
+    assert_eq!(d.check(&mut w, 0)["state"], "passed");
+    assert_eq!(prompts_received(&home, &d.bo, "check-1"), 0);
+}
+
+#[test]
+fn stopping_the_worker_ends_its_running_check_which_is_then_not_run() {
+    let home = home("handoff-stop-check");
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
     let d = duo(&home, &mut w, "always", "always");
 
     d.hand(&mut w, "n1", "say done", "echo $$ > pid; sleep 600");
-    // Twice 20 seconds: the command runs again after the worker's one more try.
-    within(Duration::from_secs(120), "the reply to Ann", || {
-        !d.told(0).is_empty()
-    });
-    let told = d.told(0);
-    assert!(told.contains("did not end in 20 s"), "{told}");
-    let pid = fs::read_to_string(d.work.join("pid")).unwrap();
+    let pid = || fs::read_to_string(d.work.join("pid")).unwrap_or_default();
+    eventually("the command to start", || !pid().trim().is_empty());
+    // The worker has no turn now, and still shows as at work: that is what offers Stop.
+    assert_eq!(bot_row(&mut w, &d.bo)["busy"], true);
+    assert_eq!(d.check(&mut w, 0)["state"], "running");
+
+    w.ok("abort", json!({"bot": d.bo}));
+    let told = d.waits_for_reply(0);
+    assert!(told.contains("was not run: its user stopped it"), "{told}");
     let alive = Command::new("kill")
-        .args(["-0", pid.trim()])
+        .args(["-0", pid().trim()])
         .stderr(Stdio::null())
         .status()
         .unwrap();
     assert!(!alive.success(), "the command still runs");
-    assert_eq!(d.check(&mut w, 0)["state"], "failed");
+    let check = d.check(&mut w, 0);
+    assert_eq!(
+        (&check["state"], &check["note"]),
+        (&json!("not_run"), &json!("its user stopped it"))
+    );
+    // Stopped is not failed: the worker gets no second try.
+    assert_eq!(prompts_received(&home, &d.bo, "check-1"), 0);
+    assert_eq!(bot_row(&mut w, &d.bo)["busy"], false);
 }
 
 #[test]
