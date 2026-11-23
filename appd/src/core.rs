@@ -1774,6 +1774,12 @@ impl Core {
             }
             "abort" | "set_model" | "rewind" | "compact" => {
                 let bot = self.bot_of(f)?;
+                // A worker whose acceptance command runs has no turn to stop: the command stops.
+                if command == "abort"
+                    && let Some(Stage::Running(cancel)) = self.holds.get(&bot).map(|h| &h.stage)
+                {
+                    cancel.store(true, Ordering::SeqCst);
+                }
                 let op = match command {
                     "abort" => Op::Abort,
                     "compact" => Op::Compact,
@@ -3521,7 +3527,9 @@ impl Core {
     fn bot_info(&self, bot: &str, mut row: Value) -> Value {
         let running = self.engines.get(bot);
         row["running"] = json!(running.is_some());
-        row["busy"] = json!(running.is_some_and(|r| r.busy || r.compacting > 0));
+        // A worker whose acceptance command runs is at work too, and can be stopped.
+        let checking = (self.holds.get(bot)).is_some_and(|h| matches!(h.stage, Stage::Running(_)));
+        row["busy"] = json!(checking || running.is_some_and(|r| r.busy || r.compacting > 0));
         // An open question: the bot waits for the person's answer, which is not thinking.
         row["waiting"] = json!(self.store.has_questions(bot).unwrap_or(false));
         // Unreadable counts as limited: that is also what a start would refuse to go beyond.
@@ -5671,7 +5679,7 @@ impl Core {
             reply: text,
             runs,
             approved,
-            stage: Stage::Running,
+            stage: Stage::Running(Arc::default()),
         };
         self.holds.insert(bot.to_owned(), hold);
         self.next_check(bot);
@@ -5722,7 +5730,8 @@ impl Core {
             return;
         };
         hold.runs += 1;
-        hold.stage = Stage::Running;
+        let cancel = Arc::new(AtomicBool::new(false));
+        hold.stage = Stage::Running(cancel.clone());
         let (mail, run) = (hold.mail, hold.runs);
         let built = match self.precheck_command(bot, &command) {
             Ok(built) => built,
@@ -5732,9 +5741,10 @@ impl Core {
             }
         };
         self.put_check_state(mail, "running");
+        self.broadcast(&json!({"type": "bots_changed"}));
         let (tx, bot) = (self.tx.clone(), bot.to_owned());
         thread::spawn(move || {
-            let result = precheck::run(built, &AtomicBool::new(false));
+            let result = precheck::run(built, &cancel, precheck::HANDOFF_WAIT);
             let _ = tx.send(Msg::HandoffChecked {
                 bot,
                 mail,
@@ -5829,12 +5839,14 @@ impl Core {
         run: u8,
         result: io::Result<precheck::Checked>,
     ) {
-        let current = self
-            .holds
-            .get(bot)
-            .is_some_and(|h| h.mail == mail && h.runs == run && matches!(h.stage, Stage::Running));
-        if !current {
+        let Some(Stage::Running(cancel)) = (self.holds.get(bot))
+            .filter(|h| h.mail == mail && h.runs == run)
+            .map(|h| &h.stage)
+        else {
             return;
+        };
+        if cancel.load(Ordering::SeqCst) {
+            return self.end_check(bot, "not_run", "its user stopped it", "");
         }
         match result {
             Ok(precheck::Checked::Passed(out)) => self.end_check(bot, "passed", "", &out),
@@ -5888,6 +5900,7 @@ impl Core {
             log!("message {}: check not updated: {e}", hold.mail);
         }
         self.reply_caller(bot, hold.caller, Ok(hold.reply));
+        self.broadcast(&json!({"type": "bots_changed"}));
         self.drain_queue(bot);
     }
 
@@ -7802,7 +7815,7 @@ impl Core {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, flag, (bot, routine)) = (self.tx.clone(), cancel.clone(), key.clone());
         thread::spawn(move || {
-            let result = precheck::run(command, &flag);
+            let result = precheck::run(command, &flag, precheck::WAIT);
             let _ = tx.send(Msg::Prechecked {
                 bot,
                 routine,
@@ -8748,10 +8761,9 @@ struct Hold {
 
 enum Stage {
     /// A card for the person waits.
-    Asking {
-        question: String,
-    },
-    Running,
+    Asking { question: String },
+    /// The command runs; setting the flag ends it.
+    Running(Arc<AtomicBool>),
     /// The worker has its one more turn.
     Retrying,
 }
