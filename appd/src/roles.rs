@@ -26,6 +26,23 @@ pub struct Role {
     pub levels: HashMap<Kind, Level>,
     /// The kinds whose level allows more than a new bot's: applied only if the person agrees.
     pub raises: Vec<Kind>,
+    /// The name of a role that ships with the app, for one that was not read from a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shipped: Option<String>,
+}
+
+/// The roles that ship with the app, by the name the window asks for them under. Compiled in, as
+/// the catalog's lists are, so that the service finds them wherever it runs.
+const SHIPPED: [(&str, &str); 1] = [("lead", include_str!("../../roles/lead.md"))];
+
+/// The role that ships under `name`.
+pub fn shipped(name: &str) -> Result<Role, String> {
+    let Some((name, text)) = SHIPPED.iter().find(|(n, _)| *n == name) else {
+        return Err(format!("no role ships under the name `{name}`"));
+    };
+    let mut role = parse(text).map_err(|e| format!("the role `{name}`: {e}"))?;
+    role.shipped = Some((*name).to_owned());
+    Ok(role)
 }
 
 /// Reads the role file at the whole path `path`.
@@ -96,6 +113,7 @@ fn parse(text: &str) -> Result<Role, String> {
         skills: Vec::new(),
         levels: HashMap::new(),
         raises: Vec::new(),
+        shipped: None,
     };
     let mut seen = Vec::new();
     for line in head
@@ -194,5 +212,18 @@ mod tests {
         }
         let long = format!("---\nname: A\n---\n{}", "x".repeat(8001));
         assert!(parse(&long).unwrap_err().contains("8000"));
+    }
+
+    #[test]
+    fn the_shipped_lead_passes_the_readers_checks_and_raises_nothing() {
+        // The file in the repository is the one that ships, and the reader of files takes it too.
+        let from_file =
+            read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../roles/lead.md")).unwrap();
+        let lead = shipped("lead").unwrap();
+        assert_eq!(lead.instructions, from_file.instructions);
+        assert_eq!(lead.name, "Lead");
+        assert!(lead.levels.is_empty() && lead.raises.is_empty() && lead.skills.is_empty());
+        assert!(lead.instructions.contains("`check`"));
+        assert!(shipped("nobody").is_err());
     }
 }

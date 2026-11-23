@@ -33,3 +33,7 @@ The rest of the file, at most 8000 characters, is the bot's instructions. The fi
 On a project's Bots page, give the whole paths of one or more role files to the project. Bate shows what each will create: the name, model, skills and permission levels. A level that lets the bot do more than a new bot may (`always` for anything but `read`) is listed, and is applied only if you agree; otherwise that kind stays on `ask`.
 
 A file that is malformed, or names a skill folder that is missing or holds another skill, is refused with the reason, and no bot is created. The protocol is in `PROTOCOL.md` (`read_roles`, `add_roles`).
+
+## Ready-made roles
+
+Bate ships one role, in this same format: **Lead** (`roles/lead.md` in the source). Its instructions tell a bot to answer a short question itself, hand anything more to the fitting bot of the project with an acceptance command in `check`, read what the check showed, say plainly when it failed after the worker's second try, and report to the person what was done, by whom, and what the check showed. It sets no level, so it has a new bot's. The project's Bots page offers it beside adding a role from a file (**Add a Lead**). In a project that has no lead of its own the new bot becomes its lead; a project whose lead was chosen keeps it.

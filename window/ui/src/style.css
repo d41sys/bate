@@ -82,6 +82,10 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .mail > summary { font-weight: var(--weight-strong); }
 .mail .rows { margin-bottom: 0; }
 .mail .rows li:last-child { border-bottom: 0; }
+/* The acceptance command of a hand-off: one line closed, the command and its output opened. */
+.check { font-size: var(--size-small); color: var(--fg-muted); }
+.check > summary { padding: var(--space-1) 0; }
+.check pre { max-height: calc(var(--leading) * 8); overflow: auto; margin: var(--space-1) 0; padding: var(--space-1) var(--space-2); }
 .empty { margin: auto; text-align: center; color: var(--fg-muted); }
 /* The notes that are gone, under the list of notes: closed until looked for. */
 .deleted { margin-top: var(--space-3); }

@@ -1968,6 +1968,89 @@ fn sub_agents_nest_five_deep_and_no_deeper() {
 }
 
 #[test]
+fn a_message_can_carry_an_acceptance_command_the_card_shows_and_a_bad_one_is_refused_unasked() {
+    let dir = workdir("message-check");
+    let model = Model::serve(vec![
+        vec![call(
+            "c1",
+            "message_bot",
+            json!({"bot": "scout", "text": "Fix it.", "check": "cargo test"}),
+        )],
+        vec![call(
+            "c2",
+            "message_bot",
+            json!({"bot": "scout", "text": "Fix it.", "check": "  "}),
+        )],
+        vec![call(
+            "c3",
+            "message_bot",
+            json!({"bot": "scout", "text": "Fix it.", "check": 7}),
+        )],
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let peers = vec![Peer {
+        id: "b2".into(),
+        name: "Scout".into(),
+        lead: false,
+    }];
+    assert_eq!(
+        engine.request(Op::Peers {
+            peers,
+            leads: false
+        }),
+        None
+    );
+    engine.prompt("ask around");
+    // The person is shown the command with the message: it is part of what the other bot is given.
+    let events = engine.until(is_question);
+    let Some(Event::Question {
+        title, question, ..
+    }) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        title,
+        "Message Scout: Fix it.\nAcceptance command, run afterwards: cargo test"
+    );
+    let approve = Op::Answer {
+        question: question.clone(),
+        choice: "Approve".into(),
+    };
+    assert_eq!(engine.request(approve), None);
+    let sent = engine.until(|e| matches!(e, Event::Message { .. }));
+    let Some(Event::Message { check, message, .. }) = sent.last() else {
+        unreachable!()
+    };
+    assert_eq!(check.as_deref(), Some("cargo test"));
+    let reply = Op::Reply {
+        message: message.clone(),
+        text: Some("Fixed.".into()),
+        error: None,
+    };
+    assert_eq!(engine.request(reply), None);
+    // An empty command, or one that is not text, is the model's mistake: no question, no message.
+    let rest = engine.until(is_turn_end);
+    assert!(
+        !rest
+            .iter()
+            .any(|e| is_question(e) || matches!(e, Event::Message { .. }))
+    );
+    let requests = model.requests();
+    let result =
+        |n: usize| requests[n]["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    assert_eq!(result(1), "Fixed.");
+    for n in [2, 3] {
+        assert_eq!(
+            result(n),
+            "`check` must be one command of 1 to 1000 characters."
+        );
+    }
+}
+
+#[test]
 fn the_card_for_a_message_to_another_bot_has_the_whole_message() {
     let dir = workdir("message-long");
     let model = Model::serve(vec![
@@ -2066,7 +2149,10 @@ fn a_bot_messages_another_bot_after_asking_and_gets_its_reply_or_why_there_is_no
     };
     assert_eq!(engine.request(approve), None);
     let sent = engine.until(|e| matches!(e, Event::Message { .. }));
-    let Some(Event::Message { message, to, text }) = sent.last() else {
+    let Some(Event::Message {
+        message, to, text, ..
+    }) = sent.last()
+    else {
         unreachable!()
     };
     assert_eq!((to.as_str(), text.as_str()), ("b2", "How many tests fail?"));

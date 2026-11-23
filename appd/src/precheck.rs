@@ -1,5 +1,6 @@
 //! A routine's precheck: a command that runs before the bot, with no model, in the limits of the
-//! bot's own commands (`limit::command`). Its time and its output are bounded.
+//! bot's own commands (`limit::command`). Its time and its output are bounded. A hand-off's
+//! acceptance command runs the same way, after the worker's turn.
 
 use crate::sys;
 use std::io::Read;
@@ -19,8 +20,9 @@ const MAX_OUTPUT: usize = 4096;
 pub enum Checked {
     /// Exit 0, with what it printed (standard output and error together).
     Passed(String),
-    /// Any other end, with the first line it printed, or what happened if it printed none.
-    Stopped(String),
+    /// Any other end: how it ended (`exit code 1`, `ended by a signal`, `did not end in 20 s`)
+    /// and what it printed.
+    Stopped { how: String, output: String },
 }
 
 /// Runs `command` to its end, or until `cancel` is set, which kills it. An error: it could not
@@ -53,7 +55,10 @@ pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
             None if cancel.load(Ordering::Relaxed) => {
                 killpg(&child);
                 let _ = child.wait();
-                return Ok(Checked::Stopped("cancelled".into()));
+                return Ok(Checked::Stopped {
+                    how: "cancelled".into(),
+                    output: String::new(),
+                });
             }
             None if started.elapsed() >= WAIT => break None,
             None => thread::sleep(Duration::from_millis(20)),
@@ -67,11 +72,17 @@ pub fn run(mut command: Command, cancel: &AtomicBool) -> io::Result<Checked> {
     let out = String::from_utf8_lossy(&out).into_owned();
     Ok(match status {
         Some(s) if s.success() => Checked::Passed(out),
-        Some(s) => Checked::Stopped(first_line(&out).unwrap_or_else(|| match s.code() {
-            Some(code) => format!("exit code {code}"),
-            None => "ended by a signal".into(),
-        })),
-        None => Checked::Stopped(format!("did not end in {} s", WAIT.as_secs())),
+        Some(s) => Checked::Stopped {
+            how: match s.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "ended by a signal".into(),
+            },
+            output: out,
+        },
+        None => Checked::Stopped {
+            how: format!("did not end in {} s", WAIT.as_secs()),
+            output: out,
+        },
     })
 }
 
@@ -81,7 +92,8 @@ fn killpg(child: &std::process::Child) {
     unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
 }
 
-fn first_line(out: &str) -> Option<String> {
+/// The first line of `out` that says something, cut to 200 characters.
+pub fn first_line(out: &str) -> Option<String> {
     let line = out.lines().map(str::trim).find(|l| !l.is_empty())?;
     Some(line.chars().take(200).collect())
 }
