@@ -3675,55 +3675,61 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     send(&device, json!({"id": "5", "type": "get_provider"}));
     let refused = until(&device, &|v| v["type"] == "response" && v["id"] == "5");
     assert_eq!(refused["code"], "forbidden", "{refused}");
-    // Nor let itself, or anyone, in through a chat.
-    for (id, command) in [
-        ("6", "set_channel"),
-        ("7", "pair_channel"),
-        ("8", "get_channels"),
-        ("9", "remove_chat"),
-        ("10", "install_update"),
-        ("11", "set_disk_access"),
-        ("18", "set_network"),
+    // A command that no list names (a new one, or a made-up one) is refused too: a device may call
+    // only the commands of the allow list.
+    for (n, command) in [
+        "set_channel",
+        "pair_channel",
+        "get_channels",
+        "remove_chat",
+        "install_update",
+        "set_disk_access",
+        "set_network",
         // A path on this Mac is not for a device to look at or copy from.
-        ("19", "preview_skill"),
-        ("20", "install_skill"),
-        ("12", "set_project"),
-        ("13", "delete_project"),
+        "preview_skill",
+        "install_skill",
+        "set_project",
+        "delete_project",
         // Surfaces are for the window on this Mac.
-        ("14", "list_surfaces"),
-        ("15", "read_surface"),
-        ("16", "act_surface"),
-        ("17", "watch_surfaces"),
+        "list_surfaces",
+        "read_surface",
+        "act_surface",
+        "watch_surfaces",
         // It changes files on this Mac, maybe outside the bot's folder.
-        ("21", "undo_change"),
+        "undo_change",
         // So are the files a bot is made from.
-        ("22", "preview_bot_file"),
-        ("23", "import_bot"),
+        "preview_bot_file",
+        "import_bot",
         // The lists, and what they would install, are for the window on this Mac.
-        ("24", "list_catalog"),
-        ("25", "preview_catalog"),
-        ("26", "install_catalog"),
-        ("27", "preview_skill_catalog"),
-        ("28", "install_skill_catalog"),
+        "list_catalog",
+        "preview_catalog",
+        "install_catalog",
+        "preview_skill_catalog",
+        "install_skill_catalog",
         // An adapter is a program from the network, run as the user.
-        ("29", "preview_agent"),
-        ("30", "install_agent"),
-        ("31", "remove_agent"),
+        "preview_agent",
+        "install_agent",
+        "remove_agent",
         // The files of a bot's folder, and what Git or the kept copies say of them, are for the window on this Mac.
-        ("32", "list_changes"),
-        ("33", "read_change"),
+        "list_changes",
+        "read_change",
         // A spend cap is set where it was made: not raised or cleared from the network.
-        ("34", "set_token_limit"),
+        "set_token_limit",
         // So are Quick Ask's settings and what it takes from this Mac's screen.
-        ("35", "get_quick_ask"),
-        ("36", "set_quick_ask"),
-        ("37", "quick_context"),
-        ("38", "quick_shot"),
+        "get_quick_ask",
+        "set_quick_ask",
+        "quick_context",
+        "quick_shot",
         // Secrets are typed in the window on this Mac: a device can neither read, set nor remove one.
-        ("39", "answer_secret"),
-        ("40", "list_secrets"),
-        ("41", "remove_secret"),
-    ] {
+        "answer_secret",
+        "list_secrets",
+        "remove_secret",
+        "a_command_in_no_list",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("refused-{n}");
         send(
             &device,
             json!({"id": id, "type": command, "bot": "x", "kind": "telegram"}),

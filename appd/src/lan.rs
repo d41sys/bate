@@ -434,63 +434,77 @@ impl Lan {
     }
 }
 
-/// A paired device may do what the window does, but not change local credentials, file access
-/// or network settings, add devices, or install an update.
-const FORBIDDEN_OVER_LAN: &[&str] = &[
-    "lan_status",
-    "set_lan",
-    "pair_device",
-    "remove_device",
-    "get_provider",
-    "set_provider",
-    "install_update",
-    "set_disk_access",
-    "undo_change",
-    "list_changes",
-    "read_change",
-    "set_network",
-    "set_project",
-    "delete_project",
-    "read_roles",
-    "add_roles",
-    "preview_skill",
-    "install_skill",
-    "preview_bot_file",
-    "import_bot",
-    "preview_workplace",
-    "install_workplace",
-    "list_catalog",
-    "preview_catalog",
-    "install_catalog",
-    "preview_skill_catalog",
-    "install_skill_catalog",
-    "approve_workplace",
-    "remove_workplace",
-    "preview_agent",
-    "install_agent",
-    "remove_agent",
-    "list_surfaces",
-    "read_surface",
-    "act_surface",
-    "watch_surfaces",
-    "get_chatgpt",
-    "get_keychain",
-    "ask_keychain",
-    "sign_in_chatgpt",
-    "set_token_limit",
-    "sign_out_chatgpt",
-    "open_helper_settings",
-    "get_quick_ask",
-    "set_quick_ask",
-    "quick_context",
-    "quick_shot",
-    "get_channels",
-    "set_channel",
-    "pair_channel",
-    "remove_chat",
-    "answer_secret",
-    "list_secrets",
-    "remove_secret",
+/// The commands a paired device may call: what the window does, less changing local credentials,
+/// file access or network settings, adding devices, and installing an update. Any other command,
+/// a new one too, is for the window on this Mac until it is listed here.
+const ALLOWED_OVER_LAN: &[&str] = &[
+    "hello",
+    "list_bots",
+    "create_bot",
+    "open_bot",
+    "prompt",
+    "answer",
+    "steer",
+    "set_paused",
+    "get_usage",
+    "abort",
+    "set_model",
+    "rewind",
+    "compact",
+    "list_later",
+    "cancel_later",
+    "list_queue",
+    "remove_queued",
+    "list_conversations",
+    "list_attention",
+    "mark_seen",
+    "new_conversation",
+    "set_conversation",
+    "list_routines",
+    "set_routine",
+    "run_routine",
+    "list_routine_runs",
+    "delete_routine",
+    "list_projects",
+    "list_workplaces",
+    "list_mail",
+    "list_room",
+    "send_room",
+    "cancel_mail",
+    "list_skills",
+    "set_skill_enabled",
+    "delete_skill",
+    "list_memory",
+    "read_memory",
+    "write_memory",
+    "delete_memory",
+    "list_memory_versions",
+    "restore_memory_version",
+    "list_deleted_memory",
+    "hand_back_browser",
+    "get_helper",
+    "set_agent",
+    "list_agents",
+    "get_permissions",
+    "set_permission",
+    "block_tool",
+    "delete_grant",
+    "attach",
+    "export_chat",
+    "export_bot",
+    "set_bot",
+    "order_bots",
+    "delete_bot",
+    "search",
+    "get_update",
+    "check_update",
+    "list_models",
+    "export_report",
+    "list_connectors",
+    "sign_in_connector",
+    "sign_out_connector",
+    "set_connector",
+    "delete_connector",
 ];
 
 fn send(s: &Session, body: &[u8]) -> Answer {
@@ -503,7 +517,7 @@ fn send(s: &Session, body: &[u8]) -> Answer {
         // A routine's precheck is a command that runs on this computer, and its watch calls a
         // connector by itself: only the person at its own window sets them, so a device may not
         // add, change or clear one.
-        && (FORBIDDEN_OVER_LAN.contains(&cmd)
+        && (!ALLOWED_OVER_LAN.contains(&cmd)
             || cmd == "set_routine"
                 && ["precheck", "watch"]
                     .iter()
@@ -916,6 +930,103 @@ fn read(stream: &mut impl Read) -> Result<Request, Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The commands that were refused to a device before the list was turned round: each is still
+    /// refused. A new command goes in this list or in `ALLOWED_OVER_LAN`, never in neither.
+    const REFUSED_OVER_LAN: &[&str] = &[
+        "lan_status",
+        "set_lan",
+        "pair_device",
+        "remove_device",
+        "get_provider",
+        "set_provider",
+        "install_update",
+        "set_disk_access",
+        "undo_change",
+        "list_changes",
+        "read_change",
+        "set_network",
+        "set_project",
+        "delete_project",
+        "read_roles",
+        "add_roles",
+        "preview_skill",
+        "install_skill",
+        "preview_bot_file",
+        "import_bot",
+        "preview_workplace",
+        "install_workplace",
+        "list_catalog",
+        "preview_catalog",
+        "install_catalog",
+        "preview_skill_catalog",
+        "install_skill_catalog",
+        "approve_workplace",
+        "remove_workplace",
+        "preview_agent",
+        "install_agent",
+        "remove_agent",
+        "list_surfaces",
+        "read_surface",
+        "act_surface",
+        "watch_surfaces",
+        "get_chatgpt",
+        "get_keychain",
+        "ask_keychain",
+        "sign_in_chatgpt",
+        "set_token_limit",
+        "sign_out_chatgpt",
+        "open_helper_settings",
+        "get_quick_ask",
+        "set_quick_ask",
+        "quick_context",
+        "quick_shot",
+        "get_channels",
+        "set_channel",
+        "pair_channel",
+        "remove_chat",
+        "answer_secret",
+        "list_secrets",
+        "remove_secret",
+    ];
+
+    /// The commands the service knows: the arms of the `match` in `Core::request`, read from its
+    /// source (each arm is one line starting at that match's indent with its quoted names).
+    fn known_commands() -> Vec<&'static str> {
+        let src = include_str!("core.rs");
+        let from = src.find("fn request(&mut self, client").unwrap();
+        let body = &src[from..];
+        let body = &body[..body.find("unknown_command").unwrap()];
+        body.lines()
+            .filter(|l| l.starts_with("            \"") && l.contains("=>"))
+            .flat_map(|l| l.split("=>").next().unwrap().split('"').skip(1).step_by(2))
+            .collect()
+    }
+
+    #[test]
+    fn every_command_is_allowed_or_refused_to_a_device() {
+        let known = known_commands();
+        assert!(known.len() > 100, "the arms were not read: {known:?}");
+        for c in ALLOWED_OVER_LAN {
+            assert!(
+                known.contains(c),
+                "{c} is allowed but the service has no such command"
+            );
+            assert!(!REFUSED_OVER_LAN.contains(c), "{c} is in both lists");
+        }
+        for c in REFUSED_OVER_LAN {
+            assert!(
+                known.contains(c),
+                "{c} is refused but the service has no such command"
+            );
+        }
+        for c in &known {
+            assert!(
+                ALLOWED_OVER_LAN.contains(c) || REFUSED_OVER_LAN.contains(c),
+                "{c} is in neither list: add it to ALLOWED_OVER_LAN to let a device call it, or to REFUSED_OVER_LAN in this test"
+            );
+        }
+    }
 
     fn ips(list: &[&str]) -> Vec<Ipv4Addr> {
         list.iter().map(|ip| ip.parse().unwrap()).collect()
