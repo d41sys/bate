@@ -1775,10 +1775,8 @@ impl Core {
             "abort" | "set_model" | "rewind" | "compact" => {
                 let bot = self.bot_of(f)?;
                 // A worker whose acceptance command runs has no turn to stop: the command stops.
-                if command == "abort"
-                    && let Some(Stage::Running(cancel)) = self.holds.get(&bot).map(|h| &h.stage)
-                {
-                    cancel.store(true, Ordering::SeqCst);
+                if command == "abort" {
+                    self.stop_check(&bot);
                 }
                 let op = match command {
                     "abort" => Op::Abort,
@@ -3068,6 +3066,11 @@ impl Core {
                     )
                 })?;
                 self.on_engine_gone(&bot);
+                // Its acceptance command, if one still runs, ends with it; whoever waits is told.
+                self.stop_check(&bot);
+                if let Some(hold) = self.holds.remove(&bot) {
+                    self.reply_caller(&bot, hold.caller, Err("the bot was deleted".into()));
+                }
                 self.cancel_starts(&bot, None, None);
                 // Its senders were told an answer would come: they hear why none will.
                 for mail in self
@@ -5083,8 +5086,10 @@ impl Core {
         if !paused {
             self.drain_queue(bot);
         } else {
-            // A routine that waits for its precheck does not start.
+            // A routine that waits for its precheck does not start, and an acceptance command
+            // that runs ends.
             self.cancel_starts(bot, None, Some("paused"));
+            self.stop_check(bot);
             if self.occupied(bot) {
                 self.send_op(bot, Op::Abort, Waiter::Quiet)?;
             }
@@ -5658,6 +5663,7 @@ impl Core {
         seq: i64,
         reply: Result<String, String>,
     ) {
+        self.stop_check(bot);
         let hold = self.holds.remove(bot).filter(|h| h.mail == seq);
         let (runs, approved) = hold.map_or((0, false), |h| (h.runs, h.approved));
         let text = match reply {
@@ -5846,7 +5852,11 @@ impl Core {
             return;
         };
         if cancel.load(Ordering::SeqCst) {
-            return self.end_check(bot, "not_run", "its user stopped it", "");
+            let why = match self.is_paused(bot) {
+                true => "the worker is paused",
+                false => "its user stopped it",
+            };
+            return self.end_check(bot, "not_run", why, "");
         }
         match result {
             Ok(precheck::Checked::Passed(out)) => self.end_check(bot, "passed", "", &out),
@@ -5887,6 +5897,14 @@ impl Core {
             .is_err()
         {
             self.end_check(bot, "failed", &how, &output);
+        }
+    }
+
+    /// Ends the acceptance command of `bot`, if one runs: `on_handoff_checked` follows, or
+    /// nothing when the hold is dropped first.
+    fn stop_check(&self, bot: &str) {
+        if let Some(Stage::Running(cancel)) = self.holds.get(bot).map(|h| &h.stage) {
+            cancel.store(true, Ordering::SeqCst);
         }
     }
 
