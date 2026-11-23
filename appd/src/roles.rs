@@ -129,7 +129,7 @@ fn parse(text: &str) -> Result<Role, String> {
                 let level: Level = serde_json::from_value(value.into()).map_err(|_| {
                     format!("`{key}` must be `always`, `ask` or `never`, not `{value}`")
                 })?;
-                // It covers the tools the person was shown marked in Settings: a role cannot choose them.
+                // It covers only tools the person confirmed in the window: a role cannot choose it.
                 if level == Level::ReadOnly {
                     return Err(format!(
                         "`{key}` cannot be `read_only`: that is chosen in Settings"
