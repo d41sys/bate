@@ -418,8 +418,12 @@ impl Turn {
         // Whether the conversation was already summarised for the model call that comes next.
         let mut shrunk = false;
         let system = self.system();
-        for (name, names) in mcp.sync(&self.connectors, &self.dir, &self.control) {
-            self.out.send(&Event::ConnectorLoaded { name, names });
+        for (name, names, read_only) in mcp.sync(&self.connectors, &self.dir, &self.control) {
+            self.out.send(&Event::ConnectorLoaded {
+                name,
+                names,
+                read_only,
+            });
         }
         let tools = self.tools(mcp, 0);
         let mut check = Check {

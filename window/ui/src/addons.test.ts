@@ -27,10 +27,10 @@ test("a connector's tools are those its engine listed and those blocked, each by
   const c: Connector = { name: "web", enabled: true, transport: { type: "http", url: "https://a.b/mcp" } };
   assert.deepEqual(connectorTools(c), []);
   // A blocked tool is listed even when the engine has not (yet) said it has it.
-  assert.deepEqual(connectorTools({ ...c, toolNames: ["web__search", "web__fetch"], blocked: ["web__fetch", "web__old"] }), [
-    { name: "web__fetch", own: "fetch", blocked: true },
-    { name: "web__old", own: "old", blocked: true },
-    { name: "web__search", own: "search", blocked: false },
+  assert.deepEqual(connectorTools({ ...c, toolNames: ["web__search", "web__fetch"], blocked: ["web__fetch", "web__old"], readOnly: ["web__search"] }), [
+    { name: "web__fetch", own: "fetch", blocked: true, marked: false },
+    { name: "web__old", own: "old", blocked: true, marked: false },
+    { name: "web__search", own: "search", blocked: false, marked: true },
   ]);
 });
 

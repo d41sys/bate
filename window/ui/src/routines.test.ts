@@ -47,10 +47,13 @@ test("the arguments of a watch are a JSON object, or empty for none", () => {
 
 test("the tools to watch are the connector's own, each marked when the bot would not be let call it alone", () => {
   const issues = { name: "issues", enabled: true, transport: { type: "stdio" as const, command: "serve" }, toolNames: ["issues__list", "issues__close", "issues__get"], blocked: ["issues__close"] };
-  const allow = (level: "always" | "ask" | "never", grants: { kind: "connector"; target: string; atMs: number }[] = []) => ({ levels: { connector: level } as never, grants });
+  const allow = (level: "always" | "read_only" | "ask" | "never", grants: { kind: "connector"; target: string; atMs: number }[] = []) => ({ levels: { connector: level } as never, grants });
   assert.deepEqual(watchTools(issues, "", allow("always"))?.map((t) => t.label), ["close (blocked)", "get", "list"]);
   assert.deepEqual(watchTools(issues, "", allow("ask", [{ kind: "connector", target: "issues__get", atMs: 1 }]))?.map((t) => t.label), ["close (blocked)", "get", "list (would ask)"]);
   assert.deepEqual(watchTools(issues, "", allow("never"))?.map((t) => t.label), ["close (blocked)", "get (not allowed)", "list (not allowed)"]);
+  // At "read-only tools without asking" a tool runs alone when it is marked and confirmed; one still to confirm, or not marked, would ask.
+  const marked = { ...issues, toolNames: [...issues.toolNames, "issues__peek"], readOnly: ["issues__get", "issues__peek"], toConfirm: ["issues__peek"] };
+  assert.deepEqual(watchTools(marked, "", allow("read_only"))?.map((t) => t.label), ["close (blocked)", "get", "list (would ask)", "peek (would ask)"]);
   assert.equal(watchTools(issues, "")?.[2].label, "list");
   // A tool already set that the engine did not list stays in the list; a connector never loaded has no list.
   assert.equal(watchTools(issues, "gone", allow("always"))?.some((t) => t.own === "gone"), true);

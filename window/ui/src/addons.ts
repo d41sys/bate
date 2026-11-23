@@ -48,11 +48,11 @@ export function connectorState(c: Connector, agent = false): { text: string; pro
   return { text: "On, no problem reported", problem: false };
 }
 
-/** The tools of a connector for one bot, to switch to blocked: those its engine listed and those blocked (a blocked one may not be listed yet), each with its own name. */
-export function connectorTools(c: Connector): { name: string; own: string; blocked: boolean }[] {
+/** The tools of a connector for one bot, to switch to blocked: those its engine listed and those blocked (a blocked one may not be listed yet), each with its own name and whether the connector marks it read-only. */
+export function connectorTools(c: Connector): { name: string; own: string; blocked: boolean; marked: boolean }[] {
   const blocked = c.blocked ?? [];
   const names = [...new Set([...(c.toolNames ?? []), ...blocked])].sort();
-  return names.map((name) => ({ name, own: name.slice(c.name.length + 2), blocked: blocked.includes(name) }));
+  return names.map((name) => ({ name, own: name.slice(c.name.length + 2), blocked: blocked.includes(name), marked: (c.readOnly ?? []).includes(name) }));
 }
 
 /** The one line of a row: on for how many of the bots that have it. */

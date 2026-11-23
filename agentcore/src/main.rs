@@ -390,8 +390,12 @@ impl Engine {
                     let (out, inputs) = (self.out.clone(), self.inputs.clone());
                     let (connectors, dir) = (self.connectors.clone(), self.dir.clone());
                     thread::spawn(move || {
-                        for (name, names) in mcp.sync(&connectors, &dir, &control) {
-                            out.send(&Event::ConnectorLoaded { name, names });
+                        for (name, names, read_only) in mcp.sync(&connectors, &dir, &control) {
+                            out.send(&Event::ConnectorLoaded {
+                                name,
+                                names,
+                                read_only,
+                            });
                         }
                         let mut events = Vec::new();
                         let error = match mcp.call_within(&tool, &args, &control, CALL_TOOL) {

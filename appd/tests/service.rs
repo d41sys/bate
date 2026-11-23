@@ -203,7 +203,10 @@ while IFS= read -r line; do
       case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
       case "$line" in *'"name":"works","enabled":true'*)
         if [ -e works-dies ]; then echo "connector works: it stopped" >&2
-        else echo '{"type":"connector_loaded","name":"works","names":["works__a","works__b"]}'; fi ;; esac
+        else
+          # The file `works-marks` holds the JSON list of the tools its server marks read-only.
+          [ -s works-marks ] && marks=",\"readOnly\":$(cat works-marks)" || marks=
+          echo "{\"type\":\"connector_loaded\",\"name\":\"works\",\"names\":[\"works__a\",\"works__b\"]$marks}"; fi ;; esac
       echo "$ok" ;;
     *'"type":"peers"'*) printf '%s\n' "$line" >> peers.log; echo "$ok" ;;
     *'"type":"skill_folders"'*) printf '%s\n' "$line" >> skills.log; echo "$ok" ;;
@@ -3724,6 +3727,8 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
         "answer_secret",
         "list_secrets",
         "remove_secret",
+        // What a connector marks read-only is confirmed by the person who was shown it, in the window on this Mac.
+        "confirm_read_tools",
         "a_command_in_no_list",
     ]
     .into_iter()
@@ -4611,6 +4616,221 @@ fn a_blocked_tool_is_refused_whatever_else_is_set_and_survives_a_restart_but_not
         act(&mut w, &bot, "n9", "connector works__a", Some("Deny")),
         "chose Deny"
     );
+}
+
+/// A bot with the connector `works` whose server marks the tools in `marks` read-only (a JSON list),
+/// and an engine that has started and loaded it.
+fn marked_bot(home: &Path, w: &mut Window, marks: &str) -> String {
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("works-marks"), marks).unwrap();
+    let works = json!({"name": "works", "enabled": true,
+        "transport": {"type": "stdio", "command": "serve", "args": []}});
+    w.ok("set_connector", json!({"bot": bot, "connector": works}));
+    w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+    bot
+}
+
+fn works(w: &mut Window, bot: &str) -> Value {
+    w.ok("list_connectors", json!({"bot": bot}))["connectors"][0].clone()
+}
+
+#[test]
+fn read_without_asking_runs_the_tools_marked_and_confirmed_and_asks_for_the_rest() {
+    let home = home("read-only-level");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = marked_bot(&home, &mut w, r#"["works__a"]"#);
+    eventually("the mark is listed", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__a"])
+    });
+    let level = |w: &mut Window, level: &str| {
+        w.ok(
+            "set_permission",
+            json!({"bot": bot, "kind": "connector", "level": level}),
+        )
+    };
+
+    // The level covers the tools the person confirmed, none until then: the row says what is left.
+    assert!(works(&mut w, &bot).get("toConfirm").is_none());
+    level(&mut w, "read_only");
+    assert_eq!(works(&mut w, &bot)["toConfirm"], json!(["works__a"]));
+    assert_eq!(
+        act(&mut w, &bot, "n1", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+    w.ok(
+        "confirm_read_tools",
+        json!({"bot": bot, "tools": ["works__a"]}),
+    );
+    assert!(works(&mut w, &bot).get("toConfirm").is_none());
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["levels"]["connector"],
+        "read_only"
+    );
+
+    // A marked tool runs without a question; one that is not marked, and every other kind, asks.
+    assert_eq!(
+        act(&mut w, &bot, "n2", "connector works__a", None),
+        "chose Approve"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n3", "connector works__b", Some("Deny")),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n4", "run ls", Some("Deny")),
+        "chose Deny"
+    );
+
+    // A blocked tool does not run, marked or not.
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": true}),
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n5", "connector works__a", None),
+        "chose Deny"
+    );
+    w.ok(
+        "block_tool",
+        json!({"bot": bot, "tool": "works__a", "blocked": false}),
+    );
+
+    // A watch can be saved on a tool the level covers, and not on one that would ask.
+    let watch = |tool: &str| {
+        let watch = json!({"connector": "works", "tool": tool, "arguments": {}, "every": 5});
+        json!({"bot": bot, "routine": {"name": "Look", "prompt": "Say what changed.", "enabled": false, "watch": watch}})
+    };
+    w.ok("set_routine", watch("a"));
+    let id = w.send("set_routine", watch("b"));
+    let answer = w.wait_for(|f| f["type"] == "response" && f["id"] == id.as_str());
+    let why = answer["error"].as_str().unwrap_or_default();
+    assert!(
+        answer["code"] == "invalid_routine" && why.contains("would ask"),
+        "{answer}"
+    );
+
+    // Only a tool the server marks can be confirmed; the level is for connectors only, and not for
+    // a bot on an installed agent, which runs its connectors itself.
+    for (command, args) in [
+        (
+            "confirm_read_tools",
+            json!({"bot": bot, "tools": ["works__b"]}),
+        ),
+        (
+            "set_permission",
+            json!({"bot": bot, "kind": "run", "level": "read_only"}),
+        ),
+    ] {
+        assert_eq!(refused(&mut w, command, args), "bad_request", "{command}");
+    }
+    let other = w.create_bot();
+    w.ok(
+        "set_agent",
+        json!({"bot": other, "command": ["some-agent"]}),
+    );
+    let args = json!({"bot": other, "kind": "connector", "level": "read_only"});
+    assert_eq!(refused(&mut w, "set_permission", args), "bad_request");
+}
+
+#[test]
+fn a_tool_marked_later_asks_until_confirmed_and_the_level_and_confirmation_survive_a_restart() {
+    let home = home("read-only-later");
+    let mut service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = marked_bot(&home, &mut w, r#"["works__a"]"#);
+    eventually("the mark is listed", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__a"])
+    });
+    w.ok(
+        "confirm_read_tools",
+        json!({"bot": bot, "tools": ["works__a"]}),
+    );
+    w.ok(
+        "set_permission",
+        json!({"bot": bot, "kind": "connector", "level": "read_only"}),
+    );
+    // The server's marks as the next engine finds them, after a restart of the service.
+    let restart = |service: &mut Service, marks: &str| {
+        service.kill();
+        fs::write(home.join("bots").join(&bot).join("works-marks"), marks).unwrap();
+        *service = Service::start(&home);
+        let mut w = Window::connect(&home);
+        w.ok("set_model", json!({"bot": bot, "model": "m1"}));
+        w
+    };
+
+    // The level and the confirmed tool are kept; the engine of the new run finds the same mark.
+    let mut w = restart(&mut service, r#"["works__a"]"#);
+    assert_eq!(
+        w.ok("get_permissions", json!({"bot": bot}))["levels"]["connector"],
+        "read_only"
+    );
+    eventually("the mark is listed", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__a"])
+    });
+    assert!(works(&mut w, &bot).get("toConfirm").is_none());
+    assert_eq!(
+        act(&mut w, &bot, "n1", "connector works__a", None),
+        "chose Approve"
+    );
+
+    // A tool the server marks since asks, and the row says so, until the person confirms it.
+    let mut w = restart(&mut service, r#"["works__a","works__b"]"#);
+    eventually("the new mark is listed", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__a", "works__b"])
+    });
+    assert_eq!(works(&mut w, &bot)["toConfirm"], json!(["works__b"]));
+    assert_eq!(
+        act(&mut w, &bot, "n2", "connector works__a", None),
+        "chose Approve"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n3", "connector works__b", Some("Deny")),
+        "chose Deny"
+    );
+    w.ok(
+        "confirm_read_tools",
+        json!({"bot": bot, "tools": ["works__b"]}),
+    );
+    assert!(works(&mut w, &bot).get("toConfirm").is_none());
+    assert_eq!(
+        act(&mut w, &bot, "n4", "connector works__b", None),
+        "chose Approve"
+    );
+
+    // A tool that lost its mark asks at once, and has to be confirmed again if it gets it back.
+    let mut w = restart(&mut service, r#"["works__b"]"#);
+    eventually("the mark is gone", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__b"])
+    });
+    assert_eq!(
+        act(&mut w, &bot, "n5", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+    assert_eq!(
+        act(&mut w, &bot, "n6", "connector works__b", None),
+        "chose Approve"
+    );
+    let mut w = restart(&mut service, r#"["works__a","works__b"]"#);
+    eventually("the mark is back", || {
+        works(&mut w, &bot)["readOnly"] == json!(["works__a", "works__b"])
+    });
+    assert_eq!(works(&mut w, &bot)["toConfirm"], json!(["works__a"]));
+    assert_eq!(
+        act(&mut w, &bot, "n7", "connector works__a", Some("Deny")),
+        "chose Deny"
+    );
+
+    // A connector that is changed is another server: what was confirmed for it is forgotten.
+    let changed = json!({"name": "works", "enabled": true,
+        "transport": {"type": "stdio", "command": "elsewhere", "args": []}});
+    w.ok("set_connector", json!({"bot": bot, "connector": changed}));
+    eventually("the connector is loaded again", || {
+        works(&mut w, &bot)["toConfirm"] == json!(["works__a", "works__b"])
+    });
 }
 
 #[test]

@@ -37,6 +37,8 @@ struct Tool {
     name: String,
     /// The model's name for it: `<connector>__<name>`.
     exposed: String,
+    /// The server marks it read-only (`annotations.readOnlyHint`): its claim, not checked.
+    read_only: bool,
     /// In the OpenAI function-calling shape.
     definition: Value,
 }
@@ -69,13 +71,14 @@ impl Drop for Link {
 impl Servers {
     /// Makes the running servers match `connectors`: stops those removed, changed or disabled, and
     /// starts the new enabled ones. A connector that fails is reported on stderr (the service log);
-    /// the ones that loaded are returned with the model's names for their tools, for the service to be told.
+    /// the ones that loaded are returned with the model's names for their tools, and those of them
+    /// the server marks read-only, for the service to be told.
     pub fn sync(
         &mut self,
         connectors: &[Connector],
         dir: &Path,
         control: &Control,
-    ) -> Vec<(String, Vec<String>)> {
+    ) -> Vec<(String, Vec<String>, Vec<String>)> {
         // A server that has stopped is forgotten here, so it is started again below.
         self.0.retain_mut(|(known, server)| {
             connectors.contains(known) && server.as_mut().is_none_or(Server::alive)
@@ -118,7 +121,13 @@ impl Servers {
                     free
                 });
                 let names = server.tools.iter().map(|t| t.exposed.clone()).collect();
-                loaded.push((connector.name.clone(), names));
+                let read_only = server
+                    .tools
+                    .iter()
+                    .filter(|t| t.read_only)
+                    .map(|t| t.exposed.clone())
+                    .collect();
+                loaded.push((connector.name.clone(), names, read_only));
             }
             let server = server
                 .map_err(|e| eprintln!("connector {}: {e}", connector.name))
@@ -297,6 +306,7 @@ impl Server {
                 let description = tool["description"].as_str().unwrap_or("");
                 server.tools.push(Tool {
                     name: name.to_owned(),
+                    read_only: tool["annotations"]["readOnlyHint"] == true,
                     definition: json!({"type": "function", "function":
                         {"name": exposed, "description": description, "parameters": parameters}}),
                     exposed,

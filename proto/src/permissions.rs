@@ -65,6 +65,9 @@ pub enum Level {
     Always,
     /// The user is asked, unless a grant covers exactly this action.
     Ask,
+    /// Only for `Kind::Connector`: a tool its connector marks read-only, and that the user has
+    /// seen marked, runs without asking; every other action is asked as at `Ask`.
+    ReadOnly,
     /// Refused without asking.
     Never,
 }

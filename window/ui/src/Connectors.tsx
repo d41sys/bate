@@ -13,7 +13,7 @@ const blank: ConnectorForm = { name: "", type: "http", url: "", command: "", arg
 type Ask = { form: ConnectorForm; listed?: ConnectorListed } | { copy: Connector; from: string; has: string[] } | { remove: string; users: string[] };
 const address = (c: Connector) => (c.transport.type === "http" ? c.transport.url : [c.transport.command, ...(c.transport.args ?? [])].join(" "));
 /** What `set_connector` takes: the output-only fields are left out. */
-const sent = ({ error, tools, toolNames, blocked, signedIn, ...c }: Connector) => c;
+const sent = ({ error, tools, toolNames, blocked, readOnly, toConfirm, signedIn, ...c }: Connector) => c;
 
 /** The connectors of every bot in one list: is each on, does it work, who has it; add to more bots in one step. */
 export function Connectors({ bots }: { bots: Bot[] }) {
@@ -78,6 +78,14 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                           {botName(bot)}
                         </label>
                         <small className={state.problem ? "error" : undefined}>{state.text}</small>
+                        {item.toConfirm && (
+                          <>
+                            <small>
+                              Marked read-only by the connector, its own claim. They ask until you confirm: {item.toConfirm.map((t) => t.slice(item.name.length + 2)).join(", ")}
+                            </small>
+                            {inShell && <button className="small" aria-label={`Confirm ${item.toConfirm.length} read-only ${item.toConfirm.length === 1 ? "tool" : "tools"} of ${item.name} for ${botName(bot)}`} onClick={() => void run(request("confirm_read_tools", { bot, tools: item.toConfirm }))}>Confirm</button>}
+                          </>
+                        )}
                         {item.oauth &&
                           (item.signedIn ? (
                             <button className="small" onClick={() => void run(request("sign_out_connector", { bot, name: item.name }))}>Sign out</button>
@@ -89,6 +97,7 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                           <details>
                             <summary>
                               {tools.length} {tools.length === 1 ? "tool" : "tools"}
+                              {tools.some((t) => t.marked) && ` · ${tools.filter((t) => t.marked).length} marked read-only`}
                               {tools.some((t) => t.blocked) && ` · ${tools.filter((t) => t.blocked).length} blocked`}
                             </summary>
                             <ul className="rows">
@@ -96,7 +105,7 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                                 <li key={t.name}>
                                   <div className="what">
                                     <code>{t.own}</code>
-                                    <small>{t.blocked ? "Blocked: the bot is not offered it and cannot call it" : "Not blocked"}</small>
+                                    <small>{t.blocked ? "Blocked: the bot is not offered it and cannot call it" : t.marked ? "Marked read-only by the connector: its own claim" : "Not marked read-only"}</small>
                                   </div>
                                   <label>
                                     <input type="checkbox" role="switch" aria-label={`Block ${t.own} for ${botName(bot)}`} checked={t.blocked} onChange={(e) => void run(request("block_tool", { bot, tool: t.name, blocked: e.target.checked }))} />

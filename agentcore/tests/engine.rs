@@ -1074,7 +1074,7 @@ fn a_stdio_connector_lists_its_tools_and_each_call_asks_first() {
     let loaded: Vec<_> = asked
         .iter()
         .filter_map(|e| match e {
-            Event::ConnectorLoaded { name, names } => Some((name.as_str(), names.as_slice())),
+            Event::ConnectorLoaded { name, names, .. } => Some((name.as_str(), names.as_slice())),
             _ => None,
         })
         .collect();
@@ -1172,6 +1172,52 @@ fn a_blocked_connector_tool_is_not_offered_and_a_call_to_it_is_refused_unasked()
     );
     assert!(!tool_names(&model, 0).contains(&"fake__echo".to_owned()));
     assert!(!dir.join("calls.log").exists());
+}
+
+#[test]
+fn a_loaded_connector_reports_the_tools_its_server_marks_read_only() {
+    let dir = workdir("mcp-read-only");
+    let script = dir.join("fake-mcp");
+    // `look` says it only reads; `poke` says it does not; `echo` says nothing; `maybe` says it as
+    // text, which is not the protocol's `true`.
+    let tool = |name: &str| {
+        format!(
+            r#"{{\"name\":\"{name}\",\"description\":\"T\",\"inputSchema\":{{\"type\":\"object\"}}"#
+        )
+    };
+    let listed = [
+        tool("echo") + "}",
+        tool("look") + r#",\"annotations\":{\"readOnlyHint\":true}}"#,
+        tool("poke") + r#",\"annotations\":{\"readOnlyHint\":false}}"#,
+        tool("maybe") + r#",\"annotations\":{\"readOnlyHint\":\"true\"}}"#,
+    ]
+    .join(",");
+    let server = FAKE_MCP.replacen(
+        r#"\"tools\":[{\"name\":\"echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}}]"#,
+        &format!(r#"\"tools\":[{listed}]"#),
+        1,
+    );
+    assert_ne!(server, FAKE_MCP);
+    fs::write(&script, server).unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let model = Model::serve(Vec::new());
+    let mut engine = Engine::start(&dir, &model);
+    let connectors = vec![connector("fake", stdio(&script))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+    engine.send(Op::CallTool {
+        tool: "fake__look".into(),
+        args: serde_json::Map::new(),
+    });
+    let events = engine.until(|e| matches!(e, Event::Response { .. }));
+    let loaded = events.iter().find_map(|e| match e {
+        Event::ConnectorLoaded {
+            names, read_only, ..
+        } => Some((names, read_only)),
+        _ => None,
+    });
+    let (names, read_only) = loaded.expect("the connector was reported");
+    assert_eq!(names.len(), 4, "{names:?}");
+    assert_eq!(read_only, &["fake__look".to_owned()], "{events:?}");
 }
 
 #[test]

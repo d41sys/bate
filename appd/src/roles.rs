@@ -60,7 +60,8 @@ fn reach(level: Level) -> u8 {
     match level {
         Level::Never => 0,
         Level::Ask => 1,
-        Level::Always => 2,
+        Level::ReadOnly => 2,
+        Level::Always => 3,
     }
 }
 
@@ -128,6 +129,12 @@ fn parse(text: &str) -> Result<Role, String> {
                 let level: Level = serde_json::from_value(value.into()).map_err(|_| {
                     format!("`{key}` must be `always`, `ask` or `never`, not `{value}`")
                 })?;
+                // It covers the tools the person was shown marked in Settings: a role cannot choose them.
+                if level == Level::ReadOnly {
+                    return Err(format!(
+                        "`{key}` cannot be `read_only`: that is chosen in Settings"
+                    ));
+                }
                 if kind.always_asks() && level == Level::Always {
                     return Err(format!(
                         "`{key}` is asked about every time: use `ask` or `never`"
@@ -173,6 +180,10 @@ mod tests {
             ("---\n---\nHi", "`name` must be"),
             ("---\nname: A\nwirte: always\n---\n", "`wirte` is not a key"),
             ("---\nname: A\nrun: sometimes\n---\n", "`run` must be"),
+            (
+                "---\nname: A\nconnector: read_only\n---\n",
+                "chosen in Settings",
+            ),
             ("---\nname: A\nname: B\n---\n", "given twice"),
             ("---\nname: A\napple_change: always\n---\n", "every time"),
             ("---\nname: A\nskills: ../x\n---\n", "a skill's `name`"),

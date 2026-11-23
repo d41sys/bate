@@ -213,9 +213,10 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         <Problem text={error("load")} />
         {permissions &&
           KINDS.map((kind) => (
-            <Setting key={kind} id={`perm-${kind}`} title={ACTIONS[kind]} saved={saved(`perm-${kind}`)} error={error(`perm-${kind}`)}>
+            <Setting key={kind} id={`perm-${kind}`} title={ACTIONS[kind]} hint={kind !== "connector" ? undefined : bot.agent ? "An installed agent runs connector tools itself, so read-only tools without asking is not offered." : permissions.levels[kind] === "read_only" ? "A tool its connector marks read-only runs without a question once you have confirmed it under Add-ons. Every other tool asks." : undefined} saved={saved(`perm-${kind}`)} error={error(`perm-${kind}`)}>
               <select value={permissions.levels[kind]} onChange={(e) => { edit(`perm-${kind}`); run(`perm-${kind}`, request("set_permission", { bot: bot.id, kind, level: e.target.value as Level })); }}>
                 {kind !== "apple_change" && <option value="always">always</option>}
+                {kind === "connector" && (!bot.agent || permissions.levels[kind] === "read_only") && <option value="read_only">read-only tools without asking</option>}
                 <option value="ask">ask me</option>
                 <option value="never">never</option>
               </select>
