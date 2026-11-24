@@ -9725,7 +9725,8 @@ impl FakeHelper {
         };
         let mut out = stream.try_clone().unwrap();
         let status = json!({"type": "status", "accessibility": accessibility, "screenRecording": screen_recording, "fullDiskAccess": full_disk_access});
-        writeln!(out, "{status}").unwrap();
+        // A stranger may be refused before it has said this: its tests see the closed socket.
+        let _ = writeln!(out, "{status}");
         let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let (seen, input) = (calls.clone(), stream.try_clone().unwrap());
         std::thread::spawn(move || {
