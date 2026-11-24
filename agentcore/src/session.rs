@@ -146,7 +146,9 @@ impl Session {
     }
 
     /// Rough size of what the model sees.
-    // shortcut: 4 bytes per token; use the server's own token counts once a provider reports them (#8).
+    // shortcut: 4 bytes per token, and the system text and the tools are not counted. A size the
+    // server refuses is summarised and asked again (`OVERFLOW` in `turn`); use the server's own
+    // counts if a summary is seen to come too early or too late.
     pub fn tokens(&self) -> usize {
         self.bytes / 4
     }

@@ -2223,6 +2223,64 @@ fn a_bot_alone_has_no_message_tool_and_a_lead_is_told_what_it_may_do() {
 }
 
 #[test]
+fn two_bots_with_one_name_are_listed_with_their_ids_and_messaged_by_id() {
+    let dir = workdir("message-same-name");
+    let tell =
+        |id: &str, bot: &str| vec![call(id, "message_bot", json!({"bot": bot, "text": "hi"}))];
+    let model = Model::serve(vec![
+        tell("c1", "scout"),
+        tell("c2", "b3"),
+        vec![text("done")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let peer = |id: &str| Peer {
+        id: id.into(),
+        name: "Scout".into(),
+        lead: false,
+    };
+    let peers = vec![peer("b2"), peer("b3")];
+    assert_eq!(
+        engine.request(Op::Peers {
+            peers,
+            leads: false
+        }),
+        None
+    );
+    engine.prompt("ask around");
+
+    // The name alone picks neither, so nothing is asked about it; the id picks one.
+    let events = answer(&mut engine, "Approve");
+    let Some(Event::Question { target, .. }) = events.last() else {
+        unreachable!()
+    };
+    assert_eq!(target.as_deref(), Some("bot:b3"));
+    let sent = engine.until(|e| matches!(e, Event::Message { .. }));
+    let Some(Event::Message { message, to, .. }) = sent.last() else {
+        unreachable!()
+    };
+    assert_eq!(to, "b3");
+    let reply = Op::Reply {
+        message: message.clone(),
+        text: Some("hello".into()),
+        error: None,
+    };
+    assert_eq!(engine.request(reply), None);
+    engine.until(is_turn_end);
+
+    let requests = model.requests();
+    let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("- Scout (id `b2`)\n- Scout (id `b3`)"),
+        "{system}"
+    );
+    assert_eq!(
+        requests[1]["messages"].as_array().unwrap().last().unwrap()["content"],
+        "More than one bot is named `scout`. Give the id of the one you mean: b2, b3."
+    );
+}
+
+#[test]
 fn check_back_is_offered_only_when_the_prompt_says_so_and_the_service_carries_it_out() {
     let dir = workdir("check-back");
     let model = Model::serve(vec![
