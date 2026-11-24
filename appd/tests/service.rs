@@ -18138,6 +18138,8 @@ const ANSWERS_LATER: &[&str] = &[
     "answer_secret",
     "steer",
     "abort",
+    "delete_bot",
+    "export_report",
     "set_model",
     "rewind",
     "compact",
@@ -18595,7 +18597,7 @@ fn log_end(home: &Path) -> String {
 fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Vec<u8>, Sent)>) {
     let mut waiting: std::collections::HashMap<String, Sent> = Default::default();
     // Frames with no `id` (or a null one) and lines that are not frames are answered with `null`.
-    let (mut nulls_at_once, mut nulls_later) = (0, 0);
+    let (mut nulls_at_once, mut nulls_later) = (Vec::<String>::new(), 0);
     for (line, sent) in lines {
         // A service that has died refuses the write: the read below says so.
         let _ = w
@@ -18607,7 +18609,7 @@ fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Ve
             .and_then(|f| f.get("id").cloned())
             .unwrap_or(Value::Null);
         match id {
-            Value::Null if sent.at_once => nulls_at_once += 1,
+            Value::Null if sent.at_once => nulls_at_once.push(sent.command.clone()),
             Value::Null => nulls_later += 1,
             id => {
                 let key = id.to_string();
@@ -18622,7 +18624,7 @@ fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Ve
     let barrier = w.next.to_string();
     let _ = writeln!(w.writer, "{}", json!({"id": barrier, "type": "list_bots"}));
     let mut barrier_seen = false;
-    while !(barrier_seen && waiting.is_empty() && nulls_later == 0 && nulls_at_once == 0) {
+    while !(barrier_seen && waiting.is_empty() && nulls_later == 0 && nulls_at_once.is_empty()) {
         let mut line = String::new();
         let read = w.reader.read_line(&mut line);
         let pending = || {
@@ -18632,7 +18634,7 @@ fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Ve
                 .map(|s| format!("{}: {}", s.command, shortened(&s.frame)))
                 .collect();
             left.push(format!(
-                "{nulls_at_once} + {nulls_later} answers to `null` ids"
+                "{nulls_at_once:?} + {nulls_later} answers to `null` ids"
             ));
             left.join("\n  ")
         };
@@ -18666,8 +18668,8 @@ fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Ve
             barrier_seen = true;
             let late: Vec<&Sent> = waiting.values().filter(|s| s.at_once).collect();
             assert!(
-                late.is_empty() && nulls_at_once == 0,
-                "answered after the barrier, though the command answers at once:\n  {}",
+                late.is_empty() && nulls_at_once.is_empty(),
+                "answered after the barrier, though the command answers at once:\n  {}\n  no answer to a `null` id from: {nulls_at_once:?}",
                 late.iter()
                     .take(3)
                     .map(|s| format!("{}: {}", s.command, shortened(&s.frame)))
@@ -18675,9 +18677,7 @@ fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Ve
                     .join("\n  ")
             );
         } else if frame["id"].is_null() {
-            if nulls_at_once > 0 {
-                nulls_at_once -= 1;
-            } else {
+            if nulls_at_once.pop().is_none() {
                 assert!(nulls_later > 0, "an answer to a `null` id nobody sent");
                 nulls_later -= 1;
             }
