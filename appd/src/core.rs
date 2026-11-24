@@ -133,6 +133,14 @@ pub enum Msg {
         run: u8,
         result: io::Result<precheck::Checked>,
     },
+    /// A bot's folder went to the Trash, or did not: `delete_bot` goes on from here.
+    BotTrashed {
+        client: u64,
+        id: Value,
+        bot: String,
+        label: String,
+        result: Result<(), String>,
+    },
     /// The answer to a request that waited for the network: the catalog read, or why not.
     Replied {
         client: u64,
@@ -781,6 +789,8 @@ pub struct Core {
     /// Hand-offs whose acceptance command has not ended, by the worker: it takes no other prompt
     /// until it has.
     holds: HashMap<String, Hold>,
+    /// Bots whose folder is on its way to the Trash: they take no command and start no engine.
+    deleting: HashSet<String>,
     /// The port of the proxy that holds each limited bot's browser to its hosts. Chrome cannot
     /// send a key, so each such bot has a listener of its own, kept while the service runs.
     // shortcut: one listener thread and port per limited bot, none freed when the bot is deleted; fine for tens of bots.
@@ -880,6 +890,7 @@ impl Core {
             net_keys: HashMap::new(),
             starting: HashMap::new(),
             holds: HashMap::new(),
+            deleting: HashSet::new(),
             browser_proxies: HashMap::new(),
             lan,
             channels: HashMap::new(),
@@ -1191,7 +1202,9 @@ impl Core {
                 // What was not started for want of a secret is started now; a turn that failed
                 // for it is not replayed: the window sends it again.
                 self.start_channels();
-                self.lan.resume();
+                // Asks Tailscale and may make a certificate: not on this thread.
+                let lan = self.lan.clone();
+                thread::spawn(move || lan.resume());
                 self.broadcast(&json!({"type": "keychain_changed"}));
             }
             Msg::UpdateDue => self.start_check(),
@@ -1205,6 +1218,34 @@ impl Core {
                 command,
                 result,
             } => self.reply(client, &id, command, result),
+            Msg::BotTrashed {
+                client,
+                id,
+                bot,
+                label,
+                result,
+            } => {
+                self.deleting.remove(&bot);
+                let gone = result
+                    .map_err(|e| ("trash_failed", e))
+                    .and_then(|()| self.forget_bot(&bot));
+                match gone {
+                    // Its Chrome has closed: the profile follows, and then the answer.
+                    Ok(()) => {
+                        let profile = paths::home().join("browsers").join(&bot);
+                        self.reply_later(client, &id, "delete_bot", move || {
+                            if let Err(e) = trash(&profile, &format!("{label} browser")) {
+                                log!(
+                                    "bot {bot}: {} not moved to the Trash: {e}",
+                                    profile.display()
+                                );
+                            }
+                            Ok(json!({}))
+                        });
+                    }
+                    Err(refusal) => self.reply(client, &id, "delete_bot", Err(refusal)),
+                }
+            }
             Msg::AdapterBuilt { client, id, result } => {
                 let result = result.and_then(|built| {
                     // Not while a bot is running on the copy that goes.
@@ -3056,50 +3097,24 @@ impl Core {
                     .map_err(internal)?
                     .expect("checked")
                     .name;
-                // Its folder to the Trash first: if that fails, the bot stays as it was.
+                // Its folder to the Trash first, on a thread of its own: if that fails, the bot
+                // stays as it was. `BotTrashed` goes on.
                 let label = format!("{} {bot}", name.replace('/', "-"));
                 let dir = paths::bot_dir(&bot);
-                trash(&dir, &label).map_err(|e| {
-                    (
-                        "trash_failed",
-                        format!("{} was not moved to the Trash: {e}", dir.display()),
-                    )
-                })?;
-                self.on_engine_gone(&bot);
-                // Its acceptance command, if one still runs, ends with it; whoever waits is told.
-                self.stop_check(&bot);
-                if let Some(hold) = self.holds.remove(&bot) {
-                    self.reply_caller(&bot, hold.caller, Err("the bot was deleted".into()));
-                }
-                self.cancel_starts(&bot, None, None);
-                // Its senders were told an answer would come: they hear why none will.
-                for mail in self
-                    .store
-                    .mail_in("waiting", Some(&bot))
-                    .map_err(internal)?
-                {
-                    self.answer_mail(mail.seq, Err("the bot was deleted".into()), None);
-                }
-                // Its Chrome closes with the handle.
-                self.browsers.remove(&bot);
-                let profile = paths::home().join("browsers").join(&bot);
-                if let Err(e) = trash(&profile, &format!("{label} browser")) {
-                    log!(
-                        "bot {bot}: {} not moved to the Trash: {e}",
-                        profile.display()
-                    );
-                }
-                let project = self.project_of(&bot).map_err(internal)?;
-                // The database clears its place in the project, and the project's lead if it was.
-                self.store.delete_bot(&bot).map_err(internal)?;
-                for kind in channels::KINDS {
-                    self.stop_channel(&(bot.clone(), kind));
-                }
-                if project.is_some() {
-                    self.projects_changed(std::slice::from_ref(&bot));
-                }
-                self.broadcast(&json!({"type": "bots_changed"}));
-                Ok(Some(json!({})))
+                self.deleting.insert(bot.clone());
+                let (tx, id) = (self.tx.clone(), id.clone());
+                thread::spawn(move || {
+                    let result = trash(&dir, &label)
+                        .map_err(|e| format!("{} was not moved to the Trash: {e}", dir.display()));
+                    let _ = tx.send(Msg::BotTrashed {
+                        client,
+                        id,
+                        bot,
+                        label,
+                        result,
+                    });
+                });
+                Ok(None)
             }
             "search" => {
                 let text = str_field(f, "text")?.trim();
@@ -3137,8 +3152,13 @@ impl Core {
                     .get("on")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| bad("`on` must be true or false"))?;
-                self.lan.set(on).map_err(|e| ("lan_failed", e))?;
-                Ok(Some(self.lan.status()))
+                // Turning it on asks Tailscale and may make a certificate: not on this thread.
+                let lan = self.lan.clone();
+                self.reply_later(client, id, "set_lan", move || {
+                    lan.set(on).map_err(|e| ("lan_failed", e))?;
+                    Ok(lan.status())
+                });
+                Ok(None)
             }
             "pair_device" => self.lan.pair_code().map(Some).map_err(|e| ("lan_off", e)),
             "remove_device" => {
@@ -3292,9 +3312,15 @@ impl Core {
                 Ok(None)
             }
             "export_report" => {
-                let path = crate::report::export(&self.store, now_ms())
-                    .map_err(|e| ("export_failed", e.to_string()))?;
-                Ok(Some(json!({"path": path})))
+                let failed = |e: io::Error| ("export_failed", e.to_string());
+                let (settings, secrets) = crate::report::gather(&self.store).map_err(failed)?;
+                let now = now_ms();
+                // Reading the logs and packing them is not for this thread.
+                self.reply_later(client, id, "export_report", move || {
+                    let path = crate::report::write(&settings, &secrets, now).map_err(failed)?;
+                    Ok(json!({"path": path}))
+                });
+                Ok(None)
             }
             "list_connectors" => {
                 let bot = self.bot_of(f)?;
@@ -3518,8 +3544,40 @@ impl Core {
         Ok(paths::bot_dir(from).join(proto::skills::DIR).join(name))
     }
 
+    /// What `delete_bot` does once the bot's folder is in the Trash: its engine, what waits for
+    /// it, its browser and its rows go.
+    fn forget_bot(&mut self, bot: &str) -> Result<(), Refusal> {
+        self.on_engine_gone(bot);
+        // Its acceptance command, if one still runs, ends with it; whoever waits is told.
+        self.stop_check(bot);
+        if let Some(hold) = self.holds.remove(bot) {
+            self.reply_caller(bot, hold.caller, Err("the bot was deleted".into()));
+        }
+        self.cancel_starts(bot, None, None);
+        // Its senders were told an answer would come: they hear why none will.
+        for mail in self.store.mail_in("waiting", Some(bot)).map_err(internal)? {
+            self.answer_mail(mail.seq, Err("the bot was deleted".into()), None);
+        }
+        // Its Chrome closes with the handle.
+        self.browsers.remove(bot);
+        let project = self.project_of(bot).map_err(internal)?;
+        // The database clears its place in the project, and the project's lead if it was.
+        self.store.delete_bot(bot).map_err(internal)?;
+        for kind in channels::KINDS {
+            self.stop_channel(&(bot.to_owned(), kind));
+        }
+        if project.is_some() {
+            self.projects_changed(&[bot.to_owned()]);
+        }
+        self.broadcast(&json!({"type": "bots_changed"}));
+        Ok(())
+    }
+
     fn bot_of(&self, f: &Value) -> Result<String, Refusal> {
         let bot = str_field(f, "bot")?;
+        if self.deleting.contains(bot) {
+            return Err(("no_such_bot", format!("bot `{bot}` is being deleted")));
+        }
         match self.store.bot(bot).map_err(internal)? {
             Some(_) => Ok(bot.to_owned()),
             None => Err(("no_such_bot", format!("no bot `{bot}`"))),
@@ -3767,6 +3825,9 @@ impl Core {
 
     /// Starts the bot's engine if it has none, with `conversation` open, else the current one.
     fn ensure_engine(&mut self, bot: &str, conversation: Option<&str>) -> Result<(), Refusal> {
+        if self.deleting.contains(bot) {
+            return Err(("no_such_bot", format!("bot `{bot}` is being deleted")));
+        }
         if self.engines.contains_key(bot) {
             return Ok(());
         }
@@ -9133,4 +9194,220 @@ fn fetch_models(base_url: &str, key: Option<&str>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The core thread never waits (`docs/agents/contract.md`). This reads the service's source and
+/// holds that as far as names show it: a call that waits, or a call of a function that does, is
+/// on a thread of its own or listed in `ALLOWED`. It cannot see a wait behind a closure kept for
+/// later, a function brought in under another name, or a lock that a waiting thread holds.
+#[cfg(test)]
+mod waits {
+    use std::collections::BTreeSet;
+
+    /// Calls that wait: for a clock, a process, a channel or the network.
+    const WAITS: [&str; 10] = [
+        "thread::sleep(",
+        ".output()",
+        ".wait()",
+        ".wait_with_output()",
+        ".wait_timeout(",
+        ".recv()",
+        ".recv_timeout(",
+        ".call()",
+        ".accept()",
+        "TcpStream::connect",
+    ];
+
+    /// What hands a closure to a thread of its own.
+    const OFF_THREAD: [&str; 4] = [
+        "thread::spawn(",
+        ".spawn(move ",
+        "self.reply_later(",
+        "self.install(",
+    ];
+
+    /// The waits left on the core thread: the method, the call, and why it may stay.
+    const ALLOWED: [(&str, &str, &str); 4] = [
+        (
+            "run",
+            ".recv_timeout(",
+            "the loop's own wait for the next message",
+        ),
+        (
+            "on_engine_gone",
+            ".wait()",
+            "reaps an engine it has just killed",
+        ),
+        (
+            "install_if_idle",
+            "update::install(",
+            "no bot works, and the service exits right after",
+        ),
+        (
+            "install_if_idle",
+            "thread::sleep(",
+            "the same exit: the answer leaves the socket first",
+        ),
+    ];
+
+    struct Line {
+        at: usize,
+        /// The module and the function it is in.
+        func: (String, String),
+        /// In a function that takes `self`.
+        method: bool,
+        text: String,
+        /// In a closure handed to another thread.
+        off: bool,
+    }
+
+    /// The lines of code of a module up to its tests, each with where it is.
+    fn read(module: &str, src: &str) -> Vec<Line> {
+        let (mut func, mut method, mut signature) = (String::new(), false, false);
+        // The indent of the line that opened a closure for another thread.
+        let mut region: Option<usize> = None;
+        let mut lines = Vec::new();
+        for (n, text) in src.lines().enumerate() {
+            let code = text.trim_start();
+            if code == "#[cfg(test)]" {
+                break;
+            }
+            if code.is_empty() || code.starts_with("//") {
+                continue;
+            }
+            let indent = text.len() - code.len();
+            let declared = ["fn ", "pub fn ", "pub(crate) fn ", "pub(super) fn "]
+                .iter()
+                .find_map(|p| code.strip_prefix(p));
+            if let Some(rest) = declared {
+                func = rest.split(['(', '<']).next().unwrap_or_default().to_owned();
+                (method, signature) = (false, true);
+            }
+            if signature {
+                method |= code.contains("self,") || code.contains("self)");
+                signature = !code.contains('{') && !code.ends_with(';');
+            }
+            if region.is_some_and(|open| indent <= open) {
+                region = None;
+            }
+            let opens = OFF_THREAD.iter().any(|o| code.contains(o));
+            let off = region.is_some() || opens;
+            if opens && region.is_none() && !code.ends_with(';') {
+                region = Some(indent);
+            }
+            lines.push(Line {
+                at: n + 1,
+                func: (module.to_owned(), func.clone()),
+                method,
+                text: code.to_owned(),
+                off,
+            });
+        }
+        lines
+    }
+
+    /// The functions `text` calls, as (module, function): `m::f(` and `self.m.f(` for a module
+    /// `m`, and `f(`, `self.f(` and `Self::f(` for `module` itself.
+    fn calls(module: &str, text: &str) -> Vec<(String, String)> {
+        let word = |end: usize| {
+            let start = (text[..end].char_indices().rev())
+                .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+                .map_or(0, |(i, c)| i + c.len_utf8());
+            (start, &text[start..end])
+        };
+        (text.match_indices('('))
+            .filter_map(|(open, _)| {
+                let (start, name) = word(open);
+                let before = &text[..start];
+                let owner = (before.strip_suffix("::"))
+                    .or(before.strip_suffix('.'))
+                    .map(|b| word(b.len()).1);
+                let owner = match owner {
+                    None | Some("self" | "Self") => module,
+                    Some(other) => other,
+                };
+                (!name.is_empty()).then(|| (owner.to_owned(), name.to_owned()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_core_thread_waits_only_where_listed() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut lines = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let module = path.file_stem().unwrap().to_str().unwrap();
+                lines.extend(read(module, &std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+        // A process's `.status()` waits for it; a response's or a listener's does not.
+        let commands: BTreeSet<_> = (lines.iter())
+            .filter(|l| l.text.contains("Command::new("))
+            .map(|l| &l.func)
+            .collect();
+        let direct = |l: &Line| {
+            let status = commands.contains(&l.func) && l.text.contains(".status()");
+            (WAITS.iter().copied().find(|w| l.text.contains(w))).or(status.then_some(".status()"))
+        };
+        // On the core thread: a method of `core.rs`, outside a closure handed to another thread.
+        let core = |l: &Line| l.func.0 == "core" && l.method;
+        let elsewhere = |l: &&Line| !l.off && !core(l);
+        let mut waiting: BTreeSet<(String, String)> = (lines.iter())
+            .filter(elsewhere)
+            .filter(|l| direct(l).is_some())
+            .map(|l| l.func.clone())
+            .collect();
+        loop {
+            let more: Vec<_> = (lines.iter())
+                .filter(elsewhere)
+                .filter(|l| !waiting.contains(&l.func))
+                .filter(|l| {
+                    calls(&l.func.0, &l.text)
+                        .iter()
+                        .any(|c| waiting.contains(c))
+                })
+                .map(|l| l.func.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            waiting.extend(more);
+        }
+        // The reader works: these wait, each found another way.
+        for (module, func) in [("precheck", "run"), ("catalog", "entry"), ("core", "trash")] {
+            let known = (module.to_owned(), func.to_owned());
+            assert!(
+                waiting.contains(&known),
+                "{module}::{func} was not read as waiting"
+            );
+        }
+
+        let (mut found, mut used) = (Vec::new(), BTreeSet::new());
+        for l in lines.iter().filter(|l| core(l) && !l.off) {
+            let called = (calls("core", &l.text).into_iter())
+                .find(|c| waiting.contains(c))
+                .map(|(module, func)| format!("{module}::{func}"));
+            let Some(what) = direct(l).map(str::to_owned).or(called) else {
+                continue;
+            };
+            let listed = (ALLOWED.iter())
+                .position(|(func, call, _)| *func == l.func.1 && l.text.contains(call));
+            match listed {
+                Some(n) => _ = used.insert(n),
+                None => found.push(format!("core.rs:{} in `{}`: {what}", l.at, l.func.1)),
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "the core thread would wait here; hand the work to a thread (`reply_later`), or list it in ALLOWED with its reason:\n{}",
+            found.join("\n")
+        );
+        assert_eq!(
+            used.len(),
+            ALLOWED.len(),
+            "an entry of ALLOWED matches nothing any more: remove it"
+        );
+    }
 }

@@ -42,9 +42,8 @@ const NAMES: [&str; 13] = [
 /// After these the value runs to the end of the line: it has a scheme and may have spaces.
 const WHOLE_LINE: [&str; 3] = ["authorization", "auth", "cookie"];
 
-/// Writes `reports/bate-report-<now_ms>.tar.gz` under the service's home and returns its path.
-// shortcut: runs on the core's thread (about 20 MiB of logs at most); move it off if it is ever slow.
-pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
+/// What a report takes from the store: the settings it shows, and the secrets it must not.
+pub fn gather(store: &Store) -> io::Result<(Value, Vec<String>)> {
     let db = io::Error::other;
     let mut secrets: Vec<String> = std::env::var("BATE_MODEL_API_KEY").into_iter().collect();
     if let Ok(Some((_, Some(key)))) = store.provider() {
@@ -125,12 +124,17 @@ pub fn export(store: &Store, now_ms: u64) -> io::Result<PathBuf> {
     // Longest first, so a secret that contains another one goes whole.
     secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
     secrets.dedup();
+    Ok((settings, secrets))
+}
 
+/// Writes `reports/bate-report-<now_ms>.tar.gz` under the service's home and returns its path.
+/// It reads the logs and runs `tar`: not for the core's thread.
+pub fn write(settings: &Value, secrets: &[String], now_ms: u64) -> io::Result<PathBuf> {
     let reports = paths::home().join("reports");
     sys::create_private_dir(&reports)?;
     let staging = reports.join(format!(".staging-{}", sys::random_hex(4)));
     let archive = reports.join(format!("bate-report-{now_ms}.tar.gz"));
-    let built = build(&staging, &archive, &settings, &secrets);
+    let built = build(&staging, &archive, settings, secrets);
     let _ = fs::remove_dir_all(&staging);
     if built.is_err() {
         let _ = fs::remove_file(&archive);
