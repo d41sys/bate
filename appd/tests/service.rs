@@ -18119,3 +18119,837 @@ fn the_lead_role_that_ships_with_the_app_makes_a_bot_with_its_instructions_and_a
     assert_eq!(other["lead"], plain.as_str());
     assert_eq!(other["bots"].as_array().unwrap().len(), 2);
 }
+
+// ---- Frames the service does not expect ----
+
+/// Commands the walk does not send, and why. A command that is in neither this list nor the
+/// walk fails the test, so a new command is decided on when it is added.
+const NOT_WALKED: &[(&str, &str)] = &[(
+    "set_lan",
+    "with `on: true` it listens on every network interface of this Mac, which can raise a firewall dialog",
+)];
+
+/// Commands whose answer comes later by design: a thread, the engine or a project's program gives it.
+/// The walk holds their frames to "answered at last", and to the order of answers only for
+/// what the service refuses at once.
+const ANSWERS_LATER: &[&str] = &[
+    "prompt",
+    "answer",
+    "answer_secret",
+    "steer",
+    "abort",
+    "delete_bot",
+    "export_report",
+    "set_model",
+    "rewind",
+    "compact",
+    "run_routine",
+    "install_workplace",
+    "list_catalog",
+    "preview_skill_catalog",
+    "install_skill_catalog",
+    "preview_catalog",
+    "install_catalog",
+    "list_surfaces",
+    "read_surface",
+    "act_surface",
+    "list_changes",
+    "read_change",
+    "quick_context",
+    "quick_shot",
+    "list_agents",
+    "preview_agent",
+    "install_agent",
+    "check_update",
+    "list_models",
+    "sign_in_connector",
+];
+
+const WALK_SEED: u64 = 0x2026_0260;
+const FRAMES_PER_BATCH: usize = 16;
+
+/// The fields of `set_model` and `rewind`, which serde reads from the whole frame (the source
+/// of the service names them nowhere else).
+const OP_FIELDS: [(&str, Want); 4] = [
+    ("model", Want::Text),
+    ("effort", Want::Text),
+    ("entry", Want::Text),
+    ("fork", Want::Bool),
+];
+
+/// The arms of the `match` in `Core::request`: the names of each and the source of its body.
+fn command_arms() -> Vec<(Vec<&'static str>, &'static str)> {
+    let src = include_str!("../src/core.rs");
+    let from = src.find("fn request(&mut self, client").unwrap();
+    let body = &src[from..];
+    let body = &body[..body.find("unknown_command").unwrap()];
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        if line.starts_with("            \"") && line.contains("=>") {
+            starts.push(at);
+        }
+        at += line.len();
+    }
+    starts.push(body.len());
+    starts
+        .windows(2)
+        .map(|w| {
+            let arm = &body[w[0]..w[1]];
+            let names = arm.lines().next().unwrap().split("=>").next().unwrap();
+            (names.split('"').skip(1).step_by(2).collect(), arm)
+        })
+        .collect()
+}
+
+/// What a field of a frame is read as, from the code that reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Want {
+    Any,
+    Bool,
+    Num,
+    Text,
+    List,
+    Map,
+}
+
+/// The text of `src` from byte `from` to byte `to` (cut where a character would be split).
+fn around(src: &str, from: usize, to: usize) -> String {
+    let bytes = src.as_bytes();
+    String::from_utf8_lossy(&bytes[from.min(bytes.len())..to.min(bytes.len())]).into_owned()
+}
+
+/// The fields the source reads from a frame, and as what: `f.get("x")`, `str_field(f, "x")`,
+/// `field::<T>(f, "x")` and the small readers made for a few of them.
+fn fields_read(src: &str) -> Vec<(&str, Want)> {
+    let mut found: Vec<(&str, Want)> = Vec::new();
+    for prefix in [
+        ".get(\"",
+        "(f, \"",
+        "f[\"",
+        "number(\"",
+        "flag(\"",
+        "text(\"",
+        "word(\"",
+    ] {
+        for (at, _) in src.match_indices(prefix) {
+            let rest = &src[at + prefix.len()..];
+            let name = &rest[..rest.find('"').unwrap()];
+            if name.is_empty()
+                || !name.bytes().all(|b| b.is_ascii_alphanumeric())
+                || ["id", "type"].contains(&name)
+            {
+                continue;
+            }
+            let before = around(src, at.saturating_sub(24), at);
+            let end = at + prefix.len() + rest.find(';').unwrap_or(rest.len()).min(200);
+            let after = around(src, at + prefix.len(), end);
+            let has = |text: &String, any: &[&str]| any.iter().any(|a| text.contains(a));
+            let want = if prefix == "number(\"" || has(&after, &["as_u64", "as_i64"]) {
+                Want::Num
+            } else if prefix == "flag(\""
+                || has(&before, &["::<bool>"])
+                || has(&after, &["as_bool"])
+            {
+                Want::Bool
+            } else if has(&before, &["str_field"]) || has(&after, &["as_str"]) {
+                Want::Text
+            } else {
+                Want::Any
+            };
+            match found.iter_mut().find(|(n, _)| *n == name) {
+                Some(known) if known.1 == Want::Any => known.1 = want,
+                Some(_) => {}
+                None => found.push((name, want)),
+            }
+        }
+    }
+    found
+}
+
+/// A small generator, so that a failing frame is the same one on every run.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64, command: &str) -> Rng {
+        let name = command.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+        });
+        Rng((seed ^ name) | 1)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+}
+
+/// The objects some fields hold, as the service reads them: each key and what it is read as. They
+/// are what makes a frame reach past reading its fields into the rules about a routine, a project
+/// or a connector. None has a folder, an address or a URL in it.
+const SHAPES: &[(&str, &[(&str, Want)])] = &[
+    (
+        "routine",
+        &[
+            ("name", Want::Text),
+            ("prompt", Want::Text),
+            ("enabled", Want::Bool),
+            ("webhook", Want::Bool),
+            ("chat", Want::Bool),
+            ("anchor", Want::Text),
+            ("schedule", Want::Map),
+            ("after", Want::Map),
+        ],
+    ),
+    (
+        "schedule",
+        &[
+            ("frequency", Want::Text),
+            ("interval", Want::Num),
+            ("daysOfWeek", Want::List),
+            ("monthDay", Want::Num),
+            ("month", Want::Num),
+            ("time", Want::Text),
+            ("timezone", Want::Text),
+        ],
+    ),
+    ("after", &[("bot", Want::Text), ("outcome", Want::Text)]),
+    (
+        "project",
+        &[
+            ("name", Want::Text),
+            ("bots", Want::List),
+            ("lead", Want::Text),
+            ("instructions", Want::Text),
+            ("hosts", Want::List),
+        ],
+    ),
+    (
+        "connector",
+        &[
+            ("name", Want::Text),
+            ("enabled", Want::Bool),
+            ("transport", Want::Map),
+            ("oauth", Want::Bool),
+            ("clientId", Want::Text),
+        ],
+    ),
+    (
+        "transport",
+        &[
+            ("type", Want::Text),
+            ("command", Want::Text),
+            ("args", Want::List),
+            ("env", Want::Map),
+        ],
+    ),
+];
+
+/// Words a field is read as one of, so that a frame can get past the check on it.
+const HINTS: &[(&str, &[&str])] = &[
+    ("nonce", &["n1"]),
+    ("question", &["q1"]),
+    ("choice", &["Approve", "Deny", "Always", "Conversation"]),
+    (
+        "kind",
+        &[
+            "read",
+            "write",
+            "run",
+            "connector",
+            "desktop",
+            "apple_read",
+            "apple_change",
+            "telegram",
+            "discord",
+        ],
+    ),
+    ("level", &["always", "ask", "never", "read_only"]),
+    ("check", &["off", "own", "model", "bot"]),
+    ("stops", &["unattended", "everything"]),
+    ("name", &["a.md", "a", "Ada", "pdf-forms"]),
+    (
+        "frequency",
+        &["minutes", "hourly", "daily", "weekly", "monthly", "yearly"],
+    ),
+    ("outcome", &["done", "failed", "any"]),
+    ("type", &["stdio"]),
+    ("time", &["09:30", "00:00", "23:59"]),
+    ("timezone", &["UTC", "America/New_York", "Asia/Tokyo"]),
+];
+
+/// What the walk made for the commands that take a path: where things are, and the hash of a bot file.
+struct Fixtures {
+    paths: Vec<String>,
+    sha: String,
+}
+
+/// Makes the frames of one command for one bot: what each field holds is a value the service may
+/// well take (so that a frame gets past its first checks), or one it should refuse, or a shape of
+/// the kinds above; or the field is left out. How often each happens is drawn for every frame, so
+/// that some frames are all plain but one field.
+struct Maker<'a> {
+    rng: &'a mut Rng,
+    bot: &'a str,
+    conversation: &'a str,
+    fixtures: &'a Fixtures,
+    plain: Vec<Value>,
+    junk: Vec<Value>,
+    /// In tenths.
+    missing: usize,
+    junky: usize,
+}
+
+impl<'a> Maker<'a> {
+    fn new(
+        rng: &'a mut Rng,
+        bot: &'a str,
+        conversation: &'a str,
+        fixtures: &'a Fixtures,
+    ) -> Maker<'a> {
+        let plain = vec![
+            json!(true),
+            json!(false),
+            json!(1),
+            json!(2),
+            json!(40),
+            json!("a"),
+            json!("a.md"),
+            json!("aGk="),
+            json!("n1"),
+            json!("q1"),
+            json!("hello"),
+            json!("read"),
+            json!("write"),
+            json!("run"),
+            json!("connector"),
+            json!("always"),
+            json!("ask"),
+            json!("never"),
+            json!("Approve"),
+            json!("Deny"),
+            json!("high"),
+            json!("telegram"),
+            json!("discord"),
+            json!("daily"),
+            json!("weekly"),
+            json!("monthly"),
+            json!("yearly"),
+            json!("hourly"),
+            json!("minutes"),
+            json!("09:30"),
+            json!("UTC"),
+            json!("2026-02-28"),
+            json!("done"),
+            json!("stdio"),
+            json!(bot),
+            json!(conversation),
+            json!([]),
+            json!({}),
+            json!([bot]),
+            json!(["mon", "fri"]),
+            json!(["no-such-program-i260"]),
+        ];
+        let junk = vec![
+            json!(null),
+            json!(0),
+            json!(-1),
+            json!(i64::MIN),
+            json!(u64::MAX),
+            json!(1e308),
+            json!(""),
+            json!("x".repeat(20_000)),
+            json!("two\nlines"),
+            json!("nul\u{0}byte"),
+            json!([1, "x", null]),
+            json!({"a": {"b": {"c": [1, {"d": null}]}}}),
+            json!("no-such-bot"),
+            json!("/etc/hosts"),
+            json!("../../../../etc/passwd"),
+            json!("25:61"),
+            json!("1999-13-45"),
+            json!("Nowhere/Land"),
+        ];
+        Maker {
+            rng,
+            bot,
+            conversation,
+            fixtures,
+            plain,
+            junk,
+            missing: 0,
+            junky: 0,
+        }
+    }
+
+    fn value(&mut self, name: &str, want: Want) -> Value {
+        let shape = SHAPES.iter().find(|(shape, _)| *shape == name);
+        if let Some((_, keys)) = shape
+            && self.rng.below(10) < 8
+        {
+            // Fewer faults inside a shape than at its top, or it never passes its own checks.
+            let (missing, junky) = (self.missing, self.junky);
+            (self.missing, self.junky) = (missing / 2, junky / 2);
+            let mut object = serde_json::Map::new();
+            for (key, kind) in *keys {
+                if self.rng.below(10) >= self.missing {
+                    let value = self.value(key, *kind);
+                    object.insert((*key).to_owned(), value);
+                }
+            }
+            (self.missing, self.junky) = (missing, junky);
+            return Value::Object(object);
+        }
+        let rng = &mut *self.rng;
+        let hint = HINTS.iter().find(|(hinted, _)| *hinted == name);
+        match name {
+            "bot" if rng.below(10) != 0 => json!(self.bot),
+            "conversation" if rng.below(3) != 0 => json!(self.conversation),
+            "path" if rng.below(2) == 0 => json!(self.fixtures.paths[rng.below(2)]),
+            "sha256" if rng.below(4) != 0 => json!(self.fixtures.sha),
+            "lead" if rng.below(4) != 0 => json!(self.bot),
+            "bots" if rng.below(2) == 0 => json!([self.bot]),
+            "daysOfWeek" if rng.below(2) == 0 => json!(["mon", "fri"]),
+            _ if rng.below(10) < self.junky => self.junk[rng.below(self.junk.len())].clone(),
+            _ if hint.is_some() && rng.below(4) != 0 => {
+                let words = hint.unwrap().1;
+                json!(words[rng.below(words.len())])
+            }
+            _ => {
+                let fits = |v: &&Value| match want {
+                    Want::Any => true,
+                    Want::Bool => v.is_boolean(),
+                    Want::Num => v.is_number(),
+                    Want::Text => v.is_string(),
+                    Want::List => v.is_array(),
+                    Want::Map => v.is_object(),
+                };
+                let plain: Vec<&Value> = self.plain.iter().filter(fits).collect();
+                plain[rng.below(plain.len())].clone()
+            }
+        }
+    }
+
+    /// A frame for a command whose arm reads the fields `arm`; one other field of the service
+    /// may come with it. `bot` is a real bot nearly always.
+    fn frame(
+        &mut self,
+        arm: &[(&str, Want)],
+        all: &[(&str, Want)],
+    ) -> serde_json::Map<String, Value> {
+        self.missing = [0, 1, 3][self.rng.below(3)];
+        self.junky = [0, 1, 3, 6][self.rng.below(4)];
+        let mut names = vec![("bot", Want::Text), ("conversation", Want::Text)];
+        names.extend(arm);
+        names.push(all[self.rng.below(all.len())]);
+        let mut frame = serde_json::Map::new();
+        for (name, want) in names {
+            if self.rng.below(10) < if name == "bot" { 1 } else { self.missing } {
+                continue;
+            }
+            let value = self.value(name, want);
+            frame.insert(name.to_owned(), value);
+        }
+        frame
+    }
+}
+
+fn shortened(frame: &str) -> String {
+    match frame.char_indices().nth(300) {
+        Some((at, _)) => format!("{}… ({} bytes)", &frame[..at], frame.len()),
+        None => frame.to_owned(),
+    }
+}
+
+/// A frame sent and not yet answered.
+struct Sent {
+    command: String,
+    frame: String,
+    /// Answered before the barrier that follows it, if the command answers at once.
+    at_once: bool,
+}
+
+/// What the service wrote to its log: what it said before the log opened, and the log's files.
+fn service_log(home: &Path) -> String {
+    let mut log = fs::read(home.join("appd.log")).unwrap_or_default();
+    for file in fs::read_dir(home.join("logs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        log.extend(fs::read(file.path()).unwrap_or_default());
+    }
+    String::from_utf8_lossy(&log).into_owned()
+}
+
+fn log_end(home: &Path) -> String {
+    let log = service_log(home);
+    let from = (log.len().saturating_sub(1500)..).find(|at| log.is_char_boundary(*at));
+    log[from.unwrap_or(0)..].to_owned()
+}
+
+/// Sends `lines` (each the bytes of one line, without its newline), then a plain `list_bots`,
+/// and reads until the service has answered every one of them. Every frame gets one answer, and
+/// a refusal has a `code`. The answers of what the service handles at once come in order, so they
+/// are all in before the barrier's; the others only have to come.
+fn walk_batch(w: &mut Window, service: &mut Service, home: &Path, lines: Vec<(Vec<u8>, Sent)>) {
+    let mut waiting: std::collections::HashMap<String, Sent> = Default::default();
+    // Frames with no `id` (or a null one) and lines that are not frames are answered with `null`.
+    let (mut nulls_at_once, mut nulls_later) = (Vec::<String>::new(), 0);
+    for (line, sent) in lines {
+        // A service that has died refuses the write: the read below says so.
+        let _ = w
+            .writer
+            .write_all(&line)
+            .and_then(|()| w.writer.write_all(b"\n"));
+        let id = serde_json::from_slice::<Value>(&line)
+            .ok()
+            .and_then(|f| f.get("id").cloned())
+            .unwrap_or(Value::Null);
+        match id {
+            Value::Null if sent.at_once => nulls_at_once.push(sent.command.clone()),
+            Value::Null => nulls_later += 1,
+            id => {
+                let key = id.to_string();
+                assert!(
+                    waiting.insert(key, sent).is_none(),
+                    "a frame id was used twice"
+                );
+            }
+        }
+    }
+    w.next += 1;
+    let barrier = w.next.to_string();
+    let _ = writeln!(w.writer, "{}", json!({"id": barrier, "type": "list_bots"}));
+    let mut barrier_seen = false;
+    while !(barrier_seen && waiting.is_empty() && nulls_later == 0 && nulls_at_once.is_empty()) {
+        let mut line = String::new();
+        let read = w.reader.read_line(&mut line);
+        let pending = || {
+            let mut left: Vec<String> = waiting
+                .values()
+                .take(3)
+                .map(|s| format!("{}: {}", s.command, shortened(&s.frame)))
+                .collect();
+            left.push(format!(
+                "{nulls_at_once:?} + {nulls_later} answers to `null` ids"
+            ));
+            left.join("\n  ")
+        };
+        match read {
+            Ok(n) if n > 0 => {}
+            other => panic!(
+                "the service stopped answering ({other:?}); waiting for:\n  {}\nthe end of its log:\n{}",
+                pending(),
+                log_end(home)
+            ),
+        }
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["type"] != "response" {
+            continue;
+        }
+        if frame["success"] == false {
+            let (code, error) = (frame["code"].as_str(), frame["error"].as_str());
+            assert!(
+                code.is_some_and(|c| !c.is_empty()) && error.is_some(),
+                "a refusal without a code or a text: {}",
+                shortened(&frame.to_string())
+            );
+        } else {
+            assert_eq!(frame["success"], true, "{}", shortened(&frame.to_string()));
+        }
+        if frame["id"] == barrier.as_str() {
+            assert_eq!(
+                frame["success"], true,
+                "the plain command was refused: {frame}"
+            );
+            barrier_seen = true;
+            let late: Vec<&Sent> = waiting.values().filter(|s| s.at_once).collect();
+            assert!(
+                late.is_empty() && nulls_at_once.is_empty(),
+                "answered after the barrier, though the command answers at once:\n  {}\n  no answer to a `null` id from: {nulls_at_once:?}",
+                late.iter()
+                    .take(3)
+                    .map(|s| format!("{}: {}", s.command, shortened(&s.frame)))
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
+        } else if frame["id"].is_null() {
+            if nulls_at_once.pop().is_none() {
+                assert!(nulls_later > 0, "an answer to a `null` id nobody sent");
+                nulls_later -= 1;
+            }
+        } else {
+            let key = frame["id"].to_string();
+            assert!(
+                waiting.remove(&key).is_some(),
+                "an answer to a frame nobody sent: {}",
+                shortened(&frame.to_string())
+            );
+        }
+    }
+    assert!(
+        service.0.try_wait().unwrap().is_none(),
+        "the service stopped"
+    );
+    let log = service_log(home);
+    assert!(
+        !log.contains("panicked"),
+        "the service panicked:\n{}",
+        log_end(home)
+    );
+}
+
+fn garbage_lines() -> Vec<Vec<u8>> {
+    let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+    let long_key = format!("{{\"{}\": 1}}", "k".repeat(50_000));
+    [
+        "not json at all".as_bytes(),
+        b"{",
+        b"{\"type\":",
+        b"{\"type\":\"list_bots\"",
+        b"[]",
+        b"[1,2,3]",
+        b"[{\"type\":\"list_bots\"}]",
+        b"42",
+        b"-1",
+        b"true",
+        b"null",
+        b"\"list_bots\"",
+        b"{} {}",
+        b"{\"type\":\"list_bots\"} trailing",
+        b"\xff\xfe{\"type\":\"list_bots\"}",
+        b"{\"type\":\"list_bots\",\"id\":\"\xff\"}",
+        b"",
+        b"   ",
+        b"\0\0\0",
+        deep.as_bytes(),
+        long_key.as_bytes(),
+    ]
+    .into_iter()
+    .map(<[u8]>::to_vec)
+    .collect()
+}
+
+/// Frames whose `type` is missing or not a command.
+fn untyped_frames() -> Vec<String> {
+    [
+        json!({"id": "t1"}),
+        json!({"id": "t2", "type": null}),
+        json!({"id": "t3", "type": 7}),
+        json!({"id": "t4", "type": ""}),
+        json!({"id": "t5", "type": "no_such_command"}),
+        json!({"id": "t6", "type": ["list_bots"]}),
+        json!({"id": "t7", "type": "x".repeat(20_000)}),
+        json!({"id": "t8", "type": "list_bots\n"}),
+        json!({"type": "no_such_command"}),
+        json!({"id": {"a": 1}}),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect()
+}
+
+#[test]
+fn no_command_stops_the_service_whatever_its_frames_hold() {
+    let started = Instant::now();
+    let arms = command_arms();
+    let known: Vec<&str> = arms.iter().flat_map(|(names, _)| names.clone()).collect();
+    assert!(known.len() > 100, "the arms were not read: {known:?}");
+    for (name, _) in NOT_WALKED {
+        assert!(known.contains(name), "{name} is listed but is no command");
+    }
+    for name in ANSWERS_LATER {
+        assert!(known.contains(name), "{name} is listed but is no command");
+    }
+    let mut all = fields_read(include_str!("../src/core.rs"));
+    all.extend(OP_FIELDS);
+    for name in ["bot", "nonce", "text", "routine", "projectId"] {
+        assert!(
+            all.iter().any(|(field, _)| *field == name),
+            "the fields were not read: {all:?}"
+        );
+    }
+
+    let home = home("junk-frames");
+    fs::create_dir_all(home.join("trash")).unwrap();
+    let opener = home.join("fake-open");
+    fs::write(
+        &opener,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            home.join("open.log").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
+    // Nothing opens, asks or goes out: the helper is not there, the opener only writes a line,
+    // the Trash is a folder of the test, and every address the service may call is a port nobody
+    // listens on. `HOME` is the home folder too.
+    let nowhere = "http://127.0.0.1:9";
+    let mut service = Service::start_with(&home, |c| {
+        c.env("APPD_ENGINE", home.join("fake-engine"))
+            .env(
+                "APPD_HELPER",
+                home.join("no-helper/Bate Helper.app/Contents/MacOS/bate-helper"),
+            )
+            .env("APPD_OPEN", &opener)
+            .env("APPD_TRASH", home.join("trash"))
+            .env("HOME", &*home)
+            .current_dir(&*home)
+            .env("BATE_CATALOG", format!("{nowhere}/"))
+            .env("BATE_CHATGPT_AUTH", nowhere)
+            .env("BATE_CHATGPT_API", nowhere)
+            .env("BATE_TELEGRAM_API", nowhere)
+            .env("BATE_DISCORD_API", nowhere)
+            .env("BATE_UPDATE_FEED", nowhere)
+            .env("BATE_UPDATE_PUBKEY", "")
+            .env("BATE_MODEL_BASE_URL", "")
+            .env("BATE_MODEL_API_KEY", "");
+    });
+    let mut w = Window::connect(&home);
+    // A skill's folder and a bot's file that are what they say, for the commands that take a path.
+    let skill = home.join("fixtures/skill");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: pdf-forms\ndescription: Fill in PDF forms.\n---\nHow.\n",
+    )
+    .unwrap();
+    let first = w.create_bot();
+    let file = w.ok("export_bot", json!({"bot": first}))["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sha = w.ok("preview_bot_file", json!({"path": file}))["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fixtures = Fixtures {
+        paths: vec![skill.to_string_lossy().into_owned(), file],
+        sha,
+    };
+
+    let mut frames = 0;
+    // The frames of one command are sent together, to a bot made for them, and answered before the
+    // next command's: once to a bot with nothing going on, once to a bot that waits for the answer
+    // to a question.
+    for (names, arm) in &arms {
+        for &command in names {
+            if NOT_WALKED.iter().any(|(name, _)| *name == command) {
+                continue;
+            }
+            let mut own = fields_read(arm);
+            if ["set_model", "rewind"].contains(&command) {
+                own.extend(OP_FIELDS);
+            }
+            let mut rng = Rng::new(WALK_SEED, command);
+            for asking in [false, true] {
+                let bot = w.create_bot();
+                let conversation = w.ok("open_bot", json!({"bot": bot}))["conversation"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                if asking {
+                    w.ok(
+                        "prompt",
+                        json!({"bot": bot, "nonce": "ask1", "text": "ask"}),
+                    );
+                    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "question");
+                }
+                let mut maker = Maker::new(&mut rng, &bot, &conversation, &fixtures);
+                let mut lines = Vec::new();
+                for i in 0..FRAMES_PER_BATCH {
+                    let mut frame = maker.frame(&own, &all);
+                    frame.insert("type".into(), json!(command));
+                    // One in ten of each: no id, a null one, a number, a list, an object; the rest a string.
+                    let id = match i % 10 {
+                        0 => None,
+                        1 => Some(json!(null)),
+                        2 => Some(json!(1_000_000 + frames)),
+                        3 => Some(json!([frames])),
+                        4 => Some(json!({"n": frames})),
+                        _ => Some(json!(format!("walk-{frames}"))),
+                    };
+                    frames += 1;
+                    if let Some(id) = id {
+                        frame.insert("id".into(), id);
+                    }
+                    let text = Value::Object(frame).to_string();
+                    let at_once = !ANSWERS_LATER.contains(&command);
+                    let sent = Sent {
+                        command: command.to_owned(),
+                        frame: text.clone(),
+                        at_once,
+                    };
+                    lines.push((text.into_bytes(), sent));
+                }
+                walk_batch(&mut w, &mut service, &home, lines);
+            }
+        }
+    }
+
+    let mut lines: Vec<(Vec<u8>, Sent)> = Vec::new();
+    for text in untyped_frames() {
+        let sent = Sent {
+            command: "(no command)".into(),
+            frame: text.clone(),
+            at_once: true,
+        };
+        lines.push((text.into_bytes(), sent));
+    }
+    for line in garbage_lines() {
+        let sent = Sent {
+            command: "(not a frame)".into(),
+            frame: String::from_utf8_lossy(&line).into_owned(),
+            at_once: true,
+        };
+        lines.push((line, sent));
+    }
+    frames += lines.len();
+    walk_batch(&mut w, &mut service, &home, lines);
+
+    // A window that has not said `hello` is refused whatever it asks.
+    let stream = UnixStream::connect(home.join("run/appd.sock")).unwrap();
+    stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let asked: Vec<&str> = known.iter().copied().filter(|c| *c != "hello").collect();
+    for command in &asked {
+        writeln!(&stream, "{}", json!({"id": command, "type": command})).unwrap();
+    }
+    for _ in &asked {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["code"], "hello_required", "{reply}");
+    }
+    frames += asked.len();
+
+    // A line over the cap ends its connection, and no other: the service answers the next one.
+    let mut big = UnixStream::connect(home.join("run/appd.sock")).unwrap();
+    big.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let _ = big.write_all(&vec![b'x'; (1 << 20) + 10]);
+    if let Err(e) = big.read_to_end(&mut Vec::new()) {
+        let kept = matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        );
+        assert!(!kept, "the connection of a line over the cap was kept open");
+    }
+    Window::connect(&home).ok("list_bots", json!({}));
+
+    assert!(
+        !home.join("open.log").exists(),
+        "something was opened: {:?}",
+        fs::read_to_string(home.join("open.log"))
+    );
+    eprintln!(
+        "walked {} commands with {frames} frames in {:?}",
+        known.len() - NOT_WALKED.len(),
+        started.elapsed()
+    );
+}
