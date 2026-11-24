@@ -868,9 +868,13 @@ impl Turn {
             } else {
                 ""
             };
-            // One line each: a name is the user's text.
+            // One line each: a name is the user's text. A name two bots have comes with the id.
             let name = peer.name.replace(char::is_control, " ");
-            text.push_str(&format!("\n- {name}{role}"));
+            let id = match self.named(&peer.name).count() {
+                1 => String::new(),
+                _ => format!(" (id `{}`)", peer.id),
+            };
+            text.push_str(&format!("\n- {name}{id}{role}"));
         }
         if self.leads {
             text.push_str(
@@ -881,21 +885,34 @@ impl Turn {
         text
     }
 
+    /// The other bots called `name`, whatever the case of its letters.
+    fn named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Peer> {
+        self.peers
+            .iter()
+            .filter(move |p| p.name.eq_ignore_ascii_case(name))
+    }
+
     /// Sends `text` to the bot the model named and waits for its reply.
     fn message(&self, args: &Map<String, Value>) -> Result<String, String> {
         let name = args.get("bot").and_then(Value::as_str).unwrap_or("").trim();
-        // shortcut: two bots with one name are told apart only by id, which the model is not
-        // shown; list ids beside names if users give bots the same name.
-        let Some(peer) = self
-            .peers
-            .iter()
-            .find(|p| p.id == name || p.name.eq_ignore_ascii_case(name))
-        else {
-            let names: Vec<_> = self.peers.iter().map(|p| p.name.as_str()).collect();
-            return Err(format!(
-                "No bot `{name}`. You can message: {}.",
-                names.join(", ")
-            ));
+        let mut named = self.named(name);
+        let peer = match (self.peers.iter().find(|p| p.id == name), named.next()) {
+            (Some(peer), _) => peer,
+            (None, Some(peer)) if named.next().is_none() => peer,
+            (None, Some(_)) => {
+                let ids: Vec<_> = self.named(name).map(|p| p.id.as_str()).collect();
+                return Err(format!(
+                    "More than one bot is named `{name}`. Give the id of the one you mean: {}.",
+                    ids.join(", ")
+                ));
+            }
+            (None, None) => {
+                let names: Vec<_> = self.peers.iter().map(|p| p.name.as_str()).collect();
+                return Err(format!(
+                    "No bot `{name}`. You can message: {}.",
+                    names.join(", ")
+                ));
+            }
         };
         let text = match args.get("text").and_then(Value::as_str) {
             Some(text) if !text.trim().is_empty() => text,
