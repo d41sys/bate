@@ -3,7 +3,8 @@
 //   npm run build && npm run shots -- <folder> [screen ...]
 // Drives Google Chrome headless through its DevTools protocol, with a profile folder of its own that
 // is deleted at the end; Chrome is closed by its process id. Exits 1 when a screen showed an error
-// line or a step did not find its click; the picture is saved all the same.
+// line, a step did not find its click, or a control is cut at the window's right edge; the picture
+// is saved all the same.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -17,6 +18,14 @@ const HEIGHT = 800;
 const MAX_HEIGHT = 3000;
 const looks = ["light", "dark"].flatMap((scheme) => [1200, 390].map((width) => ({ scheme, width })));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Run in the page: the controls and times that end past the window's right edge, unless a part
+// below `main` is made to scroll sideways there (the bar of bots at a narrow width, a block of code).
+const CUT = `[...document.querySelectorAll("button, a, input, textarea, select, time, .when")].filter((e) => {
+  const r = e.getBoundingClientRect();
+  if (!r.width || r.right <= innerWidth + 1) return false;
+  for (let p = e.parentElement; p && p.tagName !== "MAIN"; p = p.parentElement) if (/auto|scroll/.test(getComputedStyle(p).overflowX)) return false;
+  return true;
+}).map((e) => (e.getAttribute("aria-label") || e.textContent.trim() || e.tagName).slice(0, 40))`;
 
 const [folder, ...asked] = process.argv.slice(2);
 if (!folder) {
@@ -93,7 +102,8 @@ try {
         if (seen.ready) break;
         await sleep(25);
       }
-      const said = [...(seen.ready ? [] : ["never ready"]), ...seen.problems, ...(seen.alert ? [`error line: ${seen.alert}`] : [])];
+      const cut = seen.ready ? (await page("Runtime.evaluate", { expression: CUT, returnByValue: true })).result.value : [];
+      const said = [...(seen.ready ? [] : ["never ready"]), ...seen.problems, ...(seen.alert ? [`error line: ${seen.alert}`] : []), ...cut.map((what) => `cut at the right edge: ${what}`)];
       for (const line of said) console.error(`${screen.name} (${scheme}, ${width}): ${line}`);
       problems += said.length;
       // A screen that scrolls is pictured whole (up to MAX_HEIGHT), not cut at the window's foot.
