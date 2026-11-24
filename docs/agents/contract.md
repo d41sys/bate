@@ -42,6 +42,7 @@ cargo test --workspace --locked
 ## The pull request
 
 - Three sections: **Summary** (ending `Closes #N.`), **Evidence** (what was run and seen; for UI, pictures in light and dark, wide and narrow, and whether they are of the real window), **Merge Danger** (what could break, what was not checked).
+- Pictures of the page: build it, then `npm run shots -- <folder> [screen ...]` in `window/ui` saves each screen (`window/ui/standin/screens.mjs`) in light and dark, 1200 and 390 wide, with Google Chrome headless; `npm run standin` serves the same page, each screen at `/<name>`. Both run the built page against the stand-in's made-up answers (`window/ui/standin/answers.mjs`), so such pictures are of a stand-in, not of the real window: say so in the pull request. A command the page learns to send needs its answer there, or `npm test` fails.
 - Rebased on `origin/main`, with the gate run again after the rebase.
 - Merged only when both checks of the pull request have run and passed, and after its diff was read.
 

@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
-    "test": "node --test 'src/**/*.test.ts'"
+    "test": "node --test 'src/**/*.test.ts' 'standin/*.test.mjs'",
+    "standin": "node standin/serve.mjs",
+    "shots": "node standin/shots.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "3.14.26",
