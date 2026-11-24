@@ -171,7 +171,8 @@ while IFS= read -r line; do
             *) action="{\"action\":\"$1\"}" ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
-          echo "{\"type\":\"browser\",\"request\":\"b-$nonce\",\"action\":$action}" ;;
+          echo "{\"type\":\"browser\",\"request\":\"b-$nonce\",\"action\":$action}"
+          echo '{"type":"text","delta":"browsing"}' ;;
         *'"text":"checking"'*)
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
           echo '{"type":"text","delta":"first"}'
@@ -402,6 +403,50 @@ fn within(limit: Duration, what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+/// A wait for a fixed time is a test that depends on timing (`docs/agents/contract.md`): wait
+/// for state, or for an order the service guarantees. These are the only places that sleep.
+#[test]
+fn no_test_sleeps_for_a_fixed_time_outside_the_listed_places() {
+    // (function, sleeps in it, why)
+    let allowed = [
+        ("start_with", 1, "polls for the service's socket"),
+        ("within", 1, "the poll that every wait for state shares"),
+        (
+            "http",
+            1,
+            "sends the body in a packet of its own, later: where a request is cut must not matter",
+        ),
+        (
+            "start",
+            1,
+            "the Telegram stand-in holds a poll that has nothing to say, as the real one does",
+        ),
+        ("connect", 1, "polls for the helper's socket"),
+        (
+            "a_discord_token_that_is_refused_says_so",
+            1,
+            "a clock: the pause before another try is a second; that none comes shows only past it",
+        ),
+    ];
+    let call = concat!("sleep", "(");
+    let mut found = std::collections::BTreeMap::new();
+    let mut function = "";
+    for line in include_str!("service.rs").lines() {
+        let code = line.trim_start();
+        if let Some(rest) = code.strip_prefix("fn ") {
+            function = rest.split(['(', '<']).next().unwrap();
+        }
+        if code.contains(call) {
+            *found.entry(function).or_insert(0) += 1;
+        }
+    }
+    let expected = allowed.iter().map(|(f, n, _)| (*f, *n)).collect();
+    assert_eq!(
+        found, expected,
+        "a fixed wait is allowed only in: {allowed:?}"
+    );
+}
+
 #[test]
 fn a_reply_finishes_after_the_window_quits_and_history_has_all_of_it() {
     let home = home("socket");
@@ -420,18 +465,14 @@ fn a_reply_finishes_after_the_window_quits_and_history_has_all_of_it() {
     drop(w); // The window quits mid-reply: the engine still has a second to go.
 
     let mut w = Window::connect(&home);
-    let deadline = Instant::now() + TIMEOUT;
-    let history = loop {
-        let history = w.ok("open_bot", json!({"bot": bot}))["history"]
+    let mut history = Vec::new();
+    eventually("the turn to end", || {
+        history = w.ok("open_bot", json!({"bot": bot}))["history"]
             .as_array()
             .unwrap()
             .clone();
-        if history.iter().any(|e| e["entry"]["type"] == "turn_end") {
-            break history;
-        }
-        assert!(Instant::now() < deadline, "the turn did not end");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+        history.iter().any(|e| e["entry"]["type"] == "turn_end")
+    });
     let kinds: Vec<&str> = history
         .iter()
         .map(|e| e["entry"]["type"].as_str().unwrap())
@@ -683,7 +724,15 @@ fn a_due_routine_is_sent_once_across_restarts_and_connectors_round_trip() {
     let _service = Service::start(&home);
     let mut w = Window::connect(&home);
     w.ok("list_bots", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
+    // The core ran its due routines before it answered. The engine takes a bot's prompts in
+    // order: once it has this one, it has had the routine's, if one was sent.
+    w.ok(
+        "prompt",
+        json!({"bot": bot, "nonce": "after-restart", "text": "hi"}),
+    );
+    eventually("the prompt after the restart", || {
+        prompts_received(&home, &bot, "after-restart") == 1
+    });
     assert_eq!(prompts_received(&home, &bot, &nonce), 1);
 
     let connector = json!({"name": "github", "enabled": true,
@@ -1047,12 +1096,16 @@ fn a_question_about_a_file_or_a_command_names_the_folder_it_would_act_in() {
 /// Builds the real engine next to `appd`, where the service looks for it when `APPD_ENGINE`
 /// is unset.
 fn build_engine() {
-    let mut cargo = Command::new(env!("CARGO"));
-    cargo.args(["build", "-q", "-p", "agentcore"]);
-    if !cfg!(debug_assertions) {
-        cargo.arg("--release");
-    }
-    assert!(cargo.status().unwrap().success(), "agentcore did not build");
+    // Once: a build that goes on while another test's service starts replaces the binary under it.
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    BUILT.call_once(|| {
+        let mut cargo = Command::new(env!("CARGO"));
+        cargo.args(["build", "-q", "-p", "agentcore"]);
+        if !cfg!(debug_assertions) {
+            cargo.arg("--release");
+        }
+        assert!(cargo.status().unwrap().success(), "agentcore did not build");
+    });
 }
 
 /// A model server that answers one request with a streamed "Hello." and hands over the request
@@ -3792,12 +3845,14 @@ fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     assert_eq!(pair(&device, &code).0, 403);
 
     w.ok("set_lan", json!({"on": false}));
-    std::thread::sleep(Duration::from_millis(300));
-    let request = ureq::http::Request::builder()
-        .uri(format!("{}/", device.base))
-        .body(())
-        .unwrap();
-    assert!(device.agent.run(request).is_err(), "still serving");
+    // The listener closes on a thread of its own: wait for the refusal.
+    eventually("the page for other devices to stop", || {
+        let request = ureq::http::Request::builder()
+            .uri(format!("{}/", device.base))
+            .body(())
+            .unwrap();
+        device.agent.run(request).is_err()
+    });
 }
 
 #[test]
@@ -4902,8 +4957,7 @@ fn probe(w: &mut Window, bot: &str, nonce: &str, what: &str) -> String {
 /// The service log of this test's home: the engine's network probes say there why one was
 /// refused, and the service says when an engine stopped (#162).
 fn probes(home: &Path) -> String {
-    // The log is written by another thread.
-    std::thread::sleep(Duration::from_millis(500));
+    // Only read to say why an assertion failed: what the log holds by then is what it says.
     fs::read_to_string(home.join("logs/appd.log")).unwrap_or_default()
 }
 
@@ -4978,11 +5032,7 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
             "set_disk_access",
             json!({"bot": bot, "wholeDisk": whole_disk}),
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while w.ok("list_bots", json!({}))["bots"][0]["running"] != false {
-            assert!(Instant::now() < deadline, "the engine was not stopped");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_stop(w);
         assert_eq!(
             w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"],
             whole_disk
@@ -5020,7 +5070,8 @@ fn a_bot_is_kept_in_its_folder_by_the_system_until_it_is_given_the_whole_disk() 
     assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["wholeDisk"], false);
 }
 
-/// A web server on a port of this machine that answers every request `hello`, and counts them.
+/// A web server on a port of this machine that answers every request `hello`, and counts them:
+/// not the icon Chrome asks for by itself a moment after a page.
 fn web() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -5037,7 +5088,9 @@ fn web() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
                     _ => break,
                 }
             }
-            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !head.starts_with(b"GET /favicon.ico ") {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello",
             );
@@ -6791,9 +6844,7 @@ fn a_bot_runs_on_an_installed_agent_once_it_has_the_whole_disk() {
 
     // The engine that ran is stopped by a change; the next one starts when that is done.
     let stopped = |w: &mut Window| {
-        while w.ok("list_bots", json!({}))["bots"][0]["running"] == true {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_stop(w);
     };
 
     // Bate's own engine, and a conversation with it.
@@ -7148,7 +7199,9 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
         "prompt",
         json!({"bot": bot, "nonce": "n7", "text": "browse look"}),
     );
-    std::thread::sleep(Duration::from_millis(1500));
+    // The engine's line after its request: once the window has this, the core has handed the
+    // action to the browser, which holds it.
+    w.wait_for(|f| f["type"] == "transcript" && f["entry"]["delta"] == "browsing");
     assert_eq!(results().len(), before);
     w.ok("hand_back_browser", json!({"bot": bot}));
     eventually("the waiting action", || results().len() > before);
@@ -7177,15 +7230,16 @@ fn a_bot_browses_in_its_own_chrome_and_waits_while_the_user_has_it() {
     w.ok("abort", json!({"bot": bot}));
     w.wait_for(|f| f["type"] == "transcript" && f["entry"]["type"] == "turn_end");
     w.ok("hand_back_browser", json!({"bot": bot}));
-    std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(results().len(), before + 1);
+    // The browser takes its work in order: once it has answered this, it is done with the
+    // action that waited.
+    let pages = browse(&mut w, "n9", "look");
+    assert_eq!(results().len(), before + 2);
     assert_eq!(
         seen.lock().unwrap().len(),
         asked,
         "{:?}",
         seen.lock().unwrap()
     );
-    let pages = browse(&mut w, "n9", "look");
     assert!(
         pages["output"]
             .as_str()
@@ -7975,8 +8029,6 @@ fn a_bots_browser_reaches_only_the_hosts_of_its_network_limit() {
         "set_network",
         json!({"bot": bot, "hosts": [format!("127.0.0.1:{a}")]}),
     );
-    // Chrome asks for the site's icon a moment after the page.
-    std::thread::sleep(Duration::from_millis(800));
     let seen = hits();
     let refused = browse(
         &mut w,
@@ -8696,12 +8748,17 @@ fn a_bot_is_messaged_from_discord_once_the_sender_has_paired_with_a_code() {
         discord.heartbeats.load(Ordering::SeqCst) >= 2
     });
 
-    // Asked for one now, it sends one, not one after another.
-    let before = discord.heartbeats.load(Ordering::SeqCst);
+    // Asked for one now, it sends one, not one after another. The gateway's interval is 100 ms:
+    // what that gives in the time taken, the one asked for, and some slack allow; a run of
+    // them would be far more.
+    let (before, asked_at) = (discord.heartbeats.load(Ordering::SeqCst), Instant::now());
     discord.ask.store(true, Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(500));
+    eventually("three more heartbeats", || {
+        discord.heartbeats.load(Ordering::SeqCst) >= before + 3
+    });
     let since = discord.heartbeats.load(Ordering::SeqCst) - before;
-    assert!((1..20).contains(&since), "{since} heartbeats");
+    let allowed = asked_at.elapsed().as_millis() as usize / 100 + 3;
+    assert!(since <= allowed, "{since} heartbeats, {allowed} allowed");
 
     // The gateway drops the connection: the bot comes back, and is reached as before.
     discord.drop.store(true, Ordering::SeqCst);
@@ -8748,6 +8805,8 @@ fn a_discord_token_that_is_refused_says_so() {
         let error = channel(&channels, "discord")["error"].as_str();
         error.is_some_and(|e| e.contains("4004"))
     });
+    // A clock: the pause before another try is a second after the first failure; no try can
+    // be seen but by waiting past it.
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(discord.identified.lock().unwrap().len(), 1);
 }
@@ -8784,9 +8843,11 @@ fn a_telegram_update_is_taken_once_and_a_channel_is_read_again_after_a_restart()
     telegram.next.store(5, std::sync::atomic::Ordering::SeqCst);
     telegram.say(7, "after a quiet week");
     assert_eq!(telegram.heard(7, 2), "hello");
-    std::thread::sleep(Duration::from_millis(500));
+    // The poller reads in order: once a later message is answered, a repeat of this one
+    // would have been taken before it.
+    telegram.say(7, "and one more");
+    assert_eq!(telegram.heard(7, 3), "hello");
     assert_eq!(prompts("after a quiet week"), 1);
-    assert_eq!(telegram.heard(7, 2), "hello");
 
     // What was written long ago, while the service was off, is not run when it starts; what
     // is written then is, with no window having asked for anything.
@@ -8794,7 +8855,7 @@ fn a_telegram_update_is_taken_once_and_a_channel_is_read_again_after_a_restart()
     telegram.message(7, json!({"text": "written long ago"}), 600);
     let _service = start();
     telegram.say(7, "written now");
-    assert_eq!(telegram.heard(7, 3), "hello");
+    assert_eq!(telegram.heard(7, 4), "hello");
     assert_eq!(
         (prompts("written long ago"), prompts("written now")),
         (0, 1)
@@ -9664,7 +9725,8 @@ impl FakeHelper {
         };
         let mut out = stream.try_clone().unwrap();
         let status = json!({"type": "status", "accessibility": accessibility, "screenRecording": screen_recording, "fullDiskAccess": full_disk_access});
-        writeln!(out, "{status}").unwrap();
+        // A stranger may be refused before it has said this: its tests see the closed socket.
+        let _ = writeln!(out, "{status}");
         let calls: std::sync::Arc<std::sync::Mutex<Vec<Value>>> = Default::default();
         let (seen, input) = (calls.clone(), stream.try_clone().unwrap());
         std::thread::spawn(move || {
