@@ -206,7 +206,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 }
 
 /* ---- Activity: a card for each conversation that is not idle, in groups. A question is the approval card, set in the card ---- */
-.attention { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+/* The one column is no wider than the page: a card's long line is cut or wrapped, not the card. */
+.attention { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
 .attention > li { margin: 0; padding: var(--space-1) var(--space-2) var(--space-2); }
 .attention .open { width: 100%; max-width: none; height: auto; padding-block: var(--space-2); align-items: flex-start; }
 .attention .open .label { flex: 1; }
