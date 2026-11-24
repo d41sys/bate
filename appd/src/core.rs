@@ -3153,9 +3153,10 @@ impl Core {
                     .and_then(Value::as_bool)
                     .ok_or_else(|| bad("`on` must be true or false"))?;
                 // Turning it on asks Tailscale and may make a certificate: not on this thread.
-                let lan = self.lan.clone();
+                // Its place among such requests is taken here, in the order they came.
+                let (lan, asked) = (self.lan.clone(), self.lan.ask());
                 self.reply_later(client, id, "set_lan", move || {
-                    lan.set(on).map_err(|e| ("lan_failed", e))?;
+                    lan.set(on, asked).map_err(|e| ("lan_failed", e))?;
                     Ok(lan.status())
                 });
                 Ok(None)

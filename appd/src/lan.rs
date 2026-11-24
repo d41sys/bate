@@ -93,11 +93,13 @@ struct State {
     code: Option<Code>,
     devices: Vec<Device>,
     sessions: HashMap<String, Arc<Session>>,
-    /// Counts the times serving was turned on or off: one that took long sees a later one.
+    /// How many times the window asked to turn serving on or off: the last one decides.
     asked: u64,
 }
 
-pub struct Lan(Mutex<State>);
+/// The state, and the switch: held while serving is turned on or off, which can take seconds,
+/// so that such requests run one after another. The state's own lock is never held that long.
+pub struct Lan(Mutex<State>, Mutex<()>);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -124,10 +126,11 @@ impl Lan {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        let lan = Arc::new(Lan(Mutex::new(State {
+        let state = State {
             devices,
             ..State::default()
-        })));
+        };
+        let lan = Arc::new(Lan(Mutex::new(state), Mutex::new(())));
         lan.resume();
         lan
     }
@@ -135,10 +138,11 @@ impl Lan {
     /// Serves if the user left it on and it is not serving: at start, and again when the
     /// Keychain, which held back the certificate's key, has been answered.
     pub fn resume(self: &Arc<Self>) {
+        let _switch = lock(&self.1);
         let serving = lock(&self.0).on.is_some();
         if !serving
             && dir().join("on").exists()
-            && let Err(e) = self.set(true)
+            && let Err(e) = self.turn(true)
         {
             log!("the page for other devices is off: {e}");
         }
@@ -169,19 +173,34 @@ impl Lan {
         }
     }
 
-    /// Turns serving on or off, and remembers it. Turning it on asks Tailscale and may make a
-    /// certificate, with no lock held: not for the core's thread.
-    pub fn set(self: &Arc<Self>, on: bool) -> Result<(), String> {
-        let asked = {
+    /// Takes a place in the order of requests to turn serving on or off: `set` carries out only
+    /// the last one made. Does not wait.
+    pub fn ask(&self) -> u64 {
+        let mut state = lock(&self.0);
+        state.asked += 1;
+        state.asked
+    }
+
+    /// Turns serving on or off, and remembers it, unless a request was made after `asked`.
+    /// Turning it on asks Tailscale and may make a certificate: not for the core's thread.
+    pub fn set(self: &Arc<Self>, on: bool, asked: u64) -> Result<(), String> {
+        let _switch = lock(&self.1);
+        if lock(&self.0).asked != asked {
+            return Ok(());
+        }
+        self.turn(on)
+    }
+
+    /// What `set` does, for a caller that holds the switch.
+    fn turn(self: &Arc<Self>, on: bool) -> Result<(), String> {
+        {
             let mut state = lock(&self.0);
             if let Some(flag) = state.on.take() {
                 flag.store(false, Ordering::Relaxed);
                 state.sessions.clear();
                 state.code = None;
             }
-            state.asked += 1;
-            state.asked
-        };
+        }
         let mark = dir().join("on");
         if !on {
             let _ = fs::remove_file(mark);
@@ -204,10 +223,6 @@ impl Lan {
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let mut state = lock(&self.0);
-        // Turned off or on again meanwhile: the later one decides.
-        if state.asked != asked {
-            return Ok(());
-        }
         state.port = listener.local_addr().map_err(|e| e.to_string())?.port();
         state.fingerprint = fingerprint;
         state.magic_dns = magic_dns;
