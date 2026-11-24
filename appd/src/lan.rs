@@ -93,6 +93,8 @@ struct State {
     code: Option<Code>,
     devices: Vec<Device>,
     sessions: HashMap<String, Arc<Session>>,
+    /// Counts the times serving was turned on or off: one that took long sees a later one.
+    asked: u64,
 }
 
 pub struct Lan(Mutex<State>);
@@ -167,14 +169,19 @@ impl Lan {
         }
     }
 
-    /// Turns serving on or off, and remembers it.
+    /// Turns serving on or off, and remembers it. Turning it on asks Tailscale and may make a
+    /// certificate, with no lock held: not for the core's thread.
     pub fn set(self: &Arc<Self>, on: bool) -> Result<(), String> {
-        let mut state = lock(&self.0);
-        if let Some(flag) = state.on.take() {
-            flag.store(false, Ordering::Relaxed);
-            state.sessions.clear();
-            state.code = None;
-        }
+        let asked = {
+            let mut state = lock(&self.0);
+            if let Some(flag) = state.on.take() {
+                flag.store(false, Ordering::Relaxed);
+                state.sessions.clear();
+                state.code = None;
+            }
+            state.asked += 1;
+            state.asked
+        };
         let mark = dir().join("on");
         if !on {
             let _ = fs::remove_file(mark);
@@ -196,6 +203,11 @@ impl Lan {
         };
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let mut state = lock(&self.0);
+        // Turned off or on again meanwhile: the later one decides.
+        if state.asked != asked {
+            return Ok(());
+        }
         state.port = listener.local_addr().map_err(|e| e.to_string())?.port();
         state.fingerprint = fingerprint;
         state.magic_dns = magic_dns;

@@ -3409,7 +3409,20 @@ fn a_bot_is_renamed_given_instructions_reordered_and_deleted_into_the_trash() {
         fs::read_to_string(home.join("bots").join(&a).join("kept.txt")).unwrap(),
         "mine"
     );
-    w.ok("delete_bot", json!({"bot": a}));
+    // A prompt sent right behind the deletion finds no bot, whether the folder is still on its
+    // way to the Trash or gone, and starts no engine that would make the folder again.
+    let gone = w.send("delete_bot", json!({"bot": a}));
+    let late = w.send("prompt", json!({"bot": a, "nonce": "late", "text": "hi"}));
+    let mut replies = Vec::new();
+    while replies.len() < 2 {
+        let frame = w.frame();
+        if frame["type"] == "response" {
+            replies.push(frame);
+        }
+    }
+    let reply = |id: &str| replies.iter().find(|f| f["id"] == id).unwrap();
+    assert_eq!(reply(&gone)["success"], true, "{}", reply(&gone));
+    assert_eq!(reply(&late)["code"], "no_such_bot", "{}", reply(&late));
     assert_eq!(ids(&mut w), std::slice::from_ref(&b));
     assert_eq!(
         refused(&mut w, "open_bot", json!({"bot": a})),
@@ -15555,7 +15568,10 @@ fn a_watch_starts_its_routine_once_per_change_and_an_error_never_does() {
     assert_eq!(row["lastCheck"]["changed"], true);
     assert_eq!(row["lastCheck"]["last"], "four open");
     eventually("the routine's prompt", || prompt_count(&home, &bot) == 1);
-    let sent = fs::read_to_string(folder.join("prompts.log")).unwrap();
+    // The count comes from another file than the text: wait for the text itself.
+    let sent = || fs::read_to_string(folder.join("prompts.log")).unwrap_or_default();
+    eventually("the prompt's text", || sent().contains("Say what changed."));
+    let sent = sent();
     let (at_answer, at_prompt) = (
         sent.find("four open").unwrap(),
         sent.find("Say what changed.").unwrap(),
