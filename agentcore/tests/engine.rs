@@ -3337,6 +3337,22 @@ fn a_call_that_sends_nothing_is_ended_and_asked_again() {
 }
 
 #[test]
+fn a_server_that_never_answers_is_asked_again_once_only() {
+    let dir = workdir("silent");
+    let model = Model::stalling(vec![vec![Value::Null]; 6]);
+    let mut engine = Engine::start_with(&dir, &model, &QUICK);
+    engine.open_new();
+    engine.prompt("hi");
+    let events = engine.until(is_turn_end);
+    assert_eq!(retries(&events).len(), 1, "{events:?}");
+    assert!(
+        matches!(events.last(), Some(Event::TurnEnd { reason: TurnEnd::Error, error: Some(e) }) if e.contains("sent nothing")),
+        "{events:?}"
+    );
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[test]
 fn stopping_the_turn_during_a_wait_ends_it_at_once() {
     let dir = workdir("stop-wait");
     let model = Model::replay(vec![
