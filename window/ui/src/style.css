@@ -153,13 +153,17 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 }
 /* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
-.row:has(input:disabled) { opacity: .6; cursor: default; }
+.row:has(input:disabled) { cursor: default; }
+/* A row that cannot be ticked is dimmed, but the line that says why stays as readable as any small text. */
+.row:has(input:disabled) > :not(.label), .row:has(input:disabled) .label > :not(small) { opacity: .6; }
 .rows li:has(> label.row) { padding: 0; }
 /* An add-on's row: what it is, its buttons at the end, and under them a line for each bot or project that has it. */
 .rows li > .what { flex: 1 1 calc(var(--popover-w) / 2); min-width: 0; overflow-wrap: anywhere; }
 .rows li > .what > small { display: block; }
 .rows li > details > summary { font-size: var(--size-small); color: var(--fg-muted); }
 .rows li > .actions { margin-left: auto; }
+/* The word beside a switch ("On", "Off") has one width, so the buttons before it stay in line from row to row. */
+.rows li .actions label:has(> input[role=switch]) { min-width: calc(var(--switch-w) + var(--space-2) + 3ch); }
 .rows li > .rows { flex: 1 0 100%; margin: 0; }
 /* A note open in place, or the error of its row, under the row's line. */
 .rows li > form, .rows li > .error { flex: 1 0 100%; margin: 0; }
@@ -247,6 +251,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .row.current { background: var(--bg-current); }
 .row .label { display: grid; min-width: 0; line-height: 18px; }
 .row .label > * { overflow: hidden; text-overflow: ellipsis; }
+/* A state under the name, so that a long name keeps its width. */
+.row .label > .badge { margin-left: 0; justify-self: start; }
 .row small { font-weight: 400; }
 /* A row with no avatar: a project, or a page of the app. */
 .row.plain { min-height: var(--control-h); }
@@ -418,7 +424,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 
 /* ---- The bot's conversations: a chip at the end of the header opens the list; each row has a ⋯ for its actions; the foot has the actions on the whole ---- */
 /* With the pane open the row is short: the chip gives way first (its name is cut), then the tabs scroll. */
-main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto; min-width: 0; }
+main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto; min-width: var(--control-w-short); }
 .popover.start { left: 0; right: auto; }
 .popover.below { top: calc(100% + var(--space-1)); bottom: auto; left: 0; right: auto; }
 .popover.end { left: auto; right: 0; }
@@ -540,10 +546,11 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   /* The strip scrolls, so a menu would be cut off: there the bot's Settings has Pause. */
   .sidebar li.bot > .more { display: none; }
   .sidebar .foot { margin: 0 0 0 auto; }
-  .row { width: auto; max-width: 12rem; }
+  .row { width: auto; }
+  .sidebar .row { max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }
   /* The header is two rows: who and the conversation, then the tabs. */
-  main > header { flex-wrap: wrap; gap: 0 var(--space-3); }
+  main > header { flex-wrap: wrap; gap: 0 var(--space-3); padding-top: var(--space-2); }
   [role=tablist] { order: 1; flex: 1 0 100%; }
   .popover.below.end { left: 0; }
   .item.user .bubble { max-width: 92%; }
@@ -552,6 +559,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */
   .composer { flex-wrap: wrap; }
   .composer textarea { order: -1; flex: 1 0 100%; }
+  .composer > :last-child { margin-left: auto; }
   .menu { position: static; }
   .popover { left: 0; right: 0; width: auto; }
   .menu.more { position: relative; }

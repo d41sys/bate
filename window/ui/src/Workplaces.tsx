@@ -185,7 +185,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
           />
           <div className="head">
             <h2>From a folder</h2>
-            <Choose folder set={(path) => void fromFolder(path)} fail={setError} />
+            <Choose small folder set={(path) => void fromFolder(path)} fail={setError} />
           </div>
           <p className="note">A folder with a <code>workplace.json</code> in it (<code>docs/workplaces.md</code>). You see its size and hosts before anything is fetched.</p>
         </>

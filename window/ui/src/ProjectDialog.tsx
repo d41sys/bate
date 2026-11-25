@@ -8,11 +8,11 @@ import type { Bot, Project, Role } from "./types.ts";
 /** A bot made with the project: from a name, or from a role file (format: docs/roles.md). */
 type Fresh = { name: string; role?: Role };
 
-/** The system's panel for a folder or a file, beside the box that takes a typed path. Only in Bate's own window. */
-export function Choose({ folder, set, fail }: { folder: boolean; set: (path: string) => void; fail: (message: string) => void }) {
+/** The system's panel for a folder or a file, beside the box that takes a typed path. Only in Bate's own window. `small` for a section's one action. */
+export function Choose({ folder, set, fail, small }: { folder: boolean; set: (path: string) => void; fail: (message: string) => void; small?: boolean }) {
   if (!inShell) return null;
   const pick = () => pickPath(folder).then((p) => p && set(p), (e) => fail(String(e)));
-  return <button type="button" onClick={pick}>Choose {folder ? "folder" : "file"}…</button>;
+  return <button type="button" className={small ? "small" : undefined} onClick={pick}>Choose {folder ? "folder" : "file"}…</button>;
 }
 
 /**

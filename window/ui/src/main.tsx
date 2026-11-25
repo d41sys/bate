@@ -342,11 +342,11 @@ function App() {
         <span className="label">
           <span>{b.name}</span>
           {state === "working" && <small>Working…</small>}
+          {state === "waiting" && <span className="badge">Needs you</span>}
+          {state === "paused" && <span className="badge quiet">Paused</span>}
+          {state === "unread" && <span className="badge quiet">New reply</span>}
         </span>
         {state === "working" && <span className="pulse" aria-hidden="true" />}
-        {state === "waiting" && <span className="badge">Needs you</span>}
-        {state === "paused" && <span className="badge quiet">Paused</span>}
-        {state === "unread" && <span className="badge quiet">New reply</span>}
       </button>
       <RowMenu label={b.name} items={[{ label: b.paused ? "Resume" : "Pause", run: () => setPaused(!b.paused, b.id) }]} />
     </li>
