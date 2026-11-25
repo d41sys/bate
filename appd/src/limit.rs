@@ -71,13 +71,18 @@ const PROFILE: &str = r#"(version 1)
 
 /// Added for a process held to its hosts: no outgoing connection but to the service's proxy (and
 /// the service's own port, for an engine), and to unix sockets in its folder. Names are not looked
-/// up (that goes through a socket too): the proxy does it.
+/// up: the proxy does it, and a name asked of the system would carry data out. No port is
+/// listened on: what connects from outside could read what the process serves.
+// The lookup socket is denied by name: the rule above that allows it outlives a plain deny.
 const NETWORK: &str = r#"
 (deny network-outbound)
+(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/syslog")))
 (allow network-outbound (remote unix-socket (subpath (param "FOLDER"))))
 (allow network-outbound (remote ip (string-append "localhost:" (param "PROXY"))))
 (allow network-outbound (remote ip (string-append "localhost:" (param "SERVICE"))))
+(deny network-inbound (local ip))
+(deny network-bind (local ip))
 "#;
 
 /// Where a limited process may connect, and how it is told to use it.
