@@ -104,15 +104,28 @@ pub fn install(bot: &str, source: &Path) -> Result<Skill, String> {
     let staged = staging().map_err(failed)?;
     let installed = copy(&from, &staged, &SKILL, 0, &mut (0, 0)).and_then(|()| {
         let dir = made(bot, DIR).map_err(failed)?;
-        let old = remove(&dir, &skill.name).map_err(failed)?;
-        let moved = dir.take(&staged, &skill.name).map_err(failed);
-        discard(old);
-        moved
+        let out = staging().map_err(failed)?;
+        let had = swap(&dir, &staged, &skill.name, &out).map_err(failed)?;
+        discard(had.then_some(out));
+        Ok(())
     });
     if installed.is_err() {
         discard(Some(staged));
     }
     installed.map(|()| skill)
+}
+
+/// Moves `staged` in as `name`, in place of what is there, which goes to `out` (true if there
+/// was something). If the new one cannot be moved in, the old one is put back.
+fn swap(dir: &Dir, staged: &Path, name: &str, out: &Path) -> io::Result<bool> {
+    let had = dir.give(name, out)?;
+    if let Err(e) = dir.take(staged, name) {
+        if had {
+            let _ = dir.take(out, name);
+        }
+        return Err(e);
+    }
+    Ok(had)
 }
 
 /// Makes the skill `name` in the bot's skills from `files` (paths already checked to stay
@@ -253,4 +266,31 @@ pub fn delete(bot: &str, name: &str) -> io::Result<bool> {
     let found = old.is_some();
     discard(old);
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skill_that_cannot_be_moved_in_leaves_the_old_one_as_it_was() {
+        let root = std::env::temp_dir().join(format!("appd-{}-skill-swap", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("skills/x")).unwrap();
+        fs::write(root.join("skills/x/SKILL.md"), "old").unwrap();
+        let dir = Dir::open(&root.join("skills")).unwrap();
+        let (out, text) = (root.join("out"), root.join("skills/x/SKILL.md"));
+
+        // Nothing staged: the move in fails.
+        assert!(swap(&dir, &root.join("none"), "x", &out).is_err());
+        assert_eq!(fs::read_to_string(&text).unwrap(), "old");
+        assert!(!out.exists());
+
+        fs::create_dir_all(root.join("new")).unwrap();
+        fs::write(root.join("new/SKILL.md"), "new").unwrap();
+        assert!(swap(&dir, &root.join("new"), "x", &out).unwrap());
+        assert_eq!(fs::read_to_string(&text).unwrap(), "new");
+        assert_eq!(fs::read_to_string(out.join("SKILL.md")).unwrap(), "old");
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

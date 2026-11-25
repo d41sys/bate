@@ -81,6 +81,17 @@ fn look(dir: &Dir, name: &str) -> io::Result<Now> {
         });
     };
     let meta = file.metadata()?;
+    // shortcut: a file over 64 times the bound is called changed without a look, also if a
+    // change left it so (an edit of a huge file); read it off this thread if that is wanted.
+    // A command can grow a file a bot wrote to gigabytes, and this is the service's one thread.
+    if meta.len() > 64 * MAX_FILE {
+        return Ok(Now {
+            // A sum no change has.
+            sum: Some(String::new()),
+            bytes: None,
+            mode: Some(meta.permissions().mode() & 0o7777),
+        });
+    }
     let (mut hash, mut bytes, mut chunk) = (Context::new(&SHA256), Vec::new(), vec![0; 64 << 10]);
     loop {
         let n = file.read(&mut chunk)?;
