@@ -103,7 +103,7 @@ while IFS= read -r line; do
             tunnel) d=$(curl -sSf -m 5 -p -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe tunnel: $r $d" >&2 ;;
             direct) d=$(curl -sSf -m 5 --noproxy '*' -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe direct: $r $d" >&2 ;;
             listen) perl -MIO::Socket::INET -e 'exit(IO::Socket::INET->new(Listen=>1,LocalAddr=>"0.0.0.0",LocalPort=>0) ? 0 : 1)' 2>/dev/null && r=ok || r=refused ;;
-            lookup) dscacheutil -q host -a name "$path" 2>/dev/null | grep -q address && r=ok || r=refused ;;
+            lookup) d=$(dscacheutil -q host -a name "$path" 2>&1 | tr '\n' ' '); case "$d" in *address*) r=ok ;; *) r=refused ;; esac; echo "probe lookup: $r $d; in the hosts file: $(grep -c "$path" /etc/hosts 2>&1); socket: $(nc -U -w 2 /private/var/run/mDNSResponder </dev/null >/dev/null 2>&1 && echo open || echo shut); nip: $(dscacheutil -q host -a name "d$$.10.1.2.3.nip.io" 2>&1 | tr '\n' ' ')" >&2 ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -5261,7 +5261,9 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     assert_eq!(probe(&mut w, &bot, "n9a", "listen x"), "refused");
     assert_eq!(
         probe(&mut w, &bot, "n9b", &format!("lookup {own}")),
-        "refused"
+        "refused",
+        "{}",
+        probes(&home)
     );
     assert_eq!(hits(), 2);
     // Not the whole disk of a limited bot, nor a limit for a bot in a turn.
