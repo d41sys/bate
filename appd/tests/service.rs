@@ -3646,6 +3646,51 @@ fn the_page_for_other_devices_is_named_for_the_tailnet() {
 }
 
 #[test]
+fn of_two_requests_to_turn_the_page_for_other_devices_on_or_off_at_once_the_last_decides() {
+    let home = home("lan-twice");
+    // A Tailscale that takes its time while `slow` is there, so that two requests are under way
+    // at once; without it, one that answers before the old listener has looked at its flag.
+    let (tailscale, slow) = (home.join("tailscale"), home.join("slow"));
+    let script = format!(
+        "#!/bin/sh\n[ -f '{}' ] && /bin/sleep 0.5\necho '{{}}'\n",
+        slow.display()
+    );
+    fs::write(&tailscale, script).unwrap();
+    fs::write(&slow, "").unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o755)).unwrap();
+    // One port for both, as in the app: the second must not find it held by the first.
+    let port = std::net::TcpListener::bind("0.0.0.0:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let _service = Service::start_with(&home, |c| {
+        c.env("APPD_LAN_PORT", port.to_string())
+            .env("APPD_TAILSCALE", &tailscale);
+    });
+    let mut w = Window::connect(&home);
+    let both = |w: &mut Window, first: bool, second: bool| {
+        w.send("set_lan", json!({"on": first}));
+        w.send("set_lan", json!({"on": second}));
+        for _ in 0..2 {
+            let reply = w.wait_for(|f| f["type"] == "response");
+            assert_eq!(reply["success"], true, "{reply}");
+        }
+        w.ok("lan_status", json!({}))["on"].clone()
+    };
+    assert_eq!(both(&mut w, true, true), true);
+    assert_eq!(both(&mut w, true, false), false);
+    assert!(!home.join("lan/on").exists());
+
+    // On while it is on, and on right after off: the port is the old listener's until that is
+    // over, and the service waits for it.
+    fs::remove_file(&slow).unwrap();
+    for on in [true, true, false, true] {
+        assert_eq!(w.ok("set_lan", json!({"on": on}))["on"], on);
+    }
+}
+
+#[test]
 fn another_device_pairs_with_a_code_and_then_works_as_a_window() {
     let home = home("lan");
     let _service = Service::start_with(&home, |c| {
