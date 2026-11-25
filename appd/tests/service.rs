@@ -242,6 +242,7 @@ done
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A private home folder, removed when the test passes; kept after a failure, for a look at what is in it.
+/// The end of what the service wrote is printed with the failure: a runner keeps no folder.
 struct Home(PathBuf);
 
 impl std::ops::Deref for Home {
@@ -255,6 +256,13 @@ impl Drop for Home {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             let _ = fs::remove_dir_all(&self.0);
+            return;
+        }
+        for log in ["appd.log", "logs/appd.log"] {
+            let text = fs::read_to_string(self.0.join(log)).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let last = lines[lines.len().saturating_sub(40)..].join("\n");
+            eprintln!("--- the end of {log}\n{last}");
         }
     }
 }
