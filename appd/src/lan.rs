@@ -98,8 +98,9 @@ struct State {
 }
 
 /// The state, and the switch: held while serving is turned on or off, which can take seconds,
-/// so that such requests run one after another. The state's own lock is never held that long.
-pub struct Lan(Mutex<State>, Mutex<()>);
+/// so that such requests run one after another. It holds the thread that accepts connections,
+/// if one runs. The state's own lock is never held that long.
+pub struct Lan(Mutex<State>, Mutex<Option<thread::JoinHandle<()>>>);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -130,7 +131,7 @@ impl Lan {
             devices,
             ..State::default()
         };
-        let lan = Arc::new(Lan(Mutex::new(state), Mutex::new(())));
+        let lan = Arc::new(Lan(Mutex::new(state), Mutex::new(None)));
         lan.resume();
         lan
     }
@@ -138,11 +139,11 @@ impl Lan {
     /// Serves if the user left it on and it is not serving: at start, and again when the
     /// Keychain, which held back the certificate's key, has been answered.
     pub fn resume(self: &Arc<Self>) {
-        let _switch = lock(&self.1);
+        let mut switch = lock(&self.1);
         let serving = lock(&self.0).on.is_some();
         if !serving
             && dir().join("on").exists()
-            && let Err(e) = self.turn(true)
+            && let Err(e) = self.turn(true, &mut switch)
         {
             log!("the page for other devices is off: {e}");
         }
@@ -184,15 +185,20 @@ impl Lan {
     /// Turns serving on or off, and remembers it, unless a request was made after `asked`.
     /// Turning it on asks Tailscale and may make a certificate: not for the core's thread.
     pub fn set(self: &Arc<Self>, on: bool, asked: u64) -> Result<(), String> {
-        let _switch = lock(&self.1);
+        let mut switch = lock(&self.1);
         if lock(&self.0).asked != asked {
             return Ok(());
         }
-        self.turn(on)
+        self.turn(on, &mut switch)
     }
 
-    /// What `set` does, for a caller that holds the switch.
-    fn turn(self: &Arc<Self>, on: bool) -> Result<(), String> {
+    /// What `set` does, for a caller that holds the switch: `serving` is the thread that accepts
+    /// connections, if one runs.
+    fn turn(
+        self: &Arc<Self>,
+        on: bool,
+        serving: &mut Option<thread::JoinHandle<()>>,
+    ) -> Result<(), String> {
         {
             let mut state = lock(&self.0);
             if let Some(flag) = state.on.take() {
@@ -200,6 +206,10 @@ impl Lan {
                 state.sessions.clear();
                 state.code = None;
             }
+        }
+        // The port is free once the thread that accepted on it is over: it looks every 100 ms.
+        if let Some(old) = serving.take() {
+            let _ = old.join();
         }
         let mark = dir().join("on");
         if !on {
@@ -230,7 +240,9 @@ impl Lan {
         state.on = Some(flag.clone());
         let _ = fs::write(mark, "");
         let lan = self.clone();
-        thread::spawn(move || lan.accept(listener, Arc::new(config), flag));
+        *serving = Some(thread::spawn(move || {
+            lan.accept(listener, Arc::new(config), flag)
+        }));
         Ok(())
     }
 
