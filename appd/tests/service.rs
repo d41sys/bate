@@ -13674,6 +13674,15 @@ fn a_file_changed_since_is_not_overwritten_unless_the_person_insists() {
     );
     assert_eq!(text_of(&edited), "old");
 
+    // A file a command grew far past anything a change leaves is not read: changed, at once.
+    let id = change(&mut w, &bot, "n3", &edited, "new again");
+    let grown = fs::OpenOptions::new().write(true).open(&edited).unwrap();
+    grown.set_len(1 << 40).unwrap();
+    assert_eq!(
+        refused(&mut w, "undo_change", json!({"bot": bot, "change": id})),
+        "changed"
+    );
+
     // A file the change made that is gone, or is another file now.
     let id = change(&mut w, &bot, "n2", &made, "fresh");
     fs::remove_file(&made).unwrap();
