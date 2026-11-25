@@ -9,8 +9,10 @@
 use crate::attach::base64;
 use crate::core::Msg;
 use crate::hooks::Until;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -18,6 +20,8 @@ use std::time::{Duration, Instant};
 
 /// Connections served at once; more are dropped unanswered.
 const MAX_OPEN: usize = 256;
+/// Connections one key may hold at once: one bot's commands cannot take every place.
+const SHARE: usize = 64;
 const MAX_HEAD: u64 = 16 * 1024;
 /// How long a request's head may take to arrive, and the service to answer.
 const WAIT: Duration = Duration::from_secs(5);
@@ -165,16 +169,19 @@ fn serve(stream: &TcpStream, tx: &Sender<Msg>, fixed: Option<&str>) -> Result<()
             _ => kept.push_str(&header),
         }
     }
-    let rules = {
+    let (rules, _place) = {
         let (answer, answered) = mpsc::channel();
         let key = fixed.map(str::to_owned).or(key);
         let key = key.ok_or((407, "the proxy needs its key".to_owned()))?;
+        let place = Place::take(&key)
+            .ok_or((429, "too many connections at once for this bot".to_owned()))?;
         tx.send(Msg::Egress(Ask { key, answer }))
             .map_err(|_| (503, "the service is stopping".to_owned()))?;
         let hosts = answered
             .recv_timeout(WAIT)
             .map_err(|_| (503, "the service is busy".to_owned()))?;
-        hosts.ok_or((407, "the proxy does not know this key".to_owned()))?
+        let hosts = hosts.ok_or((407, "the proxy does not know this key".to_owned()))?;
+        (hosts, place)
     };
     let rules: Vec<Rule> = rules.iter().filter_map(|r| parse(r).ok()).collect();
     let connect = method.eq_ignore_ascii_case("CONNECT");
@@ -215,6 +222,34 @@ fn serve(stream: &TcpStream, tx: &Sender<Msg>, fixed: Option<&str>) -> Result<()
     Ok(())
 }
 
+/// One of a key's `SHARE` connections, given back when the connection ends.
+struct Place(String);
+
+impl Place {
+    fn take(key: &str) -> Option<Place> {
+        let mut held = HELD.lock().unwrap();
+        let n = held.entry(key.to_owned()).or_default();
+        (*n < SHARE).then(|| {
+            *n += 1;
+            Place(key.to_owned())
+        })
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let mut held = HELD.lock().unwrap();
+        if let Some(n) = held.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.0);
+            }
+        }
+    }
+}
+
+static HELD: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+
 /// Opens the connection. A name that only a wildcard matched is not taken to this Mac's own
 /// ports: the service's other ports are not for a name someone else controls.
 fn connect_to(host: &str, port: u16, rule: &Rule) -> io::Result<TcpStream> {
@@ -251,6 +286,16 @@ fn pipe(client: &TcpStream, host: &TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_key_holds_its_share_of_connections_and_no_more_while_another_still_gets_its_own() {
+        let mut held: Vec<Place> = (0..SHARE).map(|_| Place::take("one").unwrap()).collect();
+        assert!(Place::take("one").is_none());
+        assert!(Place::take("other").is_some());
+        // A connection that ended gives its place back.
+        held.pop();
+        assert!(Place::take("one").is_some());
+    }
 
     fn allowed(rules: &[&str], host: &str, port: u16) -> bool {
         let rules: Vec<Rule> = rules.iter().map(|r| parse(r).unwrap()).collect();

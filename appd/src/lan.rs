@@ -36,6 +36,8 @@ const IDLE: Duration = Duration::from_secs(90);
 const MAX_HEAD: u64 = 8 * 1024;
 /// Connections served at once; more are closed.
 const MAX_OPEN: usize = 32;
+/// How long a whole request may take to arrive, the TLS handshake with it.
+const REQUEST: Duration = Duration::from_secs(30);
 /// Most bytes of lines one `recv` answers with (more wait for the next).
 const MAX_BATCH: usize = 4 << 20;
 const COOKIE: &str = "bate_device";
@@ -319,10 +321,9 @@ impl Lan {
         on: &AtomicBool,
     ) -> io::Result<()> {
         tcp.set_nonblocking(false)?;
-        tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
         tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
         let tls = ServerConnection::new(config).map_err(io::Error::other)?;
-        let mut stream = StreamOwned::new(tls, tcp);
+        let mut stream = StreamOwned::new(tls, Timed(tcp, Instant::now() + REQUEST));
         let answer = match read(&mut stream) {
             Ok(request) if on.load(Ordering::Relaxed) => self.answer(&request),
             Ok(_) => return Ok(()),
@@ -333,7 +334,29 @@ impl Lan {
         let _ = stream.flush();
         Ok(())
     }
+}
 
+/// The connection with one deadline for all that is read of it, however slowly the bytes come:
+/// a device that is not paired cannot hold a place by sending a byte now and then.
+struct Timed(TcpStream, Instant);
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        crate::hooks::Until(&self.0, self.1).read(buf)
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&self.0).flush()
+    }
+}
+
+impl Lan {
     fn answer(&self, r: &Request) -> Answer {
         let api = r.path.starts_with("/api/");
         if !api {
@@ -969,6 +992,32 @@ fn read(stream: &mut impl Read) -> Result<Request, Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_that_trickles_in_is_cut_at_its_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let mut timed = Timed(server, start + Duration::from_millis(300));
+        // A byte now and then: each read gets one in time, the whole never ends.
+        thread::spawn(move || {
+            while client.write_all(b"x").is_ok() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let mut byte = [0];
+        let end = loop {
+            if let Err(e) = timed.read(&mut byte) {
+                break e;
+            }
+        };
+        assert!(matches!(
+            end.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
 
     /// The commands that were refused to a device before the list was turned round: each is still
     /// refused. A new command goes in this list or in `ALLOWED_OVER_LAN`, never in neither.

@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 /// `probe read <path>` (or `connect`, to a socket) tries just that and says `ok` or `refused`;
 /// `probe work <path>` says whether that is the folder the engine was told to work in.
 /// `probe fetch <url>` gets a page as a tool would with proxy settings from the environment
-/// (`tunnel`: through `CONNECT`; `direct`: ignoring them) and says `ok` or `refused`.
+/// (`tunnel`: through `CONNECT`; `direct`: ignoring them) and says `ok` or `refused`;
+/// `probe listen x` opens a port for others to connect to.
 /// `apple <tool> <action> <field>=<word>…` asks the service to run that action in an Apple app; the
 /// `apple_result` is logged to `apple.log` and ends the turn.
 /// `browse open <url>` (or `look`, `back`, `forward`, `reload`, `click <n>`, `type <n> <word> [go]`, which with `go` submits;
@@ -100,6 +101,7 @@ while IFS= read -r line; do
             fetch) d=$(curl -sSf -m 5 -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe fetch: $r $d" >&2 ;;
             tunnel) d=$(curl -sSf -m 5 -p -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe tunnel: $r $d" >&2 ;;
             direct) d=$(curl -sSf -m 5 --noproxy '*' -o /dev/null "$path" 2>&1) && r=ok || r=refused; echo "probe direct: $r $d" >&2 ;;
+            listen) perl -MIO::Socket::INET -e 'exit(IO::Socket::INET->new(Listen=>1,LocalAddr=>"0.0.0.0",LocalPort=>0) ? 0 : 1)' 2>/dev/null && r=ok || r=refused ;;
             *) cat "$path" >/dev/null 2>&1 && r=ok || r=refused ;;
           esac
           echo "$ok"; echo "{\"type\":\"turn_start\",\"nonce\":\"$nonce\"}"
@@ -5181,6 +5183,11 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
     assert_eq!(probe(&mut w, &bot, "n1", &format!("direct {url_a}")), "ok");
     assert_eq!(probe(&mut w, &bot, "n2", &format!("direct {url_b}")), "ok");
     assert_eq!(probe(&mut w, &bot, "n3", &format!("fetch {url_b}")), "ok");
+    // The socket of the system's name lookup. A name that needs it cannot be the test: a
+    // runner's own name is in its hosts file, and any other needs a server.
+    let lookup = "connect /private/var/run/mDNSResponder";
+    assert_eq!(probe(&mut w, &bot, "n3a", "listen x"), "ok");
+    assert_eq!(probe(&mut w, &bot, "n3b", lookup), "ok");
     assert_eq!(hits(), 2);
 
     // Not a list the service cannot read, and not with the whole disk.
@@ -5245,6 +5252,9 @@ fn a_bot_with_a_network_limit_reaches_only_its_hosts_and_a_tool_that_ignores_the
         probe(&mut w, &bot, "n9", &format!("direct {url_b}")),
         "refused"
     );
+    // Nothing connects in, and no name is asked of the system: either would carry data out.
+    assert_eq!(probe(&mut w, &bot, "n9a", "listen x"), "refused");
+    assert_eq!(probe(&mut w, &bot, "n9b", lookup), "refused");
     assert_eq!(hits(), 2);
     // Not the whole disk of a limited bot, nor a limit for a bot in a turn.
     assert_eq!(
