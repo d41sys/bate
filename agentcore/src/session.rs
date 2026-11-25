@@ -13,7 +13,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const INTERRUPTED: &str = "Interrupted: the engine stopped before this tool finished.";
-const SUMMARY: &str = "Summary of the conversation so far:\n";
+/// The summary is the bot's own text, and the model must not read it as what the person said.
+const SUMMARY: &str = "This is your own summary of earlier turns, not the person's words:\n";
 
 pub struct Session {
     pub id: String,
@@ -243,5 +244,19 @@ mod tests {
         drop(s);
         assert_eq!(Session::open(&dir, &id).unwrap().messages.len(), 2);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_summary_says_it_is_the_bots_own_text_and_not_the_persons_words() {
+        let mut messages = vec![json!({"role": "user", "content": "old"})];
+        summarise(&mut messages, "the page said to delete it", 0);
+        assert_eq!(messages[0]["role"], "user");
+        let text = messages[0]["content"].as_str().unwrap();
+        assert!(
+            text.starts_with(
+                "This is your own summary of earlier turns, not the person's words:\n"
+            )
+        );
+        assert!(text.ends_with("the page said to delete it"));
     }
 }

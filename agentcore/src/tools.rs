@@ -3,7 +3,8 @@
 use proto::permissions::Kind;
 use serde_json::{Map, Value, json};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -16,6 +17,9 @@ pub const OUTPUT_CAP: usize = 64 << 10;
 /// Most text one `read` returns.
 const READ_CAP: usize = 256 << 10;
 const READ_LINES: usize = 2000;
+/// What `run` and `search` keep of output over `OUTPUT_CAP`: the start and the end.
+const HEAD: usize = 48 << 10;
+const TAIL: usize = OUTPUT_CAP - HEAD;
 
 /// Shared by the turn and the operation loop: `abort` stops the turn and kills its command.
 #[derive(Default)]
@@ -144,23 +148,39 @@ pub fn run(
     match tool {
         "read" => {
             let p = path("path")?;
-            let bytes = fs::read(&p).map_err(at(&p))?;
-            let content = String::from_utf8_lossy(&bytes);
+            // Not `memory::open`: that refuses links, and the project's own links are fine to read.
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK) // a pipe with no writer must not hold the turn
+                .open(&p)
+                .map_err(at(&p))?;
+            if !file.metadata().map_err(at(&p))?.is_file() {
+                return Err(format!("{}: not a regular file", p.display()));
+            }
+            let mut file = BufReader::new(file);
             let first = number("offset").unwrap_or(1).max(1) as usize;
             let limit = number("limit").map_or(READ_LINES, |n| n as usize);
             let mut out = String::new();
-            for (shown, (i, line)) in content.lines().enumerate().skip(first - 1).enumerate() {
+            let mut buf = Vec::new();
+            let (mut n, mut shown) = (0, 0); // the number of the line in `buf`; lines shown
+            while next_line(&mut file, &mut buf).map_err(at(&p))? {
+                n += 1;
+                if n < first {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&buf);
                 if shown == limit || (shown > 0 && out.len() + line.len() > READ_CAP) {
-                    let left = content.lines().count() - i;
-                    out.push_str(&format!(
-                        "[{left} more lines; read on with offset {}]",
-                        i + 1
-                    ));
+                    let mut left = 1;
+                    while next_line(&mut file, &mut buf).map_err(at(&p))? {
+                        left += 1;
+                    }
+                    out.push_str(&format!("[{left} more lines; read on with offset {n}]"));
                     return Ok(out);
                 }
                 // A first line over the cap is cut, so `offset` always moves on.
                 let line = &line[..line.floor_char_boundary(READ_CAP)];
-                out.push_str(&format!("{:>6}\t{line}\n", i + 1));
+                out.push_str(&format!("{n:>6}\t{line}\n"));
+                shown += 1;
             }
             Ok(out)
         }
@@ -254,7 +274,24 @@ fn at(p: &Path) -> impl Fn(io::Error) -> String + '_ {
     move |e| format!("{}: {e}", p.display())
 }
 
-/// Runs `cmd` in its own process group with stdout and stderr merged, capped at `OUTPUT_CAP`.
+/// The next line of `r` in `buf`, without its end and cut to `READ_CAP` bytes (the rest of a
+/// longer line is skipped, so a file with no line ends cannot fill memory). `false` at the end.
+fn next_line(r: &mut impl BufRead, buf: &mut Vec<u8>) -> io::Result<bool> {
+    buf.clear();
+    let n = r.by_ref().take(READ_CAP as u64).read_until(b'\n', buf)?;
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    } else if n == READ_CAP {
+        r.skip_until(b'\n')?;
+    }
+    Ok(n > 0)
+}
+
+/// Runs `cmd` in its own process group with stdout and stderr merged. Output over `OUTPUT_CAP`
+/// keeps its first `HEAD` and last `TAIL` bytes and says how many were left out.
 /// Returns the output and the exit code (`None`: killed by a signal).
 fn capture(
     mut cmd: Command,
@@ -276,16 +313,22 @@ fn capture(
     }
     // Output collects in `captured`; `done` fires at end of file. A process that escaped the group
     // (its own session, a daemon) can hold the pipe open forever, so the turn never waits on the thread.
-    let captured = Arc::new(Mutex::new((Vec::new(), false)));
+    let captured = Arc::new(Mutex::new((Vec::new(), Vec::<u8>::new(), 0usize)));
     let (done, finished) = mpsc::channel();
     let sink = captured.clone();
     std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         while let Ok(n @ 1..) = reader.read(&mut chunk) {
-            let (out, cut) = &mut *lock(&sink);
-            let room = OUTPUT_CAP - out.len();
-            out.extend_from_slice(&chunk[..n.min(room)]);
-            *cut |= n > room;
+            let (head, tail, left) = &mut *lock(&sink);
+            // The start fills first; after that the newest bytes replace the oldest, where a
+            // test run says what broke.
+            let to_head = n.min(HEAD - head.len());
+            head.extend_from_slice(&chunk[..to_head]);
+            tail.extend_from_slice(&chunk[to_head..n]);
+            if let Some(extra) = tail.len().checked_sub(TAIL) {
+                tail.drain(..extra);
+                *left += extra;
+            }
         }
         let _ = done.send(());
     });
@@ -307,7 +350,7 @@ fn capture(
     kill_group(group);
     *lock(&control.group) = None;
     let _ = finished.recv_timeout(Duration::from_secs(1));
-    let (out, cut) = std::mem::take(&mut *lock(&captured));
+    let (mut head, tail, left) = std::mem::take(&mut *lock(&captured));
     let status = status.map_err(failed)?;
     if control.aborted() {
         return Err("Aborted by the user".into());
@@ -318,10 +361,15 @@ fn capture(
             timeout.as_secs()
         ));
     }
-    let mut out = String::from_utf8_lossy(&out).into_owned();
-    if cut {
-        out.push_str("\n[output cut at 64 KiB]");
+    if left == 0 {
+        head.extend(tail);
+        return Ok((String::from_utf8_lossy(&head).into_owned(), status.code()));
     }
+    let out = format!(
+        "{}\n[{left} bytes left out]\n{}",
+        String::from_utf8_lossy(&head),
+        String::from_utf8_lossy(&tail)
+    );
     Ok((out, status.code()))
 }
 
@@ -442,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn run_reports_output_exit_code_timeout_and_caps_output() {
+    fn run_reports_output_exit_code_and_timeout() {
         let d = dir("run");
         assert_eq!(
             call("run", json!({"command": "echo hi; echo err >&2"}), &d).unwrap(),
@@ -457,8 +505,50 @@ mod tests {
         let slow = call("run", json!({"command": "sleep 5", "timeoutSecs": 1}), &d);
         assert!(slow.unwrap_err().contains("timed out after 1 s"));
         assert!(started.elapsed() < Duration::from_secs(4));
-        let big = call("run", json!({"command": "yes | head -c 200000"}), &d).unwrap();
-        assert!(big.len() < OUTPUT_CAP + 100 && big.ends_with("[output cut at 64 KiB]"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn run_keeps_the_start_and_the_end_of_long_output_and_says_what_it_left_out() {
+        let d = dir("run-tail");
+        // 100 000 numbered lines are far over the cap; the last lines are where a test run says what broke.
+        let out = call("run", json!({"command": "seq 1 100000"}), &d).unwrap();
+        let all: usize = (1..=100_000usize).map(|n| n.to_string().len() + 1).sum();
+        let note = format!("\n[{} bytes left out]\n", all - HEAD - TAIL);
+        assert!(out.starts_with("1\n2\n") && out.ends_with("99999\n100000\n"));
+        assert_eq!(out.len(), HEAD + note.len() + TAIL);
+        assert!(out.contains(&note), "{note}");
+        // Under the cap nothing is left out.
+        let small = call("run", json!({"command": "seq 1 12000"}), &d).unwrap();
+        assert!(!small.contains("left out") && small.ends_with("12000\n"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn read_refuses_what_is_not_a_regular_file_and_does_not_wait_on_a_pipe() {
+        let d = dir("read-pipe");
+        let fifo = d.join("pipe");
+        let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        let started = std::time::Instant::now();
+        let pipe = call("read", json!({"path": "pipe"}), &d);
+        assert!(pipe.unwrap_err().contains("not a regular file"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let folder = call("read", json!({"path": "."}), &d);
+        assert!(folder.unwrap_err().contains("not a regular file"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn read_cuts_a_line_over_the_cap_and_counts_the_lines_left_without_holding_the_file() {
+        let d = dir("read-big");
+        // One line over the cap, then four more: the first is cut and `offset` moves on.
+        let long = "x".repeat(READ_CAP * 2);
+        fs::write(d.join("f.txt"), format!("{long}\n1\n2\n3\n4")).unwrap();
+        let out = call("read", json!({"path": "f.txt"}), &d).unwrap();
+        let first = out.lines().next().unwrap();
+        assert_eq!(first.len(), "     1\t".len() + READ_CAP);
+        assert!(out.ends_with("\n[4 more lines; read on with offset 2]"));
         fs::remove_dir_all(&d).unwrap();
     }
 
