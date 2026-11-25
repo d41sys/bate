@@ -854,12 +854,12 @@ mod tests {
 
     #[test]
     fn the_first_line_may_take_four_times_as_long_as_a_later_silence() {
-        let idle = Duration::from_millis(200);
+        let idle = Duration::from_millis(400);
         let line = r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
-        // A server that reads a long prompt: 500 ms is over `idle` but inside four times it.
+        // A server that reads a long prompt: 600 ms is over `idle` but well inside four times it.
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(600));
             tx.send(Ok(line.to_owned())).unwrap();
             tx.send(Ok("data: [DONE]".to_owned())).unwrap();
         });
