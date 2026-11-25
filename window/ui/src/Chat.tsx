@@ -284,6 +284,20 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     // Measuring made the box one line for a moment, which pulled the chat off its end.
     if (atBottom.current) rows.scrollToEnd();
   }, [text]);
+  // A narrower box (the side pane opening) wraps its words onto more lines: measure again, or the last ones are cut.
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    let width = el.clientWidth;
+    const watch = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    });
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, []);
 
   const run = (p: Promise<unknown>) => p.catch((e: Error) => setError(e.message));
   const stop = () => run(request("abort", { bot: bot.id }));

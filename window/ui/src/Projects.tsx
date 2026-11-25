@@ -2,6 +2,7 @@ import { useState } from "react";
 import { request } from "./service.ts";
 import type { Bot, Project } from "./types.ts";
 import { Group, Setting } from "./Form.tsx";
+import { Avatar } from "./Avatar.tsx";
 import { Choose, ProjectDialog } from "./ProjectDialog.tsx";
 import { sent } from "./projects.ts";
 import { useWorkplaces } from "./Workplaces.tsx";
@@ -150,7 +151,10 @@ export function ProjectBots({ project, bots }: { project: Project; bots: Bot[] }
       )}
       {project.bots.length === 0 && <p className="empty">No bots in this project yet.</p>}
       <ul className="rows">
-        {project.bots.map((id) => <li key={id}>{label(bots.find((b) => b.id === id))}</li>)}
+        {project.bots.map((id) => {
+          const b = bots.find((x) => x.id === id);
+          return <li key={id}>{b && <Avatar bot={b} />}{b?.name ?? "(deleted bot)"}</li>;
+        })}
       </ul>
       <button onClick={() => setEditing(true)}>Add or remove bots…</button>
       {editing && <ProjectDialog project={project} bots={bots} done={() => setEditing(false)} close={() => setEditing(false)} />}

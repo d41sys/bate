@@ -37,7 +37,7 @@ export function Skills({ bots }: { bots: Bot[] }) {
     <section>
       <div className="head">
         <h2>Installed</h2>
-        <Choose folder set={(path) => void look({ path }, madeBy.folder)} fail={setError} />
+        <Choose small folder set={(path) => void look({ path }, madeBy.folder)} fail={setError} />
       </div>
       {rows.length === 0 && <p className="note">No skills yet.{inShell ? " Choose a folder with a SKILL.md in it." : ""}</p>}
       <ul className="rows">

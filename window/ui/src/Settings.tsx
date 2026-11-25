@@ -148,7 +148,6 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
         ) : (
           <Setting
             id="bot-check"
-            inline
             title="Check answers before the turn ends"
             hint={inShell ? "After a reply that used tools or is long, a model reads it once more, with no tools. If it finds something wrong, the bot works on it again (checked twice at most). It uses this bot's tokens; routines and other bots' messages are not checked." : "Only Bate's own window changes this."}
             saved={saved("check")}

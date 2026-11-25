@@ -76,7 +76,7 @@
   --switch-h: 20px;
   --tip-w: 240px;
   --control-w: 240px;
-  --control-w-short: 96px;
+  --control-w-short: 112px;
 
   /* Motion: short, and none when the system asks for less. */
   --fast: 100ms;
