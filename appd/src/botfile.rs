@@ -232,15 +232,30 @@ pub fn export(
     }
     let dir = paths::home().join("exports");
     sys::create_private_dir(&dir).map_err(err)?;
-    let path = dir.join(format!("bate-bot-{bot}-{now}.batebot"));
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, &bytes));
-    written.map_err(|e| format!("the file was not written: {e}"))?;
+    let path =
+        write_new(&dir, bot, now, &bytes).map_err(|e| format!("the file was not written: {e}"))?;
     Ok((path.to_string_lossy().into_owned(), to_check))
+}
+
+/// Writes a bot's file under a name no file has: the time in it, or the next one free after it
+/// (a bot exported twice in one millisecond).
+fn write_new(dir: &Path, bot: &str, now: u64, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let mut at = now;
+    loop {
+        let path = dir.join(format!("bate-bot-{bot}-{at}.batebot"));
+        let opened = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path);
+        match opened {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => at += 1,
+            opened => {
+                std::io::Write::write_all(&mut opened?, bytes)?;
+                return Ok(path);
+            }
+        }
+    }
 }
 
 fn too_big() -> String {
@@ -695,5 +710,17 @@ mod tests {
         let name = free_name(&long, std::slice::from_ref(&long));
         assert_eq!(name.chars().count(), 80);
         assert!(name.ends_with(" 2"));
+    }
+
+    #[test]
+    fn a_bot_exported_twice_in_one_millisecond_gets_two_files() {
+        let dir = std::env::temp_dir().join(format!("bate-export-{}", sys::random_hex(4)));
+        fs::create_dir(&dir).unwrap();
+        let first = write_new(&dir, "b1", 7, b"one").unwrap();
+        let second = write_new(&dir, "b1", 7, b"two").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read(&first).unwrap(), b"one");
+        assert_eq!(fs::read(&second).unwrap(), b"two");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
