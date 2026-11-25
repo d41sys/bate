@@ -45,6 +45,8 @@ pub struct Fail {
     transient: bool,
     /// How long the server asked us to wait (`Retry-After`).
     wait: Option<Duration>,
+    /// The long wait for a first line ran out: one more request, then no more.
+    once: bool,
 }
 
 impl From<String> for Fail {
@@ -54,6 +56,7 @@ impl From<String> for Fail {
             why,
             transient: false,
             wait: None,
+            once: false,
         }
     }
 }
@@ -90,7 +93,9 @@ enum Next {
     End,
 }
 
-fn next(lines: &Lines, abort: &AtomicBool, idle: Duration) -> Result<Next, Fail> {
+/// The next line. The `first` line of a reply may take `FIRST_LINE` times `idle`.
+fn next(lines: &Lines, abort: &AtomicBool, idle: Duration, first: bool) -> Result<Next, Fail> {
+    let idle = if first { idle * FIRST_LINE } else { idle };
     let since = Instant::now();
     loop {
         let received = lines.recv_timeout(POLL);
@@ -100,9 +105,10 @@ fn next(lines: &Lines, abort: &AtomicBool, idle: Duration) -> Result<Next, Fail>
         match received {
             Ok(line) => return line.map(Next::Line),
             Err(RecvTimeoutError::Timeout) if since.elapsed() >= idle => {
-                return Err(transient(format!(
-                    "the model server sent nothing for {idle:?}"
-                )));
+                return Err(Fail {
+                    once: first,
+                    ..transient(format!("the model server sent nothing for {idle:?}"))
+                });
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Next::End),
@@ -364,6 +370,7 @@ impl Provider {
         // The same for a chat server and the option that asks it for `usage`.
         let mut tried_usage = None;
         let mut usage = api == Api::Chat && !self.usage_refused.load(Ordering::Relaxed);
+        let mut last = false;
         loop {
             let mut streamed = false;
             let once = self.once(base_url, key, api, (search, usage), ask, abort, |d| {
@@ -396,13 +403,14 @@ impl Provider {
                     search = false;
                     continue;
                 }
-                Err(fail) if fail.transient && !streamed && retries < RETRIES => fail,
+                Err(fail) if fail.transient && !streamed && retries < RETRIES && !last => fail,
                 done => return done.map_err(|fail| fail.why),
             };
             let wait = fail
                 .wait
                 .map_or(self.wait * 2u32.pow(retries), |w| w.min(MAX_ASKED));
             retries += 1;
+            last = fail.once;
             on(Delta::Retry {
                 attempt: retries,
                 wait,
@@ -529,6 +537,7 @@ impl Provider {
                         why: format!("the model server answered {status}: {}", text.trim()),
                         transient: (status.as_u16() == 429 && !quota) || status.is_server_error(),
                         wait: asked,
+                        once: false,
                     });
                 }
                 loop {
@@ -594,11 +603,11 @@ fn responses(
 ) -> Result<Reply, Fail> {
     let mut reply = Reply::default();
     let mut searches = 0;
-    let mut silence = idle * FIRST_LINE;
+    let mut first = true;
     loop {
-        let line = match next(lines, abort, silence)? {
+        let line = match next(lines, abort, idle, first)? {
             Next::Line(line) => {
-                silence = idle;
+                first = false;
                 line
             }
             Next::Aborted => {
@@ -677,11 +686,11 @@ fn chat(
     let mut at = HashMap::<u64, usize>::new();
     let mut finished = false;
     let mut length = false;
-    let mut silence = idle * FIRST_LINE;
+    let mut first = true;
     loop {
-        let line = match next(lines, abort, silence)? {
+        let line = match next(lines, abort, idle, first)? {
             Next::Line(line) => {
-                silence = idle;
+                first = false;
                 line
             }
             Next::Aborted => {
