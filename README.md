@@ -27,6 +27,8 @@ Bate keeps its secrets (model key, sign-ins, channel tokens) in a macOS keychain
 
 `window/bundle.sh` builds `Bate.app` (signed with `Bate Dev` once `window/dev-identity.sh` has run, else ad hoc). Copy it to `/Applications` and open it: the app registers the background service itself, and the first screen points at Settings for ChatGPT or a model server. Notarisation needs an Apple Developer ID and is off until `BATE_NOTARIZE_PROFILE` is set; see `PROTOCOL.md`, "The app".
 
+A release downloaded from GitHub is signed ad hoc and not notarised: Bate has no Apple Developer ID. macOS blocks the first open of such an app. Open it once and close the message, then go to System Settings > Privacy & Security and choose **Open Anyway** (macOS 15 and later; on macOS 13 and 14, Control-click the app and choose Open). After that it opens like any app. A release keeps its secrets in the login keychain, and macOS asks about each of them again after every update (see above).
+
 ## Licence
 
 Apache-2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

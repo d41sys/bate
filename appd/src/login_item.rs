@@ -58,9 +58,11 @@ const PAUSE: Duration = Duration::from_secs(3);
 /// record of the build it registered before, refuses the new program its start under it
 /// ("Launch Constraint Violation", with a crash report), and has made a new record by the time
 /// the registration is made again, which then takes. Taking the old job out of launchd first,
-/// and waiting until it is gone, changes nothing. So the build is remembered in
-/// `run/login-item`, a registration is followed by a look at whether launchd really started
-/// the service, and it is made again if not.
+/// and waiting until it is gone, changes nothing. Nor does asking again sooner: six
+/// registrations three seconds apart were all refused, and launchd's own later tries of the
+/// job left behind all failed (exit 78), so the wait in `started` is part of what works. So
+/// the build is remembered in `run/login-item`, a registration is followed by a look at
+/// whether launchd really started the service, and it is made again if not.
 pub fn start(app: &Path) -> io::Result<String> {
     if !paths::in_applications(app) {
         return Err(io::Error::other(format!(
@@ -78,7 +80,10 @@ pub fn start(app: &Path) -> io::Result<String> {
     let known = fs::read_to_string(&marker).is_ok_and(|seen| seen == build);
     if known {
         match status() {
-            Status::Enabled => return Ok("enabled".into()),
+            // Enabled, yet refused its start: what a registration that failed for another
+            // build in between leaves behind. Only a new registration ends it.
+            Status::Enabled if seen() != Some(false) => return Ok("enabled".into()),
+            Status::Enabled => {}
             Status::RequiresApproval => return Ok(APPROVAL.into()),
             Status::NotRegistered | Status::NotFound => {}
         }
@@ -119,20 +124,38 @@ fn started() -> bool {
     if let Some(dir) = fake() {
         return fake_started(&dir);
     }
-    let target = format!("{}/{}", launch::domain(), id());
     let deadline = Instant::now() + START;
     while Instant::now() < deadline {
-        let print = Command::new("/bin/launchctl")
-            .args(["print", &target])
-            .stdin(Stdio::null())
-            .output();
-        let text = print.map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-        if text.is_ok_and(|t| t.contains("state = running") || t.contains("last exit code = 0")) {
+        if seen() == Some(true) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+/// What launchd says of the service now: started, refused its start, or neither.
+fn seen() -> Option<bool> {
+    #[cfg(debug_assertions)]
+    if fake().is_some() {
+        return None;
+    }
+    let print = Command::new("/bin/launchctl")
+        .args(["print", &format!("{}/{}", launch::domain(), id())])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    judged(&String::from_utf8_lossy(&print.stdout))
+}
+
+fn judged(print: &str) -> Option<bool> {
+    if print.contains("state = running") || print.contains("last exit code = 0") {
+        Some(true)
+    } else if print.contains("job state = spawn failed") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn pause(time: Duration) {
@@ -272,5 +295,41 @@ mod tests {
         // `appd update` starts a program that must outlive the service's exit (see `update.rs`).
         assert!(file.contains("<key>AbandonProcessGroup</key><true/>"));
         assert_eq!(plist(), format!("{}.plist", launch::BASE_LABEL));
+    }
+
+    #[test]
+    fn a_service_macos_refuses_to_start_is_told_from_one_that_runs_or_has_yet_to_start() {
+        // The lines read, as `launchctl print` gave them during an install (#167).
+        let print = |lines: [&str; 4]| lines.map(|line| format!("\t{line}\n")).concat();
+        let running = [
+            "state = running",
+            "runs = 1",
+            "last exit code = (never exited)",
+            "job state = running",
+        ];
+        let starting = [
+            "state = xpcproxy",
+            "runs = 1",
+            "last exit code = (never exited)",
+            "job state = uninitialized",
+        ];
+        let killed = [
+            "state = spawn scheduled",
+            "runs = 1",
+            "last exit reason = OS_REASON_CODESIGNING",
+            "job state = spawn failed",
+        ];
+        let given_up = [
+            "state = spawn scheduled",
+            "runs = 4",
+            "last exit code = 78: EX_CONFIG",
+            "job state = spawn failed",
+        ];
+        assert_eq!(judged(&print(running)), Some(true));
+        assert_eq!(judged(&print(starting)), None);
+        assert_eq!(judged(&print(killed)), Some(false));
+        assert_eq!(judged(&print(given_up)), Some(false));
+        // No such job: taken out, or never registered.
+        assert_eq!(judged("Bad request.\n"), None);
     }
 }
