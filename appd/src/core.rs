@@ -1360,7 +1360,10 @@ impl Core {
                 }
                 match event {
                     Some(ev) => self.on_event(&bot, ev),
-                    None => self.on_engine_gone(&bot),
+                    None => {
+                        self.on_engine_gone(&bot);
+                        self.drain_queue(&bot);
+                    }
                 }
             }
         }
@@ -2047,6 +2050,7 @@ impl Core {
                     return Err(("no_such_routine", "no such routine".into()));
                 }
                 self.cancel_starts(&bot, Some(id), None);
+                self.drain_queue(&bot);
                 self.next_due = 0;
                 self.broadcast(&json!({"type": "routines_changed", "bot": bot}));
                 Ok(Some(json!({})))
@@ -2470,7 +2474,9 @@ impl Core {
                 }
                 let limited = |s: &Store| s.network(&bot).map(|n| n.is_some());
                 let switched = limited(&self.store).map_err(internal)? != hosts.is_some();
-                if switched && self.engines.get(&bot).is_some_and(|r| r.busy) {
+                if switched
+                    && (self.checking(&bot) || self.engines.get(&bot).is_some_and(|r| r.busy))
+                {
                     return Err(("busy", "the bot is in a turn; stop it first".into()));
                 }
                 self.store
@@ -2502,7 +2508,7 @@ impl Core {
                 }
                 if self.store.whole_disk(&bot).map_err(internal)? != whole_disk {
                     // A turn would go on under the old rule, and so would what it started.
-                    if self.engines.get(&bot).is_some_and(|r| r.busy) {
+                    if self.checking(&bot) || self.engines.get(&bot).is_some_and(|r| r.busy) {
                         return Err(("busy", "the bot is in a turn; stop it first".into()));
                     }
                     self.store
@@ -2647,7 +2653,7 @@ impl Core {
                     ));
                 }
                 if self.store.agent(&bot).map_err(internal)? != command {
-                    if self.engines.get(&bot).is_some_and(|r| r.busy) {
+                    if self.checking(&bot) || self.engines.get(&bot).is_some_and(|r| r.busy) {
                         return Err(("busy", "the bot is in a turn; stop it first".into()));
                     }
                     self.store
@@ -3590,7 +3596,7 @@ impl Core {
         let running = self.engines.get(bot);
         row["running"] = json!(running.is_some());
         // A worker whose acceptance command runs is at work too, and can be stopped.
-        let checking = (self.holds.get(bot)).is_some_and(|h| matches!(h.stage, Stage::Running(_)));
+        let checking = self.checking(bot);
         row["busy"] = json!(checking || running.is_some_and(|r| r.busy || r.compacting > 0));
         // An open question: the bot waits for the person's answer, which is not thinking.
         row["waiting"] = json!(self.store.has_questions(bot).unwrap_or(false));
@@ -5074,10 +5080,9 @@ impl Core {
         let Some(staged) = self.update.ready.as_ref().filter(|_| self.update.install) else {
             return;
         };
-        let busy = self
-            .engines
-            .iter()
-            .any(|(bot, r)| self.occupied(bot) || r.compacting > 0);
+        let busy = !self.holds.is_empty()
+            || !self.starting.is_empty()
+            || (self.engines.iter()).any(|(bot, r)| self.occupied(bot) || r.compacting > 0);
         if busy {
             return;
         }
@@ -5124,6 +5129,11 @@ impl Core {
                         )
                     })
             })
+    }
+
+    /// Whether `bot`'s acceptance command runs: it works under the limits it started with.
+    fn checking(&self, bot: &str) -> bool {
+        (self.holds.get(bot)).is_some_and(|h| matches!(h.stage, Stage::Running(_)))
     }
 
     /// Whether `bot` can take a prompt now: not occupied, and no compaction.
@@ -6000,7 +6010,8 @@ impl Core {
         message: String,
         reply: Result<String, String>,
     ) -> bool {
-        if self.engines.get(to).map(|engine| engine.generation) != Some(generation) {
+        // A turn that is over has no message open: the answer would be dropped, so it is queued.
+        if (self.engines.get(to)).is_none_or(|e| e.generation != generation || !e.busy) {
             return false;
         }
         let (text, error) = match reply {
@@ -7923,6 +7934,8 @@ impl Core {
             Err(e) => Gate::Fail(format!("the precheck could not be started: {e}")),
         };
         self.finish_start(bot, start, gate);
+        // What queued while the precheck ran has nothing else to wait for.
+        self.drain_queue(bot);
     }
 
     /// Ends the starts that wait for a precheck, of one routine or all of the bot's, and kills
@@ -8135,6 +8148,9 @@ impl Core {
                 self.record_run(&bot, &r, false);
             } else if self.is_paused(&bot) {
                 self.skip_run(&bot, r, "paused", None, None);
+            } else if !self.free(&bot) {
+                // The prompt would be refused, or would end a hand-off card that waits for the person.
+                self.skip_run(&bot, r, "busy", None, None);
             } else {
                 match self.store.ledger(&bot, &nonce) {
                     Ok(None) => {

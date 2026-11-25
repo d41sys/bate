@@ -48,6 +48,7 @@ use serde_json::{Value, json};
 /// A prompt that says an acceptance check failed is answered with `second try`.
 /// A turn that starts from a bot's own note (`[A turn you set yourself …]`) or from another bot's
 /// end (`[The bot … ended a turn …]` in a routine) runs the same way, after those lines.
+/// While the file `die` is there, an `abort` makes the engine exit, as an engine that crashes does.
 /// `check_back <minutes> <note>` (or `at=<time>` for the minutes) calls the `check_back` tool; what the service
 /// answers is logged to `later.log`, and the turn ends.
 const FAKE_ENGINE: &str = r#"#!/bin/sh
@@ -207,7 +208,7 @@ while IFS= read -r line; do
         *late*) ;;
         *) text=$(printf '%s' "$line" | sed 's/.*"text":"\([^"]*\)".*/\1/'); echo "{\"type\":\"steered\",\"text\":\"$text\"}" ;;
       esac ;;
-    *'"type":"abort"'*) echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
+    *'"type":"abort"'*) [ -e die ] && exit 1; echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
     *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
     *'"type":"connectors"'*)
       printf '%s\n' "$line" >> connectors.log
@@ -19076,4 +19077,259 @@ fn no_command_stops_the_service_whatever_its_frames_hold() {
         known.len() - NOT_WALKED.len(),
         started.elapsed()
     );
+}
+
+/// A slot of `id`, a routine of `bot`, comes now: its next slot is made due, and the core is
+/// woken (saving a routine does that), so the bot's state is what it is when the slot comes.
+fn slot_comes(home: &Path, w: &mut Window, bot: &str, id: &str) {
+    make_due(home, id, 0);
+    let nudge = json!({"name": "Nudge", "prompt": "x", "enabled": false, "webhook": true});
+    w.ok("set_routine", json!({"bot": bot, "routine": nudge}));
+}
+
+fn daily_routine(w: &mut Window, bot: &str) -> String {
+    let daily = json!({"name": "Brief", "prompt": "hi", "enabled": true, "webhook": true,
+        "schedule": {"frequency": "daily", "time": "09:00", "timezone": "UTC"}});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": daily}))["routine"].clone();
+    routine["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_slot_that_comes_while_the_bot_is_in_a_turn_is_skipped_busy_and_is_no_failure() {
+    let home = home("slot-busy-turn");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let id = daily_routine(&mut w, &bot);
+
+    w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "work"}));
+    eventually("the turn", || prompts_received(&home, &bot, "n1") == 1);
+    slot_comes(&home, &mut w, &bot, &id);
+    eventually("the skipped slot", || {
+        !runs_of(&mut w, &bot, &id).is_empty()
+    });
+    let run = runs_of(&mut w, &bot, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"]),
+        (&json!("skipped"), &json!("busy"))
+    );
+    // Only the person's prompt reached the engine, and the routine counts no failure.
+    assert_eq!(prompt_count(&home, &bot), 1);
+    assert!(routine_row(&mut w, &bot, &id)["backoff"].is_null());
+}
+
+#[test]
+fn a_slot_that_comes_while_a_hand_off_card_waits_leaves_the_card_open() {
+    let home = home("slot-busy-card");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "ask");
+    let id = daily_routine(&mut w, &d.bo);
+
+    d.hand(&mut w, "n1", "say done", "echo ran >> runs");
+    let card = d.card(&mut w);
+    assert_eq!(d.check(&mut w, 0)["state"], "asking");
+    slot_comes(&home, &mut w, &d.bo, &id);
+    eventually("the skipped slot", || {
+        !runs_of(&mut w, &d.bo, &id).is_empty()
+    });
+    let run = runs_of(&mut w, &d.bo, &id)[0].clone();
+    assert_eq!(
+        (&run["outcome"], &run["reason"]),
+        (&json!("skipped"), &json!("busy"))
+    );
+    // The card is still open and the person's answer still reaches the hand-off.
+    assert_eq!(prompt_count(&home, &d.bo), 1);
+    let open = w.ok("open_bot", json!({"bot": d.bo}))["questions"].clone();
+    assert_eq!(open.as_array().unwrap().len(), 1, "{open}");
+    d.answer(&mut w, &card, "Approve");
+    assert!(d.waits_for_reply(0).contains("passed"));
+    assert_eq!(d.runs(), 1);
+}
+
+#[test]
+fn a_prompt_that_waited_for_a_precheck_goes_when_the_precheck_ends_in_a_skip() {
+    let home = home("precheck-skip-drain");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let bot = w.create_bot();
+    let folder = home.join("bots").join(&bot);
+    let check = "echo $$ > pid; while [ ! -e gate ]; do sleep 0.05; done; exit 1";
+    let routine = json!({"name": "Skips", "prompt": "Look at it.", "enabled": true,
+        "webhook": true, "precheck": check});
+    let routine = w.ok("set_routine", json!({"bot": bot, "routine": routine}))["routine"].clone();
+    let url = routine["hookUrl"].as_str().unwrap();
+
+    assert_eq!(http(url, "POST", None, "content-length: 0\r\n", ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    let queued = w.ok("prompt", json!({"bot": bot, "nonce": "n1", "text": "hi"}));
+    assert_eq!(queued["queued"], true, "{queued}");
+    fs::write(folder.join("gate"), "").unwrap();
+    eventually("the prompt", || prompts_received(&home, &bot, "n1") == 1);
+}
+
+#[test]
+fn a_message_that_waited_in_the_inbox_goes_when_the_engine_of_a_busy_bot_stops_on_its_own() {
+    let home = home("engine-gone-drain");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "always");
+    let bo_prompts = home.join("bots").join(&d.bo).join("prompts.log");
+
+    w.ok(
+        "prompt",
+        json!({"bot": d.bo, "nonce": "w1", "text": "work"}),
+    );
+    eventually("Bo at work", || prompts_received(&home, &d.bo, "w1") == 1);
+    w.ok(
+        "prompt",
+        json!({"bot": d.ann, "nonce": "n1", "text": format!("tell {} ping", d.bo)}),
+    );
+    turns_ended(&mut w, &d.ann, "done", 1);
+    assert!(w.ok("list_mail", json!({"bot": d.bo}))["mail"][0]["state"] == "waiting");
+
+    // The engine exits instead of answering the abort.
+    fs::write(home.join("bots").join(&d.bo).join("die"), "").unwrap();
+    w.send("abort", json!({"bot": d.bo}));
+    eventually("the message", || {
+        fs::read_to_string(&bo_prompts).is_ok_and(|t| t.contains("ping"))
+    });
+}
+
+#[test]
+fn an_install_waits_while_a_hand_off_is_held_for_its_command() {
+    let (key, pubkey) = new_key();
+    let scratch = home("update-hold-files");
+    let archive = release(&scratch, "9.9.9");
+    let releases = Releases::start();
+    let url = format!("{}/release.tar.gz", releases.base);
+    releases.put(
+        "/feed.json",
+        signed_feed(&key, &archive, "9.9.9", &url).to_string(),
+    );
+    releases.put("/release.tar.gz", fs::read(&archive).unwrap());
+    let mut u = Updating::start("update-hold", releases, Some(&pubkey));
+    assert_eq!(u.window.ok("check_update", json!({}))["state"], "ready");
+    let d = duo(&u.home, &mut u.window, "always", "always");
+
+    d.hand(
+        &mut u.window,
+        "n1",
+        "say done",
+        "echo $$ > pid; while [ ! -e gate ]; do sleep 0.05; done",
+    );
+    eventually("the command runs", || d.work.join("pid").exists());
+    // Ann, who waited for the answer, is stopped: no engine has a turn, only the hold is left.
+    u.window.ok("abort", json!({"bot": d.ann}));
+    turns_ended(&mut u.window, &d.ann, "aborted", 1);
+    assert_eq!(u.window.ok("install_update", json!({}))["state"], "waiting");
+    // The core has looked at it once more by the time it answers the next command.
+    u.window.ok("list_bots", json!({}));
+    assert!(
+        u.untouched(),
+        "the programs were swapped under a held hand-off"
+    );
+
+    // The command ends, and then the install goes.
+    fs::write(d.work.join("gate"), "").unwrap();
+    let service = &mut u.service;
+    eventually("the service to exit", || {
+        service.0.try_wait().unwrap().is_some()
+    });
+    assert!(!u.untouched());
+}
+
+#[test]
+fn an_install_waits_while_a_routine_waits_for_its_precheck() {
+    let (key, pubkey) = new_key();
+    let scratch = home("update-precheck-files");
+    let archive = release(&scratch, "9.9.9");
+    let releases = Releases::start();
+    let url = format!("{}/release.tar.gz", releases.base);
+    releases.put(
+        "/feed.json",
+        signed_feed(&key, &archive, "9.9.9", &url).to_string(),
+    );
+    releases.put("/release.tar.gz", fs::read(&archive).unwrap());
+    let mut u = Updating::start("update-precheck", releases, Some(&pubkey));
+    assert_eq!(u.window.ok("check_update", json!({}))["state"], "ready");
+    let bot = u.window.create_bot();
+    let folder = u.home.join("bots").join(&bot);
+    let (_, hook) = waiting_routine(&mut u.window, &bot);
+
+    assert_eq!(http(&hook, "POST", None, "content-length: 0\r\n", ""), 202);
+    eventually("the precheck runs", || folder.join("pid").exists());
+    assert_eq!(u.window.ok("install_update", json!({}))["state"], "waiting");
+    u.window.ok("list_bots", json!({}));
+    assert!(u.untouched(), "the programs were swapped under a start");
+
+    fs::write(folder.join("gate"), "").unwrap();
+    let service = &mut u.service;
+    eventually("the service to exit", || {
+        service.0.try_wait().unwrap().is_some()
+    });
+    assert!(!u.untouched());
+}
+
+#[test]
+fn the_answer_of_a_worker_to_a_lead_whose_turn_was_stopped_waits_in_its_queue() {
+    let home = home("answer-after-stop");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "always");
+    let ann_prompts = home.join("bots").join(&d.ann).join("prompts.log");
+
+    // Bo is free, so Ann's message goes straight to it, and Ann's turn waits for the answer.
+    w.ok(
+        "prompt",
+        json!({"bot": d.ann, "nonce": "n1", "text": format!("tell {} work", d.bo)}),
+    );
+    eventually("Bo at work", || prompt_count(&home, &d.bo) == 1);
+    w.ok("set_paused", json!({"bot": d.ann, "paused": true}));
+    turns_ended(&mut w, &d.ann, "aborted", 1);
+    w.ok("abort", json!({"bot": d.bo}));
+    eventually("Bo to answer", || {
+        w.ok("list_mail", json!({"bot": d.bo}))["mail"][0]["state"] == "answered"
+    });
+
+    // Ann's engine had no message open: it was not sent the answer, it is queued.
+    assert_eq!(d.told(0), "");
+    let queue = w.ok("list_queue", json!({"bot": d.ann}))["queue"].clone();
+    let text = queue[0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("got no answer"), "{queue}");
+    w.ok("set_paused", json!({"bot": d.ann, "paused": false}));
+    eventually("the answer", || {
+        fs::read_to_string(&ann_prompts).is_ok_and(|t| t.contains("got no answer"))
+    });
+}
+
+#[test]
+fn a_limit_or_an_agent_is_not_changed_while_the_workers_acceptance_command_runs() {
+    let home = home("limits-while-check");
+    let _service = Service::start(&home);
+    let mut w = Window::connect(&home);
+    let d = duo(&home, &mut w, "always", "always");
+
+    d.hand(
+        &mut w,
+        "n1",
+        "say done",
+        "echo $$ > pid; while [ ! -e gate ]; do sleep 0.05; done",
+    );
+    eventually("the command runs", || d.work.join("pid").exists());
+    for (command, fields) in [
+        (
+            "set_network",
+            json!({"bot": d.bo, "hosts": ["example.com"]}),
+        ),
+        ("set_disk_access", json!({"bot": d.bo, "wholeDisk": true})),
+        ("set_agent", json!({"bot": d.bo, "command": ["true"]})),
+    ] {
+        assert_eq!(refusal(&mut w, command, fields), "busy", "{command}");
+    }
+
+    // When the command is over, the limit may change.
+    fs::write(d.work.join("gate"), "").unwrap();
+    assert!(d.waits_for_reply(0).contains("passed"));
+    w.ok("set_disk_access", json!({"bot": d.bo, "wholeDisk": true}));
 }
