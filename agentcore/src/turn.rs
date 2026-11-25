@@ -272,6 +272,22 @@ fn assistant(text: &str, calls: &[crate::model::Call]) -> Value {
     message
 }
 
+/// The model's copy of a tool result, cut to `most` bytes (on a character boundary) with a line
+/// that says how much was left out: one result must never fill the model's context.
+fn fit(mut result: Value, most: usize) -> Value {
+    let Some(content) = result["content"].as_str().filter(|c| c.len() > most) else {
+        return result;
+    };
+    let kept = content.floor_char_boundary(most);
+    let cut = format!(
+        "{}\n[{} bytes left out, to fit the model's context]",
+        &content[..kept],
+        content.len() - kept
+    );
+    result["content"] = cut.into();
+    result
+}
+
 fn saved(e: std::io::Error) -> String {
     format!("cannot save the conversation: {e}")
 }
@@ -385,15 +401,24 @@ fn verdict(reply: &str) -> Result<(bool, String), String> {
 }
 
 impl Turn {
+    /// The model's size in tokens: what the person set, else what the token said, else `CONTEXT`.
+    fn window(&self, holds: Option<usize>) -> usize {
+        self.context.or(holds).unwrap_or(CONTEXT)
+    }
+
     /// Runs the turn and returns its `turn_end`; the caller sends it once the conversation is back.
     pub fn run(&self, work: &mut Work, nonce: String, text: String) -> Event {
         let Work { session, mcp } = work;
         self.out.send(&Event::TurnStart {
             nonce: nonce.clone(),
         });
+        // A save that failed in an earlier turn can leave a call with no result, which a model
+        // refuses. This comes before the prompt's mark, so a rewind to it keeps the call closed.
         let turn = session
-            .mark_prompt(&nonce)
+            .close_interrupted()
             .map_err(saved)
+            .map(|calls| self.out.interrupted(calls))
+            .and_then(|()| session.mark_prompt(&nonce).map_err(saved))
             .and_then(|()| self.turn(session, mcp, &nonce, text));
         let (reason, error) = match turn {
             Ok(TurnEnd::Limit) => (
@@ -453,7 +478,7 @@ impl Turn {
             // Asked for first: with it comes how much the model holds.
             let mut token = self.get_token();
             let holds = token.as_ref().ok().and_then(|t| t.4);
-            if session.tokens() > self.context.or(holds).unwrap_or(CONTEXT) / 5 * 4 {
+            if session.tokens() > self.window(holds) / 5 * 4 {
                 // A summary that fails must not end the turn, or every later prompt would fail the same way.
                 if let Err(e) = self.compact(session, &system, &tools) {
                     eprintln!("the context was not compacted: {e}");
@@ -520,7 +545,8 @@ impl Turn {
                         After::Fix(notes) => {
                             session
                                 .push(json!({"role": "user", "content": format!(
-                                    "A check of your answer found a problem: {notes}\n\
+                                    "A check by another model, not the person, found a problem \
+                                     with your answer: {notes}\n\
                                      Put it right and answer again, or say why the answer stands."
                                 )}))
                                 .map_err(saved)?;
@@ -537,7 +563,10 @@ impl Turn {
             for call in &calls {
                 let result = self.run_call(mcp, call, 0, "");
                 check.note(call, &result);
-                session.push(result).map_err(saved)?;
+                // The window got the whole result in `ToolEnd`; the model gets what fits.
+                session
+                    .push(fit(result, self.window(holds)))
+                    .map_err(saved)?;
             }
         }
     }
@@ -732,7 +761,7 @@ impl Turn {
                     self.steps
                 ));
             }
-            let (url, key, api, model, _) = self.get_token()?;
+            let (url, key, api, model, holds) = self.get_token()?;
             let ask = self.ask_model(&model, &system, &messages, None, &tools);
             let Reply {
                 text,
@@ -756,7 +785,8 @@ impl Turn {
             rounds += 1;
             messages.push(assistant(&text, &calls));
             for call in &calls {
-                messages.push(self.run_call(mcp, call, depth, &format!("agent{n}/")));
+                let result = self.run_call(mcp, call, depth, &format!("agent{n}/"));
+                messages.push(fit(result, self.window(holds)));
             }
         }
     }

@@ -873,7 +873,8 @@ fn a_conversation_the_model_cannot_hold_is_summarised_and_asked_again() {
     ]);
     let mut engine = Engine::start(&dir, &model);
     engine.open_new();
-    engine.exchange("n1", "Q1-old");
+    // Long enough that the summary, which has a line of its own before the text, is smaller than what it replaces.
+    engine.exchange("n1", &format!("Q1-old {}", "x".repeat(200)));
     engine.exchange("n2", "Q2");
     engine.exchange("n3", "Q3");
     engine.prompt_as("n4", "Q4");
@@ -4237,4 +4238,154 @@ fn an_answer_with_no_tool_use_is_checked_only_when_it_is_long_and_a_turn_without
     let events = engine.until(is_turn_end);
     assert!(checks(&events).is_empty());
     assert_eq!(model.requests().len(), 5);
+}
+
+#[test]
+fn one_big_tool_result_is_cut_for_the_model_and_the_window_still_gets_all_of_it() {
+    let dir = workdir("big-result");
+    fs::write(dir.join("big.txt"), "x".repeat(5000)).unwrap();
+    let model = Model::serve(vec![
+        vec![call("c1", "read", json!({"path": "big.txt"}))],
+        vec![text("Read it.")],
+    ]);
+    // A model of 1000 tokens holds 4000 bytes: one result may have a quarter of that.
+    let mut engine = Engine::start_with_context(&dir, &model, 1000);
+    engine.open_new();
+    engine.prompt("read big.txt");
+    let mut events = answer(&mut engine, "Approve");
+    events.extend(engine.until(is_turn_end));
+    assert_eq!(ended(&events), &done());
+    // "     1\t" and the line end come with the 5000 bytes.
+    let shown = events.iter().find_map(|e| match e {
+        Event::ToolEnd { output, .. } => Some(output),
+        _ => None,
+    });
+    assert_eq!(shown.unwrap().len(), 5008);
+    let sent = model.requests()[1]["messages"].clone();
+    let result = sent
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    let content = result["content"].as_str().unwrap();
+    assert!(content.starts_with("     1\txxx"), "{content}");
+    assert!(
+        content.ends_with("\n[4008 bytes left out, to fit the model's context]"),
+        "{}",
+        &content[content.len() - 80..]
+    );
+    assert!(content.len() < 1100, "{}", content.len());
+}
+
+#[test]
+fn a_turn_closes_a_tool_call_without_a_result_before_the_model_is_asked() {
+    let dir = workdir("open-call");
+    // A log as a failed save leaves it: the call of n1 has no result, and n2 went on after it.
+    // The engine closes the call at `open`, but at the end of the file, so a rewind to n2 brings
+    // the open call back.
+    let call =
+        json!({"id": "c1", "type": "function", "function": {"name": "run", "arguments": "{}"}});
+    let log: String = [
+        json!({"mark": "prompt", "nonce": "n1"}),
+        json!({"role": "user", "content": "first"}),
+        json!({"role": "assistant", "content": "", "tool_calls": [call]}),
+        json!({"mark": "prompt", "nonce": "n2"}),
+        json!({"role": "user", "content": "second"}),
+        json!({"role": "assistant", "content": "ok"}),
+    ]
+    .iter()
+    .map(|line| format!("{line}\n"))
+    .collect();
+    fs::create_dir_all(dir.join(".agentcore/sessions")).unwrap();
+    fs::write(dir.join(".agentcore/sessions/abc.jsonl"), log).unwrap();
+    let model = Model::serve(replies(&["Back."]));
+    let mut engine = Engine::start(&dir, &model);
+    let open = Op::Open {
+        bot: "b1".into(),
+        session: "abc".into(),
+    };
+    assert_eq!(engine.request(open), None);
+    assert_eq!(
+        engine.next(),
+        Event::Session {
+            session: "abc".into()
+        }
+    );
+    assert!(matches!(engine.next(), Event::ToolEnd { call, .. } if call == "c1"));
+    let set = Op::SetModel {
+        model: "m1".into(),
+        effort: None,
+    };
+    assert_eq!(engine.request(set), None);
+    let rewind = Op::Rewind {
+        entry: "n2".into(),
+        fork: false,
+    };
+    assert_eq!(engine.request(rewind), None);
+
+    engine.prompt_as("n3", "go on");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(&events[0], Event::ToolEnd { call, output, is_error: true, .. }
+            if call == "c1" && output.starts_with("Interrupted")),
+        "{events:?}"
+    );
+    assert_eq!(ended(&events), &done());
+    let sent = model.requests()[0]["messages"].clone();
+    let roles: Vec<_> = sent
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "tool", "user"]);
+}
+
+#[test]
+fn a_chat_reply_stopped_at_the_output_limit_is_cut_off_and_a_whole_one_is_not() {
+    let dir = workdir("length");
+    let ends = |why: &str| {
+        let last = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": why}]});
+        format!(
+            "data: {}\n\ndata: {last}\n\ndata: [DONE]\n\n",
+            text("Half an")
+        )
+        .into_bytes()
+    };
+    let model = Model::replay(vec![ends("length"), ends("stop")]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let events = chat_turn(&mut engine, "n1");
+    assert!(
+        matches!(ended(&events), Event::TurnEnd { reason: TurnEnd::Error, error: Some(e) }
+            if e.contains("the model's reply was cut off")),
+        "{events:?}"
+    );
+    assert_eq!(ended(&chat_turn(&mut engine, "n2")), &done());
+}
+
+#[test]
+fn the_notes_of_a_failed_check_say_they_are_not_the_persons_words() {
+    let dir = workdir("check-voice");
+    let model = Model::serve(vec![
+        vec![a_plan_call()],
+        vec![text("First answer.")],
+        vec![text("FIX\nThe second file was never read.")],
+        vec![text("Second answer.")],
+        vec![text("OK")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_checked("read both files");
+    engine.until(is_turn_end);
+    let again = &model.requests()[3]["messages"];
+    let last = again.as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "user");
+    let note = last["content"].as_str().unwrap();
+    assert!(
+        note.starts_with("A check by another model, not the person, found a problem"),
+        "{note}"
+    );
+    assert!(note.contains("The second file was never read."));
 }

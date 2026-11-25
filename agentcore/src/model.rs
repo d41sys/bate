@@ -78,6 +78,9 @@ const RETRY_WAIT: Duration = Duration::from_secs(2);
 const MAX_ASKED: Duration = Duration::from_secs(120);
 /// How long a call may send nothing before it counts as failed.
 const IDLE: Duration = Duration::from_secs(180);
+/// The first line of a reply may take this many times `IDLE`: a server reads the whole prompt
+/// before it sends anything.
+const FIRST_LINE: u32 = 4;
 
 /// What a wait for the next line of the stream gave.
 enum Next {
@@ -591,9 +594,13 @@ fn responses(
 ) -> Result<Reply, Fail> {
     let mut reply = Reply::default();
     let mut searches = 0;
+    let mut silence = idle * FIRST_LINE;
     loop {
-        let line = match next(lines, abort, idle)? {
-            Next::Line(line) => line,
+        let line = match next(lines, abort, silence)? {
+            Next::Line(line) => {
+                silence = idle;
+                line
+            }
             Next::Aborted => {
                 reply.calls.clear();
                 reply.aborted = true;
@@ -669,9 +676,14 @@ fn chat(
     // Where the call of each server-side `index` is in `reply.calls`.
     let mut at = HashMap::<u64, usize>::new();
     let mut finished = false;
+    let mut length = false;
+    let mut silence = idle * FIRST_LINE;
     loop {
-        let line = match next(lines, abort, idle)? {
-            Next::Line(line) => line,
+        let line = match next(lines, abort, silence)? {
+            Next::Line(line) => {
+                silence = idle;
+                line
+            }
             Next::Aborted => {
                 reply.calls.clear();
                 reply.aborted = true;
@@ -690,6 +702,7 @@ fn chat(
             serde_json::from_str(data).map_err(|e| format!("the model sent bad data: {e}"))?;
         // Some servers end the body after the last chunk, with no `[DONE]` line.
         finished |= !chunk["choices"][0]["finish_reason"].is_null();
+        length |= chunk["choices"][0]["finish_reason"] == "length";
         // The last chunk before `[DONE]` has it and no choice; some servers repeat it with each
         // chunk, adding up as they go, so the newest is the whole.
         reply.usage = tokens(&chunk["usage"], "prompt_tokens", "completion_tokens").or(reply.usage);
@@ -750,6 +763,11 @@ fn chat(
             call.arguments
                 .push_str(c["function"]["arguments"].as_str().unwrap_or(""));
         }
+    }
+    // The server stopped the model at its output limit: this is half an answer, not a whole one.
+    // With tool calls the cut arguments already go back to the model as an error.
+    if length && reply.calls.is_empty() {
+        return Err(cut_off());
     }
     Ok(reply)
 }
@@ -832,5 +850,30 @@ mod tests {
         );
         let reply = read_responses(&[r#"data: {"type":"response.completed","response":{}}"#]);
         assert_eq!(reply.usage, None);
+    }
+
+    #[test]
+    fn the_first_line_may_take_four_times_as_long_as_a_later_silence() {
+        let idle = Duration::from_millis(200);
+        let line = r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
+        // A server that reads a long prompt: 500 ms is over `idle` but inside four times it.
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            tx.send(Ok(line.to_owned())).unwrap();
+            tx.send(Ok("data: [DONE]".to_owned())).unwrap();
+        });
+        let reply = chat(&lines, &AtomicBool::new(false), idle, |_| {});
+        assert_eq!(reply.unwrap_or_else(|e| panic!("{}", e.why)).text, "hi");
+
+        // After the first line, `idle` of silence ends the call.
+        let (tx, lines) = mpsc::channel();
+        tx.send(Ok(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#.to_owned()
+        ))
+        .unwrap();
+        let silent = chat(&lines, &AtomicBool::new(false), idle, |_| {});
+        assert!(silent.is_err_and(|e| e.why.contains("sent nothing")));
+        drop(tx);
     }
 }

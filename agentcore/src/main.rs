@@ -32,6 +32,18 @@ impl Out {
             std::process::exit(1);
         }
     }
+
+    /// Tells the service that these tool calls were closed with `INTERRUPTED`.
+    pub fn interrupted(&self, calls: Vec<String>) {
+        for call in calls {
+            self.send(&Event::ToolEnd {
+                call,
+                output: session::INTERRUPTED.into(),
+                is_error: true,
+                undo: None,
+            });
+        }
+    }
 }
 
 const NO_SESSION: &str = "no conversation is open: send start or open first";
@@ -261,15 +273,7 @@ impl Engine {
                         self.out.send(&Event::Session {
                             session: session.id.clone(),
                         });
-                        for call in interrupted {
-                            let output = session::INTERRUPTED.into();
-                            self.out.send(&Event::ToolEnd {
-                                call,
-                                output,
-                                is_error: true,
-                                undo: None,
-                            });
-                        }
+                        self.out.interrupted(interrupted);
                         self.session = Some(session);
                     }
                     Err(e) => self.opening_failed(id, e),
