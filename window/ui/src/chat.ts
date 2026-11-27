@@ -1,4 +1,5 @@
 // A bot's transcript entries (PROTOCOL.md, "Transcript") turned into what the chat shows.
+import { midnight } from "./times.ts";
 
 export type Entry =
   | { type: "session"; session: string }
@@ -20,13 +21,14 @@ export type Entry =
 /** `failed`: the bot goes on with the notes; `not_passed`: the last check allowed found something; `not_checked`: it could not be made. */
 export type CheckResult = "passed" | "failed" | "not_passed" | "not_checked";
 
-/** An entry as the service numbers it. */
-export type Row = { seq: number; entry: Entry };
+/** An entry as the service numbers it; `at` is when it was written, in milliseconds. */
+export type Row = { seq: number; at?: number; entry: Entry };
 
 /** `id` is the `seq` of the entry that began the item: it stays when older items come in front. */
 export type Item = { id: number } & (
   // `past`: left behind by a fork. The bot no longer has it, so it is for reading only.
-  | { kind: "user"; text: string; nonce: string; past?: boolean }
+  // `at`: when it was sent; `began`: when the turn that answers it began; `took`: how long that turn took, once it ended.
+  | { kind: "user"; text: string; nonce: string; past?: boolean; at?: number; began?: number; took?: number }
   | { kind: "reply"; text: string }
   | { kind: "thinking"; text: string }
   // `undo`: the id of the copy a write or edit kept, which Undo names; `undone`: the person used it.
@@ -53,12 +55,41 @@ export type Question = {
   askedBy?: string[];
 };
 
+type Said = Extract<Item, { kind: "user" }>;
+
+/** Changes the newest message of the person's that `is` holds for. */
+function mark(items: Item[], is: (said: Said) => boolean, change: (said: Said) => Partial<Said>) {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "user" && is(item)) {
+      items[i] = { ...item, ...change(item) };
+      return;
+    }
+  }
+}
+
+/** The messages of the person's that are the first of their day: they say the day too. */
+export function dayStarts(items: Item[]): Set<number> {
+  const starts = new Set<number>();
+  let last: number | undefined;
+  for (const item of items) {
+    if (item.kind !== "user" || item.at === undefined) continue;
+    const day = midnight(item.at);
+    if (day !== last) starts.add(item.id);
+    last = day;
+  }
+  return starts;
+}
+
 /** Puts one more entry into `items`, in place. Text and thinking deltas join the item they continue. */
-function put(items: Item[], { seq: id, entry }: Row) {
+function put(items: Item[], { seq: id, at, entry }: Row) {
   const last = items[items.length - 1];
   switch (entry.type) {
     case "prompt":
-      items.push({ id, kind: "user", text: entry.text, nonce: entry.nonce });
+      items.push({ id, kind: "user", text: entry.text, nonce: entry.nonce, ...(at !== undefined && { at }) });
+      break;
+    case "turn_start":
+      if (at !== undefined) mark(items, (said) => said.nonce === entry.nonce, () => ({ began: at }));
       break;
     case "steered":
       items.push({ id, kind: "steered", text: entry.text });
@@ -111,6 +142,8 @@ function put(items: Item[], { seq: id, entry }: Row) {
       items.push({ id, kind: "retrying", attempt: entry.attempt, of: entry.of, waitMs: entry.waitMs, error: entry.error });
       break;
     case "turn_end":
+      // The turn that ends is the newest one that began and has not ended.
+      if (at !== undefined) mark(items, (said) => said.began !== undefined && said.took === undefined, (said) => ({ took: at - (said.began ?? at) }));
       // A turn that ended as it should needs no line of its own.
       if (entry.reason !== "done") items.push({ id, kind: "ended", reason: entry.reason, error: entry.error });
       break;

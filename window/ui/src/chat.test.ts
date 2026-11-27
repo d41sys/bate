@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkFields, checkValue } from "./check.ts";
-import { add, aim, build, changedFiles, checkText, describe, fold, given, isLong, planSteps, type Entry, type Part } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, given, isLong, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -282,4 +282,28 @@ test("a message is long past 8 lines or 600 characters", () => {
   assert.equal(isLong("a\n".repeat(8) + "a"), true);
   assert.equal(isLong("a".repeat(600)), false);
   assert.equal(isLong("a".repeat(601)), true);
+});
+
+test("a message has its time, and the turn that answers it how long it took", () => {
+  const rows = [
+    { seq: 1, at: 1_000, entry: { type: "prompt", nonce: "a", text: "one" } },
+    { seq: 2, at: 2_000, entry: { type: "turn_start", nonce: "a" } },
+    { seq: 3, at: 9_000, entry: { type: "text", delta: "done" } },
+    { seq: 4, at: 14_000, entry: { type: "turn_end", reason: "done" } },
+    { seq: 5, at: 20_000, entry: { type: "prompt", nonce: "b", text: "two" } },
+    { seq: 6, at: 21_000, entry: { type: "turn_start", nonce: "b" } },
+  ] satisfies { seq: number; at: number; entry: Entry }[];
+  const [one, , two] = build(rows);
+  assert.deepEqual(one, { id: 1, kind: "user", text: "one", nonce: "a", at: 1_000, began: 2_000, took: 12_000 });
+  // The second turn still runs: it began, and has not taken any time yet.
+  assert.deepEqual(two, { id: 5, kind: "user", text: "two", nonce: "b", at: 20_000, began: 21_000 });
+  // A line with no time has none.
+  assert.deepEqual(build([{ seq: 1, entry: { type: "prompt", nonce: "a", text: "one" } }, { seq: 2, entry: { type: "turn_end", reason: "done" } }]), [{ id: 1, kind: "user", text: "one", nonce: "a" }]);
+});
+
+test("the first message of each day begins a day", () => {
+  const noon = (d: number) => new Date(2030, 0, d, 12).getTime();
+  const said = (id: number, at?: number) => ({ id, kind: "user" as const, text: "", nonce: String(id), at });
+  const items = [said(1, noon(1)), { id: 2, kind: "reply" as const, text: "" }, said(3, noon(1) + 60_000), said(4, noon(2)), said(5), said(6, noon(2) + 1)];
+  assert.deepEqual([...dayStarts(items)], [1, 4]);
 });
