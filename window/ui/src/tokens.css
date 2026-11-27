@@ -81,7 +81,8 @@
   --radius-s: 3px;
   --radius-m: 6px;
   --radius-l: 8px;
-  --radius-bubble: 6px;
+  --radius-bubble: 14px;
+  --radius-box: 16px;
   --radius-pill: 999px;
   --control-h: 30px;
   --control-h-small: 26px;
@@ -95,7 +96,6 @@
   --icon: 16px;
   --side-w: 240px;
   --thread-w: 720px;
-  --reply-w: 640px;
   --popover-w: 300px;
   --nav-w: 168px;
   --chip-w: 180px;

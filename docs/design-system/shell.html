@@ -43,8 +43,8 @@
 
     <section class="chat">
       <div class="items"><div>
-        <div class="item user"><small class="from"><b>You</b></small><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p></div>
-        <div class="item run"><small class="from"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></span><b>Analyst</b></small><details class="run"><summary><span class="mark ok" aria-hidden="true"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>Read 3 functions in Ghidra</summary></details></div>
+        <div class="item user"><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p><div class="meta"><time>9:41 PM</time></div></div>
+        <div class="item run"><small class="from"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></span><b>Analyst</b><span>12 s</span></small><details class="run"><summary><span class="dot" aria-hidden="true"></span>Read 3 functions in Ghidra</summary></details></div>
         <div class="item reply"><div class="bubble">
           <p>The update check is in <code>fw_check_update</code> at <code>0x0801a3c0</code>. It asks <code>updates.example.net</code> over HTTPS every 6 hours, and once more right after start.</p>
           <ul>
@@ -52,7 +52,7 @@
             <li>The interval is the constant <code>21600</code>, passed to the timer in <code>sched_init</code>.</li>
           </ul>
         </div></div>
-        <div class="item user"><small class="from"><b>You</b></small><p class="bubble">Unpack it.</p></div>
+        <div class="item user"><p class="bubble">Unpack it.</p><div class="meta"><time>9:43 PM</time></div></div>
         <div class="item reply"><small class="from"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg></span><b>Analyst</b></small><div class="bubble"><p>I need to run one command for that.</p></div></div>
       </div></div>
 
@@ -67,10 +67,12 @@
       </div>
 
       <form class="composer">
-        <button type="button" class="round" aria-label="Attach files"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
         <textarea rows="1" aria-label="Message" placeholder="Message Analyst"></textarea>
-        <button type="button" class="small chip" aria-label="Model: gpt-6.2-sol. This bot"><span>gpt-6.2-sol</span> <svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
-        <button>Send</button>
+        <button type="button" class="round" aria-label="Attach files"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+        <span class="end">
+          <button type="button" class="small chip" aria-label="Model: gpt-6.2-sol. This bot"><span>gpt-6.2-sol</span> <svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+          <button class="round" aria-label="Send"><svg class="lucide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
+        </span>
       </form>
     </section>
   </main>
