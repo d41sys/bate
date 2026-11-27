@@ -3,7 +3,11 @@ import { listen, request } from "./service.ts";
 import { PART, clampOffset, nextOffset, prevOffset, range, visibleNodes } from "./surface.ts";
 import type { Surface, SurfacePart } from "./types.ts";
 
-/** The surfaces a project's program offers, as chips, to open one in the pane (`current`: the one open). */
+const KINDS = { table: "Table", tree: "Tree", code: "Code" } as const;
+/** A cell of more characters than this wraps; a shorter one stays on its line. About what `--control-w` holds. */
+const LONG = 32;
+
+/** The surfaces a project's program offers, a row each, to open one in the pane (`current`: the one open). */
 export function Surfaces({ projectId, current, open, workplaces }: {
   projectId: string;
   current?: string;
@@ -50,24 +54,18 @@ export function Surfaces({ projectId, current, open, workplaces }: {
       </div>
     );
   return (
-    <>
-      <div className="surfaces" role="group" aria-label="Surfaces of the project">
-        {list.map((s) => (
-          <button
-            key={s.uri}
-            type="button"
-            className="chip"
-            aria-pressed={s.uri === current}
-            aria-label={s.description ? `${s.name}, ${s.kind}. ${s.description}` : `${s.name}, ${s.kind}`}
-            data-tip={s.description}
-            onClick={() => open(s)}
-          >
-            <span>{s.name}</span>
-            <small>{s.kind}</small>
+    <ul className="surfaces" aria-label="Surfaces of the project">
+      {list.map((s) => (
+        <li key={s.uri}>
+          <button type="button" className={s.uri === current ? "row current" : "row"} aria-pressed={s.uri === current} onClick={() => open(s)}>
+            <span className="label">
+              <span>{s.name}</span>
+              <small>{s.description ? `${KINDS[s.kind]} · ${s.description}` : KINDS[s.kind]}</small>
+            </span>
           </button>
-        ))}
-      </div>
-    </>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -205,7 +203,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
                   onClick={pickable ? () => choose(r.id) : undefined}
                   {...opener(r.id)}
                 >
-                  {r.cells.map((c, j) => <td key={j}>{c}</td>)}
+                  {r.cells.map((c, j) => <td key={j} className={c.length > LONG ? "long" : undefined}>{c}</td>)}
                 </tr>
               ))}
             </tbody>

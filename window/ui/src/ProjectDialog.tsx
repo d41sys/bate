@@ -99,7 +99,7 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
             <div className="field">
               <label htmlFor="project-folder">Folder</label>
               <div className="find">
-                <input id="project-folder" placeholder="Pick one, or type its whole path" value={folder} onChange={(e) => setFolder(e.target.value)} />
+                <input id="project-folder" className="path" placeholder="Pick one, or type its whole path" value={folder} onChange={(e) => setFolder(e.target.value)} />
                 <Choose folder set={setFolder} fail={setError} />
               </div>
               <small>Its bots work in this folder. Leave it empty and Bate makes one.</small>
@@ -144,7 +144,7 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
           <div className="field">
             <label htmlFor="role-file">Or from a role file</label>
             <div className="find">
-              <input id="role-file" placeholder="Pick one, or type its whole path" value={rolePath} onChange={(e) => setRolePath(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), void addRole(rolePath))} />
+              <input id="role-file" className="path" placeholder="Pick one, or type its whole path" value={rolePath} onChange={(e) => setRolePath(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), void addRole(rolePath))} />
               <Choose folder={false} set={(p) => void addRole(p)} fail={setError} />
               <button type="button" disabled={!rolePath.trim() || full} onClick={() => void addRole(rolePath)}>Add</button>
             </div>
