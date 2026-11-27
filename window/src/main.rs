@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
+use tauri::utils::config::WindowEffectsConfig;
+use tauri::utils::{WindowEffect, WindowEffectState};
 use tauri::{
     AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
@@ -208,6 +210,13 @@ fn open_window_on(app: &AppHandle, bot: Option<&str>) -> tauri::Result<()> {
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .inner_size(1000.0, 700.0)
+        // The ground lets the desktop through, blurred (#313); the page keeps its sheets solid.
+        .transparent(true)
+        .effects(WindowEffectsConfig {
+            effects: vec![WindowEffect::Sidebar],
+            state: Some(WindowEffectState::FollowsWindowActiveState),
+            ..Default::default()
+        })
         // Files dropped on the page reach the page (attachments), not the shell.
         .disable_drag_drop_handler()
         .on_navigation(stays)
