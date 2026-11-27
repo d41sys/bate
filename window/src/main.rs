@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::utils::config::WindowEffectsConfig;
 use tauri::utils::{WindowEffect, WindowEffectState};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse};
 use tauri::{
     AppHandle, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
