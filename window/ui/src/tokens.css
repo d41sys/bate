@@ -85,6 +85,8 @@
   --row-h: 48px;
   --row-h-l: 56px;
   --head-h: 72px;
+  /* The room the window's own buttons take at the top left, in Bate's window. */
+  --titlebar-h: 40px;
   --avatar: 28px;
   --avatar-l: 36px;
   --side-w: 280px;

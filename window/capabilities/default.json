@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The page talks to the service through the shell's two calls and may open another window, start dictation, ask what the service's start left to say, set the Dock icon's badge and show a notification that a bot waits, ask for a folder or a file with the system's panel, and set the shortcut of Quick Ask, close its panel and open a bot from it; nothing else.",
+  "description": "The page talks to the service through the shell's two calls and may open another window, start dictation, ask what the service's start left to say, set the Dock icon's badge and show a notification that a bot waits, ask for a folder or a file with the system's panel, set the shortcut of Quick Ask, close its panel and open a bot from it, and move or zoom its window from the sidebar and the header; nothing else.",
   "windows": ["bate-*"],
-  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation", "allow-service-note", "allow-set-badge", "allow-notify-waiting", "allow-pick-path", "allow-set-quick-shortcut", "allow-hide-quick", "allow-open-in-bate"]
+  "permissions": ["allow-send", "allow-recv", "allow-new-window", "allow-start-dictation", "allow-service-note", "allow-set-badge", "allow-notify-waiting", "allow-pick-path", "allow-set-quick-shortcut", "allow-hide-quick", "allow-open-in-bate", "core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
 }
