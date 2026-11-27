@@ -35,7 +35,7 @@ export function Helper() {
           <Setting
             key={pane}
             title={name}
-            hint={`${what} · ${state(granted)}${pane === "full_disk_access" && granted === false ? ". If Bate Helper is not listed there, add it with the + button." : ""}`}
+            hint={`${what}: ${state(granted)}${pane === "full_disk_access" && granted === false ? ". If Bate Helper is not listed there, add it with the + button." : ""}`}
             error={error(pane)}
           >
             <button className="small" aria-label={`Open System Settings: ${name}`} onClick={() => open(pane)}>Open System Settings</button>

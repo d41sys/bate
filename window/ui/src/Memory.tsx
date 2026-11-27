@@ -177,8 +177,8 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
                 <div className="what">
                   <strong>{n.first || n.name}</strong>
                   <small>
-                    {n.first ? `${n.name} · ` : ""}
-                    {n.modifiedMs ? `${size(n.bytes)} · ${dayTime(n.modifiedMs)}` : "not in the list"}
+                    {n.first ? `${n.name}, ` : ""}
+                    {n.modifiedMs ? `${size(n.bytes)}, ${dayTime(n.modifiedMs)}` : "not in the list"}
                   </small>
                 </div>
                 <div className="actions">
@@ -218,7 +218,7 @@ export function Memory({ target, title }: { target: { bot: string } | { projectI
               <li key={n.name}>
                 <div className="what">
                   <strong>{n.name}</strong>
-                  <small>{size(n.bytes)} · last changed by {WHO[n.by]}, {dayTime(n.atMs)}</small>
+                  <small>{size(n.bytes)}, last changed by {WHO[n.by]}, {dayTime(n.atMs)}</small>
                 </div>
                 <div className="actions">
                   <button className="small" disabled={dirty} aria-label={`Restore ${n.name}`} onClick={() => void restore(n.name, n.id)}>Restore</button>
@@ -266,7 +266,7 @@ function Versions({ target, name, tick, disabled, restore }: {
           <li key={v.id}>
             <div className="what">
               <span>{dayTime(v.atMs)}</span>
-              <small>{size(v.bytes)} · changed by {WHO[v.by]}</small>
+              <small>{size(v.bytes)}, changed by {WHO[v.by]}</small>
             </div>
             <div className="actions">
               <button className="small" disabled={disabled} aria-label={`Restore the version of ${name} from ${dayTime(v.atMs)}`} onClick={() => void restore(name, v.id)}>Restore</button>

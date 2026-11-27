@@ -32,7 +32,7 @@ export function skipWhy({ reason, detail }: Pick<RoutineRun, "reason" | "detail"
 }
 
 /** The quiet badge of a routine that is held to fewer runs: how many failed in a row, and when it next runs. */
-export const heldText = ({ failures, nextRunMs }: Backoff, now = Date.now()) => `${failures} failed in a row${nextRunMs === undefined ? "" : ` · next run ${dayTime(nextRunMs, now)}`}`;
+export const heldText = ({ failures, nextRunMs }: Backoff, now = Date.now()) => `${failures} failed in a row${nextRunMs === undefined ? "" : `, next run ${dayTime(nextRunMs, now)}`}`;
 
 /** What a watch does, in words. */
 export const watchText = ({ connector, tool, every }: Watch) => `Watches ${connector}: ${tool}, every ${every} minutes`;

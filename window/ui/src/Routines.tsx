@@ -133,7 +133,7 @@ export function Routines({ bot }: { bot: string }) {
                   {r.lastCheck && <small className={r.lastCheck.error ? "error" : undefined}>{checkText(r.lastCheck)}</small>}
                   <small>
                     {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && `${r.watch ? "Next check" : "Next"}: ${dayTime((r.backoff?.nextRunMs ?? r.nextRunMs)!)}`}
-                    {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && r.lastRun && " · "}
+                    {r.enabled && (r.backoff?.nextRunMs ?? r.nextRunMs) !== undefined && r.lastRun && ". "}
                     {r.lastRun && `Last: ${dayTime(r.lastRun.atMs)}${r.lastRun.by === "user" ? " (started by you)" : r.lastRun.by === "after" ? " (after another bot)" : r.lastRun.by === "watch" ? " (a change)" : ""}`}
                   </small>
                   {r.lastRun?.error && <small className="error">{r.lastRun.error}</small>}

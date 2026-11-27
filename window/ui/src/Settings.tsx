@@ -126,7 +126,7 @@ export function Settings({ bot, onDeleted }: { bot: Bot; onDeleted: () => void }
             <textarea maxLength={8000} rows={6} placeholder="What this bot is for and how it should answer" value={look.instructions} onChange={(e) => change({ instructions: e.target.value })} />
           </Setting>
           <Setting id="bot-avatar" title="Avatar">
-            <input className="short" maxLength={8} placeholder="🙂" value={look.avatar} onChange={(e) => change({ avatar: e.target.value })} />
+            <input className="short" maxLength={8} placeholder="One emoji" value={look.avatar} onChange={(e) => change({ avatar: e.target.value })} />
           </Setting>
           <Setting id="bot-steps" title="Tool rounds per turn" hint="A turn stops after this many; the chat then offers Continue.">
             <input className="short" type="number" required min={1} max={1000} step={1} value={look.stepLimit} onChange={(e) => change({ stepLimit: Number(e.target.value) })} />

@@ -221,7 +221,7 @@ export function QuickAsk() {
         {context?.windowsError && <p className="note">Screenshot: {context.windowsError}</p>}
         {error && <p className="error" role="alert">{error}</p>}
         <div className="foot">
-          <small>Enter sends · Esc closes</small>
+          <small>Enter sends, Esc closes</small>
           <button disabled={!bot || sending || !message(text, quote, [])}>Send</button>
         </div>
       </form>

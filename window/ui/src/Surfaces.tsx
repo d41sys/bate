@@ -60,7 +60,7 @@ export function Surfaces({ projectId, current, open, workplaces }: {
           <button type="button" className={s.uri === current ? "row current" : "row"} aria-pressed={s.uri === current} onClick={() => open(s)}>
             <span className="label">
               <span>{s.name}</span>
-              <small>{s.description ? `${KINDS[s.kind]} · ${s.description}` : KINDS[s.kind]}</small>
+              <small>{s.description ? `${KINDS[s.kind]}: ${s.description}` : KINDS[s.kind]}</small>
             </span>
           </button>
         </li>

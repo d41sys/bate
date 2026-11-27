@@ -133,7 +133,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
           <li key={w.name}>
             <div className="what">
               <strong>{w.name}</strong>
-              <small>{w.version}{w.manifest?.description ? ` · ${w.manifest.description}` : ""}</small>
+              <small>{w.version}{w.manifest?.description ? `, ${w.manifest.description}` : ""}</small>
               {w.manifest?.author && <small>{byLine(w.manifest.author)}</small>}
               {w.error && <small className="error" role="alert">{w.error}</small>}
               {w.changed && !w.error && <small className="error" role="alert">Its files changed since they were approved, so it is off in every project until you approve it.</small>}
@@ -179,7 +179,7 @@ export function Workplaces({ projects }: { projects: Project[] }) {
           <Catalog<CatalogEntry>
             kind="workplaces"
             stamp={installed}
-            lines={(e) => <small>{e.version} · {sizeText(e.size)}{e.installedVersion ? ` · Installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>}
+            lines={(e) => <small>{e.version}, {sizeText(e.size)}{e.installedVersion ? `, installed: ${e.installedVersion}${e.update ? "" : ", up to date"}` : ""}</small>}
             action={(e) => (!e.installedVersion || e.update ? { label: e.installedVersion ? `Update to ${e.version}…` : "Install…", run: () => void fromCatalog(e) } : undefined)}
             report={setError}
           />

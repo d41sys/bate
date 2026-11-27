@@ -714,7 +714,7 @@ function Run({ parts, live, bot, changes }: { parts: Part[]; live: boolean; bot:
         <summary>
           <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true" />
           {text}
-          {failed > 0 && <span className="error"> · {failed} failed</span>}
+          {failed > 0 && <span className="error">, {failed} failed</span>}
         </summary>
         <ul>
           {parts.map((part) =>

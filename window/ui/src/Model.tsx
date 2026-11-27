@@ -138,7 +138,7 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
           )}
           {onPlan && (
             <small>
-              Using ChatGPT plan · <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
+              Using ChatGPT plan. <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage</a>
             </small>
           )}
         </div>

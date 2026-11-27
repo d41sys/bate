@@ -3,67 +3,88 @@
 :root {
   color-scheme: light dark;
 
-  /* Colour: neutral surfaces, one ink for what stands out, blue only for links, focus and unread. */
-  --bg: #ffffff;
-  --bg-side: #f6f6f6;
-  --bg-raised: #ffffff;
-  --bg-soft: #f0f0f0;
-  --bg-hover: rgba(0, 0, 0, .05);
-  --bg-current: rgba(0, 0, 0, .09);
-  --fg: #1a1a1a;
-  --fg-muted: #606060;
-  --border: #e6e6e6;
-  --border-strong: #cfcfcf;
+  /* Colour: surfaces are told apart by their fill, not by a line. The window is the ground, the page a sheet on it,
+     and what sits on the sheet steps one fill at a time. One periwinkle for the main action and what is chosen,
+     one apricot for what needs the person. */
+  --bg: oklch(99.5% 0.003 75);
+  --bg-side: oklch(95.5% 0.008 75);
+  --bg-raised: oklch(99.5% 0.003 75);
+  --bg-soft: oklch(95.5% 0.008 75);
+  --bg-soft-2: oklch(92% 0.010 75);
+  --bg-soft-3: oklch(88.5% 0.012 75);
+  /* The part of a control that moves: the chosen tab, a switch's knob. */
+  --bg-thumb: oklch(99.5% 0.003 75);
+  --bg-field: oklch(99.5% 0.003 75);
+  --bg-hover: oklch(21% 0.016 268 / .06);
+  --bg-current: oklch(91% 0.038 274);
+  --fg: oklch(21% 0.016 268);
+  --fg-muted: oklch(45% 0.016 265);
+  /* The few lines left: under the head of a table. */
+  --border: oklch(90% 0.009 75);
+  --border-strong: oklch(84% 0.010 75);
   /* A field is known by its edge, so the edge has 3:1 against what is around it. */
-  --border-field: #8a8a8a;
-  --ink: #1a1a1a;
-  --on-ink: #ffffff;
-  --bubble-user: var(--ink);
-  --on-bubble-user: var(--on-ink);
-  --accent: #0a66d1;
-  --danger: #c8232c;
-  --warn: #8a5300;
-  --warn-soft: #fff1d1;
-  --mark: #f5a623;
+  --border-field: oklch(61% 0.016 265);
+  --ink: oklch(44% 0.13 274);
+  --on-ink: oklch(98.5% 0.01 274);
+  --bubble-user: oklch(93% 0.03 274);
+  --on-bubble-user: var(--fg);
+  --accent: oklch(44% 0.13 274);
+  --danger: oklch(47% 0.19 27);
+  --on-danger: oklch(98.5% 0.01 27);
+  --warn: oklch(40% 0.09 62);
+  --warn-soft: oklch(93% 0.05 72);
+  --mark: oklch(75% 0.14 62);
   /* A diff: the fill of an added and of a removed line (the + and - sign says it too). */
-  --diff-add: #e3f4e6;
-  --diff-del: #fde6e6;
-  --scrim: rgba(0, 0, 0, .35);
-  --glass: rgba(255, 255, 255, .8);
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, .06), 0 2px 8px rgba(0, 0, 0, .05);
-  --shadow-2: 0 4px 12px rgba(0, 0, 0, .08), 0 16px 48px rgba(0, 0, 0, .16);
+  --diff-add: oklch(93% 0.05 150);
+  --diff-del: oklch(93% 0.04 25);
+  /* A shown file is a page of its own: white under it, whatever the window's colours. */
+  --page: oklch(100% 0 0);
+  --scrim: oklch(21% 0.016 268 / .4);
+  /* The page's sheet lies on the ground: an edge, no fall. */
+  --shadow-0: 0 0 0 1px oklch(21% 0.016 268 / .04), 0 1px 3px oklch(21% 0.016 268 / .05);
+  /* What floats is known by its shadow: a soft edge and a fall, never a drawn line. */
+  --shadow-1: 0 0 0 1px oklch(21% 0.016 268 / .05), 0 1px 2px oklch(21% 0.016 268 / .05), 0 8px 24px -8px oklch(21% 0.016 268 / .12);
+  --shadow-2: 0 0 0 1px oklch(21% 0.016 268 / .05), 0 2px 6px oklch(21% 0.016 268 / .08), 0 24px 56px -16px oklch(21% 0.016 268 / .28);
 
-  /* Type: the system's font; 14/20 for text. */
+  /* What a control is filled with, and when pointed at. A tinted or raised surface steps both up (style.css). */
+  --fill: var(--bg-soft);
+  --fill-hover: var(--bg-soft-2);
+
+  /* Type: the system's font; 14/20 for text. Three weights: 400, 500 and the strong one. */
   --font-ui: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --size-small: 12px;
   --size-ui: 14px;
   --size-title: 17px;
-  --size-head: 22px;
+  --size-head: 20px;
+  --size-display: 24px;
   --leading: 20px;
   --size-chat: 15px;
-  --leading-chat: 22px;
+  --leading-chat: 24px;
   --leading-small: 16px;
   --weight-strong: 600;
+  --tracking-head: -0.022em;
 
-  /* Space: a 4 px grid. */
+  /* Space: a 4 px grid, and one half step. */
+  --space-0: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
+  --space-6: 40px;
 
   /* Shape. */
   --radius-s: 6px;
   --radius-m: 10px;
-  --radius-l: 14px;
+  --radius-l: 18px;
   --radius-bubble: 18px;
   --radius-pill: 999px;
-  --control-h: 32px;
-  --control-h-small: 24px;
+  --control-h: 36px;
+  --control-h-small: 32px;
   --row-h: 44px;
   --row-h-l: 52px;
-  --head-h: 52px;
+  --head-h: 60px;
   --avatar: 28px;
   --avatar-l: 36px;
   --side-w: 280px;
@@ -87,34 +108,40 @@
   --beat: 1400ms;
 }
 
+/* Dark is the same system drawn again: the ground is the darkest, each surface above it is lighter, and no hue moves. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #161616;
-    --bg-side: #101010;
-    --bg-raised: #212121;
-    --bg-soft: #262626;
-    --bg-hover: rgba(255, 255, 255, .07);
-    --bg-current: rgba(255, 255, 255, .12);
-    --fg: #f3f3f3;
-    --fg-muted: #a6a6a6;
-    --border: #2c2c2c;
-    --border-strong: #444444;
-    --border-field: #707070;
-    --ink: #f3f3f3;
-    --on-ink: #161616;
-    /* The person's message is a mid grey, so the one bright thing is the main action. */
-    --bubble-user: #3a3a3a;
-    --on-bubble-user: #f3f3f3;
-    --accent: #62a8ff;
-    --danger: #ff6f6f;
-    --warn: #ffcf70;
-    --warn-soft: rgba(255, 190, 60, .16);
-    --diff-add: rgba(70, 190, 110, .18);
-    --diff-del: rgba(255, 100, 100, .18);
-    --scrim: rgba(0, 0, 0, .6);
-    --glass: rgba(22, 22, 22, .8);
-    --shadow-1: 0 0 0 1px rgba(255, 255, 255, .06);
-    --shadow-2: 0 0 0 1px rgba(255, 255, 255, .08), 0 16px 48px rgba(0, 0, 0, .6);
+    --bg: oklch(17.5% 0.014 268);
+    --bg-side: oklch(12% 0.018 268);
+    --bg-raised: oklch(24.5% 0.017 268);
+    --bg-soft: oklch(21% 0.016 268);
+    --bg-soft-2: oklch(28.5% 0.017 268);
+    --bg-soft-3: oklch(32.5% 0.018 268);
+    --bg-thumb: oklch(36% 0.02 268);
+    --bg-field: oklch(15% 0.014 268);
+    --bg-hover: oklch(96% 0.006 75 / .07);
+    --bg-current: oklch(34% 0.06 274);
+    --fg: oklch(96% 0.006 75);
+    --fg-muted: oklch(74% 0.016 262);
+    --border: oklch(26% 0.016 266);
+    --border-strong: oklch(32% 0.016 266);
+    --border-field: oklch(55% 0.02 266);
+    --ink: oklch(77% 0.10 274);
+    --on-ink: oklch(19% 0.035 274);
+    --bubble-user: oklch(30% 0.05 272);
+    --accent: oklch(80% 0.10 274);
+    --danger: oklch(80% 0.11 27);
+    --on-danger: oklch(19% 0.04 27);
+    --warn: oklch(85% 0.095 62);
+    --warn-soft: oklch(34% 0.05 62);
+    --mark: oklch(78% 0.12 62);
+    --diff-add: oklch(32% 0.06 150);
+    --diff-del: oklch(32% 0.07 25);
+    --scrim: oklch(8% 0.02 268 / .65);
+    /* On dark a fall reads as a hole: a lit top edge, and a fall only under what floats over the page. */
+    --shadow-0: none;
+    --shadow-1: inset 0 1px 0 oklch(100% 0 0 / .06);
+    --shadow-2: inset 0 1px 0 oklch(100% 0 0 / .08), 0 24px 56px -16px oklch(8% 0.02 268 / .7);
   }
 }
 
