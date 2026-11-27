@@ -193,7 +193,7 @@ export function Room({ project, bots }: { project: Project; bots: Bot[] }) {
             }
           }}
         />
-        <button className="round" aria-label="Send" data-tip="Send" disabled={!text.trim() || !lead}>↑</button>
+        <button disabled={!text.trim() || !lead}>Send</button>
       </form>
       <p className="hints note">
         {lead ? (
