@@ -774,11 +774,7 @@ impl Turn {
         depth: usize,
         shown: &str,
     ) -> Value {
-        // Some servers send `""` for a call with no arguments.
-        let args = match serde_json::from_str::<Value>(match call.arguments.trim() {
-            "" => "{}",
-            args => args,
-        }) {
+        let args = match serde_json::from_str::<Value>(&call.arguments) {
             Ok(Value::Object(args)) => Ok(args),
             _ => Err(format!(
                 "the arguments are not a JSON object: {}",
@@ -909,7 +905,7 @@ impl Turn {
         ask: &Ask,
         mut on: impl FnMut(Delta),
     ) -> Result<Reply, String> {
-        let reply = self
+        let mut reply = self
             .provider
             .stream(url, key, api, ask, abort, |d| match d {
                 Delta::Retry { .. } => self.out.send(&event(d)),
@@ -937,6 +933,15 @@ impl Turn {
                 reported: reply.usage.is_some(),
                 tokens: reply.usage.unwrap_or_default(),
             });
+        }
+        // Some servers send `""` for a call with no arguments; kept as it is, every later request
+        // would carry arguments that are not JSON, which strict servers refuse.
+        for call in reply
+            .calls
+            .iter_mut()
+            .filter(|c| c.arguments.trim().is_empty())
+        {
+            call.arguments = "{}".into();
         }
         Ok(reply)
     }

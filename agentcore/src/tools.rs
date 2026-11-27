@@ -225,6 +225,11 @@ pub fn run(
             }
             let before = earlier(&p);
             let content = fs::read_to_string(&p).map_err(at(&p))?;
+            // `read` shows lines without `\r`: in a file with CRLF line ends, `new`'s lines get it back.
+            let new = &match content.contains("\r\n") {
+                true => new.replace("\r\n", "\n").replace('\n', "\r\n"),
+                false => new.to_owned(),
+            };
             let changed = match content.matches(old).count() {
                 1 => content.replacen(old, new, 1),
                 n if n > 1 && args.get("all").and_then(Value::as_bool) == Some(true) => {
@@ -559,6 +564,15 @@ mod tests {
         .unwrap();
         let left = fs::read_to_string(&f).unwrap();
         assert_eq!(left, "\u{feff}a = 2;\r\nc = 3;\r\n");
+        // An exact match in a CRLF file: `new`'s lines get the file's line end.
+        call(
+            "edit",
+            json!({"path": "f.txt", "old": "c = 3;", "new": "c = 3;\nd = 4;"}),
+            &d,
+        )
+        .unwrap();
+        let left = fs::read_to_string(&f).unwrap();
+        assert_eq!(left, "\u{feff}a = 2;\r\nc = 3;\r\nd = 4;\r\n");
         // A loose match must be the only one too.
         fs::write(&f, "x \ny\nx\t\ny\n").unwrap();
         let twice = call(
