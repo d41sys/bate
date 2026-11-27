@@ -5,9 +5,11 @@
 
   /* Colour (#312): slate with a lavender hue in every grey, drawn dark first. The window is the ground, the page a sheet on it;
      a field, a button and the chosen row are a fill, and nothing on the sheet has an edge. One lavender is the main action,
-     a switch that is on, the chosen row's tint, the person's message, links and focus; one apricot for what needs the person. */
+     a switch that is on, the chosen row's tint, the person's message, links and focus; a deeper lavender for what needs the person. No yellow or brown. */
   --bg: oklch(99.2% 0.004 285);
   --bg-side: oklch(95.6% 0.012 285);
+  /* In Bate's own window the ground is a tint over the system's blurred material (#313): this tint, a little over half there, keeps the lavender. */
+  --bg-glass: oklch(94% 0.03 290);
   --bg-raised: oklch(100% 0 0);
   --bg-soft: oklch(96% 0.01 285);
   --bg-soft-2: oklch(93.5% 0.012 285);
@@ -30,9 +32,9 @@
   --accent: oklch(48% 0.16 300);
   --danger: oklch(50% 0.19 27);
   --on-danger: oklch(100% 0 0);
-  --warn: oklch(42% 0.09 62);
-  --warn-soft: oklch(95% 0.045 72);
-  --mark: oklch(75% 0.14 62);
+  --warn: oklch(42% 0.16 305);
+  --warn-soft: oklch(90.5% 0.055 305);
+  --mark: oklch(60% 0.2 305);
   /* A diff: the fill of an added and of a removed line (the + and - sign says it too). */
   --diff-add: oklch(94% 0.05 150);
   --diff-del: oklch(94% 0.04 25);
@@ -116,6 +118,7 @@
   :root {
     --bg: oklch(19.5% 0.02 283);
     --bg-side: oklch(24% 0.022 285);
+    --bg-glass: oklch(28% 0.06 287);
     --bg-raised: oklch(24% 0.02 283);
     --bg-soft: oklch(23.5% 0.02 283);
     --bg-soft-2: oklch(28% 0.02 283);
@@ -134,9 +137,9 @@
     --accent: oklch(80% 0.1 300);
     --danger: oklch(74% 0.14 25);
     --on-danger: oklch(14% 0 0);
-    --warn: oklch(85% 0.095 62);
-    --warn-soft: oklch(30% 0.045 62);
-    --mark: oklch(78% 0.12 62);
+    --warn: oklch(86% 0.08 305);
+    --warn-soft: oklch(35% 0.085 305);
+    --mark: oklch(78% 0.13 305);
     --diff-add: oklch(30% 0.06 150);
     --diff-del: oklch(30% 0.07 25);
     --scrim: oklch(0% 0 0 / .65);

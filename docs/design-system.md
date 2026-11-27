@@ -9,7 +9,7 @@ The owner chose a chat-app look: a bot is a contact, a conversation is messages.
 - **A ground and sheets.** The window is the ground (`--bg-side`); the sidebar lies on it. The page is a rounded sheet on the ground (`--bg`), and the side pane a second sheet beside it.
 - **Fills step.** A tile or a well on the sheet is `--bg-soft`; a button on the sheet has that fill too, and on a tile, a well or anything raised it steps to `--bg-soft-2` (`--fill`, set by the surface it is on), so a button never has the fill it sits on. In dark each step is lighter, in light darker.
 - **Lines are faint and few.** A field is a grey fill (`--bg-field`) with no edge: the owner's choice in #306, knowing that an empty field's fill is under the 3:1 that WCAG 1.4.11 asks of a control's edge (see Accessibility). The sheets and what floats on them (a card, a popover, a dialog) have a ring at a few percent of the text's colour under their shadow. A table in a message has one line under its head. Rows, groups and buttons have none.
-- **Two colours with a meaning.** Lavender (`--ink`) is the main action, Send, a switch that is on and a working bot's dot; the chosen row and the person's message are tinted with it, and links and the focus ring (`--accent`) are a lighter or darker step of it. Apricot (`--warn`, `--warn-soft`) is what needs the person: the "Needs you" badge and the bot's question. Every grey carries a faint lavender hue. A bot's own colour shows on its avatar only.
+- **One colour with a meaning.** Lavender (`--ink`) is the main action, Send, a switch that is on and a working bot's dot; the chosen row and the person's message are tinted with it, and links and the focus ring (`--accent`) are a lighter or darker step of it. A deeper lavender (`--warn`, `--warn-soft`) is what needs the person: the "Needs you" badge and the bot's question, which say so in words too. There is no yellow or brown. Every grey carries a faint lavender hue. A bot's own colour shows on its avatar only.
 - **Soft squares.** Buttons, fields and rows have a 6 px corner, sheets, cards and the composer 8 px, code and badges 3 px; an avatar is a rounded square. A round button (Attach, Dictate, a row's `⋯`) is the only circle.
 - **One header, no bar.** The page's title (a bot's face, its name and the page it is on) stays at the head of the sheet, and the conversation at the end. The title is a button that opens the menu of pages; there is no row of tabs. Nothing else sits between it and the first message. In Bate's own window there is no title bar either: the page runs under it, the window's buttons sit on the ground above the sidebar, and that ground, the gaps between the sheets and a header's own gaps move the window (`data-tauri-drag-region`). Nothing that scrolls or opens does (the sidebar, a popover, the title), so its scroll bar and its text keep working.
 - **One column, one pair of edges.** The header, the messages and the composer start and end on the same two lines, whatever the scroll bar's width; a scroll bar is thin, a quiet thumb on no track.
@@ -38,7 +38,7 @@ All in `window/ui/src/tokens.css`.
 
 | Family | Tokens | Use |
 |---|---|---|
-| Surface | `--bg-side`, `--bg`, `--bg-raised`, `--bg-soft`, `--bg-soft-2`, `--bg-soft-3`, `--bg-field`, `--page` | The ground (the window, with the sidebar on it; in Bate's own window it is `--bg-side` at 55% over the system's sidebar material, meant to let the desktop through, blurred); a sheet (the page, the pane); what floats (the composer, a card, a popover, a dialog); a tile or a well; a control's fill on a tile or on what floats; that control pointed at; the inside of a field; white under a shown file |
+| Surface | `--bg-side`, `--bg-glass`, `--bg`, `--bg-raised`, `--bg-soft`, `--bg-soft-2`, `--bg-soft-3`, `--bg-field`, `--page` | The ground (the window, with the sidebar on it); in Bate's own window the ground is `--bg-glass` at 55% over the system's blurred sidebar material, more lavender than `--bg-side` so that the material's grey does not wash the hue out; a sheet (the page, the pane); what floats (the composer, a card, a popover, a dialog); a tile or a well; a control's fill on a tile or on what floats; that control pointed at; the inside of a field; white under a shown file |
 | Fill of a control | `--fill`, `--fill-hover` | What `<button>`, `<code>`, `<pre>` and a quiet badge are filled with. `--bg-soft` and `--bg-soft-2` on a sheet; a tile, a well and anything raised set them one step up for what is inside; the question card sets them to a shade of the text's colour |
 | State fill | `--bg-hover`, `--bg-current` | Under the pointer (a row, a ghost button); the chosen row |
 | Text | `--fg`, `--fg-muted` | Text; secondary text and placeholders |
@@ -146,7 +146,7 @@ Widths the page must work at: 1200 px and more, 900 px, and 390 px (a phone, sin
   | Link on a tile or a well | 6.3 | 8.7 |
   | Error text on the page | 6.5 | 7.5 |
   | Error text on a tile or a well | 5.9 | 6.8 |
-  | Warning text on its fill | 7.4 | 8.6 |
+  | Warning text on its fill | 6.8 | 7.5 |
   | Text on the person's message | 15.4 | 12.7 |
   | Text in a field | 15.2 | 13.9 |
   | Placeholder in a field | 5.5 | 6.7 |
