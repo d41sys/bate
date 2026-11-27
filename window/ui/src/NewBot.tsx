@@ -57,7 +57,7 @@ export function NewBot({ opened, report }: { opened: (bot: string) => void; repo
           Purpose
           <textarea maxLength={8000} rows={3} placeholder="What this bot is for and how it should answer" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
         </label>
-        <label>Avatar <input maxLength={8} placeholder="🙂" value={avatar} onChange={(e) => setAvatar(e.target.value)} /></label>
+        <label>Avatar <input maxLength={8} placeholder="One emoji" value={avatar} onChange={(e) => setAvatar(e.target.value)} /></label>
         <button disabled={!name.trim()}>Create</button>
         {error && <p className="error" role="alert">{error}</p>}
       </form>

@@ -108,7 +108,7 @@ export function ProjectDialog({ project, bots, done, close }: { project?: Projec
           </>
         )}
         <fieldset>
-          <legend>Bots in it · {ticked.length + fresh.length} of {MAX_BOTS}</legend>
+          <legend>Bots in it: {ticked.length + fresh.length} of {MAX_BOTS}</legend>
           {bots.length > 0 && <label>Find a bot <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} /></label>}
           <ul className="rows">
             {findBots(bots, query).map((b) => {

@@ -544,7 +544,7 @@ function App() {
         </Pane>
       )}
       {shown && "changes" in shown && changesBot && (
-        <Pane label="Changes" title={`Changes · ${changesBot.name}`} close={() => setShown(undefined)}>
+        <Pane label="Changes" title={`Changes: ${changesBot.name}`} close={() => setShown(undefined)}>
           <Changes key={`${changesBot.id}-${shown.changes.conversation}`} bot={changesBot} conversation={shown.changes.conversation} />
         </Pane>
       )}

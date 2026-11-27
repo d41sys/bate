@@ -64,7 +64,7 @@ export function Connectors({ bots }: { bots: Bot[] }) {
               <details>
                 <summary>
                   {sum.text}
-                  {sum.problems > 0 && <span className="error"> · {sum.problems} to look at</span>}
+                  {sum.problems > 0 && <span className="error">, {sum.problems} to look at</span>}
                 </summary>
                 <ul className="rows">
                   {r.users.map(({ bot, item }) => {
@@ -97,8 +97,8 @@ export function Connectors({ bots }: { bots: Bot[] }) {
                           <details>
                             <summary>
                               {tools.length} {tools.length === 1 ? "tool" : "tools"}
-                              {tools.some((t) => t.marked) && ` · ${tools.filter((t) => t.marked).length} marked read-only`}
-                              {tools.some((t) => t.blocked) && ` · ${tools.filter((t) => t.blocked).length} blocked`}
+                              {tools.some((t) => t.marked) && `, ${tools.filter((t) => t.marked).length} marked read-only`}
+                              {tools.some((t) => t.blocked) && `, ${tools.filter((t) => t.blocked).length} blocked`}
                             </summary>
                             <ul className="rows">
                               {tools.map((t) => (

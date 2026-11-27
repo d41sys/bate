@@ -59,7 +59,7 @@ export function Palette({ choices, bots, found, close }: {
         ...hits.map((h) => ({
           group: "In conversations",
           label: h.snippet,
-          hint: `${find(h.bot)?.name ?? h.bot} · ${when(h.atMs)} · ${h.kind === "user" ? "you" : "reply"}`,
+          hint: `${find(h.bot)?.name ?? h.bot}, ${when(h.atMs)}, ${h.kind === "user" ? "you" : "reply"}`,
           bot: find(h.bot),
           run: () => found(h.bot, h.conversation, h.seq),
         })),

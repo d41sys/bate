@@ -18,7 +18,7 @@ function CheckLine({ c }: { c: Check }) {
   const line = c.command.split("\n")[0];
   return (
     <details className="check">
-      <summary className={c.state === "failed" ? "error" : undefined}>Check: <code>{line.length > 60 ? `${line.slice(0, 59)}…` : line}</code> · {state}</summary>
+      <summary className={c.state === "failed" ? "error" : undefined}>Check: <code>{line.length > 60 ? `${line.slice(0, 59)}…` : line}</code>, {state}</summary>
       <pre><Revealed text={c.command} /></pre>
       {c.note && <small>{c.note}</small>}
       {c.output.trim() && <pre>{c.output}</pre>}
@@ -48,7 +48,7 @@ export function Mail({ bot, bots }: { bot: string; bots: Bot[] }) {
 
   return (
     <details className="banner mail">
-      <summary>Messages with other bots · {open ? `${open} open` : "none open"}</summary>
+      <summary>Messages with other bots, {open ? `${open} open` : "none open"}</summary>
       <ul className="rows">
         {mail.map((m) => {
           const title = m.from === bot ? `To ${name(m.to)}` : `From ${name(m.from)}`;
@@ -56,7 +56,7 @@ export function Mail({ bot, bots }: { bot: string; bots: Bot[] }) {
             <li key={m.seq}>
               <div className="what">
                 <strong>{title}</strong>
-                <span className="note"> · {when(m.atMs)}</span>
+                <span className="note">, {when(m.atMs)}</span>
                 <div>{m.text.slice(0, 200)}</div>
                 {m.check && <CheckLine c={m.check} />}
                 {m.state === "answered" && (failed(m) ? <small className="error">No answer: {m.error}</small> : <small>Answer: {(m.answer ?? "").slice(0, 200)}</small>)}

@@ -1,52 +1,62 @@
 /* The components, written on the tokens only: no colour, size or font is named here.
+   A surface is told from the next by its fill and its shadow; a line is drawn only round a field and under the head of a table.
    See docs/design-system.md for what each is for. */
 @import "./tokens.css";
 
 /* ---- Base ---- */
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
+html, body { overflow-x: clip; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: var(--size-ui)/var(--leading) var(--font-ui); -webkit-font-smoothing: antialiased; }
 h1 { font-size: var(--size-head); line-height: 28px; font-weight: var(--weight-strong); margin: 0; }
 h2 { font-size: var(--size-title); line-height: 24px; font-weight: var(--weight-strong); margin: var(--space-5) 0 var(--space-2); }
 h3 { font-size: var(--size-ui); font-weight: var(--weight-strong); margin: var(--space-4) 0 var(--space-1); }
-p { margin: var(--space-2) 0; }
+h1, h2, h3 { letter-spacing: var(--tracking-head); text-wrap: balance; }
+b, strong { font-weight: var(--weight-strong); }
+p { margin: var(--space-2) 0; text-wrap: pretty; }
 a { color: var(--accent); }
 small { font-size: var(--size-small); color: var(--fg-muted); }
-code, pre, kbd { font-family: var(--font-mono); font-size: .92em; }
-code { background: var(--bg-soft); padding: 1px 5px; border-radius: var(--radius-s); }
-pre { background: var(--bg-soft); padding: var(--space-2) var(--space-3); border-radius: var(--radius-m); margin: var(--space-2) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+code, pre, kbd { font-family: var(--font-mono); font-size: max(.92em, var(--size-small)); }
+code { background: var(--fill); padding: 0 var(--space-1); border-radius: var(--radius-s); }
+pre { background: var(--fill); padding: var(--space-3) var(--space-4); border-radius: var(--radius-m); margin: var(--space-2) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 pre code { background: none; padding: 0; }
 summary { cursor: pointer; }
 table { border-collapse: collapse; }
-fieldset { border: 1px solid var(--border); border-radius: var(--radius-m); margin: var(--space-3) 0; padding: var(--space-2) var(--space-3); min-width: 0; }
-legend { color: var(--fg-muted); font-size: var(--size-small); padding: 0 var(--space-1); }
+fieldset { border: 0; border-radius: var(--radius-l); background: var(--bg-soft); margin: var(--space-3) 0; padding: var(--space-3) var(--space-4); min-width: 0; }
+/* The legend sits in the well, not on an edge. */
+legend { float: left; width: 100%; margin-bottom: var(--space-2); padding: 0; color: var(--fg-muted); font-size: var(--size-small); }
+legend + * { clear: both; }
 /* One focus ring, on every control, only when the keyboard is in use. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- Button: secondary unless it says otherwise ---- */
-button { font: inherit; font-weight: 500; color: var(--fg); min-height: var(--control-h); padding: 0 var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-pill); background: var(--bg-raised); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); white-space: nowrap; transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease); }
-button:hover:not(:disabled) { background: var(--bg-soft); }
+button { font: inherit; font-weight: 500; color: var(--fg); min-height: var(--control-h); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--fill); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); white-space: nowrap; transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease); }
+button:hover:not(:disabled) { background: var(--fill-hover); }
 button:active:not(:disabled) { transform: scale(.98); }
-button:disabled { opacity: .45; cursor: default; }
+button:disabled { opacity: .45; cursor: not-allowed; }
 /* The one action a form is for: its submit button is primary without being told. */
-button.primary, form button:not([type=button]) { background: var(--ink); color: var(--on-ink); border-color: transparent; }
-button.primary:hover:not(:disabled), form button:not([type=button]):hover:not(:disabled) { background: var(--ink); opacity: .85; }
-button.danger { color: var(--danger); }
-button.ghost { border-color: transparent; background: none; color: var(--fg-muted); }
+button.primary, form button:not([type=button]) { background: var(--ink); color: var(--on-ink); }
+button.primary:hover:not(:disabled), form button:not([type=button]):hover:not(:disabled) { background: color-mix(in oklab, var(--ink) 86%, var(--fg)); }
+/* What cannot be taken back is said in its colour, with no fill until it is pointed at. */
+button.danger { background: none; color: var(--danger); }
+button.danger:hover:not(:disabled) { background: color-mix(in oklab, var(--danger) 12%, transparent); }
+button.ghost { background: none; color: var(--fg-muted); }
 button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 /* A button at the end of a settings row is small by itself; beside a text box or a select it keeps the box's height. */
-button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
+button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-3); font-size: var(--size-small); }
 /* A button that is one sign: it needs an aria-label. */
 button.round { width: var(--control-h); padding: 0; flex: none; }
 /* A sign drawn inline: it takes the button's colour. */
 button.round svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 button.file { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; font-weight: inherit; text-decoration: underline; white-space: normal; }
+/* On a tinted or raised surface a control's fill steps up with it, so a button never has the fill it sits on. */
+.rows li, .group-rows, .banner, fieldset, .card, .question, .first-run, .sheet > form, .popover, .composer, .quick, .surface .body, .changes summary { --fill: var(--bg-soft-2); --fill-hover: var(--bg-soft-3); }
 
 /* ---- Text field, select ---- */
-input:not([type=checkbox], [type=radio], [type=file], [type=range]), select, textarea { font: inherit; color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border-field); border-radius: var(--radius-m); min-height: var(--control-h); padding: var(--space-1) var(--space-3); max-width: 100%; }
+input:not([type=checkbox], [type=radio], [type=file], [type=range]), select, textarea { font: inherit; color: var(--fg); background: var(--bg-field); border: 1px solid var(--border-field); border-radius: var(--radius-m); min-height: var(--control-h); padding: var(--space-1) var(--space-3); max-width: 100%; }
 textarea { padding: var(--space-2) var(--space-3); line-height: var(--leading); resize: vertical; }
 ::placeholder { color: var(--fg-muted); opacity: 1; }
-input:disabled, select:disabled, textarea:disabled { opacity: .5; }
+input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
 input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 .fields label { display: block; margin: var(--space-3) 0; }
 .fields textarea { display: block; width: 100%; }
@@ -56,19 +66,19 @@ input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
 /* A label that is one checkbox and its words stays in a line, in a stacked form too. */
 .fields.stack label:has(> input[type=checkbox]) { display: flex; align-items: center; gap: var(--space-2); }
 /* ---- Switch: a checkbox that takes effect at once. `<input type="checkbox" role="switch">` in a label with its words ---- */
-input[role=switch] { -webkit-appearance: none; appearance: none; position: relative; flex: none; width: var(--switch-w); height: var(--switch-h); margin: 0; border-radius: var(--radius-pill); background: var(--border-strong); cursor: pointer; transition: background-color var(--fast) var(--ease); }
-input[role=switch]::after { content: ""; position: absolute; top: calc(var(--space-1) / 2); left: calc(var(--space-1) / 2); width: calc(var(--switch-h) - var(--space-1)); height: calc(var(--switch-h) - var(--space-1)); border-radius: 50%; background: var(--bg-raised); transition: transform var(--fast) var(--ease); }
+input[role=switch] { -webkit-appearance: none; appearance: none; position: relative; flex: none; width: var(--switch-w); height: var(--switch-h); margin: 0; border-radius: var(--radius-pill); background: var(--border-field); cursor: pointer; transition: background-color var(--fast) var(--ease); }
+input[role=switch]::after { content: ""; position: absolute; top: var(--space-0); left: var(--space-0); width: calc(var(--switch-h) - var(--space-1)); height: calc(var(--switch-h) - var(--space-1)); border-radius: 50%; background: var(--bg); transition: transform var(--fast) var(--ease); }
 input[role=switch]:checked { background: var(--ink); }
 input[role=switch]:checked::after { transform: translateX(calc(var(--switch-w) - var(--switch-h))); background: var(--on-ink); }
-input[role=switch]:disabled { opacity: .45; cursor: default; }
+input[role=switch]:disabled { opacity: .45; cursor: not-allowed; }
 label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
 /* ---- Tabs ---- */
-[role=tablist] { display: flex; align-items: stretch; align-self: stretch; gap: var(--space-1); min-width: 0; overflow-x: auto; scrollbar-width: none; }
-/* Plain words, a line under the chosen one; it keeps its weight so the words do not move. */
-[role=tab] { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--fg-muted); min-height: 28px; padding: 0 var(--space-2); }
+[role=tablist] { display: flex; align-items: center; flex: 0 1 auto; gap: var(--space-0); min-width: 0; padding: var(--space-0); border-radius: var(--radius-pill); background: var(--fill); overflow-x: auto; scrollbar-width: none; }
+/* One track, the chosen one raised on it; it keeps its weight so the words do not move. */
+[role=tab] { flex: none; background: none; color: var(--fg-muted); min-height: var(--control-h-small); padding: 0 var(--space-3); }
 [role=tab]:hover:not(:disabled) { background: none; color: var(--fg); }
-[role=tab][aria-selected=true] { color: var(--fg); border-bottom-color: var(--ink); }
+[role=tab][aria-selected=true], [role=tab][aria-selected=true]:hover:not(:disabled) { background: var(--bg-thumb); color: var(--fg); box-shadow: var(--shadow-1); }
 [role=tab]:focus-visible { outline-offset: -2px; }
 /* The panel adds no box: its contents lay out as the main area's own. */
 [role=tabpanel] { display: contents; }
@@ -76,13 +86,13 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 /* ---- Lines that tell: a note, an error, nothing here yet ---- */
 .note { color: var(--fg-muted); }
 .error { color: var(--danger); }
-.banner { background: var(--bg-soft); border-radius: var(--radius-m); padding: var(--space-2) var(--space-3); }
+.banner { background: var(--bg-soft); border-radius: var(--radius-m); padding: var(--space-3) var(--space-4); }
 .banner.error { background: var(--warn-soft); color: var(--warn); cursor: pointer; }
 /* Messages with other bots: closed, with the count of the open ones; the rows are the list-row component. */
 .mail { margin-bottom: var(--space-2); }
 .mail > summary { font-weight: var(--weight-strong); }
 .mail .rows { margin-bottom: 0; }
-.mail .rows li:last-child { border-bottom: 0; }
+.mail .rows li { min-height: var(--control-h); padding-inline: 0; background: none; }
 /* On the banner's own fill a quiet badge has no pill to pad: its word ends where a button's edge would. */
 .mail .badge.quiet { padding-inline: 0; }
 /* The acceptance command of a hand-off: one line closed, the command and its output opened. */
@@ -96,8 +106,9 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .deleted > summary:hover { color: var(--fg); }
 
 /* ---- Rows of a list, actions side by side, a card ---- */
-.rows { list-style: none; padding: 0; margin: var(--space-2) 0; }
-.rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; min-height: var(--row-h); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.rows { list-style: none; padding: 0; margin: var(--space-2) 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
+/* A row is a tile of its own: the gap between two says where one ends, so no line does. */
+.rows li { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; min-height: var(--row-h-l); padding: var(--space-2) var(--space-4); border-radius: var(--radius-m); background: var(--bg-soft); }
 /* A label over a box and the buttons beside it (a path and its Choose button). */
 .field { margin: var(--space-3) 0; }
 .field > label { margin: 0 0 var(--space-1); }
@@ -114,11 +125,10 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 /* ---- Settings: a group is a heading over one card of rows. A row has its title and one small line on the left and its control at the end ---- */
 .group { margin-block: var(--space-5) 0; }
 .group > h2 { margin: 0 0 var(--space-2); }
-.group-rows { background: var(--bg-soft); border-radius: var(--radius-l); padding: 0 var(--space-4); }
-.group-rows > * + *, .group-rows > form > * + * { border-top: 1px solid var(--border-strong); }
+.group-rows { background: var(--bg-soft); border-radius: var(--radius-l); padding: var(--space-1) var(--space-4); }
+.group-rows .rows li { padding-inline: 0; background: none; }
 .group-rows > p { margin: 0; padding: var(--space-3) 0; }
 .group-rows > .note { font-size: var(--size-small); line-height: var(--leading-small); }
-.group-rows code { background: var(--bg-hover); }
 .group-rows .actions { padding: var(--space-3) 0; }
 .group + .actions { margin-top: var(--space-4); }
 /* A name and the small lines under it, in a row of settings or of a list. */
@@ -143,8 +153,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
 /* The page is wider than a column, and its header starts where it does. A rule of its own: the build drops this selector from a list with `.settings`. */
 main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
-.settings nav { position: sticky; top: calc(var(--row-h) + var(--space-3)); z-index: 1; background: var(--bg); }
-.settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.settings nav { position: sticky; top: calc(var(--head-h) + var(--space-1)); z-index: 1; background: var(--bg); }
+.settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-0); }
 .settings > div > .group:first-child { margin-top: 0; }
 .settings code { overflow-wrap: anywhere; }
 @media (max-width: 640px) {
@@ -158,10 +168,10 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
 }
 /* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
-.row:has(input:disabled) { cursor: default; }
+.row:has(input:disabled) { cursor: not-allowed; }
 /* A row that cannot be ticked is dimmed, but the line that says why stays as readable as any small text. */
-.row:has(input:disabled) > :not(.label), .row:has(input:disabled) .label > :not(small) { opacity: .6; }
-.rows li:has(> label.row) { padding: 0; }
+.row:has(input:disabled) > :not(.label), .row:has(input:disabled) .label > :not(small) { opacity: .6; cursor: not-allowed; }
+.rows li:has(> label.row) { min-height: 0; padding: 0; background: none; }
 /* An add-on's row: what it is, its buttons at the end, and under them a line for each bot or project that has it. */
 .rows li > .what { flex: 1 1 calc(var(--popover-w) / 2); min-width: 0; overflow-wrap: anywhere; }
 .rows li > .what > small { display: block; }
@@ -172,30 +182,34 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
 .rows li > .rows { flex: 1 0 100%; margin: 0; }
 /* A note open in place, or the error of its row, under the row's line. */
 .rows li > form, .rows li > .error { flex: 1 0 100%; margin: 0; }
-.rows li > .rows li { padding: var(--space-1) 0; border-bottom: 0; }
+.rows li > .rows li { min-height: var(--control-h); padding: var(--space-1) 0; border-radius: 0; background: none; }
 /* A routine's past runs: a disclosure under its row, one line for each run. */
 .rows li > details { flex: 1 0 100%; }
-.rows li > details .rows li { padding: var(--space-1) 0; border-bottom: 0; min-height: var(--control-h); }
+.rows li > details .rows li { min-height: var(--control-h); padding: var(--space-1) 0; border-radius: 0; background: none; }
 .actions, .tools, .find { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 .tools, .find { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
 /* A box for a whole path keeps a width that shows it; in a narrow form its buttons go under it. */
 .find input.path { min-width: min(100%, var(--control-w)); }
-.card, .question, .first-run { background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); padding: var(--space-3) var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
+.card, .question, .first-run { background: var(--bg-raised); color: var(--fg); border-radius: var(--radius-l); padding: var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
 /* First run: one card in the middle of the page and one main button; the model server's fields stay folded until asked for. */
-main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
+main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-6) var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
 .first-run h1, .first-run p { margin: 0; }
+.first-run h1 { font-size: var(--size-display); line-height: 32px; }
 .first-run h1 + p { color: var(--fg-muted); }
-.first-run button.primary { min-height: var(--row-h); }
+.first-run button.primary { min-height: calc(var(--control-h) + var(--space-1)); }
 .first-run details { text-align: left; }
 .first-run summary { color: var(--fg-muted); text-align: center; }
 .first-run details[open] summary { margin-bottom: var(--space-2); }
 /* Starter cards: a button each, to start a form from. */
 .starters { list-style: none; margin: var(--space-2) 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--popover-w), 1fr)); gap: var(--space-2); }
-.starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
-.starters button[aria-pressed=true] { background: var(--bg-current); border-color: var(--ink); }
+.starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
+.starters button[aria-pressed=true] { background: var(--bg-current); box-shadow: inset 0 0 0 2px var(--ink); }
 .starters .label { display: grid; gap: var(--space-1); min-width: 0; white-space: normal; }
-.question { overflow-wrap: anywhere; box-shadow: none; flex: none; position: sticky; bottom: 0; z-index: 1; }
+/* A bot's question is the one thing on the page in the colour of what needs the person: it floats over the conversation, above the composer. */
+.question { overflow-wrap: anywhere; flex: none; position: sticky; bottom: 0; z-index: 1; background: color-mix(in oklab, var(--warn-soft) 55%, var(--bg-raised)); }
+/* On its colour a fill is a shade of the text's colour, so it is of the card's hue, not grey on it. */
+.question, .attention > li:has(.question) { --fill: color-mix(in oklab, var(--fg) 8%, transparent); --fill-hover: color-mix(in oklab, var(--fg) 14%, transparent); }
 .question > p { margin: var(--space-2) 0 0; }
 /* The title and the command are all of what will run: they wrap as written and scroll inside the card when long. */
 .question > p:first-child { font-weight: var(--weight-strong); margin-top: 0; white-space: pre-wrap; max-height: calc(var(--leading) * 5); overflow: auto; }
@@ -219,23 +233,25 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* ---- Activity: a card for each conversation that is not idle, in groups. A question is the approval card, set in the card ---- */
 /* The one column is no wider than the page: a card's long line is cut or wrapped, not the card. */
 .attention { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
-.attention > li { margin: 0; padding: var(--space-1) var(--space-2) var(--space-2); }
+.attention > li { margin: 0; padding: var(--space-1) var(--space-2) var(--space-2); background: var(--bg-soft); box-shadow: none; }
+.attention > li:has(.question) { background: color-mix(in oklab, var(--warn-soft) 55%, var(--bg-raised)); }
 .attention .open { width: 100%; max-width: none; height: auto; padding-block: var(--space-2); align-items: flex-start; }
 .attention .open .label { flex: 1; }
 .attention .when { flex: none; color: var(--fg-muted); white-space: nowrap; }
 .attention .line { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.attention .question { position: static; margin: 0; padding: var(--space-2) var(--space-3); background: var(--bg-soft); border: 0; }
+/* In its card the question is the card's own words: no second box. */
+.attention .question { position: static; margin: 0; padding: var(--space-1) var(--space-2) 0; background: none; box-shadow: none; }
 
 /* ---- Dialog: a modal sheet. The dialog is the scrim itself: ::backdrop cannot read the tokens in older WebKit ---- */
 .sheet { max-width: none; max-height: none; width: 100%; height: 100%; margin: 0; padding: var(--space-4); border: 0; background: var(--scrim); color: var(--fg); }
 .sheet[open] { display: flex; }
-.sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-4); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
+.sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-5); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
 .sheet .rows li button { margin-left: auto; }
 .sheet p, .sheet li { overflow-wrap: anywhere; }
 .sheet h3 { margin-top: var(--space-3); }
 .sheet ul:not(.rows) { margin: var(--space-1) 0; padding-left: var(--space-4); }
 .sheet .error { white-space: pre-line; }
-.sheet button.danger { background: var(--bg-raised); color: var(--danger); border-color: var(--danger); }
+.sheet button.danger, .sheet button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-danger); }
 /* The buttons stay in sight while a long dialog scrolls. */
 .sheet .actions { position: sticky; bottom: 0; padding: var(--space-2) 0 var(--space-4); background: var(--bg-raised); }
 
@@ -243,17 +259,17 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: 50%; flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: var(--fg); background: color-mix(in srgb, var(--tint, var(--fg-muted)) 22%, var(--bg-raised)); box-shadow: inset 0 0 0 1.5px var(--tint, var(--border-strong)); }
 
 /* ---- The window: sidebar, main area, side pane ---- */
-.app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; }
-.sidebar { background: var(--bg-side); border-right: 1px solid var(--border); padding: var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
-.sidebar h2 { font-size: var(--size-small); line-height: var(--leading); color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
+.app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
+.sidebar { padding: var(--space-1) var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
+.sidebar h2 { font-size: var(--size-small); line-height: var(--leading); font-weight: 500; letter-spacing: 0; color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
 /* A section's heading with its one action beside it. */
 .sidebar .heading { display: flex; align-items: center; justify-content: space-between; }
 .sidebar .heading h2 { margin-block: 0; }
-.sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-0); }
 .sidebar ul ul { padding-left: var(--space-4); }
 /* The pages of the app sit at the foot. */
 .sidebar .foot { margin-top: auto; }
-.row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border: 0; border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
+.row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
 .row:hover:not(:disabled) { background: var(--bg-hover); }
 .row.current { background: var(--bg-current); }
 .row .label { display: grid; min-width: 0; line-height: 18px; }
@@ -275,26 +291,23 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 }
 /* A working bot's row: a dot that breathes beside "Working…". */
 .pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
-/* A state on a row: a dot and a word. `quiet` is for what does not need the person. */
-.badge { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-1); flex: none; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
-.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.badge.quiet { background: var(--bg-soft); color: var(--fg-muted); }
+/* A state on a row: a word on its own fill. `quiet` is for what does not need the person. */
+.badge { margin-left: auto; display: inline-flex; align-items: center; flex: none; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
+.badge.quiet { background: var(--fill); color: var(--fg-muted); }
 
-main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
+main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-5) var(--space-5); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
 main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
-/* No bar on top: who this is floats above the page as a chip, the tabs beside it. */
-main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--glass); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
-/* Who this is: a chip, no shadow; the tabs and the conversation chip follow on the same row. */
-.who { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); }
-.who h1 { font-size: var(--size-ui); line-height: var(--leading); }
-/* A project or a page has no avatar before its name. */
-.who > h1:first-child { margin-left: var(--space-2); }
+/* No bar on top: who this is, the tabs and the conversation stay at the head of the sheet while the page scrolls under them. */
+main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--bg); }
+/* Who this is: the face and the name, as the page's title. */
+.who { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); }
+.who h1 { font-size: var(--size-title); line-height: 24px; }
 
-.pane { position: relative; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg); min-width: 0; padding: 0 var(--space-2) var(--space-2); }
+.pane { position: relative; display: flex; flex-direction: column; margin-left: var(--space-2); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); min-width: 0; padding: 0 var(--space-3) var(--space-3); }
 .pane:focus { outline: none; }
 /* Under 860 px the pane is a sheet over the conversation, with a scrim that closes it. */
-.pane.overlay { position: fixed; z-index: 2; top: 0; right: 0; bottom: 0; border-radius: var(--radius-l) 0 0 var(--radius-l); box-shadow: var(--shadow-2); }
+.pane.overlay { position: fixed; z-index: 2; top: 0; right: 0; bottom: 0; margin: 0; border-radius: var(--radius-l) 0 0 var(--radius-l); box-shadow: var(--shadow-2); }
 .scrim { position: fixed; inset: 0; z-index: 2; background: var(--scrim); }
 /* The head: the title, cut in the middle when long so its end stays, and Close. */
 .pane-head { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) 0; }
@@ -310,22 +323,22 @@ main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items
 .pane .leave { position: absolute; right: var(--space-4); bottom: var(--space-4); z-index: 1; background: var(--bg-raised); box-shadow: var(--shadow-1); }
 .pane .leave:not(:focus) { opacity: 0; pointer-events: none; }
 /* A shown file is a page of its own: white under it, whatever the window's colours. */
-.pane iframe { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: var(--radius-s); background: white; }
+.pane iframe { flex: 1; width: 100%; border: 0; border-radius: var(--radius-m); background: var(--page); }
 .pane.dragging iframe { pointer-events: none; }
-.pane .grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 1; }
+.pane .grip { position: absolute; left: calc(-1 * var(--space-2)); top: var(--space-4); bottom: var(--space-4); width: var(--space-2); border-radius: var(--radius-s); cursor: col-resize; z-index: 1; }
 .pane .grip:hover, .pane .grip:focus-visible { background: var(--bg-current); }
 
 /* ---- Tooltip: `data-tip` on a control. Shown for a pointer or the keyboard, not on a touch screen ---- */
 [data-tip] { position: relative; }
 @media (hover: hover) {
-  [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--ink); color: var(--on-ink); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
+  [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--fg); color: var(--bg); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
   /* The last control of a row is at the edge: its tip grows to the left. */
   .composer > [data-tip]:last-child::after, .heading > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
   [data-tip][aria-expanded=true]::after { display: none; }
 }
 /* A hint key on a button: the key that does the same. */
-button kbd, .palette kbd { padding: 0 var(--space-1); border: 1px solid var(--border-strong); border-radius: var(--radius-s); font-size: var(--size-small); font-weight: 400; color: var(--fg-muted); }
-button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
+button kbd, .palette kbd { padding: 0 var(--space-1); border-radius: var(--radius-s); background: var(--bg-hover); font-size: var(--size-small); font-weight: 400; color: var(--fg-muted); }
+button.primary kbd { color: inherit; background: color-mix(in oklab, currentColor 18%, transparent); }
 
 /* ---- The conversation ---- */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
@@ -333,23 +346,22 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 /* The scroller is as wide as the window, so its bar is at the edge; the messages keep the column. */
 .items { flex: 1; overflow: auto; min-height: 0; max-width: none; }
 .items > div { max-width: var(--thread-w); margin-inline: auto; }
-.item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-1) 0; user-select: text; -webkit-user-select: text; }
+.item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-2) 0; user-select: text; -webkit-user-select: text; }
 .item > * { max-width: 100%; margin-block: 0; }
 .item.user { align-items: flex-end; }
 .bubble { padding: var(--space-2) var(--space-3); border-radius: var(--radius-bubble); background: var(--bg-soft); min-width: 0; max-width: min(var(--reply-w), 100%); overflow-wrap: anywhere; font-size: var(--size-chat); line-height: var(--leading-chat); }
 .bubble > :first-child { margin-top: 0; }
 .bubble > :last-child { margin-bottom: 0; }
-/* Code is a hairline block, not a box in a box. */
-.bubble pre { background: none; border: 1px solid var(--border-strong); }
-.bubble :not(pre) > code { background: var(--bg-hover); }
 .bubble table { display: block; max-width: 100%; overflow-x: auto; }
-.bubble th, .bubble td { padding: var(--space-1) var(--space-3) var(--space-1) 0; border-bottom: 1px solid var(--border-strong); text-align: left; }
-.bubble th { font-weight: var(--weight-strong); }
+.bubble th, .bubble td { padding: var(--space-1) var(--space-4) var(--space-1) 0; text-align: left; }
+.bubble th { font-weight: var(--weight-strong); border-bottom: 1px solid var(--border-strong); }
 .bubble pre code.hljs { padding: 0; background: none; }
 /* Who said it, in a room of many bots: above the message. */
 .item .from { display: flex; align-items: center; gap: var(--space-1); }
 .item .from b { color: var(--fg); font-weight: var(--weight-strong); }
-.item.user .bubble { background: var(--bubble-user); color: var(--on-bubble-user); max-width: 80%; white-space: pre-wrap; }
+/* What the bot says is the page's own text; what the person said is the one filled shape. */
+.item:not(.user) .bubble { max-width: 100%; padding: 0; border-radius: 0; background: none; }
+.item.user .bubble { --fill: var(--bg-hover); background: var(--bubble-user); color: var(--on-bubble-user); max-width: 80%; white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
 .item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.checked, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
 .item.working p { margin: 0; }
@@ -365,8 +377,8 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .mark.bad { color: var(--danger); }
 .mark.bad::before { content: "✕"; }
 .mark.spin { border: 2px solid var(--border-strong); border-top-color: var(--fg-muted); border-radius: 50%; animation: spin var(--spin) linear infinite; }
-.run > ul { list-style: none; margin: var(--space-1) 0 var(--space-1) var(--space-2); padding: 0 0 0 var(--space-3); border-left: 1px solid var(--border-strong); }
-.run li { padding: 2px 0; }
+.run > ul { list-style: none; margin: var(--space-1) 0; padding: 0 0 0 var(--space-5); }
+.run li { padding: var(--space-0) 0; }
 .run li summary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run code { background: none; padding: 0; }
 .run pre { max-height: calc(var(--leading) * 8); overflow: auto; }
@@ -377,7 +389,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .run li > details { flex: 1 1 calc(var(--popover-w) / 3); min-width: 0; }
 .run .undo { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-left: auto; }
 /* The mark under the last message while the bot works, and its small cousin on its row in the sidebar. */
-.dots { display: inline-flex; gap: 3px; margin-right: var(--space-1); }
+.dots { display: inline-flex; gap: var(--space-1); margin-right: var(--space-1); }
 .dots i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: beat var(--beat) var(--ease) infinite; }
 .dots i:nth-child(2) { animation-delay: calc(var(--beat) / 6); }
 .dots i:nth-child(3) { animation-delay: calc(var(--beat) / 3); }
@@ -390,7 +402,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 }
 .item.marked { outline: 2px solid var(--mark); outline-offset: -2px; border-radius: var(--radius-m); }
 .item .actions { gap: 0; }
-.item .actions button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); border-color: transparent; background: none; color: var(--fg-muted); }
+.item .actions button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); background: none; color: var(--fg-muted); }
 .item .actions button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 /* With a pointer, a message's actions show when it is pointed at or holds the focus. */
 @media (hover: hover) {
@@ -400,16 +412,16 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 .plan { list-style: none; padding: 0; margin: var(--space-1) 0; }
 .plan [aria-current] { font-weight: var(--weight-strong); color: var(--fg); }
 .attached, .queue { list-style: none; padding: 0; margin: var(--space-1) auto; display: flex; flex-wrap: wrap; gap: var(--space-1); font-size: var(--size-small); }
-.attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: 2px 2px 2px var(--space-3); border-radius: var(--radius-pill); background: var(--bg-soft); }
-.attached button, .queue button, .mention button { min-height: 20px; padding: 0 var(--space-2); border-color: transparent; background: none; }
+.attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0) var(--space-0) var(--space-0) var(--space-3); border-radius: var(--radius-pill); background: var(--fill); }
+.attached button, .queue button, .mention button { min-height: var(--control-h-small); padding: 0 var(--space-2); background: none; }
 .queue strong { white-space: nowrap; }
 
-/* The composer is one pill: what to add, the words, what to do with them. */
-.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-1); border: 1px solid var(--border-strong); border-radius: calc(var(--control-h) / 2 + var(--space-1)); background: var(--bg-raised); }
-/* One edge, no ring: it darkens while the words are being written. */
-.composer:focus-within { border-color: var(--border-field); }
-.composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: 6px var(--space-2); resize: none; outline: none; }
-.composer button[type=button]:not(.primary) { border-color: transparent; background: none; color: var(--fg-muted); }
+/* The composer is one floating shape: what to add, the words, what to do with them. */
+.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-2); border-radius: calc(var(--control-h) / 2 + var(--space-2)); background: var(--bg-raised); box-shadow: 0 0 0 1px var(--border-field), var(--shadow-1); }
+/* It is a field, so it has a field's edge; the edge takes the accent while the words are being written. */
+.composer:focus-within { box-shadow: 0 0 0 2px var(--accent), var(--shadow-1); }
+.composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: var(--space-2); resize: none; outline: none; }
+.composer button[type=button]:not(.primary) { background: none; color: var(--fg-muted); }
 .composer button[type=button]:not(.primary):hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 .composer .note { align-self: center; font-size: var(--size-small); }
 /* The model chip: its name, cut short when long; the popover opens above it. */
@@ -418,7 +430,7 @@ button.primary kbd { color: inherit; border-color: currentColor; opacity: .75; }
 /* In the composer the chip is as tall as the buttons beside it, so its words sit on their line. */
 .composer .chip { min-height: var(--control-h); }
 .chip > :first-child { overflow: hidden; text-overflow: ellipsis; }
-.popover { position: absolute; bottom: calc(100% + var(--space-2)); right: 0; z-index: 2; width: var(--popover-w); max-width: calc(100vw - 2 * var(--space-2)); display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); box-shadow: var(--shadow-2); font-size: var(--size-ui); font-weight: 400; white-space: normal; }
+.popover { position: absolute; bottom: calc(100% + var(--space-2)); right: 0; z-index: 2; width: var(--popover-w); max-width: calc(100vw - 2 * var(--space-2)); display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); font-size: var(--size-ui); font-weight: 400; white-space: normal; }
 .popover ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }
 .popover p { margin: 0; }
 .popover label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
@@ -443,7 +455,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .popover li > form input { flex: 1; min-width: 0; }
 /* The actions of the row that is open come under it. */
 .popover li > .actions { flex: 1 0 100%; justify-content: flex-end; padding: 0 var(--space-2) var(--space-1); }
-.popover .foot { display: grid; padding-top: var(--space-1); border-top: 1px solid var(--border); }
+.popover .foot { display: grid; }
 .popover .foot .row { min-height: var(--control-h); padding: 0 var(--space-3); }
 /* A pinned conversation: a drawn pin before its name. */
 .pin { width: 12px; height: 12px; margin-right: var(--space-1); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
@@ -453,18 +465,19 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 }
 
 /* ---- A project's surfaces: a row for each (the name, then its kind and what it is), and one drawn in the pane ---- */
-.surfaces { list-style: none; margin-block: var(--space-2); padding: 0; display: grid; gap: 2px; }
+.surfaces { list-style: none; margin-block: var(--space-2); padding: 0; display: grid; gap: var(--space-0); }
 .surfaces .row { height: auto; padding-block: var(--space-2); }
 .surfaces small { white-space: normal; }
 .surface { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .surface .tools { padding-top: 0; }
 .surface .pager { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; }
-.surface .body { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-s); }
+.surface .body { flex: 1; overflow: auto; border-radius: var(--radius-m); background: var(--bg-soft); }
 .surface table { width: 100%; }
-.surface th, .surface td { height: var(--control-h); padding: 0 var(--space-3); text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.surface th, .surface td { height: var(--control-h); padding: 0 var(--space-3); text-align: left; white-space: nowrap; }
 /* A long cell wraps, so a table of two columns needs no sideways scroll in a narrow pane; a short one is never broken. */
 .surface td.long { min-width: var(--control-w); white-space: normal; overflow-wrap: anywhere; }
-.surface th { position: sticky; top: 0; background: var(--bg-raised); color: var(--fg-muted); font-size: var(--size-small); font-weight: var(--weight-strong); }
+/* The head stays at the top of the table's own scroller, not of the page's. */
+.surface th { position: sticky; inset-block-start: 0; background: var(--bg-soft); color: var(--fg-muted); font-size: var(--size-small); font-weight: var(--weight-strong); }
 /* A row, node or line that can be chosen: pointed at, chosen (a bar at its start too, not the fill alone), and in focus inside the scroller. */
 .surface [aria-selected] { cursor: pointer; }
 .surface [aria-selected]:not([aria-selected=true]):hover { background: var(--bg-hover); }
@@ -480,7 +493,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .surface .code { margin: 0; padding: var(--space-1) 0; border-radius: 0; }
 /* A long line wraps under its own text: the number stays at its start. */
 .surface .code .line { display: flex; min-height: var(--leading); padding-right: var(--space-3); }
-.surface .code .no { flex: none; min-width: 4ch; margin-right: var(--space-2); padding-right: var(--space-2); text-align: right; color: var(--fg-muted); border-right: 1px solid var(--border); user-select: none; }
+.surface .code .no { flex: none; min-width: 4ch; margin-right: var(--space-3); text-align: right; color: var(--fg-muted); user-select: none; }
 
 /* ---- Changes: what a bot changed, as a diff for each file in the pane, with comments on lines ---- */
 .changes { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -488,13 +501,13 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 .changes .note, .changes .error, .changes .banner, .changes .empty { margin: var(--space-2) 0; }
 .changes > .tools .note { flex: 1; min-width: 0; margin: 0; }
 .changes .files { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 0; }
-.changes .files > li { border-top: 1px solid var(--border); }
-.changes summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--row-h); cursor: pointer; }
+.changes .files > li + li { margin-top: var(--space-1); }
+.changes summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: var(--row-h); padding: 0 var(--space-3); border-radius: var(--radius-m); background: var(--bg-soft); cursor: pointer; }
 .changes summary code { padding: 0; background: none; overflow-wrap: anywhere; }
 .changes summary .badge { margin-left: 0; }
 .changes summary small { color: var(--fg-muted); }
 /* The kept comments, always in reach at the foot, with the one button that sends them. */
-.changes .comments { flex: none; padding-top: var(--space-2); border-top: 1px solid var(--border); }
+.changes .comments { flex: none; padding-top: var(--space-2); }
 .changes .comments .rows { max-height: calc(var(--row-h) * 3); overflow: auto; }
 .diff { width: 100%; margin-bottom: var(--space-2); border-collapse: collapse; font: var(--size-small) / var(--leading-small) var(--font-mono); }
 .diff td { padding: 0; vertical-align: top; }
@@ -505,7 +518,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 /* A line is chosen (fill) or has a comment (a bar at its start), not by colour alone: the number's button names it. */
 .diff .chosen > td { background: var(--bg-current); }
 .diff .marked > .no { box-shadow: inset 3px 0 0 var(--warn); }
-.diff .no { width: 5ch; text-align: right; border-right: 1px solid var(--border); user-select: none; }
+.diff .no { width: 5ch; text-align: right; user-select: none; }
 .diff .no button { width: 100%; min-height: 0; padding: 0 var(--space-2); border: 0; border-radius: 0; background: none; color: var(--fg-muted); font: inherit; justify-content: flex-end; }
 .diff .text { padding: 0 var(--space-2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff .compose td { padding: var(--space-2); background: var(--bg-soft); font: var(--size-ui) / var(--leading) var(--font-ui); }
@@ -521,7 +534,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 /* ---- Palette (⌘K): a Dialog whose panel is a search box over groups of options ---- */
 .sheet.palette { align-items: flex-start; }
 .sheet.palette > form { display: flex; flex-direction: column; margin: 12vh auto 0; max-height: calc(100% - 12vh); padding: 0; overflow: hidden; }
-.sheet.palette input { width: 100%; padding: var(--space-3) var(--space-4); font-size: var(--size-title); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: none; }
+.sheet.palette input { width: 100%; padding: var(--space-4) var(--space-5); font-size: var(--size-title); border: 0; border-radius: 0; background: none; }
 /* The focus is the accent line under the box, where the panel's rounded corners do not cut it and no second ring sits on its edge. */
 .sheet.palette input:focus-visible { outline: none; box-shadow: inset 0 -2px 0 var(--accent); }
 .sheet.palette ul { list-style: none; margin: 0; padding: 0; }
@@ -546,8 +559,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 }
 @media (max-width: 640px) {
   /* The sidebar becomes a strip of projects and bots across the top. */
-  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .sidebar { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); padding: 0 var(--space-2) var(--space-2); }
+  .sidebar { flex-direction: row; align-items: center; padding-inline: 0; }
   /* A heading stays, close to its `+`, which alone says nothing; a list with no row takes no room. */
   .sidebar .heading { flex: none; }
   .sidebar h2 { margin: 0; }
@@ -560,15 +573,12 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .sidebar .foot { margin: 0 0 0 auto; }
   .row { width: auto; }
   .sidebar .row { max-width: 12rem; }
-  main { padding: 0 var(--space-2) var(--space-2); }
+  main { padding: 0 var(--space-3) var(--space-3); }
   .popover.below.end { left: 0; }
   .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
   button kbd, .palette kbd { display: none; }
   /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */
-  .composer { flex-wrap: wrap; }
-  .composer textarea { order: -1; flex: 1 0 100%; }
-  .composer > :last-child { margin-left: auto; }
   .menu { position: static; }
   .popover { left: 0; right: 0; width: auto; }
   .menu.more { position: relative; }
@@ -576,12 +586,17 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 }
 /* A main area too narrow for one row (a phone, or the side pane open): the header is two rows, who and the conversation, then the tabs. */
 @container (max-width: 640px) {
-  main > header { flex-wrap: wrap; gap: 0 var(--space-3); padding-top: var(--space-2); }
+  main > header { flex-wrap: wrap; gap: var(--space-1) var(--space-3); padding-block: var(--space-2); }
   [role=tablist] { order: 1; flex: 1 0 100%; }
+  [role=tab] { flex: 1 0 auto; padding: 0 var(--space-2); }
+  /* The words get a row of their own, the buttons the one under it. */
+  .composer { flex-wrap: wrap; }
+  .composer textarea { order: -1; flex: 1 0 100%; }
+  .composer > :last-child { margin-left: auto; }
 }
 
 /* The earlier versions of a note: set in under it with the rule the folded calls use. */
-.versions { flex: 1 0 calc(100% - var(--space-2)); box-sizing: border-box; margin: 0 0 var(--space-1) var(--space-2); padding-left: var(--space-3); border-left: 1px solid var(--border-strong); }
+.versions { flex: 1 0 100%; box-sizing: border-box; margin: 0 0 var(--space-1); padding-left: var(--space-5); }
 .versions > small { display: block; color: var(--fg-muted); }
 .versions > .rows { margin: 0; }
 

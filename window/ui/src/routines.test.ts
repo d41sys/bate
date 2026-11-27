@@ -17,7 +17,7 @@ test("a skipped run says why, and names the connector or the precheck's line", (
 test("the badge of a held routine has the count and the next run, if there is one", () => {
   const now = new Date(2026, 10, 21, 10, 0).getTime();
   const next = new Date(2026, 10, 22, 9, 0).getTime();
-  assert.equal(heldText({ failures: 3, nextRunMs: next }, now), `3 failed in a row · next run ${dayTime(next, now)}`);
+  assert.equal(heldText({ failures: 3, nextRunMs: next }, now), `3 failed in a row, next run ${dayTime(next, now)}`);
   assert.equal(heldText({ failures: 7 }, now), "7 failed in a row");
 });
 
