@@ -791,6 +791,17 @@ fn compact_replaces_older_messages_with_a_summary_and_it_survives_a_restart() {
 
     // Nothing but the response comes back: the summary is not streamed as a reply.
     assert_eq!(engine.request(Op::Compact), None);
+    // The conversation is shorter now, so how full the model is is said again: a guess here, as
+    // this server counts nothing, of the 32,000 taken for a model nobody named a size for.
+    let said: Vec<Event> = engine
+        .usage
+        .try_iter()
+        .filter(|e| matches!(e, Event::Context { .. }))
+        .collect();
+    assert!(
+        matches!(said[..], [Event::Context { used, size: 32_000 }] if used > 0),
+        "{said:?}"
+    );
     let asked = sent(&model, 3);
     assert!(
         asked.contains("Q1-old") && asked.contains("Summarise"),
@@ -855,6 +866,13 @@ fn the_size_that_comes_with_the_token_says_when_to_compact() {
     assert_eq!(model.requests().len(), 4);
     assert!(sent(&model, 2).contains("Summarise"));
     assert!(!sent(&model, 3).contains("Q1-old"));
+    // What is said after the summary names the token's size too.
+    assert!(
+        engine
+            .usage
+            .try_iter()
+            .any(|e| matches!(e, Event::Context { size: 100, .. }))
+    );
 }
 
 #[test]

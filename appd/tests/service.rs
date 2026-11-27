@@ -211,7 +211,7 @@ while IFS= read -r line; do
         *) text=$(printf '%s' "$line" | sed 's/.*"text":"\([^"]*\)".*/\1/'); echo "{\"type\":\"steered\",\"text\":\"$text\"}" ;;
       esac ;;
     *'"type":"abort"'*) [ -e die ] && exit 1; echo "$ok"; echo '{"type":"turn_end","reason":"aborted"}' ;;
-    *'"type":"compact"'*) sleep 0.3; echo "$ok" ;;
+    *'"type":"compact"'*) sleep 0.3; echo '{"type":"context","used":7,"size":100}'; echo "$ok" ;;
     *'"type":"connectors"'*)
       printf '%s\n' "$line" >> connectors.log
       case "$line" in *'"name":"broken","enabled":true'*) echo "connector broken: no such program" >&2 ;; esac
@@ -3230,6 +3230,14 @@ fn a_bot_is_busy_while_its_conversation_is_compacted() {
         w.wait_for(|f| f["type"] == "bots_changed");
         assert_eq!(w.ok("list_bots", json!({}))["bots"][0]["busy"], busy);
     }
+    // The engine said how full the model is after the summary, outside any turn: it is in the
+    // conversation, where a window that opens it later finds it.
+    let opened = w.ok("open_bot", json!({"bot": bot}));
+    assert_eq!(
+        opened["history"].as_array().unwrap().last().unwrap()["entry"],
+        json!({"type": "context", "used": 7, "size": 100}),
+        "{opened}"
+    );
 }
 
 fn now_ms() -> i64 {
