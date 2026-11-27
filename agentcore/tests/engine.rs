@@ -3789,6 +3789,10 @@ fn a_call_with_empty_arguments_is_a_call_with_none() {
     assert!(events.iter().any(|e| matches!(e,
         Event::ToolEnd { output, is_error: true, .. }
             if output == "`steps` must list at least one step.")));
+    // The conversation keeps them as JSON, so a strict server takes the next request.
+    let messages = model.requests()[1]["messages"].clone();
+    let kept = &messages.as_array().unwrap()[2]["tool_calls"][0]["function"]["arguments"];
+    assert_eq!(kept, "{}", "{messages}");
 }
 
 /// A turn on the Responses API: the prompt, the token, and every event up to `turn_end`.
