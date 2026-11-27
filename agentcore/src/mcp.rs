@@ -25,6 +25,8 @@ const ABORTED: &str = "Aborted by the user";
 const MAX_DESCRIPTION: usize = 1 << 10;
 /// Largest input schema of a tool that is offered to the model.
 const MAX_SCHEMA: usize = 16 << 10;
+/// Most tools of one connector offered to the model: every one is sent with every model call.
+const MAX_TOOLS: usize = 128;
 
 /// The connectors tried so far. `None`: it failed to load, and is not tried again until it changes.
 #[derive(Default)]
@@ -280,7 +282,7 @@ impl Server {
         )?;
         let mut cursor = None;
         // At most 50 pages: a server that always names a next page must not hold the turn.
-        for _ in 0..50 {
+        'pages: for _ in 0..50 {
             let params = match &cursor {
                 Some(cursor) => json!({"cursor": cursor}),
                 None => json!({}),
@@ -290,6 +292,13 @@ impl Server {
                 let Some(name) = tool["name"].as_str() else {
                     continue;
                 };
+                if server.tools.len() == MAX_TOOLS {
+                    eprintln!(
+                        "connector {}: tools after the first {MAX_TOOLS} left out",
+                        connector.name
+                    );
+                    break 'pages;
+                }
                 let exposed = format!("{}__{name}", connector.name);
                 // What model APIs accept as a function name.
                 if exposed.len() > 64
