@@ -4,7 +4,7 @@ import { Avatar } from "./Avatar.tsx";
 import { Markdown } from "./Markdown.ts";
 import { leadOf, mentionAt, withoutMention } from "./room.ts";
 import type { Bot, Project } from "./types.ts";
-import { X } from "lucide-react";
+import { ArrowUp, X } from "lucide-react";
 
 type Line = { seq: number; from: string; to: string; text: string; atMs: number };
 
@@ -194,7 +194,7 @@ export function Room({ project, bots }: { project: Project; bots: Bot[] }) {
             }
           }}
         />
-        <button disabled={!text.trim() || !lead}>Send</button>
+        <button className="round" aria-label="Send" data-tip="Send (Enter)" disabled={!text.trim() || !lead}><ArrowUp /></button>
       </form>
       <p className="hints note">
         {lead ? (

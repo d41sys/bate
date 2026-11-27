@@ -10,7 +10,7 @@ import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { clock, day, dayTime, took } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
-import { ArrowDown, ArrowUp, CalendarClock, Check, Circle, CircleAlert, CircleCheck, CircleDot, Clock, GitFork, Mic, Paperclip, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarClock, Circle, CircleAlert, CircleCheck, CircleDot, Clock, GitFork, Mic, Paperclip, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { upload } from "./upload.ts";
 import { useLater } from "./useLater.ts";
 
@@ -21,6 +21,13 @@ const PAGE = 2000;
 
 /** How long (ms) a row that just came in counts as arriving: a little longer than its fade (`--slow`). */
 const ARRIVING = 400;
+/** What an empty conversation offers: a click puts the words in the box and sends nothing. */
+const STARTERS: [label: string, words: string][] = [
+  ["Plan a task", "Help me plan this task: "],
+  ["Explain a file", "Explain what this file does: "],
+  ["Review my changes", "Review the changes in this folder and list what could break."],
+  ["Write a first draft", "Write a first draft of "],
+];
 
 type Hit = { seq: number };
 
@@ -103,8 +110,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const [away, setAway] = useState(false);
   // Files are held over the chat.
   const [dropping, setDropping] = useState(false);
-  // The long messages opened with "Show all". Kept here, not in the row: a row scrolled far away is drawn anew.
-  const [whole, setWhole] = useState<ReadonlySet<number>>(new Set());
+  // What the person opened or folded by hand: a long message ("Show all"), a run of calls. Kept here, not in the row: a row scrolled far away is drawn anew.
+  const [folds, setFolds] = useState<ReadonlyMap<number, boolean>>(new Map());
   // The newest message of the person's that the bot still has: what Retry sends again after a turn that failed or was stopped.
   const lastPrompt = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) {
@@ -495,6 +502,11 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             <Avatar bot={bot} />
             <strong>{bot.name}</strong>
             <span>Nothing is said here yet. Write below to start.</span>
+            <div className="prompts">
+              {STARTERS.map(([label, words]) => (
+                <button key={label} type="button" className="small" onClick={() => { setText(words); box.current?.focus(); }}>{label}</button>
+              ))}
+            </div>
           </div>
         )}
         <div style={{ height: rows.getTotalSize(), position: "relative" }}>
@@ -509,21 +521,14 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                 className={`item ${item.kind}${item.id === marked ? " marked" : ""}${Date.now() - (arrived.current.get(item.id) ?? 0) < ARRIVING ? " arriving" : ""}`}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
               >
-                {/* A work log: each of the person's messages, and the first thing the bot does after one, says who.
-                    The person's says when (the first of a day, the day too); the bot's, how long the turn took. */}
-                {item.kind === "user" ? (
+                {/* The first thing the bot does after a message of the person's says who, and how long the turn took.
+                    The person's own are bubbles at the end edge, with their time under them. */}
+                {item.kind !== "user" && (!before || before.kind === "user") && (
                   <small className="from">
-                    <b>You</b>
-                    {item.at !== undefined && <time dateTime={new Date(item.at).toISOString()}>{days.has(item.id) ? `${day(item.at)} ${clock(item.at)}` : clock(item.at)}</time>}
+                    <Avatar bot={bot} />
+                    <b>{bot.name}</b>
+                    {before?.kind === "user" && before.took !== undefined && <span>{took(before.took)}</span>}
                   </small>
-                ) : (
-                  (!before || before.kind === "user") && (
-                    <small className="from">
-                      <Avatar bot={bot} />
-                      <b>{bot.name}</b>
-                      {before?.kind === "user" && before.took !== undefined && <span>{took(before.took)}</span>}
-                    </small>
-                  )
                 )}
                 <Row
                   item={item}
@@ -531,8 +536,9 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                   // The call run that the bot is at now, if it is the last thing said.
                   working={bot.busy && row.index === lastIndex}
                   since={lastPrompt?.took === undefined ? lastPrompt?.began : undefined}
-                  all={whole.has(item.id)}
-                  toggleAll={() => setWhole((ids) => { const next = new Set(ids); if (!next.delete(item.id)) next.add(item.id); return next; })}
+                  firstOfDay={days.has(item.id)}
+                  chosen={folds.get(item.id)}
+                  setFold={(open) => setFolds((all) => new Map(all).set(item.id, open))}
                   // An installed agent cannot go back in a conversation.
                   fixed={!!bot.agent?.length}
                   retry={retry}
@@ -629,6 +635,27 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         </ol>
       )}
       <form className="composer" onSubmit={(e) => { e.preventDefault(); send(); }}>
+        <textarea
+          ref={box}
+          rows={1}
+          aria-label="Message"
+          placeholder={dropping ? "Drop the files here to attach them" : bot.paused ? "Resume the bot to send a message" : bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            if (e.clipboardData.files.length) {
+              e.preventDefault();
+              attach(e.clipboardData.files);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              // While the bot works, Enter queues the message and ⌥Enter puts it into the turn that runs.
+              send(e.altKey && bot.busy && !bot.agent?.length);
+            }
+          }}
+        />
         <input
           ref={picker}
           type="file"
@@ -654,34 +681,15 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             <Mic />
           </button>
         )}
-        <textarea
-          ref={box}
-          rows={1}
-          aria-label="Message"
-          placeholder={dropping ? "Drop the files here to attach them" : bot.paused ? "Resume the bot to send a message" : bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onPaste={(e) => {
-            if (e.clipboardData.files.length) {
-              e.preventDefault();
-              attach(e.clipboardData.files);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              // While the bot works, Enter queues the message and ⌥Enter puts it into the turn that runs.
-              send(e.altKey && bot.busy && !bot.agent?.length);
-            }
-          }}
-        />
-        {filled && <Meter filled={filled} />}
-        {model}
-        {bot.busy ? (
-          <button type="button" className="primary" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>Stop</button>
-        ) : (
-          <button disabled={!message || uploading || sending || !!signIn || bot.paused}>Send</button>
-        )}
+        <span className="end">
+          {filled && <Meter filled={filled} />}
+          {model}
+          {bot.busy ? (
+            <button type="button" className="round primary" aria-label="Stop the bot" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}><Square /></button>
+          ) : (
+            <button className="round" aria-label="Send" data-tip="Send (Enter)" disabled={!message || uploading || sending || !!signIn || bot.paused}><ArrowUp /></button>
+          )}
+        </span>
       </form>
     </section>
   );
@@ -712,19 +720,21 @@ type Actions = {
   stopReading: () => void;
   /** When the turn that runs began: the working line counts from it. */
   since?: number;
-  /** Whether a long message of the person's is shown whole, and what "Show all" does. */
-  all: boolean;
-  toggleAll: () => void;
+  /** The person's message is the first of its day: its time says the day too. */
+  firstOfDay: boolean;
+  /** What the person chose for a part that folds (a long message, a run of calls), if anything, and how they choose. */
+  chosen?: boolean;
+  setFold: (open: boolean) => void;
 };
 
-function Row({ item, busy, working, since, all, toggleAll, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, since, firstOfDay, chosen, setFold, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
-      return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} all={all} toggleAll={toggleAll} />;
+      return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} firstOfDay={firstOfDay} chosen={chosen} setFold={setFold} />;
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "run":
-      return <Run parts={item.parts} live={working} bot={bot} changes={changes} />;
+      return <Run parts={item.parts} live={working} bot={bot} changes={changes} chosen={chosen} setFold={setFold} />;
     case "plan":
       return (
         <ul className="plan">
@@ -803,45 +813,54 @@ function Meter({ filled }: { filled: Fullness }) {
   );
 }
 
-/** A message of the person's: a long one (a pasted log) is cut until asked for; its actions are Copy and, while the bot can still go back, Retry, Edit and Fork. */
-function Said({ item, busy, fixed, retry, edit, fork, all, toggleAll }: { item: Extract<Item, { kind: "user" }> } & Pick<Actions, "busy" | "fixed" | "retry" | "edit" | "fork" | "all" | "toggleAll">) {
+/** A message of the person's: a long one (a pasted log) is cut until asked for. Under it, when it was said and its actions: Copy and, while the bot can still go back, Retry, Edit and Fork. */
+function Said({ item, busy, fixed, retry, edit, fork, firstOfDay, chosen: all = false, setFold }: { item: Extract<Item, { kind: "user" }> } & Pick<Actions, "busy" | "fixed" | "retry" | "edit" | "fork" | "firstOfDay" | "chosen" | "setFold">) {
   const long = isLong(item.text);
   return (
     <>
       <p className={`bubble${item.past ? " past" : ""}${long && !all ? " folded" : ""}`}>{item.text}</p>
-      {long && <button type="button" className="small ghost" aria-expanded={all} onClick={toggleAll}>{all ? "Show less" : "Show all"}</button>}
-      <div className="actions">
-        <CopyButton label="Copy the message" text={() => item.text} />
-        {!item.past && !fixed && (
-          <>
-            <button aria-label="Retry" data-tip="Retry: send it again" disabled={busy} onClick={() => retry(item)}><RotateCcw /></button>
-            <button aria-label="Edit" data-tip="Edit" disabled={busy} onClick={() => edit(item)}><Pencil /></button>
-            <button aria-label="Fork" data-tip="Fork: a new conversation from before this message; this one stays as it is" disabled={busy} onClick={() => fork(item)}><GitFork /></button>
-          </>
-        )}
+      {long && <button type="button" className="small ghost" aria-expanded={all} onClick={() => setFold(!all)}>{all ? "Show less" : "Show all"}</button>}
+      <div className="meta">
+        <div className="actions">
+          <CopyButton label="Copy the message" text={() => item.text} />
+          {!item.past && !fixed && (
+            <>
+              <button aria-label="Retry" data-tip="Retry: send it again" disabled={busy} onClick={() => retry(item)}><RotateCcw /></button>
+              <button aria-label="Edit" data-tip="Edit" disabled={busy} onClick={() => edit(item)}><Pencil /></button>
+              <button aria-label="Fork" data-tip="Fork: a new conversation from before this message; this one stays as it is" disabled={busy} onClick={() => fork(item)}><GitFork /></button>
+            </>
+          )}
+        </div>
+        {item.at !== undefined && <time dateTime={new Date(item.at).toISOString()}>{firstOfDay ? `${day(item.at)} ${clock(item.at)}` : clock(item.at)}</time>}
       </div>
     </>
   );
 }
 
-/** Calls and thinking that follow each other: one line saying what happened, which opens to a row for each call. */
-function Run({ parts, live, bot, changes }: { parts: Part[]; live: boolean; bot: string; changes?: () => void }) {
+/**
+ * Calls and thinking that follow each other: one line saying what happened, with a dot for how it stands, which opens to
+ * a row for each call. It is open while the bot is at it and folds when the run is done, unless the person chose.
+ */
+function Run({ parts, live, bot, changes, chosen, setFold }: { parts: Part[]; live: boolean; bot: string; changes?: () => void } & Pick<Actions, "chosen" | "setFold">) {
   const { text, running, failed } = describe(parts, live);
   const files = changedFiles(parts).length;
+  const open = chosen ?? live;
   return (
     <>
-      <details className="run">
-        <summary>
-          <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true">{!running && (failed ? <X /> : <Check />)}</span>
+      <details className="run" open={open}>
+        {/* The click is the person's choice; left to the element, the fold the chat does itself would count as one. */}
+        <summary onClick={(e) => { e.preventDefault(); setFold(!open); }}>
+          <span className={running ? "dot going" : failed ? "dot bad" : "dot"} aria-hidden="true" />
           {text}
           {failed > 0 && <span className="error">, {failed} failed</span>}
         </summary>
         <ul>
           {parts.map((part) =>
             part.kind === "thinking" ? (
-              <li key={part.id} className="thought"><p>{part.text}</p></li>
+              <li key={part.id} className="thought"><span className="dot" aria-hidden="true" /><p>{part.text}</p></li>
             ) : (
               <li key={part.id}>
+                <span className={part.isError ? "dot bad" : live && part.output === undefined ? "dot going" : "dot"} aria-hidden="true" />
                 <details>
                   <summary>
                     <code>{aim(part)}</code>
