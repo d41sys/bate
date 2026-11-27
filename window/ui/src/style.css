@@ -8,6 +8,9 @@
 html, body, #root { height: 100%; }
 html, body { overflow-x: clip; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: var(--size-ui)/var(--leading) var(--font-ui); -webkit-font-smoothing: antialiased; }
+/* Scroll bars: thin, a quiet thumb on no track. */
+:root { scrollbar-color: var(--bg-soft-3) transparent; }
+* { scrollbar-width: thin; }
 h1 { font-size: var(--size-head); line-height: 30px; font-weight: var(--weight-strong); margin: 0; }
 h2 { font-size: var(--size-title); line-height: 24px; font-weight: var(--weight-strong); margin: var(--space-5) 0 var(--space-2); }
 h3 { font-size: var(--size-ui); font-weight: var(--weight-strong); margin: var(--space-4) 0 var(--space-1); }
@@ -153,7 +156,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
 /* The page is wider than a column, and its header starts where it does. A rule of its own: the build drops this selector from a list with `.settings`. */
 main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
-.settings nav { position: sticky; top: calc(var(--head-h) + var(--space-1)); z-index: 1; background: var(--bg); }
+/* Its words start where the title's do, and its first row is centred on the first section's heading. */
+.settings nav { position: sticky; top: calc(var(--head-h) - var(--space-2)); z-index: 1; margin: calc(-1 * var(--space-2)) 0 0 calc(-1 * var(--space-2)); background: var(--bg); }
 .settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-0); }
 .settings > div > .group:first-child { margin-top: 0; }
 .settings code { overflow-wrap: anywhere; }
@@ -161,7 +165,9 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
   .settings { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
   .settings nav ul { display: flex; overflow-x: auto; }
   .settings nav li { flex: none; }
-  /* A row's control goes under its title, as wide as the column; a switch or a button stays at the end. */
+}
+/* A main area too narrow for a title and its field side by side: a row's control goes under its title, as wide as the column; a switch or a button stays at the end. */
+@container (max-width: 760px) {
   .setting:not(.inline) { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-2); }
   .setting:not(.inline) .control { justify-content: flex-start; flex-wrap: wrap; }
   .setting:not(.inline) .control > :where(input:not([type=checkbox], [type=radio], [type=color], [type=range]), select) { width: 100%; }
@@ -261,6 +267,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* ---- The window: sidebar, main area, side pane ---- */
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
 .sidebar { padding: var(--space-1) var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
+/* In Bate's own window the page runs under the title bar: the window's buttons sit over the top of the sidebar. */
+.app.shell .sidebar { padding-top: var(--titlebar-h); }
 .sidebar h2 { font-size: var(--size-small); line-height: var(--leading); font-weight: 500; letter-spacing: 0; color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
 /* A section's heading with its one action beside it. */
 .sidebar .heading { display: flex; align-items: center; justify-content: space-between; }
@@ -282,12 +290,16 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* A bot's row is taller, with a bigger face; chosen, it keeps its weight so that its words do not move. */
 .sidebar .row:not(.plain) { min-height: var(--row-h-l); }
 .sidebar .avatar { width: var(--avatar-l); height: var(--avatar-l); font-size: var(--size-title); }
-/* A bot's row with its `⋯` menu beside it; a pointer sees the menu when it is over the row or has the focus, a touch screen always (not in the strip: see below). */
-.sidebar li.bot { display: flex; align-items: center; gap: var(--space-1); }
-.sidebar li.bot > .row { flex: 1; min-width: 0; }
+/* A bot's row with its `⋯` menu over its end; a pointer sees the menu when it is over the row or has the focus, a touch screen always (not in the strip: see below). */
+.sidebar li.bot { position: relative; }
+/* The row is as wide as the sidebar; while its menu shows, the row keeps room for it. */
+.sidebar li.bot > .row { padding-right: calc(var(--control-h) + var(--space-2)); }
+.sidebar li.bot > .more { position: absolute; top: 0; bottom: 0; right: var(--space-1); align-items: center; }
 @media (hover: hover) {
   .sidebar li.bot > .more { opacity: 0; }
   .sidebar li.bot:hover > .more, .sidebar li.bot:focus-within > .more, .sidebar li.bot > .more:has([aria-expanded=true]) { opacity: 1; }
+  .sidebar li.bot > .row { padding-right: var(--space-3); }
+  .sidebar li.bot:hover > .row, .sidebar li.bot:focus-within > .row, .sidebar li.bot:has(> .more [aria-expanded=true]) > .row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
 /* A working bot's row: a dot that breathes beside "Working…". */
 .pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
@@ -343,12 +355,14 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 /* ---- The conversation ---- */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
 .chat > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; }
-/* The scroller is as wide as the window, so its bar is at the edge; the messages keep the column. */
-.items { flex: 1; overflow: auto; min-height: 0; max-width: none; }
-.items > div { max-width: var(--thread-w); margin-inline: auto; }
+/* The scroller reaches the sheet's edge, so its bar is there; the messages keep the column, edge to edge with the header and the box. */
+.items { flex: 1; overflow: auto; min-height: 0; width: auto; max-width: none; margin-inline: calc(-1 * var(--space-5)); padding-left: var(--space-5); }
+/* Placed on the sheet's column (`cqw` is the sheet's width), so its edges are the header's whatever the bar's width. */
+.items > div { width: min(100cqw, var(--thread-w)); margin-left: calc((100cqw - min(100cqw, var(--thread-w))) / 2); }
 .item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-2) 0; user-select: text; -webkit-user-select: text; }
 .item > * { max-width: 100%; margin-block: 0; }
-.item.user { align-items: flex-end; }
+/* A message of the person's starts a turn: more room above it. */
+.item.user { align-items: flex-end; padding-top: var(--space-4); }
 .bubble { padding: var(--space-2) var(--space-3); border-radius: var(--radius-bubble); background: var(--bg-soft); min-width: 0; max-width: min(var(--reply-w), 100%); overflow-wrap: anywhere; font-size: var(--size-chat); line-height: var(--leading-chat); }
 .bubble > :first-child { margin-top: 0; }
 .bubble > :last-child { margin-bottom: 0; }
@@ -372,7 +386,7 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 .run > summary::after { content: "›"; transition: transform var(--fast) var(--ease); }
 .run[open] > summary::after { transform: rotate(90deg); }
 .run > summary:hover { color: var(--fg); }
-.mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
+.mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; line-height: 1; }
 .mark.ok::before { content: "✓"; }
 .mark.bad { color: var(--danger); }
 .mark.bad::before { content: "✕"; }
@@ -408,6 +422,8 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 @media (hover: hover) {
   .item .actions { opacity: 0; transition: opacity var(--fast) var(--ease); }
   .item:hover .actions, .item:focus-within .actions { opacity: 1; }
+  /* A message of the person's has its actions on its left, on its line, so they take no room under it. */
+  .item.user:has(> .actions) { flex-direction: row-reverse; align-items: center; justify-content: flex-start; }
 }
 .plan { list-style: none; padding: 0; margin: var(--space-1) 0; }
 .plan [aria-current] { font-weight: var(--weight-strong); color: var(--fg); }
@@ -443,7 +459,7 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 
 /* ---- The bot's conversations: a chip at the end of the header opens the list; each row has a ⋯ for its actions; the foot has the actions on the whole ---- */
 /* With the pane open the row is short: the chip gives way first (its name is cut), then the tabs scroll. */
-main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto; min-width: var(--control-w-short); }
+main > header > .conversation { display: flex; flex-shrink: 8; justify-content: flex-end; margin-left: auto; min-width: var(--control-w-short); }
 .popover.start { left: 0; right: auto; }
 .popover.below { top: calc(100% + var(--space-1)); bottom: auto; left: 0; right: auto; }
 .popover.end { left: auto; right: 0; }
@@ -560,6 +576,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
 @media (max-width: 640px) {
   /* The sidebar becomes a strip of projects and bots across the top. */
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); padding: 0 var(--space-2) var(--space-2); }
+  .app.shell { padding-top: var(--titlebar-h); }
+  .app.shell .sidebar { padding-top: var(--space-1); }
   .sidebar { flex-direction: row; align-items: center; padding-inline: 0; }
   /* A heading stays, close to its `+`, which alone says nothing; a list with no row takes no room. */
   .sidebar .heading { flex: none; }
@@ -570,10 +588,13 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .sidebar ul, .sidebar li { flex: none; }
   /* The strip scrolls, so a menu would be cut off: there the bot's Settings has Pause. */
   .sidebar li.bot > .more { display: none; }
+  .sidebar li.bot > .row { padding-right: var(--space-2); }
   .sidebar .foot { margin: 0 0 0 auto; }
   .row { width: auto; }
   .sidebar .row { max-width: 12rem; }
   main { padding: 0 var(--space-3) var(--space-3); }
+  .items { margin-inline: 0; padding-left: 0; }
+  .items > div { width: auto; margin-left: 0; }
   .popover.below.end { left: 0; }
   .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
@@ -584,11 +605,14 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .menu.more { position: relative; }
   .menu.more .popover { left: auto; right: 0; width: max-content; }
 }
-/* A main area too narrow for one row (a phone, or the side pane open): the header is two rows, who and the conversation, then the tabs. */
+/* A main area too narrow for one row (the window at its first size, a phone, the side pane open): the header is two rows, who and the conversation, then the tabs. */
+@container (max-width: 760px) {
+  main > header { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2) var(--space-3); padding-block: var(--space-2) var(--space-3); }
+  main > header > [role=tablist] { grid-row: 2; grid-column: 1 / -1; justify-self: start; max-width: 100%; }
+}
 @container (max-width: 640px) {
-  main > header { flex-wrap: wrap; gap: var(--space-1) var(--space-3); padding-block: var(--space-2); }
-  [role=tablist] { order: 1; flex: 1 0 100%; }
-  [role=tab] { flex: 1 0 auto; padding: 0 var(--space-2); }
+  main > header > [role=tablist] { justify-self: stretch; }
+  [role=tab] { flex: 1 0 auto; padding: 0 var(--space-1); }
   /* The words get a row of their own, the buttons the one under it. */
   .composer { flex-wrap: wrap; }
   .composer textarea { order: -1; flex: 1 0 100%; }

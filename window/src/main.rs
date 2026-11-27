@@ -204,6 +204,9 @@ fn open_window_on(app: &AppHandle, bot: Option<&str>) -> tauri::Result<()> {
     let label = format!("bate-{}", OPENED.fetch_add(1, Ordering::Relaxed));
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Bate")
+        // The page runs under the title bar; its sidebar and header move the window (`data-tauri-drag-region`).
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
         .inner_size(1000.0, 700.0)
         // Files dropped on the page reach the page (attachments), not the shell.
         .disable_drag_drop_handler()

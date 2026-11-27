@@ -362,8 +362,9 @@ function App() {
 
   if (unpaired) return <Pair onPair={pair} />;
   return (
-    <div className="app">
-      <nav className="sidebar" aria-label="Projects and bots">
+    // In Bate's window there is no title bar: the sidebar, the header and the gaps between them move the window.
+    <div className={inShell ? "app shell" : "app"} data-tauri-drag-region="">
+      <nav className="sidebar" aria-label="Projects and bots" data-tauri-drag-region="deep">
         <ul>
           <li>{plain("Activity", view?.page === "attention", () => setView({ page: "attention" }), waiting > 0 && <span className="badge">{waiting} {waiting === 1 ? "needs" : "need"} you</span>)}</li>
         </ul>
@@ -407,25 +408,25 @@ function App() {
         {error && <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p>}
         {view?.page === "attention" && (
           <>
-            <header><div className="who"><h1>Activity</h1></div></header>
+            <header data-tauri-drag-region="deep"><div className="who"><h1>Activity</h1></div></header>
             <Attention key={connection} bots={bots} open={(id, conversation) => openBot(id, "chat", conversation)} />
           </>
         )}
         {view?.page === "new-bot" && (
           <>
-            <header><div className="who"><h1>New bot</h1></div></header>
+            <header data-tauri-drag-region="deep"><div className="who"><h1>New bot</h1></div></header>
             <NewBot opened={(id) => openBot(id)} report={setError} />
           </>
         )}
         {view?.page === "projects" && (
           <>
-            <header><div className="who"><h1>Projects</h1></div></header>
+            <header data-tauri-drag-region="deep"><div className="who"><h1>Projects</h1></div></header>
             <Projects key={`${connection}-${view.asked}`} adding={view.asked !== undefined} bots={bots} projects={projects} open={openProject} />
           </>
         )}
         {view?.page === "addons" && (
           <>
-            <header>
+            <header data-tauri-drag-region="deep">
               <div className="who"><h1>Add-ons</h1></div>
               <Tabs ids={Object.keys(ADDON_TABS) as AddonTab[]} names={ADDON_TABS} tab={view.tab} set={(tab) => setView({ page: "addons", tab })} />
             </header>
@@ -438,13 +439,13 @@ function App() {
         )}
         {view?.page === "settings" && (
           <>
-            <header><div className="who"><h1>Settings</h1></div></header>
+            <header data-tauri-drag-region="deep"><div className="who"><h1>Settings</h1></div></header>
             <AppSettings key={connection} section={view.section} choose={(section) => setView({ page: "settings", section })} />
           </>
         )}
         {view?.page === "project" && project && (
           <>
-            <header>
+            <header data-tauri-drag-region="deep">
               <div className="who"><h1>{project.name}</h1></div>
               <Tabs ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)} />
             </header>
@@ -473,7 +474,7 @@ function App() {
         )}
         {view?.page === "bot" && bot && (
           <>
-            <header>
+            <header data-tauri-drag-region="deep">
               <div className="who">
                 <Avatar bot={bot} />
                 <h1>{bot.name}</h1>
