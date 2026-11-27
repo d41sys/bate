@@ -1621,7 +1621,7 @@ fn after_a_refusal_for_size_the_summary_gets_older_tool_results_cut() {
     let dir = workdir("overflow-cleared");
     fs::write(
         dir.join("a.txt"),
-        format!("{}TAIL-MARK\n", "y".repeat(10_000)),
+        format!("{}TAIL-MARK\n", format!("{}\n", "y".repeat(99)).repeat(100)),
     )
     .unwrap();
     let ok = |t: &str| format!("data: {}\n\ndata: [DONE]\n\n", text(t)).into_bytes();
@@ -3693,6 +3693,7 @@ fn a_turn_stops_after_its_tool_rounds_and_one_more_prompt_goes_on() {
     let model = Model::serve(vec![
         vec![plan("c1")],
         vec![plan("c2")],
+        vec![text("Planned x; nothing is done yet.")],
         vec![text("Finished.")],
     ]);
     let mut engine = Engine::start(&dir, &model);
@@ -3708,7 +3709,14 @@ fn a_turn_stops_after_its_tool_rounds_and_one_more_prompt_goes_on() {
             error: Some("stopped after 2 tool rounds".into())
         })
     );
-    assert_eq!(model.requests().len(), 2);
+    // At the limit the model is asked once more, with no tools, to say where it got to.
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].get("tools").is_none(), "{}", requests[2]);
+    assert!(sent(&model, 2).contains("all the tool rounds"));
+    assert!(events.contains(&Event::Text {
+        delta: "Planned x; nothing is done yet.".into()
+    }));
 
     engine.prompt_as("n2", "Continue.");
     let events = engine.until(is_turn_end);
@@ -3722,10 +3730,65 @@ fn a_turn_stops_after_its_tool_rounds_and_one_more_prompt_goes_on() {
             ..
         })
     ));
-    // The model sees the two rounds and the prompt after them.
-    let last = model.requests()[2]["messages"].as_array().unwrap().clone();
+    // The model sees the two rounds, its answer at the limit, and the prompt after them; not
+    // the note that asked for the answer.
+    let last = model.requests()[3]["messages"].as_array().unwrap().clone();
     assert_eq!(last.iter().filter(|m| m["role"] == "tool").count(), 2);
-    assert_eq!(last.last().unwrap()["content"], "Continue.");
+    let n = last.len();
+    assert_eq!(last[n - 2]["content"], "Planned x; nothing is done yet.");
+    assert_eq!(last[n - 1]["content"], "Continue.");
+    assert!(!sent(&model, 3).contains("all the tool rounds"));
+}
+
+#[test]
+fn a_sub_agent_at_its_limit_answers_with_what_it_has() {
+    let dir = workdir("sub-steps");
+    let model = Model::serve(vec![
+        vec![call("c1", "agent", json!({"task": "Plan x."}))],
+        vec![call(
+            "s1",
+            "plan",
+            json!({"steps": [{"step": "x", "status": "pending"}]}),
+        )],
+        vec![text("Sub: planned x.")],
+        vec![text("Main: the sub-agent planned x.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    assert_eq!(engine.request(Op::StepLimit { steps: 1 }), None);
+    engine.prompt("go");
+    engine.until(is_turn_end);
+    let requests = model.requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[2].get("tools").is_none(), "{}", requests[2]);
+    // The sub-agent's answer is the `agent` call's result, with a word on why it stopped; the
+    // main turn, at its limit too, is asked after it.
+    let main = requests[3]["messages"].as_array().unwrap();
+    let result = main[main.len() - 2]["content"].as_str().unwrap();
+    assert!(
+        result.contains("stopped after 1 tool rounds") && result.ends_with("Sub: planned x."),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_call_with_empty_arguments_is_a_call_with_none() {
+    let dir = workdir("empty-args");
+    let model = Model::serve(vec![
+        vec![delta(
+            json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+            "function": {"name": "plan", "arguments": ""}}]}),
+        )],
+        vec![text("ok")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt("go");
+    let events = engine.until(is_turn_end);
+    // Not "not a JSON object": the tool ran, and said what it misses.
+    assert!(events.iter().any(|e| matches!(e,
+        Event::ToolEnd { output, is_error: true, .. }
+            if output == "`steps` must list at least one step.")));
 }
 
 /// A turn on the Responses API: the prompt, the token, and every event up to `turn_end`.
@@ -4582,7 +4645,11 @@ fn an_answer_with_no_tool_use_is_checked_only_when_it_is_long_and_a_turn_without
 #[test]
 fn one_big_tool_result_is_cut_for_the_model_and_the_window_still_gets_all_of_it() {
     let dir = workdir("big-result");
-    fs::write(dir.join("big.txt"), "x".repeat(5000)).unwrap();
+    fs::write(
+        dir.join("big.txt"),
+        format!("{}\n", "x".repeat(99)).repeat(50),
+    )
+    .unwrap();
     let model = Model::serve(vec![
         vec![call("c1", "read", json!({"path": "big.txt"}))],
         vec![text("Read it.")],
@@ -4594,12 +4661,12 @@ fn one_big_tool_result_is_cut_for_the_model_and_the_window_still_gets_all_of_it(
     let mut events = answer(&mut engine, "Approve");
     events.extend(engine.until(is_turn_end));
     assert_eq!(ended(&events), &done());
-    // "     1\t" and the line end come with the 5000 bytes.
+    // "     1\t" comes with each of the 50 lines of 100 bytes.
     let shown = events.iter().find_map(|e| match e {
         Event::ToolEnd { output, .. } => Some(output),
         _ => None,
     });
-    assert_eq!(shown.unwrap().len(), 5008);
+    assert_eq!(shown.unwrap().len(), 5350);
     let sent = model.requests()[1]["messages"].clone();
     let result = sent
         .as_array()
@@ -4610,7 +4677,7 @@ fn one_big_tool_result_is_cut_for_the_model_and_the_window_still_gets_all_of_it(
     let content = result["content"].as_str().unwrap();
     assert!(content.starts_with("     1\txxx"), "{content}");
     assert!(
-        content.ends_with("\n[4008 bytes left out, to fit the model's context]"),
+        content.ends_with("\n[4350 bytes left out, to fit the model's context]"),
         "{}",
         &content[content.len() - 80..]
     );

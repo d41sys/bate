@@ -17,6 +17,11 @@ pub const OUTPUT_CAP: usize = 64 << 10;
 /// Most text one `read` returns.
 const READ_CAP: usize = 256 << 10;
 const READ_LINES: usize = 2000;
+/// Most bytes `read` shows of one line: one minified line must not fill the result.
+const LINE: usize = 2000;
+/// Most lines `search` returns, and most bytes of each.
+const MATCHES: usize = 200;
+const MATCH_LINE: usize = 500;
 /// What `run` and `search` keep of output over `OUTPUT_CAP`: the start and the end.
 const HEAD: usize = 48 << 10;
 const TAIL: usize = OUTPUT_CAP - HEAD;
@@ -90,8 +95,9 @@ pub fn definitions() -> Value {
         ),
         tool(
             "edit",
-            "Replace one exact piece of text in a file. `old` must appear exactly once.",
-            json!({"path": path, "old": {"type": "string"}, "new": {"type": "string"}}),
+            "Replace a piece of text in a file. `old` must appear exactly once, unless `all` is true.",
+            json!({"path": path, "old": {"type": "string"}, "new": {"type": "string"},
+            "all": {"type": "boolean", "description": "Replace every time `old` appears (default false)"}}),
             &["path", "old", "new"]
         ),
         tool(
@@ -154,10 +160,17 @@ pub fn run(
                 .custom_flags(libc::O_NONBLOCK) // a pipe with no writer must not hold the turn
                 .open(&p)
                 .map_err(at(&p))?;
-            if !file.metadata().map_err(at(&p))?.is_file() {
+            let meta = file.metadata().map_err(at(&p))?;
+            if meta.is_dir() {
+                return list(&p);
+            }
+            if !meta.is_file() {
                 return Err(format!("{}: not a regular file", p.display()));
             }
             let mut file = BufReader::new(file);
+            if file.fill_buf().map_err(at(&p))?.contains(&0) {
+                return Err(format!("{}: a binary file, not shown", p.display()));
+            }
             let first = number("offset").unwrap_or(1).max(1) as usize;
             let limit = number("limit").map_or(READ_LINES, |n| n as usize);
             let mut out = String::new();
@@ -169,7 +182,13 @@ pub fn run(
                     continue;
                 }
                 let line = String::from_utf8_lossy(&buf);
-                if shown == limit || (shown > 0 && out.len() + line.len() > READ_CAP) {
+                let line = match line.floor_char_boundary(LINE) {
+                    end if end < line.len() => {
+                        format!("{}[line cut at {LINE} bytes]", &line[..end])
+                    }
+                    _ => line.into_owned(),
+                };
+                if shown == limit || out.len() + line.len() > READ_CAP {
                     let mut left = 1;
                     while next_line(&mut file, &mut buf).map_err(at(&p))? {
                         left += 1;
@@ -177,10 +196,13 @@ pub fn run(
                     out.push_str(&format!("[{left} more lines; read on with offset {n}]"));
                     return Ok(out);
                 }
-                // A first line over the cap is cut, so `offset` always moves on.
-                let line = &line[..line.floor_char_boundary(READ_CAP)];
                 out.push_str(&format!("{n:>6}\t{line}\n"));
                 shown += 1;
+            }
+            if shown == 0 && first > 1 {
+                return Err(format!(
+                    "offset {first} is past the end: the file has {n} lines"
+                ));
             }
             Ok(out)
         }
@@ -203,19 +225,29 @@ pub fn run(
             }
             let before = earlier(&p);
             let content = fs::read_to_string(&p).map_err(at(&p))?;
-            match content.matches(old).count() {
-                0 => Err(format!("the text to replace is not in {}", p.display())),
-                1 => {
-                    let changed = content.replacen(old, new, 1);
-                    fs::write(&p, &changed).map_err(at(&p))?;
-                    keep(control, &p, before, &changed);
-                    Ok(format!("edited {}", p.display()))
+            let changed = match content.matches(old).count() {
+                1 => content.replacen(old, new, 1),
+                n if n > 1 && args.get("all").and_then(Value::as_bool) == Some(true) => {
+                    content.replace(old, new)
                 }
-                n => Err(format!(
-                    "the text to replace appears {n} times in {}; include more of the text around it",
-                    p.display()
-                )),
-            }
+                0 => match loose(&content, old, new) {
+                    Ok(changed) => changed,
+                    Err(0) if new.len() >= 20 && content.contains(new) => {
+                        return Err(format!(
+                            "the text to replace is not in {}, but the new text is: the edit may already be done",
+                            p.display()
+                        ));
+                    }
+                    Err(0) => {
+                        return Err(format!("the text to replace is not in {}", p.display()));
+                    }
+                    Err(n) => return Err(repeated(n, &p)),
+                },
+                n => return Err(repeated(n, &p)),
+            };
+            fs::write(&p, &changed).map_err(at(&p))?;
+            keep(control, &p, before, &changed);
+            Ok(format!("edited {}", p.display()))
         }
         "run" => {
             let secs = number("timeoutSecs").unwrap_or(120).clamp(1, 600);
@@ -236,13 +268,99 @@ pub fn run(
                 .arg(args.get("path").and_then(Value::as_str).unwrap_or("."))
                 .current_dir(dir);
             match capture(cmd, Duration::from_secs(30), control)? {
-                (out, Some(0)) => Ok(out),
+                (out, Some(0)) => Ok(matches(&out)),
                 (out, Some(1)) if out.is_empty() => Ok("no matches".into()),
-                (out, _) => Err(out),
+                (out, _) => Err(matches(&out)),
             }
         }
         _ => Err(format!("there is no tool `{tool}`")),
     }
+}
+
+fn repeated(n: usize, p: &Path) -> String {
+    format!(
+        "the text to replace appears {n} times in {}; include more of the text around it, or set `all`",
+        p.display()
+    )
+}
+
+/// `old` matched as whole lines, not minding what models get wrong when they copy text: the
+/// ends of lines (spaces, `\r`), a byte order mark, typographic quotes, dashes and spaces. The
+/// one run of lines it matches becomes `new`'s lines, with the file's line end. `Err`: how many
+/// runs match, when not one.
+fn loose(content: &str, old: &str, new: &str) -> Result<String, usize> {
+    let plain = |line: &str| -> String {
+        let line = line.trim_start_matches('\u{feff}').trim_end();
+        line.chars()
+            .map(|c| match c {
+                '\u{2018}'..='\u{201b}' => '\'',
+                '\u{201c}'..='\u{201f}' => '"',
+                '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+                '\u{a0}' | '\u{2002}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+                c => c,
+            })
+            .collect()
+    };
+    let want: Vec<String> = old.lines().map(plain).collect();
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let have: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+    let found: Vec<usize> = (have.windows(want.len()).enumerate())
+        .filter(|(_, run)| *run == want.as_slice())
+        .map(|(i, _)| i)
+        .collect();
+    let [i] = found[..] else {
+        return Err(found.len());
+    };
+    let (run, last) = (&lines[i..i + want.len()], lines[i + want.len() - 1]);
+    let start: usize = lines[..i].iter().map(|l| l.len()).sum();
+    let end = start + run.iter().map(|l| l.len()).sum::<usize>();
+    let eol = if run[0].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut with = String::new();
+    if run[0].starts_with('\u{feff}') && !new.starts_with('\u{feff}') {
+        with.push('\u{feff}');
+    }
+    if !new.is_empty() {
+        with += &new.lines().collect::<Vec<_>>().join(eol);
+        if last.ends_with('\n') {
+            with += eol;
+        }
+    }
+    Ok(format!("{}{with}{}", &content[..start], &content[end..]))
+}
+
+/// The lines of a folder at `p`, sorted, a folder's with `/` after it.
+fn list(p: &Path) -> Result<String, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(p).map_err(at(p))? {
+        let entry = entry.map_err(at(p))?;
+        let slash = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            "/"
+        } else {
+            ""
+        };
+        names.push(format!("{}{slash}\n", entry.file_name().to_string_lossy()));
+    }
+    names.sort();
+    Ok(names.concat())
+}
+
+/// `search` output with each line cut to `MATCH_LINE` bytes, and no more than `MATCHES` lines.
+fn matches(out: &str) -> String {
+    let mut kept = String::new();
+    for (n, line) in out.lines().enumerate() {
+        if n == MATCHES {
+            kept.push_str("[more matches left out; narrow the pattern or the path]\n");
+            break;
+        }
+        let end = line.floor_char_boundary(MATCH_LINE);
+        kept.push_str(&line[..end]);
+        kept.push_str(if end < line.len() { "…\n" } else { "\n" });
+    }
+    kept
 }
 
 /// The text of the file at `p` before a change, to keep: `Some(None)` when there is no file,
@@ -417,6 +535,56 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    #[test]
+    fn edit_matches_lines_whatever_their_ends_trailing_spaces_and_typographic_quotes() {
+        let d = dir("edit-loose");
+        let f = d.join("f.txt");
+        // `read` shows lines without `\r` or the byte order mark, so the model's `old` has neither.
+        fs::write(&f, "\u{feff}a = 1;\r\nb = 'x';  \r\nc = 3;\r\n").unwrap();
+        let old = "a = 1;\nb = \u{2018}x\u{2019};";
+        call(
+            "edit",
+            json!({"path": "f.txt", "old": old, "new": "a = 2;\nb = 'y';"}),
+            &d,
+        )
+        .unwrap();
+        let left = fs::read_to_string(&f).unwrap();
+        assert_eq!(left, "\u{feff}a = 2;\r\nb = 'y';\r\nc = 3;\r\n");
+        // Removing lines leaves no empty one behind.
+        call(
+            "edit",
+            json!({"path": "f.txt", "old": "b = 'y';\n", "new": ""}),
+            &d,
+        )
+        .unwrap();
+        let left = fs::read_to_string(&f).unwrap();
+        assert_eq!(left, "\u{feff}a = 2;\r\nc = 3;\r\n");
+        // A loose match must be the only one too.
+        fs::write(&f, "x \ny\nx\t\ny\n").unwrap();
+        let twice = call(
+            "edit",
+            json!({"path": "f.txt", "old": "x\ny", "new": "z"}),
+            &d,
+        );
+        assert!(twice.unwrap_err().contains("2 times"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn edit_replaces_every_piece_when_asked_and_says_when_the_edit_looks_done() {
+        let d = dir("edit-all");
+        let f = d.join("f.txt");
+        fs::write(&f, "two two").unwrap();
+        let all = json!({"path": "f.txt", "old": "two", "new": "2", "all": true});
+        call("edit", all, &d).unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "2 2");
+        fs::write(&f, "let total = compute_total(items);\n").unwrap();
+        let again = json!({"path": "f.txt", "old": "let total = sum(items);",
+            "new": "let total = compute_total(items);"});
+        assert!(call("edit", again, &d).unwrap_err().contains("already"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
     /// Runs `write` or `edit` and gives what the call kept of the file.
     fn kept(name: &str, args: Value, dir: &Path) -> Option<Kept> {
         let control = Control::default();
@@ -534,21 +702,56 @@ mod tests {
         let pipe = call("read", json!({"path": "pipe"}), &d);
         assert!(pipe.unwrap_err().contains("not a regular file"));
         assert!(started.elapsed() < Duration::from_secs(3));
-        let folder = call("read", json!({"path": "."}), &d);
-        assert!(folder.unwrap_err().contains("not a regular file"));
+        let folder = call("read", json!({"path": "."}), &d).unwrap();
+        assert_eq!(folder, "pipe\n");
         fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
-    fn read_cuts_a_line_over_the_cap_and_counts_the_lines_left_without_holding_the_file() {
+    fn read_refuses_binary_data_lists_a_folder_and_says_when_offset_is_past_the_end() {
+        let d = dir("read-more");
+        fs::write(d.join("bin"), b"PNG\0\x01\x02").unwrap();
+        let binary = call("read", json!({"path": "bin"}), &d);
+        assert!(binary.unwrap_err().contains("binary"));
+        fs::write(d.join("f.txt"), "1\n2\n").unwrap();
+        let past = call("read", json!({"path": "f.txt", "offset": 5}), &d);
+        assert!(past.unwrap_err().contains("2 lines"));
+        fs::create_dir(d.join("sub")).unwrap();
+        let listed = call("read", json!({"path": "."}), &d).unwrap();
+        assert_eq!(listed, "bin\nf.txt\nsub/\n");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn read_cuts_a_long_line_and_counts_the_lines_left_without_holding_the_file() {
         let d = dir("read-big");
         // One line over the cap, then four more: the first is cut and `offset` moves on.
         let long = "x".repeat(READ_CAP * 2);
         fs::write(d.join("f.txt"), format!("{long}\n1\n2\n3\n4")).unwrap();
-        let out = call("read", json!({"path": "f.txt"}), &d).unwrap();
+        let out = call("read", json!({"path": "f.txt", "limit": 1}), &d).unwrap();
         let first = out.lines().next().unwrap();
-        assert_eq!(first.len(), "     1\t".len() + READ_CAP);
+        assert!(
+            first.starts_with(&format!("     1\t{}[", "x".repeat(LINE))),
+            "{first}"
+        );
+        assert!(first.len() < LINE + 100);
         assert!(out.ends_with("\n[4 more lines; read on with offset 2]"));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_cuts_long_lines_and_says_when_it_left_matches_out() {
+        let d = dir("search-many");
+        fs::write(
+            d.join("f.txt"),
+            "y".repeat(2000) + "\n" + &"y\n".repeat(300),
+        )
+        .unwrap();
+        let out = call("search", json!({"pattern": "y"}), &d).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), MATCHES + 1, "{out}");
+        assert!(lines[0].len() <= MATCH_LINE + 3, "{}", lines[0]);
+        assert!(lines[MATCHES].contains("narrow"));
         fs::remove_dir_all(&d).unwrap();
     }
 

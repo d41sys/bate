@@ -86,6 +86,9 @@ const EMPTY_TRIES: u32 = 2;
 /// Sent after the conversation, and not kept, when the model's reply was empty.
 const EMPTY: &str = "Your last reply was empty. Answer now: say what you found or did, or call a \
     tool if there is more to do.";
+/// Sent after the conversation, and not kept, when the turn has used its tool rounds.
+const LIMIT: &str = "You have used all the tool rounds you may use for this request. Do not call \
+    tools: answer now with what you found and did, and what is left to do.";
 /// Parts, in lower case, of what model servers answer when the conversation is more than the
 /// model holds: the list pi keeps (`packages/ai/src/utils/overflow.ts`), without the entries
 /// that also fit a rate limit.
@@ -520,7 +523,16 @@ impl Turn {
             }
             // The conversation ends on tool results, so one more prompt goes on from here.
             if rounds >= self.steps {
-                return Ok(TurnEnd::Limit);
+                // What the model says of where it got to is kept, so the next prompt goes on from it.
+                if let Some(text) =
+                    self.wrap_up(&system, &session.messages, |d| self.out.send(&event(d)))
+                {
+                    session.push(assistant(&text, &[])).map_err(saved)?;
+                }
+                return Ok(match self.control.aborted() {
+                    true => TurnEnd::Aborted,
+                    false => TurnEnd::Limit,
+                });
             }
             // Asked for first: with it comes how much the model holds.
             let mut token = self.get_token();
@@ -762,7 +774,11 @@ impl Turn {
         depth: usize,
         shown: &str,
     ) -> Value {
-        let args = match serde_json::from_str::<Value>(&call.arguments) {
+        // Some servers send `""` for a call with no arguments.
+        let args = match serde_json::from_str::<Value>(match call.arguments.trim() {
+            "" => "{}",
+            args => args,
+        }) {
             Ok(Value::Object(args)) => Ok(args),
             _ => Err(format!(
                 "the arguments are not a JSON object: {}",
@@ -823,10 +839,11 @@ impl Turn {
                 return Err("Aborted by the user".into());
             }
             if rounds >= self.steps {
-                return Err(format!(
-                    "The sub-agent stopped after {} tool rounds.",
-                    self.steps
-                ));
+                let stopped = format!("The sub-agent stopped after {} tool rounds.", self.steps);
+                return match self.wrap_up(&system, &messages, |_| {}) {
+                    Some(answer) => Ok(format!("[{stopped}]\n{answer}")),
+                    None => Err(stopped),
+                };
             }
             let (url, key, api, model, holds) = self.get_token()?;
             let ask = self.ask_model(&model, &system, &messages, None, &tools);
@@ -856,6 +873,18 @@ impl Turn {
                 messages.push(repeats.note(call, fit(result, self.window(holds))));
             }
         }
+    }
+
+    /// The model asked once more, with no tools, to say where it got to: the turn or sub-agent
+    /// has used its tool rounds. `None` when it says nothing or cannot be asked.
+    fn wrap_up(&self, system: &str, messages: &[Value], on: impl FnMut(Delta)) -> Option<String> {
+        let (url, key, api, model, _) = self.get_token().ok()?;
+        let note = json!({"role": "user", "content": LIMIT});
+        let none = json!([]);
+        let ask = self.ask_model(&model, system, messages, Some(&note), &none);
+        let reply = self.stream(&url, key.as_deref(), api, &ask, on).ok()?;
+        let text = reply.text.trim();
+        (!reply.aborted && !text.is_empty()).then(|| text.to_owned())
     }
 
     /// A model call; each wait before it is asked again is shown.
