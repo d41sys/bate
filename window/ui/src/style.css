@@ -34,7 +34,8 @@ button.primary:hover:not(:disabled), form button:not([type=button]):hover:not(:d
 button.danger { color: var(--danger); }
 button.ghost { border-color: transparent; background: none; color: var(--fg-muted); }
 button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
-button.small { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
+/* A button at the end of a settings row is small by itself; beside a text box or a select it keeps the box's height. */
+button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
 /* A button that is one sign: it needs an aria-label. */
 button.round { width: var(--control-h); padding: 0; flex: none; }
 /* A sign drawn inline: it takes the button's colour. */
@@ -82,6 +83,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .mail > summary { font-weight: var(--weight-strong); }
 .mail .rows { margin-bottom: 0; }
 .mail .rows li:last-child { border-bottom: 0; }
+/* On the banner's own fill a quiet badge has no pill to pad: its word ends where a button's edge would. */
+.mail .badge.quiet { padding-inline: 0; }
 /* The acceptance command of a hand-off: one line closed, the command and its output opened. */
 .check { font-size: var(--size-small); color: var(--fg-muted); }
 .check > summary { padding: var(--space-1) 0; }
@@ -138,6 +141,8 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .head > .actions { flex-wrap: nowrap; flex: none; }
 /* The app's settings: a list of sections that jump to them, and all of them in one scroll; a strip across the top on a phone. */
 .settings { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); gap: var(--space-5); align-items: start; max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
+/* The page is wider than a column, and its header starts where it does. A rule of its own: the build drops this selector from a list with `.settings`. */
+main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) + var(--space-5)); }
 .settings nav { position: sticky; top: calc(var(--row-h) + var(--space-3)); z-index: 1; background: var(--bg); }
 .settings nav ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .settings > div > .group:first-child { margin-top: 0; }
@@ -171,9 +176,11 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 /* A routine's past runs: a disclosure under its row, one line for each run. */
 .rows li > details { flex: 1 0 100%; }
 .rows li > details .rows li { padding: var(--space-1) 0; border-bottom: 0; min-height: var(--control-h); }
-.actions, .tools, .find, .surfaces { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
-.tools, .find, .surfaces { padding: var(--space-1) 0; }
+.actions, .tools, .find { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+.tools, .find { padding: var(--space-1) 0; }
 .find input { flex: 1; min-width: 0; }
+/* A box for a whole path keeps a width that shows it; in a narrow form its buttons go under it. */
+.find input.path { min-width: min(100%, var(--control-w)); }
 .card, .question, .first-run { background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-l); padding: var(--space-3) var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
 /* First run: one card in the middle of the page and one main button; the model server's fields stay folded until asked for. */
 main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
@@ -273,7 +280,7 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge.quiet { background: var(--bg-soft); color: var(--fg-muted); }
 
-main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
+main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
 main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
 /* No bar on top: who this is floats above the page as a chip, the tabs beside it. */
@@ -445,15 +452,18 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .popover li:hover > .more, .popover li:focus-within > .more, .popover li.acting > .more { opacity: 1; }
 }
 
-/* ---- A project's surfaces: a chip for each, and one drawn in the pane ---- */
-.surfaces .chip { gap: var(--space-2); }
-.surfaces button[aria-pressed=true] { background: var(--bg-current); border-color: var(--ink); }
+/* ---- A project's surfaces: a row for each (the name, then its kind and what it is), and one drawn in the pane ---- */
+.surfaces { list-style: none; margin-block: var(--space-2); padding: 0; display: grid; gap: 2px; }
+.surfaces .row { height: auto; padding-block: var(--space-2); }
+.surfaces small { white-space: normal; }
 .surface { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .surface .tools { padding-top: 0; }
 .surface .pager { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; }
 .surface .body { flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-s); }
 .surface table { width: 100%; }
-.surface th, .surface td { height: var(--control-h); padding: 0 var(--space-3); text-align: left; border-bottom: 1px solid var(--border); overflow-wrap: break-word; }
+.surface th, .surface td { height: var(--control-h); padding: 0 var(--space-3); text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+/* A long cell wraps, so a table of two columns needs no sideways scroll in a narrow pane; a short one is never broken. */
+.surface td.long { min-width: var(--control-w); white-space: normal; overflow-wrap: anywhere; }
 .surface th { position: sticky; top: 0; background: var(--bg-raised); color: var(--fg-muted); font-size: var(--size-small); font-weight: var(--weight-strong); }
 /* A row, node or line that can be chosen: pointed at, chosen (a bar at its start too, not the fill alone), and in focus inside the scroller. */
 .surface [aria-selected] { cursor: pointer; }
@@ -538,8 +548,10 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   /* The sidebar becomes a strip of projects and bots across the top. */
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .sidebar { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); }
-  .sidebar h2 { display: none; }
+  /* A heading stays, close to its `+`, which alone says nothing; a list with no row takes no room. */
   .sidebar .heading { flex: none; }
+  .sidebar h2 { margin: 0; }
+  .sidebar ul:empty { display: none; }
   .sidebar ul, .sidebar li { display: flex; align-items: center; }
   .sidebar ul ul { padding-left: 0; }
   .sidebar ul, .sidebar li { flex: none; }
@@ -549,9 +561,6 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .row { width: auto; }
   .sidebar .row { max-width: 12rem; }
   main { padding: 0 var(--space-2) var(--space-2); }
-  /* The header is two rows: who and the conversation, then the tabs. */
-  main > header { flex-wrap: wrap; gap: 0 var(--space-3); padding-top: var(--space-2); }
-  [role=tablist] { order: 1; flex: 1 0 100%; }
   .popover.below.end { left: 0; }
   .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
@@ -564,6 +573,11 @@ main > header > .conversation { display: flex; flex-shrink: 8; margin-left: auto
   .popover { left: 0; right: 0; width: auto; }
   .menu.more { position: relative; }
   .menu.more .popover { left: auto; right: 0; width: max-content; }
+}
+/* A main area too narrow for one row (a phone, or the side pane open): the header is two rows, who and the conversation, then the tabs. */
+@container (max-width: 640px) {
+  main > header { flex-wrap: wrap; gap: 0 var(--space-3); padding-top: var(--space-2); }
+  [role=tablist] { order: 1; flex: 1 0 100%; }
 }
 
 /* The earlier versions of a note: set in under it with the rule the folded calls use. */

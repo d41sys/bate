@@ -76,7 +76,7 @@ export function ProjectForm({ project, bots }: { project: Project; bots: Bot[] }
         </Setting>
         <Setting id="project-folder" title="Folder" wide>
           <div className="find">
-            <input id="project-folder" placeholder="Pick one, or type its whole path" value={form.folder} onChange={(e) => setForm({ ...form, folder: e.target.value })} />
+            <input id="project-folder" className="path" placeholder="Pick one, or type its whole path" value={form.folder} onChange={(e) => setForm({ ...form, folder: e.target.value })} />
             <Choose folder set={(folder) => setForm({ ...form, folder })} fail={setError} />
           </div>
         </Setting>

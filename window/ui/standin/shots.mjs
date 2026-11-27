@@ -106,8 +106,9 @@ try {
       const said = [...(seen.ready ? [] : ["never ready"]), ...seen.problems, ...(seen.alert ? [`error line: ${seen.alert}`] : []), ...cut.map((what) => `cut at the right edge: ${what}`)];
       for (const line of said) console.error(`${screen.name} (${scheme}, ${width}): ${line}`);
       problems += said.length;
-      // A screen that scrolls is pictured whole (up to MAX_HEIGHT), not cut at the window's foot.
-      const tall = (await page("Runtime.evaluate", { expression: "document.querySelector('main')?.scrollHeight ?? 0", returnByValue: true })).result.value;
+      // A screen that scrolls is pictured whole (up to MAX_HEIGHT), not cut at the window's foot:
+      // the window grows by what `main` hides, so the strip above it at a narrow width is counted.
+      const tall = (await page("Runtime.evaluate", { expression: "(() => { const m = document.querySelector('main'); return m ? innerHeight + m.scrollHeight - m.clientHeight : 0; })()", returnByValue: true })).result.value;
       await size(Math.min(Math.max(tall, HEIGHT), MAX_HEIGHT));
       // Let the new size settle.
       await sleep(100);
