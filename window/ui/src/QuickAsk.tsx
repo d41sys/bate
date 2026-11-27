@@ -7,6 +7,7 @@ import { answerCommand } from "./secret.ts";
 import { answerOf, loadUsed, message, type QuickContext, saveUsed, used, usedFirst } from "./quick.ts";
 import { hideQuick, listen, openInBate, request } from "./service.ts";
 import type { Bot } from "./types.ts";
+import { X } from "lucide-react";
 
 /** The conversation the question started: the frames of no other one are the panel's. */
 type Asked = { bot: string; conversation: string };
@@ -202,7 +203,7 @@ export function QuickAsk() {
           {quote && (
             <li>
               <span>Selected text: “{quote.split("\n")[0].slice(0, 60)}{quote.length > 60 || quote.includes("\n") ? "…" : ""}”</span>
-              <button type="button" aria-label="Do not send the selected text" onClick={() => setQuote(undefined)}>×</button>
+              <button type="button" aria-label="Do not send the selected text" onClick={() => setQuote(undefined)}><X /></button>
             </li>
           )}
           {shot.on && (
@@ -213,7 +214,7 @@ export function QuickAsk() {
                   {windows.map((w) => <option key={w.id} value={w.id}>{w.app}{w.title ? `: ${w.title}` : ""}</option>)}
                 </select>
               </label>
-              <button type="button" aria-label="Do not send a screenshot" onClick={() => setShot({ on: false, window: "" })}>×</button>
+              <button type="button" aria-label="Do not send a screenshot" onClick={() => setShot({ on: false, window: "" })}><X /></button>
             </li>
           )}
         </ul>

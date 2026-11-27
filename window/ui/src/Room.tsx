@@ -4,6 +4,7 @@ import { Avatar } from "./Avatar.tsx";
 import { Markdown } from "./Markdown.ts";
 import { leadOf, mentionAt, withoutMention } from "./room.ts";
 import type { Bot, Project } from "./types.ts";
+import { X } from "lucide-react";
 
 type Line = { seq: number; from: string; to: string; text: string; atMs: number };
 
@@ -153,7 +154,7 @@ export function Room({ project, bots }: { project: Project; bots: Bot[] }) {
         {chosen && (
           <span className="mention">
             <Avatar bot={chosen} />@{chosen.name}
-            <button type="button" aria-label={`Do not write to ${chosen.name} only`} onClick={() => { setTo(undefined); box.current?.focus(); }}>×</button>
+            <button type="button" aria-label={`Do not write to ${chosen.name} only`} onClick={() => { setTo(undefined); box.current?.focus(); }}><X /></button>
           </span>
         )}
         <textarea

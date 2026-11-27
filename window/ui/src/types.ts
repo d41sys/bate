@@ -26,7 +26,7 @@ export type Bot = {
   checkBot: string;
   /** Why the bot in `checkBot` cannot check now (gone, left the project, signed out); then the bot's answers are not checked. */
   checkBroken?: string;
-  /** A few characters, such as an emoji; empty: none. */
+  /** The name of one of the icons a bot can have (`icons.ts`), or a few characters set before there were icons; empty: none. */
   avatar: string;
   /** `#rrggbb`; empty: none. */
   color: string;

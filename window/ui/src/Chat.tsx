@@ -10,6 +10,7 @@ import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { dayTime } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
+import { ArrowDown, ArrowUp, Check, Mic, Plus, X } from "lucide-react";
 import { upload } from "./upload.ts";
 import { useLater } from "./useLater.ts";
 
@@ -448,8 +449,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           <span className="note" aria-live="polite">
             {hits === undefined ? "" : hits.length ? `${hit + 1} of ${hits.length}${hits.length === 200 ? "+" : ""}` : "Not found"}
           </span>
-          <button type="button" aria-label="Newer" disabled={!hits?.length} onClick={() => step(-1)}>↓</button>
-          <button type="button" aria-label="Older" disabled={!hits?.length} onClick={() => step(1)}>↑</button>
+          <button type="button" aria-label="Newer" disabled={!hits?.length} onClick={() => step(-1)}><ArrowDown /></button>
+          <button type="button" aria-label="Older" disabled={!hits?.length} onClick={() => step(1)}><ArrowUp /></button>
           <button type="button" onClick={() => setFinding(false)}>Done</button>
         </div>
       )}
@@ -534,7 +535,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           {files.map((f) => (
             <li key={f.id}>
               {f.name} {f.error ? `: ${f.error}` : f.path ? "" : "…"}
-              <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles((fs) => fs.filter((x) => x.id !== f.id))}>×</button>
+              <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles((fs) => fs.filter((x) => x.id !== f.id))}><X /></button>
             </li>
           ))}
         </ul>
@@ -544,7 +545,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           {waiting.map((p) => (
             <li key={p.nonce}>
               {p.text}{" "}
-              <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, conversation, nonce: p.nonce }))}>×</button>
+              <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, conversation, nonce: p.nonce }))}><X /></button>
             </li>
           ))}
         </ol>
@@ -554,7 +555,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           {later.map((l) => (
             <li key={l.id}>
               <strong>{dayTime(l.dueMs)}</strong> {l.note}{" "}
-              <button type="button" aria-label={`Cancel the later turn: ${l.note}`} onClick={() => run(request("cancel_later", { bot: bot.id, later: l.id }))}>×</button>
+              <button type="button" aria-label={`Cancel the later turn: ${l.note}`} onClick={() => run(request("cancel_later", { bot: bot.id, later: l.id }))}><X /></button>
             </li>
           ))}
         </ol>
@@ -570,7 +571,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             e.target.value = "";
           }}
         />
-        <button type="button" className="round" aria-label="Attach files" data-tip="Attach files" onClick={() => picker.current?.click()}>+</button>
+        <button type="button" className="round" aria-label="Attach files" data-tip="Attach files" onClick={() => picker.current?.click()}><Plus /></button>
         {inShell && (
           <button
             type="button"
@@ -582,10 +583,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
               run(startDictation());
             }}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="9" y="3" width="6" height="11" rx="3" />
-              <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-            </svg>
+            <Mic />
           </button>
         )}
         <textarea
@@ -715,7 +713,7 @@ function Run({ parts, live, bot, changes }: { parts: Part[]; live: boolean; bot:
     <>
       <details className="run">
         <summary>
-          <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true" />
+          <span className={running ? "mark spin" : failed ? "mark bad" : "mark ok"} aria-hidden="true">{!running && (failed ? <X /> : <Check />)}</span>
           {text}
           {failed > 0 && <span className="error">, {failed} failed</span>}
         </summary>

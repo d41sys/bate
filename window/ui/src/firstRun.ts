@@ -17,13 +17,13 @@ export type Starter = { name: string; purpose: string; avatar: string };
 export const FIRST_BOT: Starter & { message: string } = {
   name: "Scout",
   purpose: "Answers questions and works on the files in its folder.",
-  avatar: "🧭",
+  avatar: "compass",
   message: "Say hello, then tell me three things you can do for me here.",
 };
 
 export const STARTERS: Starter[] = [
-  { name: "Researcher", purpose: "Finds things out and reports what it found, with where each fact came from.", avatar: "🔎" },
-  { name: "Writer", purpose: "Drafts and edits text, and asks what it needs to know before it writes.", avatar: "✍️" },
-  { name: "Coder", purpose: "Reads and changes the code in its folder, runs the tests and says what changed.", avatar: "💻" },
-  { name: "Organiser", purpose: "Keeps notes and lists in its folder, tidy and easy to find again.", avatar: "🗂️" },
+  { name: "Researcher", purpose: "Finds things out and reports what it found, with where each fact came from.", avatar: "search" },
+  { name: "Writer", purpose: "Drafts and edits text, and asks what it needs to know before it writes.", avatar: "pen" },
+  { name: "Coder", purpose: "Reads and changes the code in its folder, runs the tests and says what changed.", avatar: "code" },
+  { name: "Organiser", purpose: "Keeps notes and lists in its folder, tidy and easy to find again.", avatar: "folder" },
 ];

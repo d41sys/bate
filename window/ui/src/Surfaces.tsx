@@ -2,6 +2,7 @@ import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { listen, request } from "./service.ts";
 import { PART, clampOffset, nextOffset, prevOffset, range, visibleNodes } from "./surface.ts";
 import type { Surface, SurfacePart } from "./types.ts";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 const KINDS = { table: "Table", tree: "Tree", code: "Code" } as const;
 /** A cell of more characters than this wraps; a shorter one stays on its line. About what `--control-w` holds. */
@@ -239,7 +240,7 @@ export function SurfaceView({ projectId, uri }: { projectId: string; uri: string
                         });
                       }}
                     >
-                      {collapsed.has(n.id) ? "▸" : "▾"}
+                      {collapsed.has(n.id) ? <ChevronRight /> : <ChevronDown />}
                     </button>
                   ) : (
                     <span className="gap" aria-hidden="true" />
