@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkFields, checkValue } from "./check.ts";
-import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, given, isLong, planSteps, type Entry, type Part } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, fullness, fullnessText, given, isLong, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -306,4 +306,22 @@ test("the first message of each day begins a day", () => {
   const said = (id: number, at?: number) => ({ id, kind: "user" as const, text: "", nonce: String(id), at });
   const items = [said(1, noon(1)), { id: 2, kind: "reply" as const, text: "" }, said(3, noon(1) + 60_000), said(4, noon(2)), said(5), said(6, noon(2) + 1)];
   assert.deepEqual([...dayStarts(items)], [1, 4]);
+});
+
+test("how full the model is comes from the newest context entry, and is said in thousands", () => {
+  const rows = [
+    { seq: 1, entry: { type: "context", used: 10_000, size: 200_000 } },
+    { seq: 2, entry: { type: "text", delta: "hi" } },
+    { seq: 3, entry: { type: "context", used: 124_400, size: 200_000 } },
+    { seq: 4, entry: { type: "turn_end", reason: "done" } },
+  ] satisfies { seq: number; entry: Entry }[];
+  assert.deepEqual(fullness(rows), { used: 124_400, size: 200_000 });
+  assert.equal(fullness(rows.slice(1, 2)), undefined);
+  // A size of 0 would divide by nothing: it is no measure.
+  assert.equal(fullness([{ seq: 1, entry: { type: "context", used: 5, size: 0 } }]), undefined);
+  assert.deepEqual(fullnessText({ used: 124_400, size: 200_000 }), { part: 0.622, text: "Context 62% full: 124k of 200k tokens. Past 80% the bot summarises the older messages." });
+  // More than the model holds is shown as full, not past it.
+  assert.equal(fullnessText({ used: 900, size: 800 }).part, 1);
+  // The entry makes no line of its own in the chat.
+  assert.deepEqual(build(rows), [{ id: 2, kind: "reply", text: "hi" }]);
 });

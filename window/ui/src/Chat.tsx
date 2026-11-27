@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
-import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, given, isLong, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, fullness, fullnessText, given, isLong, WORKING, type Entry, type Fullness, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { Avatar } from "./Avatar.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
 import { CopyButton, Markdown } from "./Markdown.ts";
@@ -97,6 +97,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const lastIndex = shown.length - (shown[shown.length - 1] === WORKING ? 2 : 1);
   // The conversation whose first page has come: until then an empty chat is not said to be empty.
   const [loaded, setLoaded] = useState<string>();
+  // How full the model is, when the engine has said.
+  const [filled, setFilled] = useState<Fullness>();
   // The person reads further up: a button brings the latest message back.
   const [away, setAway] = useState(false);
   // Files are held over the chat.
@@ -146,6 +148,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         hasMore.current = d.more;
         setMore(d.more);
         setItems(build(entries.current));
+        setFilled(fullness(entries.current));
         setLoaded(conversation);
         setQuestions(d.questions);
         setWaiting(d.queue);
@@ -188,6 +191,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         const row = { seq: frame.seq as number, at: frame.at as number | undefined, entry };
         live?.push(row);
         entries.current.push(row);
+        if (entry.type === "context") setFilled(fullness([row]));
         arrived.current.set(row.seq, Date.now());
         setItems((items) => add(items, row));
         // History holds every question ever asked; only one asked now is still open.
@@ -671,6 +675,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
             }
           }}
         />
+        {filled && <Meter filled={filled} />}
         {model}
         {bot.busy ? (
           <button type="button" className="primary" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>Stop</button>
@@ -783,6 +788,19 @@ function Elapsed({ since }: { since: number }) {
     return () => clearInterval(tick);
   }, []);
   return <span aria-hidden="true">{took(now - since)}</span>;
+}
+
+/** How full the model's context is: a ring that fills, with the numbers as its name and tooltip. */
+function Meter({ filled }: { filled: Fullness }) {
+  const { part, text } = fullnessText(filled);
+  return (
+    <span className={part >= 0.7 ? "meter near" : "meter"} role="img" aria-label={text} data-tip={text} tabIndex={0}>
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <circle className="track" cx="8" cy="8" r="6" />
+        <circle cx="8" cy="8" r="6" pathLength="100" strokeDasharray={`${part * 100} 100`} />
+      </svg>
+    </span>
+  );
 }
 
 /** A message of the person's: a long one (a pasted log) is cut until asked for; its actions are Copy and, while the bot can still go back, Retry, Edit and Fork. */

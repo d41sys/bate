@@ -16,7 +16,9 @@ export type Entry =
   | { type: "steered"; text: string }
   // What the check of the bot's answer said; `note` is the check's own words.
   | { type: "checked"; result: CheckResult; note: string; by?: string }
-  | { type: "fork"; nonce: string };
+  | { type: "fork"; nonce: string }
+  // How full the model is: `used` tokens of the `size` it holds.
+  | { type: "context"; used: number; size: number };
 
 /** `failed`: the bot goes on with the notes; `not_passed`: the last check allowed found something; `not_checked`: it could not be made. */
 export type CheckResult = "passed" | "failed" | "not_passed" | "not_checked";
@@ -66,6 +68,23 @@ function mark(items: Item[], is: (said: Said) => boolean, change: (said: Said) =
       return;
     }
   }
+}
+
+/** How full the model is, as the newest `context` entry says; none when the engine has not said. */
+export type Fullness = { used: number; size: number };
+export function fullness(rows: Row[]): Fullness | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const entry = rows[i].entry;
+    if (entry.type === "context" && entry.size > 0) return { used: entry.used, size: entry.size };
+  }
+}
+
+const thousands = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+
+/** The meter's share, 0 to 1, and its words. The engine summarises the older messages past 80%. */
+export function fullnessText({ used, size }: Fullness): { part: number; text: string } {
+  const part = Math.min(1, used / size);
+  return { part, text: `Context ${Math.round(part * 100)}% full: ${thousands(used)} of ${thousands(size)} tokens. Past 80% the bot summarises the older messages.` };
 }
 
 /** The messages of the person's that are the first of their day: they say the day too. */

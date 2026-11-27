@@ -154,7 +154,7 @@ struct Engine {
     child: Child,
     input: Arc<Mutex<ChildStdin>>,
     events: Receiver<Event>,
-    /// The `usage` events, taken out of `events`: they follow each model request.
+    /// The `usage` and `context` events, taken out of `events`: they follow each model request.
     usage: Receiver<Event>,
     next_id: u32,
 }
@@ -227,7 +227,7 @@ impl Engine {
                     let _ = proto::write_frame(&mut *loop_input.lock().unwrap(), &op, MAX_OP_FRAME);
                     continue;
                 }
-                if matches!(event, Event::Usage { .. }) {
+                if matches!(event, Event::Usage { .. } | Event::Context { .. }) {
                     let _ = usage_tx.send(event);
                     continue;
                 }
@@ -416,12 +416,18 @@ fn each_model_request_reports_what_the_server_said_it_used_and_a_silent_one_is_s
         cached: 40,
         output: 20,
     };
+    // The first request's input was counted, so how full the model is follows it; nobody named
+    // the model's size, so it is the 32,000 taken for an unknown one.
     assert_eq!(
         engine.usage.try_iter().collect::<Vec<_>>(),
         [
             Event::Usage {
                 reported: true,
                 tokens: used
+            },
+            Event::Context {
+                used: 100,
+                size: 32_000
             },
             Event::Usage {
                 reported: false,

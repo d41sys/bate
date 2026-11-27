@@ -325,6 +325,14 @@ pub enum Event {
         #[serde(flatten)]
         tokens: Tokens,
     },
+    /// How full the model is: `used` tokens of the `size` it holds. Sent after each request of the
+    /// turn itself whose input the server counted (not a sub-agent's, a check's or a summary's),
+    /// and after a summary took the older messages' place (then `used` is a guess). Part of the
+    /// transcript: the windows show it.
+    Context {
+        used: u64,
+        size: u64,
+    },
     /// The engine asks the service for the endpoint and token before a model call.
     /// The engine waits until the service sends `token` for `request`.
     Token {
