@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
 import { add, aim, build, changedFiles, checkText, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { Avatar } from "./Avatar.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
 import { Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
@@ -472,6 +473,12 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                 className={`item ${item.kind}${item.id === marked ? " marked" : ""}${Date.now() - (arrived.current.get(item.id) ?? 0) < ARRIVING ? " arriving" : ""}`}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
               >
+                {/* A work log: each of the person's messages, and the first thing the bot does after one, says who. */}
+                {item.kind === "user" ? (
+                  <small className="from"><b>You</b></small>
+                ) : (
+                  (row.index === 0 || shown[row.index - 1].kind === "user") && <small className="from"><Avatar bot={bot} /><b>{bot.name}</b></small>
+                )}
                 <Row
                   item={item}
                   busy={bot.busy || sending}
@@ -604,13 +611,9 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         />
         {model}
         {bot.busy ? (
-          <button type="button" className="round primary" aria-label="Stop" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
-            </svg>
-          </button>
+          <button type="button" className="primary" data-tip={asked ? "Stop the bot" : "Stop the bot (Esc)"} onClick={stop}>Stop</button>
         ) : (
-          <button className="round" aria-label="Send" data-tip="Send" disabled={!message || uploading || sending || !!signIn || bot.paused}>↑</button>
+          <button disabled={!message || uploading || sending || !!signIn || bot.paused}>Send</button>
         )}
       </form>
     </section>

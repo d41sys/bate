@@ -212,7 +212,7 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
 .find input.path { min-width: min(100%, var(--control-w)); }
 .card, .question, .first-run { background: var(--bg-raised); color: var(--fg); border-radius: var(--radius-l); padding: var(--space-4); box-shadow: var(--shadow-1); margin: var(--space-2) auto; }
 /* First run: one card in the middle of the page and one main button; the model server's fields stay folded until asked for. */
-main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-6) var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
+main > .first-run { margin: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-6) var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
 .first-run h1, .first-run p { margin: 0; }
 .first-run h1 { font-size: var(--size-display); line-height: var(--leading-display); }
 .first-run h1 + p { color: var(--fg-muted); }
@@ -277,7 +277,7 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .sheet .actions { position: sticky; bottom: 0; padding: var(--space-2) 0 var(--space-4); background: var(--bg-raised); }
 
 /* ---- Avatar: the bot's colour as a tint and a ring, so the sign on it always reads ---- */
-.avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: 50%; flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: var(--fg); background: color-mix(in srgb, var(--tint, var(--fg-muted)) 22%, var(--bg-raised)); box-shadow: inset 0 0 0 1.5px var(--tint, var(--border-strong)); }
+.avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: var(--radius-m); flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: var(--fg); background: color-mix(in srgb, var(--tint, var(--fg-muted)) 22%, var(--bg-raised)); box-shadow: inset 0 0 0 1.5px var(--tint, var(--border-strong)); }
 
 /* ---- The window: sidebar, main area, side pane ---- */
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
@@ -321,12 +321,12 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* A working bot's row: a dot that breathes beside "Working…". */
 .pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
 /* A state on a row: a word on its own fill. `quiet` is for what does not need the person. */
-.badge { margin-left: auto; display: inline-flex; align-items: center; flex: none; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
+.badge { margin-left: auto; display: inline-flex; align-items: center; flex: none; padding: 0 var(--space-2); border-radius: var(--radius-s); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
 .badge.quiet { background: var(--fill); color: var(--fg-muted); }
 
 main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-5) var(--space-5); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); }
-/* Every screen is one column of a width that reads well; the conversation sets its own. */
-main > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
+/* A work log: every page's column starts at the sheet's start edge, not its centre. */
+main > * { width: 100%; max-width: var(--thread-w); margin-inline: 0; flex: none; }
 /* No bar on top: who this is and the conversation stay at the head of the sheet while the page scrolls under them. */
 main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--bg); }
 /* Who this is: the face and the name, as the page's title. */
@@ -375,15 +375,15 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 
 /* ---- The conversation ---- */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
-.chat > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; }
+.chat > * { width: 100%; max-width: var(--thread-w); margin-inline: 0; }
 /* The scroller reaches the sheet's edge, so its bar is there; the messages keep the column, edge to edge with the header and the box. */
 .items { flex: 1; overflow: auto; min-height: 0; width: auto; max-width: none; margin-inline: calc(-1 * var(--space-5)); padding-left: var(--space-5); }
-/* Placed on the sheet's column (`cqw` is the sheet's width), so its edges are the header's whatever the bar's width. */
-.items > div { width: min(100cqw, var(--thread-w)); margin-left: calc((100cqw - min(100cqw, var(--thread-w))) / 2); }
+/* Placed on the sheet's column, so its edges are the header's whatever the bar's width. */
+.items > div { width: min(100cqw, var(--thread-w)); }
 .item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-2) 0; user-select: text; -webkit-user-select: text; }
 .item > * { max-width: 100%; margin-block: 0; }
-/* A message of the person's starts a turn: more room above it. */
-.item.user { align-items: flex-end; padding-top: var(--space-4); }
+/* A message of the person's starts a turn: more room above it. It reads from the start edge like the rest of the log. */
+.item.user { padding-top: var(--space-4); }
 .bubble { padding: var(--space-2) var(--space-3); border-radius: var(--radius-bubble); background: var(--bg-soft); min-width: 0; max-width: min(var(--reply-w), 100%); overflow-wrap: anywhere; font-size: var(--size-chat); line-height: var(--leading-chat); }
 .bubble > :first-child { margin-top: 0; }
 .bubble > :last-child { margin-bottom: 0; }
@@ -391,12 +391,12 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 .bubble th, .bubble td { padding: var(--space-1) var(--space-4) var(--space-1) 0; text-align: left; }
 .bubble th { font-weight: var(--weight-strong); border-bottom: 1px solid var(--border-strong); }
 .bubble pre code.hljs { padding: 0; background: none; }
-/* Who said it, in a room of many bots: above the message. */
-.item .from { display: flex; align-items: center; gap: var(--space-1); }
+/* Who said it, above the message: "You", or the bot's face and name at the start of its turn. */
+.item .from { display: flex; align-items: center; gap: var(--space-2); }
 .item .from b { color: var(--fg); font-weight: var(--weight-strong); }
-/* What the bot says is the page's own text; what the person said is the one filled shape. */
+/* What the bot says is the page's own text; what the person said is a tinted block. */
 .item:not(.user) .bubble { max-width: 100%; padding: 0; border-radius: 0; background: none; }
-.item.user .bubble { --fill: var(--bg-hover); background: var(--bubble-user); color: var(--on-bubble-user); max-width: 80%; white-space: pre-wrap; }
+.item.user .bubble { --fill: var(--bg-hover); background: var(--bubble-user); color: var(--on-bubble-user); white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
 .item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.checked, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
 .item.working p { margin: 0; }
@@ -443,20 +443,20 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 @media (hover: hover) {
   .item .actions { opacity: 0; transition: opacity var(--fast) var(--ease); }
   .item:hover .actions, .item:focus-within .actions { opacity: 1; }
-  /* A message of the person's has its actions on its left, on its line, so they take no room under it. */
-  .item.user:has(> .actions) { flex-direction: row-reverse; align-items: center; justify-content: flex-start; }
+  /* A message of the person's has its actions at the end of its "You" line, so they take no room under it. */
+  .item.user > .actions { position: absolute; top: var(--space-3); right: 0; }
 }
 .plan { list-style: none; padding: 0; margin: var(--space-1) 0; }
 .plan [aria-current] { font-weight: var(--weight-strong); color: var(--fg); }
-.attached, .queue { list-style: none; padding: 0; margin: var(--space-1) auto; display: flex; flex-wrap: wrap; gap: var(--space-1); font-size: var(--size-small); }
-.attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0) var(--space-0) var(--space-0) var(--space-3); border-radius: var(--radius-pill); background: var(--fill); }
+.attached, .queue { list-style: none; padding: 0; margin: var(--space-1) 0; display: flex; flex-wrap: wrap; gap: var(--space-1); font-size: var(--size-small); }
+.attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0) var(--space-0) var(--space-0) var(--space-3); border-radius: var(--radius-m); background: var(--fill); }
 .attached button, .queue button, .mention button { min-height: var(--control-h-small); padding: 0 var(--space-2); background: none; }
 .queue strong { white-space: nowrap; }
 
-/* The composer is one floating shape: what to add, the words, what to do with them. */
-.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-2); border-radius: var(--radius-l); background: var(--bg-raised); box-shadow: var(--shadow-1); }
-/* It floats like a card; while the words are being written its ring takes the accent. */
-.composer:focus-within { box-shadow: 0 0 0 2px var(--accent), var(--shadow-1); }
+/* The message box is a tinted bar at the log's foot, not a floating card. */
+.composer { position: relative; display: flex; align-items: flex-end; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-2); border-radius: var(--radius-l); background: var(--bg-soft); }
+/* While the words are being written its ring takes the accent. */
+.composer:focus-within { box-shadow: 0 0 0 2px var(--accent); }
 .composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: var(--space-2); resize: none; outline: none; }
 .composer button[type=button]:not(.primary) { background: none; color: var(--fg-muted); }
 .composer button[type=button]:not(.primary):hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
@@ -615,9 +615,8 @@ main > header > .conversation { display: flex; flex-shrink: 8; justify-content: 
   .sidebar .row { max-width: 12rem; }
   main { padding: 0 var(--space-3) var(--space-3); }
   .items { margin-inline: 0; padding-left: 0; }
-  .items > div { width: auto; margin-left: 0; }
+  .items > div { width: auto; }
   .popover.below.end { left: 0; }
-  .item.user .bubble { max-width: 92%; }
   /* A phone has no Esc to press. */
   button kbd, .palette kbd { display: none; }
   /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */

@@ -3,33 +3,31 @@
 :root {
   color-scheme: light dark;
 
-  /* Colour: one neutral grey with no hue, light and dark. The window is the ground, the page a near-white sheet on it;
-     a field, a button and the chosen row are one grey fill, and nothing on the sheet has an edge. Black is the main action;
-     one green for links and focus, one apricot for what needs the person. */
-  --bg: oklch(99.2% 0 0);
-  --bg-side: oklch(96.8% 0 0);
+  /* Colour (#312): slate with a lavender hue in every grey, drawn dark first. The window is the ground, the page a sheet on it;
+     a field, a button and the chosen row are a fill, and nothing on the sheet has an edge. One lavender is the main action,
+     a switch that is on, the chosen row's tint, the person's message, links and focus; one apricot for what needs the person. */
+  --bg: oklch(99.2% 0.004 285);
+  --bg-side: oklch(95.6% 0.012 285);
   --bg-raised: oklch(100% 0 0);
-  --bg-soft: oklch(96% 0 0);
-  --bg-soft-2: oklch(93.5% 0 0);
-  --bg-soft-3: oklch(90.5% 0 0);
-  /* The part of a control that moves: the chosen tab, a switch's knob. */
-  --bg-thumb: oklch(100% 0 0);
+  --bg-soft: oklch(96% 0.01 285);
+  --bg-soft-2: oklch(93.5% 0.012 285);
+  --bg-soft-3: oklch(90.5% 0.014 285);
   /* A field is its fill, with no edge (the owner's choice, #306: an empty field is under WCAG 1.4.11's 3:1). */
-  --bg-field: oklch(93.5% 0 0);
-  --bg-hover: oklch(15% 0 0 / .05);
-  --bg-current: oklch(93% 0 0);
-  --fg: oklch(15% 0 0);
-  --fg-muted: oklch(48% 0 0);
+  --bg-field: oklch(94% 0.012 285);
+  --bg-hover: oklch(22% 0.03 285 / .05);
+  --bg-current: oklch(92.5% 0.035 300);
+  --fg: oklch(20% 0.03 285);
+  --fg-muted: oklch(48% 0.03 285);
   /* The few lines left: under the head of a table. */
-  --border: oklch(92% 0 0);
-  --border-strong: oklch(86% 0 0);
+  --border: oklch(92% 0.01 285);
+  --border-strong: oklch(86% 0.012 285);
   /* A switch that is off: its track has 3:1 against what is around it. */
-  --border-field: oklch(62% 0 0);
-  --ink: oklch(15% 0 0);
+  --border-field: oklch(62% 0.02 285);
+  --ink: oklch(50% 0.17 300);
   --on-ink: oklch(100% 0 0);
-  --bubble-user: oklch(94.5% 0 0);
+  --bubble-user: oklch(94.5% 0.03 300);
   --on-bubble-user: var(--fg);
-  --accent: oklch(47% 0.1 165);
+  --accent: oklch(48% 0.16 300);
   --danger: oklch(50% 0.19 27);
   --on-danger: oklch(100% 0 0);
   --warn: oklch(42% 0.09 62);
@@ -77,11 +75,11 @@
   --space-5: 24px;
   --space-6: 40px;
 
-  /* Shape: small rounded rectangles; a round button and a badge are the only pills. */
-  --radius-s: 4px;
-  --radius-m: 8px;
-  --radius-l: 12px;
-  --radius-bubble: 18px;
+  /* Shape: small soft-square corners; an avatar is a rounded square; a round button is the only pill. */
+  --radius-s: 3px;
+  --radius-m: 6px;
+  --radius-l: 8px;
+  --radius-bubble: 6px;
   --radius-pill: 999px;
   --control-h: 32px;
   --control-h-small: 28px;
@@ -113,28 +111,27 @@
   --beat: 1400ms;
 }
 
-/* Dark is the same system drawn again: the ground is near black, each surface above it is lighter, white is the main action. */
+/* Dark is where the palette starts: a slate ground, sheets a step darker, each surface above them lighter, lavender the main action. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: oklch(14% 0 0);
-    --bg-side: oklch(9% 0 0);
-    --bg-raised: oklch(18.5% 0 0);
-    --bg-soft: oklch(18.5% 0 0);
-    --bg-soft-2: oklch(23.5% 0 0);
-    --bg-soft-3: oklch(28% 0 0);
-    --bg-thumb: oklch(32% 0 0);
-    --bg-field: oklch(21.5% 0 0);
-    --bg-hover: oklch(100% 0 0 / .06);
-    --bg-current: oklch(25% 0 0);
-    --fg: oklch(97% 0 0);
-    --fg-muted: oklch(72% 0 0);
-    --border: oklch(22% 0 0);
-    --border-strong: oklch(30% 0 0);
-    --border-field: oklch(50% 0 0);
-    --ink: oklch(97% 0 0);
-    --on-ink: oklch(14% 0 0);
-    --bubble-user: oklch(24% 0 0);
-    --accent: oklch(78% 0.11 165);
+    --bg: oklch(19.5% 0.02 283);
+    --bg-side: oklch(24% 0.022 285);
+    --bg-raised: oklch(24% 0.02 283);
+    --bg-soft: oklch(23.5% 0.02 283);
+    --bg-soft-2: oklch(28% 0.02 283);
+    --bg-soft-3: oklch(32.5% 0.019 283);
+    --bg-field: oklch(26% 0.019 283);
+    --bg-hover: oklch(100% 0 0 / .05);
+    --bg-current: oklch(31% 0.05 300);
+    --fg: oklch(96% 0.006 285);
+    --fg-muted: oklch(74% 0.02 285);
+    --border: oklch(27% 0.02 283);
+    --border-strong: oklch(35% 0.02 283);
+    --border-field: oklch(56% 0.02 285);
+    --ink: oklch(72% 0.13 300);
+    --on-ink: oklch(18% 0.03 300);
+    --bubble-user: oklch(29% 0.045 300);
+    --accent: oklch(80% 0.1 300);
     --danger: oklch(74% 0.14 25);
     --on-danger: oklch(14% 0 0);
     --warn: oklch(85% 0.095 62);

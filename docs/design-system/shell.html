@@ -41,8 +41,8 @@
 
     <section class="chat">
       <div class="items"><div>
-        <div class="item user"><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p></div>
-        <div class="item run"><details class="run"><summary><span class="mark ok" aria-hidden="true"></span>Read 3 functions in Ghidra</summary></details></div>
+        <div class="item user"><small class="from"><b>You</b></small><p class="bubble">Where does this firmware check for updates? I want the address and how often.</p></div>
+        <div class="item run"><small class="from"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6">A</span><b>Analyst</b></small><details class="run"><summary><span class="mark ok" aria-hidden="true"></span>Read 3 functions in Ghidra</summary></details></div>
         <div class="item reply"><div class="bubble">
           <p>The update check is in <code>fw_check_update</code> at <code>0x0801a3c0</code>. It asks <code>updates.example.net</code> over HTTPS every 6 hours, and once more right after start.</p>
           <ul>
@@ -50,8 +50,8 @@
             <li>The interval is the constant <code>21600</code>, passed to the timer in <code>sched_init</code>.</li>
           </ul>
         </div></div>
-        <div class="item user"><p class="bubble">Unpack it.</p></div>
-        <div class="item reply"><div class="bubble"><p>I need to run one command for that.</p></div></div>
+        <div class="item user"><small class="from"><b>You</b></small><p class="bubble">Unpack it.</p></div>
+        <div class="item reply"><small class="from"><span class="avatar" aria-hidden="true" style="--tint: #4a67d6">A</span><b>Analyst</b></small><div class="bubble"><p>I need to run one command for that.</p></div></div>
       </div></div>
 
       <div class="question" role="group" aria-label="Analyst wants to run a command">
@@ -68,7 +68,7 @@
         <button type="button" class="round" aria-label="Attach files">+</button>
         <textarea rows="1" aria-label="Message" placeholder="Message Analyst"></textarea>
         <button type="button" class="small chip" aria-label="Model: gpt-6.2-sol. This bot"><span>gpt-6.2-sol</span> <span aria-hidden="true">▾</span></button>
-        <button class="round" aria-label="Send">↑</button>
+        <button>Send</button>
       </form>
     </section>
   </main>
