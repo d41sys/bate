@@ -11,6 +11,7 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod apple;
 pub mod connectors;
+#[cfg(target_os = "macos")]
 pub mod desktop;
 pub mod memory;
 pub mod paths;
@@ -19,6 +20,7 @@ pub mod projects;
 pub mod quick;
 pub mod routines;
 pub mod secrets;
+#[cfg(target_os = "macos")]
 pub mod signer;
 pub mod skills;
 pub mod undo;
