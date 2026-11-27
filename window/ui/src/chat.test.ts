@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkFields, checkValue } from "./check.ts";
-import { add, aim, build, changedFiles, checkText, describe, fold, planSteps, type Entry, type Part } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, describe, fold, given, isLong, planSteps, type Entry, type Part } from "./chat.ts";
 
 test("a transcript becomes the chat the user reads", () => {
   const entries: Entry[] = [
@@ -267,4 +267,19 @@ test("the files a run changed are those of its write and edit calls that worked,
     ...call(7, "edit", { title: "Edit", locations: [{ path: "/x/f.txt" }] }, "ok"),
   ]);
   assert.deepEqual(changedFiles(run), ["a.txt", "/x/f.txt"]);
+});
+
+test("a call given one text shows that text; anything else is shown as JSON", () => {
+  assert.equal(given({ command: "ls -la" }), "ls -la");
+  assert.equal(given({ path: "a.txt", content: "x" }), '{\n  "path": "a.txt",\n  "content": "x"\n}');
+  assert.equal(given({ limit: 3 }), '{\n  "limit": 3\n}');
+  assert.equal(given(["ls"]), '[\n  "ls"\n]');
+  assert.equal(given(null), "null");
+});
+
+test("a message is long past 8 lines or 600 characters", () => {
+  assert.equal(isLong("a\n".repeat(7) + "a"), false);
+  assert.equal(isLong("a\n".repeat(8) + "a"), true);
+  assert.equal(isLong("a".repeat(600)), false);
+  assert.equal(isLong("a".repeat(601)), true);
 });

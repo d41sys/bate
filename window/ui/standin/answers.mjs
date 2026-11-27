@@ -72,7 +72,56 @@ export const answers = (now) => {
     row({ type: "text", delta: "The vendor says every update is signed with an offline key and checked before it is unpacked. The page is `docs.example.net/updates/signing`." }),
     row({ type: "turn_end", reason: "done" }),
   ];
-  const history = { b1: analyst, b2: daisy, b3: scout };
+  // A second conversation of Analyst's that holds one of everything a chat can show.
+  const pasted = Array.from({ length: 12 }, (_, i) => `[   ${31 + i}.9021${i}4] eth0: link is not ready (try ${i + 1})`).join("\n");
+  const parts = [
+    row({ type: "prompt", nonce: "m0", text: "Summarise the whole log." }),
+    row({ type: "turn_start", nonce: "m0" }),
+    row({ type: "text", delta: "It is 4,200 lines. A summary of all of it would hide what matters." }),
+    row({ type: "turn_end", reason: "done" }),
+    row({ type: "fork", nonce: "m0" }),
+    row({ type: "prompt", nonce: "m1", text: "Read `logs/boot.log` and say why the device takes 40 seconds to start." }),
+    row({ type: "turn_start", nonce: "m1" }),
+    row({ type: "thinking", delta: "Look at the gaps between the time stamps first." }),
+    row({ type: "tool_start", call: "m-1", tool: "read", args: { path: "logs/boot.log" } }),
+    row({ type: "tool_end", call: "m-1", output: "[    0.000000] Booting Linux\n[    2.114502] mmc0: new high speed SDHC card\n[   31.902114] eth0: link is not ready", isError: false }),
+    row({ type: "tool_start", call: "m-2", tool: "run", args: { command: "dmesg --since boot" } }),
+    row({ type: "tool_end", call: "m-2", output: "dmesg: unrecognized option '--since'", isError: true }),
+    row({ type: "tool_start", call: "m-3", tool: "edit", args: { path: "notes/boot.md", old: "", new: "## Boot\n" } }),
+    row({ type: "tool_end", call: "m-3", output: "Edited notes/boot.md", isError: false, undo: "u2" }),
+    row({ type: "tool_start", call: "m-4", tool: "plan", args: { steps: [{ step: "Find the longest gap", status: "done" }, { step: "Find what waits there", status: "in_progress" }, { step: "Say how to shorten it", status: "pending" }] } }),
+    row({ type: "tool_end", call: "m-4", output: "ok", isError: false }),
+    row({
+      type: "text",
+      delta: [
+        "## Why it is slow",
+        "The device waits **29 seconds** for the network before it goes on. The notes are in [notes/boot.md](notes/boot.md); the vendor describes the wait on [its page](https://docs.example.net/boot).",
+        "| Phase | Starts at | Takes |\n|---|---|---|\n| Kernel | 0.0 s | 2.1 s |\n| Storage | 2.1 s | 0.8 s |\n| Network wait | 2.9 s | 29.0 s |",
+        "> eth0: link is not ready",
+        "The wait is set in the start script:",
+        "```sh\n# /etc/init.d/S40network\nwait_for_link eth0 --timeout 30\n```",
+        "### What to change",
+        "1. Lower the timeout to 5 seconds.\n2. Start the network in the background:\n   - the display does not need it;\n   - the updater waits for it by itself.",
+        "```c\nstatic int wait_for_link(const char *ifname, int timeout_s) {\n    for (int i = 0; i < timeout_s * 10; i++) {\n        if (link_up(ifname)) return 0;\n        usleep(100000);\n    }\n    return -ETIMEDOUT;\n}\n```",
+        "```\nno language is named here\n```",
+      ].join("\n\n"),
+    }),
+    row({ type: "turn_end", reason: "done" }),
+    row({ type: "prompt", nonce: "m2", text: `What are these lines?\n\n${pasted}` }),
+    row({ type: "turn_start", nonce: "m2" }),
+    row({ type: "steered", text: "Only the ones after 35 seconds." }),
+    row({ type: "text", delta: "They are the network driver asking again, once a second, until the cable answers." }),
+    row({ type: "turn_end", reason: "limit" }),
+    row({ type: "prompt", nonce: "m3", text: "Go on." }),
+    row({ type: "turn_start", nonce: "m3" }),
+    row({ type: "turn_end", reason: "aborted" }),
+    row({ type: "prompt", nonce: "m4", text: "Now check the second image." }),
+    row({ type: "turn_start", nonce: "m4" }),
+    row({ type: "retry", attempt: 1, of: 3, waitMs: 2000, error: "the server answered 503" }),
+    row({ type: "turn_end", reason: "error", error: "The model did not answer." }),
+  ];
+  // By conversation; one that is not here has nothing said in it yet.
+  const history = { c1: analyst, d1: daisy, s1: scout, c2: parts };
   const question = {
     question: "q1", title: "Run a command", kind: "run", target: "strace -f -e trace=openat,write ./updater --once", options: ["Approve", "Always", "Deny"], folder: "/Users/demo/firmware-review",
   };
@@ -198,11 +247,12 @@ export const answers = (now) => {
     new_conversation: { conversation: "c9" },
     set_conversation: {},
     export_chat: { path: "/Users/demo/Library/Application Support/Bate/exports/chat.md" },
-    open_bot: ({ bot: id, conversation, before }) => ({
-      bot: bots.find((b) => b.id === id), conversation: conversation ?? current[id], history: before ? [] : (conversation ?? current[id]) === current[id] ? history[id] : [], more: false, questions: questions[id], queue: [],
+    open_bot: ({ bot: id, conversation = current[id], before }) => ({
+      bot: bots.find((b) => b.id === id), conversation, history: before ? [] : history[conversation] ?? [], more: false, questions: conversation === current[id] ? questions[id] : [],
+      queue: conversation === "c2" ? [{ nonce: "w1", text: "Then compare it with the first image." }] : [],
     }),
     list_queue: { queue: [] },
-    list_later: { later: [] },
+    list_later: ({ conversation }) => ({ later: conversation === "c2" ? [{ id: 1, conversation: "c2", dueMs: ago(-90), note: "Look at the build server again" }] : [] }),
     cancel_later: {},
     remove_queued: {},
     mark_seen: {},

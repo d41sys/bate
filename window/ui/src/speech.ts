@@ -8,7 +8,7 @@ export const canRead = "speechSynthesis" in window;
 /** What a reply says, as the page shows it: no Markdown marks, no link addresses, no code blocks. */
 export const readable = (reply: HTMLElement) =>
   Array.from(reply.children)
-    .filter((block) => block.tagName !== "PRE")
+    .filter((block) => !block.classList.contains("code"))
     .map((block) => (block as HTMLElement).innerText)
     .join("\n")
     .trim();

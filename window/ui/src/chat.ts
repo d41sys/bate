@@ -270,6 +270,15 @@ export function aim(part: Extract<Part, { kind: "tool" }>): string {
   return first(path, a.title, a.action) ?? part.tool;
 }
 
+/** What a call was given, to read: the text itself when it was given one text (a command, a path), else all of it as JSON. */
+export function given(args: unknown): string {
+  const values = args && typeof args === "object" && !Array.isArray(args) ? Object.values(args) : [];
+  return values.length === 1 && typeof values[0] === "string" ? values[0] : JSON.stringify(args, null, 2);
+}
+
+/** Whether a message of the person's is cut until asked for: a pasted log would push the bot's answer out of sight. */
+export const isLong = (text: string) => text.length > 600 || text.split("\n").length > 8;
+
 /** The files that the calls of a run changed (`write`, `edit`, an installed agent's changes that worked), each once. */
 export function changedFiles(parts: Part[]): string[] {
   const files = new Set<string>();

@@ -51,8 +51,8 @@ test("every selector the screen list names is in the page's code", () => {
         assert.ok(new RegExp(`(?<![\\w-])${cls}(?![\\w-])`).test(code), `${where}: no class ${cls} in window/ui/src`);
       }
       for (const [, label] of selector.matchAll(/\[aria-label=['"]([^'"]+)['"]\]/g)) assert.ok(code.includes(label), `${where}: no label "${label}" in window/ui/src`);
-      // The words of a click: in the page, or the name of a bot the stand-in made up.
-      if (text) assert.ok(code.includes(text) || JSON.stringify(answers(0)).includes(text), `${where}: the text "${text}" is not in window/ui/src or in the stand-in`);
+      // The words of a click: in the page, or something the stand-in made up (a bot's name, a conversation's title).
+      if (text) assert.ok(code.includes(text) || readFileSync(new URL("./answers.mjs", import.meta.url), "utf8").includes(text), `${where}: the text "${text}" is not in window/ui/src or in the stand-in`);
     }
   }
 });
