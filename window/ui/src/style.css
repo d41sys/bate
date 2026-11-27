@@ -300,7 +300,7 @@ main > .first-run { margin: auto; max-width: calc(var(--thread-w) / 2); padding:
 
 /* ---- The window: sidebar, main area, side pane ---- */
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
-.sidebar { padding: var(--space-1) var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
+.sidebar { padding: var(--space-1) var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-3); }
 /* In Bate's own window the page runs under the title bar: the window's buttons sit on the ground above the sidebar, which moves the window (the sidebar, which scrolls, does not). */
 .app.shell .sidebar { margin-top: calc(var(--titlebar-h) - var(--space-1)); }
 /* In Bate's own window the ground lets the desktop through, blurred by the system's sidebar material (#313): the page under it is transparent, and the ground's tint is a little over half there. The sheets stay solid. */

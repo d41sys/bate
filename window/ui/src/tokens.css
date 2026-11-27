@@ -81,11 +81,11 @@
   --radius-l: 8px;
   --radius-bubble: 6px;
   --radius-pill: 999px;
-  --control-h: 28px;
-  --control-h-small: 24px;
-  --row-h: 32px;
+  --control-h: 30px;
+  --control-h-small: 26px;
+  --row-h: 36px;
   --row-h-l: 40px;
-  --head-h: 48px;
+  --head-h: 52px;
   /* The room the window's own buttons take at the top left, in Bate's window. */
   --titlebar-h: 40px;
   --avatar: 20px;
