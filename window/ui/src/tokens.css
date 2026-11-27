@@ -34,6 +34,7 @@
   --on-danger: oklch(100% 0 0);
   --warn: oklch(42% 0.09 62);
   --warn-soft: oklch(95% 0.045 72);
+  --mark: oklch(75% 0.14 62);
   /* A diff: the fill of an added and of a removed line (the + and - sign says it too). */
   --diff-add: oklch(94% 0.05 150);
   --diff-del: oklch(94% 0.04 25);
