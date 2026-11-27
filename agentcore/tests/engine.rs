@@ -1463,6 +1463,30 @@ fn a_summary_that_fails_does_not_end_the_turn() {
 }
 
 #[test]
+fn an_input_count_of_zero_leaves_the_size_to_the_estimate() {
+    let dir = workdir("autocompact-zero");
+    // A server that counts no input: taken as a count, the size would start again near 0 and never be summarised.
+    let zero = json!({"choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 5}});
+    let model = Model::serve(vec![
+        vec![text("A1")],
+        vec![text("A2"), zero],
+        vec![text("AUTO-SUMMARY")],
+        vec![text("A3")],
+    ]);
+    // 100 tokens: compaction starts above 80, which is about 320 bytes of messages.
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL_CONTEXT", "100")]);
+    engine.open_new();
+    let long = "x".repeat(150);
+    engine.exchange("n1", &format!("Q1-old {long}"));
+    engine.exchange("n2", &format!("Q2 {long}"));
+    engine.exchange("n3", "Q3");
+
+    assert_eq!(model.requests().len(), 4);
+    assert!(sent(&model, 2).contains("Summarise"));
+    assert!(!sent(&model, 3).contains("Q1-old"));
+}
+
+#[test]
 fn the_size_the_server_counted_says_when_to_compact() {
     let dir = workdir("autocompact-usage");
     // 900 of 1,000 tokens counted; a guess from these few bytes would be far under the 800 that start a summary.

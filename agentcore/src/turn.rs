@@ -567,7 +567,8 @@ impl Turn {
                 unnamed += 1;
             }
             // Output tokens are left out: they count thinking, which the model is not sent again.
-            if let Some(usage) = usage {
+            // An input count of 0 is a server that did not count input, not an empty context.
+            if let Some(usage) = usage.filter(|u| u.input > 0) {
                 session.measured(usage.input as usize);
             }
             if !text.is_empty() || !calls.is_empty() {
