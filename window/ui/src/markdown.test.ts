@@ -41,3 +41,11 @@ test("Markdown, tables, highlighted code and web links are shown", () => {
   assert.match(html, /<table>[\s\S]*<td>1<\/td>/);
   assert.match(html, /<code class="hljs language-js"><span class="hljs-keyword">const<\/span>/);
 });
+
+test("a code block says its language and has a Copy button; one with no language has only the button", () => {
+  const named = show("```js\nconst a = 1;\n```");
+  assert.match(named, /<div class="code"><div class="tools"><small>js<\/small><small role="status"><\/small><button type="button" aria-label="Copy the code"/);
+  const bare = show("```\nplain\n```");
+  assert.match(bare, /<div class="code"><div class="tools"><small role="status"><\/small><button type="button" aria-label="Copy the code"/);
+  assert.doesNotMatch(show("some `inline` code"), /class="code"/);
+});

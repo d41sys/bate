@@ -6,7 +6,8 @@ import { answers } from "./answers.mjs";
 import { screens } from "./screens.mjs";
 
 const screen = screens.find((s) => s.name === decodeURIComponent(location.pathname.slice(1)));
-const data = { ...answers(Date.now()), ...screen?.answers };
+const usual = answers(Date.now());
+const data = { ...usual, ...(typeof screen?.answers === "function" ? screen.answers(usual) : screen?.answers) };
 const lines = [JSON.stringify({ type: "hello" })];
 const standin = (window.__standin = { ready: false, problems: [] });
 let wake;

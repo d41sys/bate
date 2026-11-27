@@ -4,7 +4,8 @@
 //   steps  : how to reach it from the start, one click each, by stable selector: a selector, or
 //            [selector, text it holds]; `{ code: "KeyK", metaKey: true }` is a key chord
 //   parts  : selectors of the screen's main parts, an id where the page has one; the page must show all
-//   answers: made-up answers that differ for this screen (see `answers.mjs`); globals: what the shell sets
+//   answers: made-up answers that differ for this screen (see `answers.mjs`), or a function that makes them
+//            from the usual ones; globals: what the shell sets
 // `standin.test.mjs` checks that every selector here is in the page's code.
 
 // The page's title is a button; its menu lists the pages, and a click on one opens it. The first page of each (Chat, Room, Connectors) is where a click on the sidebar lands.
@@ -31,6 +32,13 @@ export const screens = [
   { name: "chat-calls", title: "Conversation (what the bot did, opened)", steps: [...bot("Scout"), "details.run > summary", "details.run[open] li summary"], parts: ["details.run[open] li details[open] pre"] },
   { name: "chat-busy", title: "Conversation (a bot at work)", steps: bot("Daisy"), parts: [TITLE, "form textarea", "[data-tip^='Stop the bot']"] },
   { name: "chat-agent", title: "Conversation (a bot on an installed agent)", steps: bot("Scout"), parts: [TITLE, "form textarea"] },
+  {
+    name: "chat-parts", title: "Conversation (one of every part)", steps: [...bot("Analyst"), chip[0], [`${chip[1]} li .row`, "Reading the boot log"]],
+    parts: [".bubble .code", ".bubble.folded", ".plan", ".item.ended .error", ".queue"],
+    // Analyst is not at work here, so the last line offers Retry.
+    answers: (usual) => ({ list_bots: { bots: usual.list_bots.bots.map((b) => (b.id === "b1" ? { ...b, busy: false, waiting: false } : b)) } }),
+  },
+  { name: "chat-empty", title: "Conversation (nothing said yet)", steps: [...bot("Scout"), chip[0], [`${chip[1]} li .row`, "Release notes"]], parts: [".items .empty"] },
   { name: "mail", title: "Messages with other bots", steps: [...bot("Analyst"), "details.mail summary"], parts: ["details.mail .check"] },
   { name: "conversations", title: "Conversations of a bot", steps: [...bot("Analyst"), chip[0]], parts: [chip[1]] },
   { name: "changes", title: "Changes", steps: [...bot("Analyst"), chip[0], [`${chip[1]} .foot .row`, "Show changes"]], parts: [".pane"] },

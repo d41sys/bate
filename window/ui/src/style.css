@@ -111,7 +111,7 @@ button.title:focus-visible, button.crumb:focus-visible { outline-offset: -2px; }
 .title .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .title .page { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-muted); font-weight: 400; }
 /* The small arrow of a title or a chip that opens a list. */
-.title .chevron, .chip > svg.lucide { width: var(--size-small); height: var(--size-small); color: var(--fg-muted); }
+.title .chevron, .chip > svg.lucide, .attached li > svg.lucide, .queue li > svg.lucide { width: var(--size-small); height: var(--size-small); flex: none; color: var(--fg-muted); }
 
 /* ---- Lines that tell: a note, an error, nothing here yet ---- */
 .note { color: var(--fg-muted); }
@@ -390,7 +390,7 @@ main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items
 @media (hover: hover) {
   [data-tip]:hover::after, [data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; bottom: calc(100% + var(--space-1)); left: 50%; transform: translateX(-50%); z-index: 3; width: max-content; max-width: var(--tip-w); padding: var(--space-1) var(--space-2); border-radius: var(--radius-s); background: var(--fg); color: var(--bg); font-size: var(--size-small); font-weight: 400; line-height: var(--leading); text-align: left; white-space: normal; pointer-events: none; }
   /* The last control of a row is at the edge: its tip grows to the left. */
-  .composer > [data-tip]:last-child::after, .heading > [data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+  .composer > [data-tip]:last-child::after, .heading > [data-tip]:last-child::after, .item .actions > [data-tip]::after, .code .tools > [data-tip]::after { left: auto; right: 0; transform: none; }
   [data-tip][aria-expanded=true]::after { display: none; }
 }
 /* A hint key on a button: the key that does the same. */
@@ -417,6 +417,24 @@ main:has(> .chat) > * { max-width: none; }
 .bubble th, .bubble td { padding: var(--space-1) var(--space-4) var(--space-1) 0; text-align: left; }
 .bubble th { font-weight: var(--weight-strong); border-bottom: 1px solid var(--border-strong); }
 .bubble pre code.hljs { padding: 0; background: none; }
+/* A reply's Markdown, set for the chat's type: two sizes of heading, a quote as a soft block (a fill, not a line). */
+.bubble :is(h1, h2, h3, h4, h5, h6) { margin: var(--space-4) 0 var(--space-1); font-size: inherit; line-height: inherit; font-weight: var(--weight-strong); color: var(--fg); letter-spacing: 0; }
+.bubble :is(h1, h2) { font-size: var(--size-chat-head); line-height: var(--leading-chat-head); letter-spacing: var(--tracking-head); }
+.bubble :is(ul, ol) { margin: var(--space-2) 0; padding-left: var(--space-5); }
+.bubble li { margin: var(--space-0) 0; }
+.bubble li > p { margin: 0; }
+.bubble blockquote { margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-m); background: var(--bg-soft); color: var(--fg-muted); }
+.bubble blockquote > :first-child { margin-top: 0; }
+.bubble blockquote > :last-child { margin-bottom: 0; }
+.bubble hr { height: 1px; margin: var(--space-4) 0; border: 0; background: var(--border); }
+/* A block of code in a reply: its language and Copy lie over its top corner, on the block's own fill. */
+.code { position: relative; margin: var(--space-2) 0; }
+.code pre { margin: 0; }
+.code .tools { position: absolute; top: var(--space-1); right: var(--space-1); display: flex; align-items: center; padding-left: var(--space-2); border-radius: var(--radius-m); background: var(--fill); }
+.code .tools small, .item .actions small { white-space: nowrap; }
+.code .tools small:not(:empty), .item .actions small:not(:empty) { padding-right: var(--space-2); }
+/* A long message of the person's, cut until "Show all": its last lines fade. */
+.bubble.folded { max-height: calc(var(--leading-chat) * 8 + var(--space-2)); overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
 /* Who said it, above the message: "You", or the bot's face and name at the start of its turn. */
 .item .from { display: flex; align-items: center; gap: var(--space-2); }
 .item .from b { color: var(--fg); font-weight: var(--weight-strong); }
@@ -425,6 +443,9 @@ main:has(> .chat) > * { max-width: none; }
 .item.user .bubble { --fill: var(--bg-hover); background: var(--bubble-user); color: var(--on-bubble-user); white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
 .item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.checked, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
+/* How a turn ended, when not as it should: one line, with what mends it beside the words. */
+.item.ended p, .item.retrying p { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.item.ended .error .mark { color: var(--danger); }
 .item.working p { margin: 0; }
 .item.arriving { animation: arrive var(--slow) var(--ease); }
 /* A run of calls: one line (a mark, what happened, a chevron) that opens to a row for each call, named by what it acted on. */
@@ -459,17 +480,33 @@ main:has(> .chat) > * { max-width: none; }
 }
 .item.marked { outline: 2px solid var(--mark); outline-offset: -2px; border-radius: var(--radius-m); }
 .item .actions { gap: 0; }
-.item .actions button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); background: none; color: var(--fg-muted); }
-.item .actions button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
-/* With a pointer, a message's actions show when it is pointed at or holds the focus. */
+.item .actions button, .code .tools button { width: var(--control-h-small); min-height: var(--control-h-small); padding: 0; background: none; color: var(--fg-muted); }
+.item .actions button:hover:not(:disabled), .code .tools button:hover { background: var(--bg-hover); color: var(--fg); }
+/* With a pointer, a message's actions and a code block's tools show when it is pointed at or holds the focus;
+   a message's float at its top corner, so they take no room. */
 @media (hover: hover) {
-  .item .actions { opacity: 0; transition: opacity var(--fast) var(--ease); }
-  .item:hover .actions, .item:focus-within .actions { opacity: 1; }
-  /* A message of the person's has its actions at the end of its "You" line, so they take no room under it. */
-  .item.user > .actions { position: absolute; top: var(--space-3); right: 0; }
+  .item .actions, .code .tools { opacity: 0; transition: opacity var(--fast) var(--ease); }
+  .item:hover .actions, .item:focus-within .actions, .code:hover .tools, .code:focus-within .tools { opacity: 1; }
+  /* A reply's are at its end, where the reading stops. */
+  .item > .actions { position: absolute; bottom: 0; right: 0; padding: var(--space-0); border-radius: var(--radius-m); background: var(--bg-raised); box-shadow: var(--shadow-1); }
+  /* A message of the person's has them at the end of its "You" line. */
+  .item.user > .actions { top: var(--space-2); bottom: auto; }
 }
-.plan { list-style: none; padding: 0; margin: var(--space-1) 0; }
+/* A plan: a mark for each step (to do, at it now, done); the step the bot is at stands out. */
+.plan { list-style: none; padding: 0; margin: var(--space-1) 0; display: grid; gap: var(--space-1); }
+.plan li { display: flex; align-items: center; gap: var(--space-2); }
 .plan [aria-current] { font-weight: var(--weight-strong); color: var(--fg); }
+.plan [aria-current] .mark { color: var(--accent); }
+/* A conversation with nothing said: the bot's face and name, and where to write. */
+.items:has(> .empty) { display: grid; align-content: center; }
+.items > .empty { display: grid; justify-items: center; gap: var(--space-1); margin: 0; }
+.items > .empty .avatar { width: calc(var(--avatar) * 2); height: calc(var(--avatar) * 2); margin-bottom: var(--space-2); font-size: var(--size-head); }
+.items > .empty strong { color: var(--fg); font-size: var(--size-head); }
+/* The way back to the latest message, over the log's foot while the person reads further up. */
+.jump { position: relative; height: 0; z-index: 1; }
+.jump button { position: absolute; bottom: var(--space-2); left: 50%; translate: -50%; background: var(--bg-raised); box-shadow: var(--shadow-2); }
+/* Files held over the chat land in the composer. */
+.chat.dropping .composer { box-shadow: 0 0 0 2px var(--accent); }
 .attached, .queue { list-style: none; padding: 0; margin: var(--space-1) 0; display: flex; flex-wrap: wrap; gap: var(--space-1); font-size: var(--size-small); }
 .attached li, .queue li, .mention { display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0) var(--space-0) var(--space-0) var(--space-3); border-radius: var(--radius-m); background: var(--fill); }
 .attached button, .queue button, .mention button { min-height: var(--control-h-small); padding: 0 var(--space-2); background: none; }

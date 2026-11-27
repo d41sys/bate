@@ -1,16 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
-import { add, aim, build, changedFiles, checkText, describe, fold, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, describe, fold, given, isLong, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { Avatar } from "./Avatar.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
-import { Markdown } from "./Markdown.ts";
+import { CopyButton, Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
 import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
 import { dayTime } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
-import { ArrowDown, ArrowUp, Check, Mic, Plus, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarClock, Check, Circle, CircleAlert, CircleCheck, CircleDot, Clock, GitFork, Mic, Paperclip, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { upload } from "./upload.ts";
 import { useLater } from "./useLater.ts";
 
@@ -95,6 +95,19 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   // The bot is at work: a mark closes the chat, unless a question is what it waits for.
   const shown = useMemo(() => (bot.busy && questions.length === 0 ? [...fold(items), WORKING] : fold(items)), [items, bot.busy, questions.length]);
   const lastIndex = shown.length - (shown[shown.length - 1] === WORKING ? 2 : 1);
+  // The conversation whose first page has come: until then an empty chat is not said to be empty.
+  const [loaded, setLoaded] = useState<string>();
+  // The person reads further up: a button brings the latest message back.
+  const [away, setAway] = useState(false);
+  // Files are held over the chat.
+  const [dropping, setDropping] = useState(false);
+  // The newest message of the person's that the bot still has: what Retry sends again after a turn that failed or was stopped.
+  const lastPrompt = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item.kind === "user") return item.past ? undefined : item;
+    }
+  }, [items]);
   const rows = useVirtualizer({
     count: shown.length,
     getScrollElement: () => scroller.current,
@@ -130,6 +143,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         hasMore.current = d.more;
         setMore(d.more);
         setItems(build(entries.current));
+        setLoaded(conversation);
         setQuestions(d.questions);
         setWaiting(d.queue);
         looked();
@@ -424,10 +438,15 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
 
   return (
     <section
-      className="chat"
-      onDragOver={(e) => e.preventDefault()}
+      className={dropping ? "chat dropping" : "chat"}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDropping(e.dataTransfer.types.includes("Files"));
+      }}
+      onDragLeave={(e) => e.currentTarget.contains(e.relatedTarget as Node | null) || setDropping(false)}
       onDrop={(e) => {
         e.preventDefault();
+        setDropping(false);
         attach(e.dataTransfer.files);
       }}
     >
@@ -460,9 +479,17 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         onScroll={(e) => {
           const el = e.currentTarget;
           atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          setAway(!atBottom.current);
           if (more && el.scrollTop < 300) older.current();
         }}
       >
+        {loaded === conversation && shown.length === 0 && (
+          <div className="empty">
+            <Avatar bot={bot} />
+            <strong>{bot.name}</strong>
+            <span>Nothing is said here yet. Write below to start.</span>
+          </div>
+        )}
         <div style={{ height: rows.getTotalSize(), position: "relative" }}>
           {rows.getVirtualItems().map((row) => {
             const item = shown[row.index];
@@ -488,6 +515,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                   // An installed agent cannot go back in a conversation.
                   fixed={!!bot.agent?.length}
                   retry={retry}
+                  again={lastPrompt && !bot.agent?.length ? () => retry(lastPrompt) : undefined}
                   proceed={proceed}
                   latest={row.index === lastIndex}
                   fork={fork}
@@ -507,6 +535,22 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           })}
         </div>
       </div>
+      {away && (
+        <div className="jump">
+          <button
+            type="button"
+            className="round"
+            aria-label="Go to the latest message"
+            data-tip="Go to the latest message"
+            onClick={() => {
+              atBottom.current = true;
+              rows.scrollToIndex(shown.length - 1, { align: "end" });
+            }}
+          >
+            <ArrowDown />
+          </button>
+        </div>
+      )}
       {questions.map((q, i) => (
         <QuestionCard key={q.question} q={q} keys={i === 0} answer={(choice, secret) => run(answer(q, choice, secret))} />
       ))}
@@ -534,6 +578,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           )}
           {files.map((f) => (
             <li key={f.id}>
+              <Paperclip />
               {f.name} {f.error ? `: ${f.error}` : f.path ? "" : "…"}
               <button type="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles((fs) => fs.filter((x) => x.id !== f.id))}><X /></button>
             </li>
@@ -544,6 +589,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         <ol className="queue" aria-label="Waiting to be sent">
           {waiting.map((p) => (
             <li key={p.nonce}>
+              <Clock />
               {p.text}{" "}
               <button type="button" aria-label={`Remove from the queue: ${p.text}`} onClick={() => run(request("remove_queued", { bot: bot.id, conversation, nonce: p.nonce }))}><X /></button>
             </li>
@@ -554,6 +600,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         <ol className="queue" aria-label="Later turns">
           {later.map((l) => (
             <li key={l.id}>
+              <CalendarClock />
               <strong>{dayTime(l.dueMs)}</strong> {l.note}{" "}
               <button type="button" aria-label={`Cancel the later turn: ${l.note}`} onClick={() => run(request("cancel_later", { bot: bot.id, later: l.id }))}><X /></button>
             </li>
@@ -590,7 +637,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           ref={box}
           rows={1}
           aria-label="Message"
-          placeholder={bot.paused ? "Resume the bot to send a message" : bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
+          placeholder={dropping ? "Drop the files here to attach them" : bot.paused ? "Resume the bot to send a message" : bot.busy ? (bot.agent?.length ? "Enter queues it for when the bot is done" : "Enter queues it for when the bot is done, ⌥Enter steers the turn now") : asked ? "Or say what to do instead: that denies the request" : `Message ${bot.name}`}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -624,6 +671,8 @@ type Actions = {
   /** No going back from any message. */
   fixed: boolean;
   retry: (p: Prompt) => void;
+  /** Sends the person's newest message again; absent when there is none the bot still has, or no going back. */
+  again?: () => void;
   /** Goes on after a turn that stopped at its step limit. */
   proceed: () => void;
   /** Whether this is the newest line of the chat. */
@@ -641,21 +690,10 @@ type Actions = {
   stopReading: () => void;
 };
 
-function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
-      return (
-        <>
-          <p className={item.past ? "bubble past" : "bubble"}>{item.text}</p>
-          {!item.past && !fixed && (
-            <div className="actions">
-              <button disabled={busy} onClick={() => retry(item)}>Retry</button>
-              <button disabled={busy} onClick={() => edit(item)}>Edit</button>
-              <button disabled={busy} onClick={() => fork(item)} title="Start a new conversation from before this message; this one stays as it is">Fork</button>
-            </div>
-          )}
-        </>
-      );
+      return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} />;
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "run":
@@ -663,11 +701,15 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
     case "plan":
       return (
         <ul className="plan">
-          {item.steps.map((s, i) => (
-            <li key={i} aria-current={s.status === "in_progress" ? "step" : undefined}>
-              <label><input type="checkbox" checked={s.status === "done"} disabled readOnly /> {s.step}</label>
-            </li>
-          ))}
+          {item.steps.map((s, i) => {
+            const [Mark, state] = s.status === "done" ? [CircleCheck, "Done"] : s.status === "in_progress" ? [CircleDot, "At it now"] : [Circle, "To do"];
+            return (
+              <li key={i} className={s.status} aria-current={s.status === "in_progress" ? "step" : undefined}>
+                <span className="mark"><Mark role="img" aria-label={state} /></span>
+                {s.step}
+              </li>
+            );
+          })}
         </ul>
       );
     case "working":
@@ -679,23 +721,29 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
     case "retrying":
       return (
         <p>
+          {working && <span className="mark spin" aria-hidden="true" />}
           The model did not answer ({item.error}). Trying again in {Math.max(1, Math.round(item.waitMs / 1000))} s (retry {item.attempt} of {item.of}).
         </p>
       );
-    case "ended":
+    case "ended": {
+      // The newest line only: an older turn's end is past mending from here.
+      const retryIt = latest && again && <button className="small" disabled={busy} onClick={again}>Retry</button>;
       if (item.reason === "limit") {
         return (
-          <>
-            <p>The turn stopped: {item.error ?? "it reached its step limit"}.</p>
-            {latest && (
-              <div className="actions">
-                <button disabled={busy} onClick={proceed}>Continue</button>
-              </div>
-            )}
-          </>
+          <p>
+            The turn stopped: {item.error ?? "it reached its step limit"}.
+            {latest && <button className="small" disabled={busy} onClick={proceed}>Continue</button>}
+          </p>
         );
       }
-      return <p>{item.reason === "aborted" ? "Stopped." : `The reply failed: ${item.error ?? item.reason}`}</p>;
+      if (item.reason === "aborted") return <p>Stopped. {retryIt}</p>;
+      return (
+        <p className="error">
+          <span className="mark" aria-hidden="true"><CircleAlert /></span>
+          The reply failed: {item.error ?? item.reason} {retryIt}
+        </p>
+      );
+    }
     case "checked":
       return <p>{checkText(item.result, item.note, item.by)}</p>;
     case "steered":
@@ -703,6 +751,28 @@ function Row({ item, busy, working, fixed, retry, edit, fork, proceed, latest, o
     case "forked":
       return <p>Forked here. The bot goes on from before the greyed messages above; they are kept to read.</p>;
   }
+}
+
+/** A message of the person's: a long one (a pasted log) is cut until asked for; its actions are Copy and, while the bot can still go back, Retry, Edit and Fork. */
+function Said({ item, busy, fixed, retry, edit, fork }: { item: Extract<Item, { kind: "user" }> } & Pick<Actions, "busy" | "fixed" | "retry" | "edit" | "fork">) {
+  const [all, setAll] = useState(false);
+  const long = isLong(item.text);
+  return (
+    <>
+      <p className={`bubble${item.past ? " past" : ""}${long && !all ? " folded" : ""}`}>{item.text}</p>
+      {long && <button type="button" className="small ghost" aria-expanded={all} onClick={() => setAll(!all)}>{all ? "Show less" : "Show all"}</button>}
+      <div className="actions">
+        <CopyButton label="Copy the message" text={() => item.text} />
+        {!item.past && !fixed && (
+          <>
+            <button aria-label="Retry" data-tip="Retry: send it again" disabled={busy} onClick={() => retry(item)}><RotateCcw /></button>
+            <button aria-label="Edit" data-tip="Edit" disabled={busy} onClick={() => edit(item)}><Pencil /></button>
+            <button aria-label="Fork" data-tip="Fork: a new conversation from before this message; this one stays as it is" disabled={busy} onClick={() => fork(item)}><GitFork /></button>
+          </>
+        )}
+      </div>
+    </>
+  );
 }
 
 /** Calls and thinking that follow each other: one line saying what happened, which opens to a row for each call. */
@@ -728,7 +798,7 @@ function Run({ parts, live, bot, changes }: { parts: Part[]; live: boolean; bot:
                     <code>{aim(part)}</code>
                     {part.isError && <span className="error"> failed</span>}
                   </summary>
-                  <pre>{JSON.stringify(part.args, null, 2)}</pre>
+                  <pre>{given(part.args)}</pre>
                   {part.output !== undefined && <pre>{part.output}</pre>}
                 </details>
                 {inShell && <Undo part={part} bot={bot} />}
@@ -789,16 +859,16 @@ function Reply({ item, busy, open, reading, read, stopReading }: {
       <div ref={text} className="bubble">
         <Markdown text={item.text} open={open} />
       </div>
-      {read && (
-        <div className="actions">
-          {reading ? (
-            <button onClick={stopReading}>Stop reading</button>
+      <div className="actions">
+        <CopyButton label="Copy the reply" text={() => item.text} />
+        {read &&
+          (reading ? (
+            <button aria-label="Stop reading" data-tip="Stop reading" onClick={stopReading}><Square /></button>
           ) : (
             // A reply still arriving is not read: it would stop at what has come so far.
-            <button disabled={busy} onClick={() => text.current && read(item.id, readable(text.current))}>Read aloud</button>
-          )}
-        </div>
-      )}
+            <button aria-label="Read aloud" data-tip="Read aloud" disabled={busy} onClick={() => text.current && read(item.id, readable(text.current))}><Volume2 /></button>
+          ))}
+      </div>
     </>
   );
 }
