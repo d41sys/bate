@@ -109,7 +109,7 @@ export function Room({ project, bots }: { project: Project; bots: Bot[] }) {
                   {from && <Avatar bot={from} />}
                   <b>{l.from ? name(l.from) : "You"}</b>
                   {l.to && ` to ${name(l.to)}`}
-                  {`, ${new Date(l.atMs).toLocaleTimeString()}`}
+                  <time>{new Date(l.atMs).toLocaleTimeString()}</time>
                 </small>
                 {l.from ? <div className="bubble"><Said text={l.text} /></div> : <p className="bubble">{l.text}</p>}
               </div>

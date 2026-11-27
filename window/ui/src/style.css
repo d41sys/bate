@@ -377,12 +377,14 @@ button kbd, .palette kbd { padding: 0 var(--space-1); border-radius: var(--radiu
 button.primary kbd { color: inherit; background: color-mix(in oklab, currentColor 18%, transparent); }
 
 /* ---- The conversation ---- */
+/* The log fills the sheet, however wide the window: the header, the box, cards and calls reach its end edge; a message's text keeps `--reply-w`, a width that reads well. */
 .chat { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: none; }
-.chat > * { width: 100%; max-width: var(--thread-w); margin-inline: 0; }
+main:has(> .chat) > * { max-width: none; }
+.chat > * { width: 100%; max-width: none; margin-inline: 0; }
 /* The scroller reaches the sheet's edge, so its bar is there; the messages keep the column, edge to edge with the header and the box. */
 .items { flex: 1; overflow: auto; min-height: 0; width: auto; max-width: none; margin-inline: calc(-1 * var(--space-5)); padding-left: var(--space-5); }
 /* Placed on the sheet's column, so its edges are the header's whatever the bar's width. */
-.items > div { width: min(100cqw, var(--thread-w)); }
+.items > div { width: 100cqw; }
 .item { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: var(--space-2) 0; user-select: text; -webkit-user-select: text; }
 .item > * { max-width: 100%; margin-block: 0; }
 /* A message of the person's starts a turn: more room above it. It reads from the start edge like the rest of the log. */

@@ -29,7 +29,7 @@ export const screens = [
 
   { name: "chat", title: "Conversation (a bot waits for you)", steps: bot("Analyst"), parts: [TITLE, ".conversation", ".question", "form textarea", "details.run"] },
   { name: "chat-calls", title: "Conversation (what the bot did, opened)", steps: [...bot("Scout"), "details.run > summary", "details.run[open] li summary"], parts: ["details.run[open] li details[open] pre"] },
-  { name: "chat-busy", title: "Conversation (a bot at work)", steps: bot("Daisy"), parts: [TITLE, "form textarea", "[aria-label='Stop']"] },
+  { name: "chat-busy", title: "Conversation (a bot at work)", steps: bot("Daisy"), parts: [TITLE, "form textarea", "[data-tip^='Stop the bot']"] },
   { name: "chat-agent", title: "Conversation (a bot on an installed agent)", steps: bot("Scout"), parts: [TITLE, "form textarea"] },
   { name: "mail", title: "Messages with other bots", steps: [...bot("Analyst"), "details.mail summary"], parts: ["details.mail .check"] },
   { name: "conversations", title: "Conversations of a bot", steps: [...bot("Analyst"), chip[0]], parts: [chip[1]] },
