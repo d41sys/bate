@@ -5,17 +5,17 @@ import { Helper } from "./Helper.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
 import { QuickSettings } from "./QuickSettings.tsx";
 import { Updates } from "./Updates.tsx";
-import { inShell, listen, openInBrowser, request } from "./service.ts";
+import { inShell, listen, type Look, openInBrowser, request, savedLook, setLook } from "./service.ts";
 
 /** The app's own settings, in one scroll. `settings-<key>` is the id of a section's heading, which the list and the palette focus. */
-const SECTIONS = { chatgpt: "ChatGPT", model: "Model server", devices: "Other devices", helper: "Bate Helper", quick: "Quick Ask", updates: "Updates", report: "Bug report" };
+const SECTIONS = { appearance: "Appearance", chatgpt: "ChatGPT", model: "Model server", devices: "Other devices", helper: "Bate Helper", quick: "Quick Ask", updates: "Updates", report: "Bug report" };
 export type SettingsSection = keyof typeof SECTIONS;
-const PAGES: Record<SettingsSection, () => React.JSX.Element> = { chatgpt: ChatGpt, model: ModelServer, devices: Devices, helper: Helper, quick: QuickSettings, updates: Updates, report: Report };
-/** Another device on the network may not read the sign-in, the model server, the devices, the helper or Quick Ask. */
-const SHELL_ONLY: SettingsSection[] = ["chatgpt", "model", "devices", "helper", "quick"];
+const PAGES: Record<SettingsSection, () => React.JSX.Element> = { appearance: Appearance, chatgpt: ChatGpt, model: ModelServer, devices: Devices, helper: Helper, quick: QuickSettings, updates: Updates, report: Report };
+/** Another device on the network may not read the sign-in, the model server, the devices, the helper or Quick Ask; its browser has its own appearance. */
+const SHELL_ONLY: SettingsSection[] = ["appearance", "chatgpt", "model", "devices", "helper", "quick"];
 export const settingsSections = (Object.keys(SECTIONS) as SettingsSection[]).filter((s) => inShell || !SHELL_ONLY.includes(s));
 
-/** What belongs to the app, not to a bot: the sign-in, the model server, devices, the helper, updates and the bug report. */
+/** What belongs to the app, not to a bot: the appearance, the sign-in, the model server, devices, the helper, updates and the bug report. */
 export function AppSettings({ section, choose }: { section?: SettingsSection; choose: (s: SettingsSection) => void }) {
   const at = section && settingsSections.includes(section) ? section : settingsSections[0];
   return (
@@ -46,6 +46,29 @@ export function AppSettings({ section, choose }: { section?: SettingsSection; ch
         })}
       </div>
     </div>
+  );
+}
+
+function Appearance() {
+  const [look, setChosen] = useState<Look>(savedLook);
+  const { run, error, saved } = useSaves();
+  return (
+    <Group id="settings-appearance" title="Appearance">
+      <Setting id="look" title="Colours" hint="Light or dark, or the same as macOS. Every Bate window changes at once." error={error("look")} saved={saved("look")}>
+        <select
+          value={look}
+          onChange={(e) => {
+            const next = e.target.value as Look;
+            setChosen(next);
+            void run("look", setLook(next));
+          }}
+        >
+          <option value="system">Same as macOS</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </Setting>
+    </Group>
   );
 }
 
