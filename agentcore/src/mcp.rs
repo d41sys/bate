@@ -21,6 +21,10 @@ const MAX_REPLY: u64 = 64 << 20;
 /// How often a wait for a server looks for `abort`.
 const POLL: Duration = Duration::from_millis(100);
 const ABORTED: &str = "Aborted by the user";
+/// Most of a tool's description the model gets; the rest is cut.
+const MAX_DESCRIPTION: usize = 1 << 10;
+/// Largest input schema of a tool that is offered to the model.
+const MAX_SCHEMA: usize = 16 << 10;
 
 /// The connectors tried so far. `None`: it failed to load, and is not tried again until it changes.
 #[derive(Default)]
@@ -303,7 +307,18 @@ impl Server {
                     schema @ Value::Object(_) => schema.clone(),
                     _ => json!({"type": "object"}),
                 };
+                // A connector's text goes to the model on every call, so it is bounded: a schema
+                // cannot be cut and stay usable, so a tool with a larger one is left out.
+                if parameters.to_string().len() > MAX_SCHEMA {
+                    eprintln!(
+                        "connector {}: tool `{name}` left out: its input schema is over {} KiB",
+                        connector.name,
+                        MAX_SCHEMA >> 10
+                    );
+                    continue;
+                }
                 let description = tool["description"].as_str().unwrap_or("");
+                let description = &description[..description.floor_char_boundary(MAX_DESCRIPTION)];
                 server.tools.push(Tool {
                     name: name.to_owned(),
                     read_only: tool["annotations"]["readOnlyHint"] == true,

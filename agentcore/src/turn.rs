@@ -10,6 +10,7 @@ use proto::permissions::{APPROVE, DENY, Kind};
 use proto::projects::Peer;
 use proto::{CheckResult, Event, TurnEnd};
 use serde_json::{Map, Value, json};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -65,6 +66,10 @@ pub type Answer = (String, Result<String, String>);
 pub const OPTIONS: [&str; 2] = [APPROVE, DENY];
 /// Most recent messages a compaction leaves as they are.
 const KEEP: usize = 4;
+/// Bytes of each older tool result the summariser gets after the server refused the conversation.
+const CLEARED: usize = 2 << 10;
+/// Calls in a row with the same tool, arguments and result before the model is told it is stuck.
+const REPEATS: u32 = 3;
 /// The context size, in tokens, taken for a model that nobody named one for.
 const CONTEXT: usize = 32_000;
 /// A `token` answer: the model server, its key, the API it speaks, the model to call, and
@@ -288,6 +293,36 @@ fn fit(mut result: Value, most: usize) -> Value {
     result
 }
 
+/// Calls in a row with the same tool, arguments and result: a model that makes one again and
+/// again is stuck, and the result says so from the `REPEATS`th time on.
+#[derive(Default)]
+struct Repeats {
+    last: u64,
+    times: u32,
+}
+
+impl Repeats {
+    /// Gives the model's copy of `call`'s `result`, with the note when it is a repeat.
+    fn note(&mut self, call: &Call, mut result: Value) -> Value {
+        let mut hash = DefaultHasher::new();
+        (&call.name, &call.arguments, result["content"].as_str()).hash(&mut hash);
+        let hash = hash.finish();
+        self.times = if hash == self.last { self.times + 1 } else { 1 };
+        self.last = hash;
+        if self.times >= REPEATS
+            && let Some(content) = result["content"].as_str()
+        {
+            result["content"] = format!(
+                "{content}\n[This is the same call with the same result {} times in a row. \
+                 Making it again will not change it: try another way, or answer with what you have.]",
+                self.times
+            )
+            .into();
+        }
+        result
+    }
+}
+
 fn saved(e: std::io::Error) -> String {
     format!("cannot save the conversation: {e}")
 }
@@ -440,6 +475,7 @@ impl Turn {
     ) -> Result<TurnEnd, String> {
         // Numbers the tool calls a server sent without an id.
         let mut unnamed = 0;
+        let mut repeats = Repeats::default();
         // Model replies that called tools, run so far.
         let mut rounds = 0;
         // Whether the conversation was already summarised for the model call that comes next.
@@ -480,7 +516,7 @@ impl Turn {
             let holds = token.as_ref().ok().and_then(|t| t.4);
             if session.tokens() > self.window(holds) / 5 * 4 {
                 // A summary that fails must not end the turn, or every later prompt would fail the same way.
-                if let Err(e) = self.compact(session, &system, &tools) {
+                if let Err(e) = self.compact(session, &system, &tools, false) {
                     eprintln!("the context was not compacted: {e}");
                 }
                 if self.control.aborted() {
@@ -503,12 +539,12 @@ impl Turn {
                 Err(e)
                     if !shrunk && OVERFLOW.iter().any(|part| e.to_lowercase().contains(part)) =>
                 {
-                    let before = session.tokens();
-                    if let Err(summary) = self.compact(session, &system, &tools) {
+                    let before = session.guessed();
+                    if let Err(summary) = self.compact(session, &system, &tools, true) {
                         return Err(format!("{e} (and the summary failed: {summary})"));
                     }
                     // Nothing was old enough to summarise.
-                    if session.tokens() >= before {
+                    if session.guessed() >= before {
                         return Err(e);
                     }
                     shrunk = true;
@@ -521,6 +557,7 @@ impl Turn {
                 text,
                 mut calls,
                 aborted,
+                usage,
                 ..
             } = reply;
             for call in calls.iter_mut().filter(|c| c.id.is_empty()) {
@@ -528,6 +565,11 @@ impl Turn {
                 // and the message count would repeat after a compaction.
                 call.id = format!("call_{nonce}_{unnamed}");
                 unnamed += 1;
+            }
+            // Output tokens are left out: they count thinking, which the model is not sent again.
+            // An input count of 0 is a server that did not count input, not an empty context.
+            if let Some(usage) = usage.filter(|u| u.input > 0) {
+                session.measured(usage.input as usize);
             }
             if !text.is_empty() || !calls.is_empty() {
                 session.push(assistant(&text, &calls)).map_err(saved)?;
@@ -565,7 +607,7 @@ impl Turn {
                 check.note(call, &result);
                 // The window got the whole result in `ToolEnd`; the model gets what fits.
                 session
-                    .push(fit(result, self.window(holds)))
+                    .push(repeats.note(call, fit(result, self.window(holds))))
                     .map_err(saved)?;
             }
         }
@@ -750,6 +792,7 @@ impl Turn {
         let tools = self.tools(mcp, depth);
         let mut messages = vec![json!({"role": "user", "content": task})];
         let mut unnamed = 0;
+        let mut repeats = Repeats::default();
         let mut rounds = 0;
         loop {
             if self.control.aborted() {
@@ -786,7 +829,7 @@ impl Turn {
             messages.push(assistant(&text, &calls));
             for call in &calls {
                 let result = self.run_call(mcp, call, depth, &format!("agent{n}/"));
-                messages.push(fit(result, self.window(holds)));
+                messages.push(repeats.note(call, fit(result, self.window(holds))));
             }
         }
     }
@@ -1010,12 +1053,24 @@ impl Turn {
 
     /// `compact` on request.
     pub fn compact_now(&self, work: &mut Work) -> Result<(), String> {
-        self.compact(&mut work.session, &self.system(), &self.tools(&work.mcp, 0))
+        self.compact(
+            &mut work.session,
+            &self.system(),
+            &self.tools(&work.mcp, 0),
+            false,
+        )
     }
 
     /// Asks the model to summarise all but the last `KEEP` messages and puts the summary in their
-    /// place. Does nothing when there is nothing that old.
-    fn compact(&self, session: &mut Session, system: &str, tools: &Value) -> Result<(), String> {
+    /// place. Does nothing when there is nothing that old. With `clear`, the summariser gets each
+    /// older tool result cut to `CLEARED`, so a conversation the server refused fits once summarised.
+    fn compact(
+        &self,
+        session: &mut Session,
+        system: &str,
+        tools: &Value,
+        clear: bool,
+    ) -> Result<(), String> {
         let messages = &session.messages;
         let mut cut = messages.len().saturating_sub(KEEP);
         // A tool result stays with the call it answers.
@@ -1026,10 +1081,27 @@ impl Turn {
         if cut == 0 || (cut == 1 && session.starts_with_summary()) {
             return Ok(());
         }
-        // Same system text and tools as a turn, so a provider's prompt cache still applies.
+        // Old tool results are the bulk of a conversation and the least needed again. Cut only
+        // here: otherwise the summary sends what the turns sent, so a provider's prompt cache applies.
+        let cleared: Vec<Value>;
+        let older = if clear {
+            cleared = messages[..cut]
+                .iter()
+                .map(|m| {
+                    if m["role"] == "tool" {
+                        fit(m.clone(), CLEARED)
+                    } else {
+                        m.clone()
+                    }
+                })
+                .collect();
+            &cleared[..]
+        } else {
+            &messages[..cut]
+        };
         let instruction = json!({"role": "user", "content": SUMMARISE});
         let (url, key, api, model, _) = self.get_token()?;
-        let mut ask = self.ask_model(&model, system, &messages[..cut], Some(&instruction), tools);
+        let mut ask = self.ask_model(&model, system, older, Some(&instruction), tools);
         // The summary is no place for a search.
         ask.web_search = false;
         let reply = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;

@@ -1462,6 +1462,195 @@ fn a_summary_that_fails_does_not_end_the_turn() {
     assert!(sent(&model, 3).contains("Q1"));
 }
 
+#[test]
+fn an_input_count_of_zero_leaves_the_size_to_the_estimate() {
+    let dir = workdir("autocompact-zero");
+    // A server that counts no input: taken as a count, the size would start again near 0 and never be summarised.
+    let zero = json!({"choices": [], "usage": {"prompt_tokens": 0, "completion_tokens": 5}});
+    let model = Model::serve(vec![
+        vec![text("A1")],
+        vec![text("A2"), zero],
+        vec![text("AUTO-SUMMARY")],
+        vec![text("A3")],
+    ]);
+    // 100 tokens: compaction starts above 80, which is about 320 bytes of messages.
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL_CONTEXT", "100")]);
+    engine.open_new();
+    let long = "x".repeat(150);
+    engine.exchange("n1", &format!("Q1-old {long}"));
+    engine.exchange("n2", &format!("Q2 {long}"));
+    engine.exchange("n3", "Q3");
+
+    assert_eq!(model.requests().len(), 4);
+    assert!(sent(&model, 2).contains("Summarise"));
+    assert!(!sent(&model, 3).contains("Q1-old"));
+}
+
+#[test]
+fn the_size_the_server_counted_says_when_to_compact() {
+    let dir = workdir("autocompact-usage");
+    // 900 of 1,000 tokens counted; a guess from these few bytes would be far under the 800 that start a summary.
+    let counted = json!({"choices": [], "usage": {"prompt_tokens": 900, "completion_tokens": 5}});
+    let model = Model::serve(vec![
+        vec![text("A1")],
+        vec![text("A2")],
+        vec![text("A3"), counted],
+        vec![text("SUMMARY")],
+        vec![text("A4")],
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL_CONTEXT", "1000")]);
+    engine.open_new();
+    engine.exchange("n1", "Q1-old");
+    engine.exchange("n2", "Q2");
+    engine.exchange("n3", "Q3");
+    engine.exchange("n4", "Q4");
+
+    assert_eq!(model.requests().len(), 5);
+    assert!(sent(&model, 3).contains("Summarise"));
+    assert!(!sent(&model, 4).contains("Q1-old"));
+}
+
+#[test]
+fn after_a_refusal_for_size_the_summary_gets_older_tool_results_cut() {
+    let dir = workdir("overflow-cleared");
+    fs::write(
+        dir.join("a.txt"),
+        format!("{}TAIL-MARK\n", "y".repeat(10_000)),
+    )
+    .unwrap();
+    let ok = |t: &str| format!("data: {}\n\ndata: [DONE]\n\n", text(t)).into_bytes();
+    let read = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        call("c1", "read", json!({"path": "a.txt"}))
+    );
+    let full = b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
+        {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"This model's maximum context length is 8192 tokens.\"}}";
+    let model = Model::replay(vec![
+        read.into_bytes(),
+        ok("A1"),
+        ok("A2"),
+        ok("A3"),
+        // Any 400 is asked again without the usage option.
+        full.to_vec(),
+        full.to_vec(),
+        ok("SUMMARY"),
+        ok("A4"),
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_as("n1", "Q1");
+    answer(&mut engine, "Approve");
+    engine.until(is_turn_end);
+    engine.exchange("n2", "Q2");
+    engine.exchange("n3", "Q3");
+    engine.prompt_as("n4", "Q4");
+    let events = engine.until(is_turn_end);
+    assert!(
+        matches!(events.last(), Some(Event::TurnEnd { error: None, .. })),
+        "{events:?}"
+    );
+
+    let summary = sent(&model, 6);
+    assert!(summary.contains("Summarise") && summary.contains("yyyy"));
+    assert!(
+        !summary.contains("TAIL-MARK") && summary.contains("bytes left out"),
+        "{summary}"
+    );
+    // The turns before the refusal got the whole result.
+    assert!(sent(&model, 3).contains("TAIL-MARK"));
+}
+
+#[test]
+fn a_connector_tool_gets_a_bounded_description_and_one_with_a_huge_schema_is_left_out() {
+    let dir = workdir("mcp-bounded");
+    let script = dir.join("fake-mcp");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}}}" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$(cat tools.json)" ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let object = json!({"type": "object"});
+    let huge = json!({"type": "object", "properties": {"x": {"type": "string", "description": "z".repeat(20_000)}}});
+    let tools = json!({"tools": [
+        {"name": "long", "description": "d".repeat(3000), "inputSchema": object},
+        {"name": "huge", "description": "Huge", "inputSchema": huge},
+        {"name": "plain", "description": "Plain", "inputSchema": object},
+    ]});
+    fs::write(dir.join("tools.json"), tools.to_string()).unwrap();
+    let model = Model::serve(replies(&["Done."]));
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let connectors = vec![connector("fake", stdio(&script))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+    engine.exchange("n1", "hi");
+
+    let names = tool_names(&model, 0);
+    assert!(
+        names.contains(&"fake__long".to_owned())
+            && names.contains(&"fake__plain".to_owned())
+            && !names.contains(&"fake__huge".to_owned()),
+        "{names:?}"
+    );
+    let tools = model.requests()[0]["tools"].as_array().unwrap().clone();
+    let long = tools
+        .iter()
+        .find(|t| t["function"]["name"] == "fake__long")
+        .unwrap();
+    assert_eq!(
+        long["function"]["description"].as_str().unwrap().len(),
+        1024
+    );
+}
+
+#[test]
+fn the_third_identical_call_with_the_same_result_tells_the_model_it_is_stuck() {
+    let dir = workdir("repeats");
+    fs::write(dir.join("a.txt"), "same\n").unwrap();
+    let read = |id: &str| vec![call(id, "read", json!({"path": "a.txt"}))];
+    let model = Model::serve(vec![
+        read("c1"),
+        read("c2"),
+        read("c3"),
+        vec![text("Done.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_as("n1", "read it");
+    for _ in 0..3 {
+        answer(&mut engine, "Approve");
+    }
+    let events = engine.until(is_turn_end);
+    // The window gets the result as it is.
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, Event::ToolEnd { output, .. } if output.contains("in a row"))),
+        "{events:?}"
+    );
+    let last_result = |i: usize| {
+        let messages = model.requests()[i]["messages"].as_array().unwrap().clone();
+        messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(!last_result(2).contains("in a row"), "{}", last_result(2));
+    assert!(
+        last_result(3).contains("same call with the same result 3 times in a row"),
+        "{}",
+        last_result(3)
+    );
+}
+
 fn aborted() -> Event {
     Event::TurnEnd {
         reason: TurnEnd::Aborted,

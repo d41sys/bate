@@ -24,6 +24,8 @@ pub struct Session {
     pub messages: Vec<Value>,
     /// Serialised size of `messages`.
     bytes: usize,
+    /// The input tokens the server counted for the last model call, and `bytes` just then.
+    measured: Option<(usize, usize)>,
 }
 
 pub fn new_id() -> io::Result<String> {
@@ -81,6 +83,7 @@ impl Session {
             file,
             messages: Vec::new(),
             bytes: 0,
+            measured: None,
         })
     }
 
@@ -107,6 +110,7 @@ impl Session {
             file,
             messages,
             bytes,
+            measured: None,
         })
     }
 
@@ -135,6 +139,7 @@ impl Session {
         self.write(&json!({"mark": "compaction", "summary": summary, "kept": kept}))?;
         summarise(&mut self.messages, summary, kept);
         self.bytes = size(&self.messages);
+        self.measured = None;
         Ok(())
     }
 
@@ -146,11 +151,22 @@ impl Session {
             .is_some_and(|c| c.starts_with(SUMMARY))
     }
 
-    /// Rough size of what the model sees.
-    // shortcut: 4 bytes per token, and the system text and the tools are not counted. A size the
-    // server refuses is summarised and asked again (`OVERFLOW` in `turn`); use the server's own
-    // counts if a summary is seen to come too early or too late.
+    /// Size of what the model sees: the server's count for the last call (system text and tools
+    /// included) and a guess of 4 bytes per token for what was added since; with no count, all guessed.
     pub fn tokens(&self) -> usize {
+        match self.measured {
+            Some((tokens, at)) => tokens + self.bytes.saturating_sub(at) / 4,
+            None => self.bytes / 4,
+        }
+    }
+
+    /// The server counted `tokens` for the call that saw the conversation as it is now.
+    pub fn measured(&mut self, tokens: usize) {
+        self.measured = Some((tokens, self.bytes));
+    }
+
+    /// The guessed size alone, to compare the conversation with itself before and after a summary.
+    pub fn guessed(&self) -> usize {
         self.bytes / 4
     }
 
@@ -195,6 +211,7 @@ impl Session {
         }
         self.messages = replay(kept);
         self.bytes = size(&self.messages);
+        self.measured = None;
         Ok(())
     }
 
