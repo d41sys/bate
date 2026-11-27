@@ -443,8 +443,9 @@ main:has(> .chat) > * { max-width: none; }
 .item.user .bubble { --fill: var(--bg-hover); background: var(--bubble-user); color: var(--on-bubble-user); white-space: pre-wrap; }
 .item.user .bubble.past { opacity: .5; }
 .item.run, .item.plan, .item.working, .item.forked, .item.steered, .item.checked, .item.ended, .item.retrying { color: var(--fg-muted); font-size: var(--size-small); }
-/* How a turn ended, when not as it should: one line, with what mends it beside the words. */
+/* How a turn ended, when not as it should: one line, with what mends it beside the words. A failure is a soft block in the error's colour. */
 .item.ended p, .item.retrying p { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+.item.ended .error { padding: var(--space-2) var(--space-3); border-radius: var(--radius-m); background: color-mix(in oklab, var(--danger) 8%, transparent); }
 .item.ended .error .mark { color: var(--danger); }
 .item.working p { margin: 0; }
 .item.arriving { animation: arrive var(--slow) var(--ease); }
