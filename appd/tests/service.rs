@@ -1538,6 +1538,8 @@ fn a_turn_that_crosses_the_limit_ends_with_the_reason_and_keeps_what_it_wrote() 
             "prompt",
             "turn_start",
             "text",
+            // The server counted the request's input: how full the model is goes to the windows.
+            "context",
             "tool_start",
             "tool_end",
             "turn_end"
@@ -1545,8 +1547,12 @@ fn a_turn_that_crosses_the_limit_ends_with_the_reason_and_keeps_what_it_wrote() 
         "{entries:?}"
     );
     assert_eq!(entries[3]["delta"], "Working.");
-    assert_eq!(entries[6]["reason"], "limit");
-    let error = entries[6]["error"].as_str().unwrap();
+    assert_eq!(
+        entries[4],
+        &json!({"type": "context", "used": 100, "size": 32_000})
+    );
+    assert_eq!(entries[7]["reason"], "limit");
+    let error = entries[7]["error"].as_str().unwrap();
     assert!(error.contains("limit of 100 tokens for today"), "{error}");
 
     // A routine that crosses it in the same way is recorded as stopped, with its tokens.

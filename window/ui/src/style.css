@@ -526,6 +526,11 @@ main:has(> .chat) > * { max-width: none; }
 .chip { max-width: var(--chip-w); min-width: 0; }
 /* In the composer the chip is as tall as the buttons beside it, so its words sit on their line. */
 .composer .chip { min-height: var(--control-h); }
+/* How full the model's context is: a ring before the model chip. Near the 80% at which the bot summarises, it takes the colour of what needs the person. */
+.meter { display: inline-flex; align-items: center; flex: none; height: var(--control-h); padding: 0 var(--space-1); border-radius: var(--radius-m); color: var(--fg-muted); }
+.meter svg { width: var(--icon); height: var(--icon); rotate: -90deg; fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; }
+.meter .track { stroke: var(--border-strong); }
+.meter.near { color: var(--warn); }
 .chip > :first-child { overflow: hidden; text-overflow: ellipsis; }
 .popover { position: absolute; bottom: calc(100% + var(--space-2)); right: 0; z-index: 2; width: var(--popover-w); max-width: calc(100vw - 2 * var(--space-2)); display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); font-size: var(--size-ui); font-weight: 400; white-space: normal; }
 .popover ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }

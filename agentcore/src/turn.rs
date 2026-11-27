@@ -600,6 +600,10 @@ impl Turn {
             // An input count of 0 is a server that did not count input, not an empty context.
             if let Some(usage) = usage.filter(|u| u.input > 0) {
                 session.measured(usage.input as usize);
+                self.out.send(&Event::Context {
+                    used: usage.input,
+                    size: self.window(holds) as u64,
+                });
             }
             // Only thinking, or nothing: small models do this, and the turn would end with no answer.
             if !aborted && calls.is_empty() && text.trim().is_empty() && empties < EMPTY_TRIES {
@@ -1159,7 +1163,7 @@ impl Turn {
             &messages[..cut]
         };
         let instruction = json!({"role": "user", "content": SUMMARISE});
-        let (url, key, api, model, _) = self.get_token()?;
+        let (url, key, api, model, holds) = self.get_token()?;
         let mut ask = self.ask_model(&model, system, older, Some(&instruction), tools);
         // The summary is no place for a search.
         ask.web_search = false;
@@ -1174,7 +1178,13 @@ impl Turn {
             return Err("the model returned no summary".into());
         }
         let kept = messages.len() - cut;
-        session.compact(summary, kept).map_err(saved)
+        session.compact(summary, kept).map_err(saved)?;
+        // The conversation is shorter now, and what the person sees of its size follows.
+        self.out.send(&Event::Context {
+            used: session.tokens() as u64,
+            size: self.window(holds) as u64,
+        });
+        Ok(())
     }
 
     fn call(
