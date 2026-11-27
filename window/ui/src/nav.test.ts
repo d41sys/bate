@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot } from "./nav.ts";
 import type { Bot, Project } from "./types.ts";
 
 const bot = (id: string, project?: string) => ({ id, project: project ? { id: project, name: project } : undefined }) as Bot;
@@ -29,16 +29,6 @@ test("the next and previous bot follow the sidebar, wrap round, and start from t
   assert.equal(stepBot(list, undefined, 1)?.id, "a");
   assert.equal(stepBot(list, undefined, -1)?.id, "d");
   assert.equal(stepBot([], undefined, 1), undefined);
-});
-
-test("the arrows move between tabs and wrap; Home and End go to the ends; other keys do nothing", () => {
-  const tabs = ["chat", "memory", "settings"];
-  assert.equal(stepTab(tabs, "chat", "ArrowRight"), "memory");
-  assert.equal(stepTab(tabs, "settings", "ArrowRight"), "chat");
-  assert.equal(stepTab(tabs, "chat", "ArrowLeft"), "settings");
-  assert.equal(stepTab(tabs, "memory", "Home"), "chat");
-  assert.equal(stepTab(tabs, "memory", "End"), "settings");
-  assert.equal(stepTab(tabs, "memory", "ArrowDown"), undefined);
 });
 
 test("each shortcut stands for one action, by the physical key, and none while composing text", () => {

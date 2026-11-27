@@ -27,7 +27,7 @@ import { noticeFor } from "./notice.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Settings } from "./Settings.tsx";
 import { AppSettings, type SettingsSection } from "./AppSettings.tsx";
-import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot, stepTab } from "./nav.ts";
+import { endsUnseen, neighbour, rowState, shortcut, shownBots, sidebar, stepBot } from "./nav.ts";
 import { FirstRun, useNeedsProvider } from "./FirstRun.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { LATER } from "./firstRun.ts";
@@ -61,30 +61,11 @@ type View =
 const botTabs = (Object.keys(BOT_TABS) as BotTab[]).filter((t) => inShell || t !== "channels");
 const projectTabs = (Object.keys(PROJECT_TABS) as ProjectTab[]).filter((t) => inShell || t !== "surfaces");
 
-function Tabs<T extends string>({ ids, names, tab, set }: { ids: T[]; names: Record<T, string>; tab: T; set: (t: T) => void }) {
-  return (
-    <div
-      role="tablist"
-      onKeyDown={(e) => {
-        const to = e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.nativeEvent.isComposing ? undefined : stepTab(ids, tab, e.key);
-        if (!to) return;
-        e.preventDefault();
-        set(to);
-        e.currentTarget.querySelector<HTMLElement>(`[id="tab-${to}"]`)?.focus();
-      }}
-    >
-      {ids.map((t) => (
-        // Only the chosen tab is in the Tab order; the arrows move among the rest.
-        <button key={t} role="tab" id={`tab-${t}`} aria-controls="tabpanel" aria-selected={t === tab} tabIndex={t === tab ? 0 : -1} onClick={() => set(t)}>{names[t]}</button>
-      ))}
-    </div>
-  );
+/** The page's title, which is also how to change page: its menu lists the pages, the current one checked. A page that is not the first is named after the title. */
+function PageMenu<T extends string>({ label, ids, names, tab, set, children }: { label: string; ids: T[]; names: Record<T, string>; tab: T; set: (t: T) => void; children: ReactNode }) {
+  const title = <>{children}{tab !== ids[0] && <span className="page">{names[tab]}</span>}</>;
+  return <RowMenu label={label} title={title} items={ids.map((t) => ({ label: names[t], current: t === tab, run: () => set(t) }))} />;
 }
-
-/** What the chosen tab shows (a bot's or a project's). */
-const Panel = ({ tab, children }: { tab: string; children: ReactNode }) => (
-  <div role="tabpanel" id="tabpanel" aria-labelledby={`tab-${tab}`}>{children}</div>
-);
 
 function App() {
   const [state, setState] = useState("Connecting to the service…");
@@ -427,14 +408,15 @@ function App() {
         {view?.page === "addons" && (
           <>
             <header data-tauri-drag-region="">
-              <div className="who" data-tauri-drag-region="deep"><h1>Add-ons</h1></div>
-              <Tabs ids={Object.keys(ADDON_TABS) as AddonTab[]} names={ADDON_TABS} tab={view.tab} set={(tab) => setView({ page: "addons", tab })} />
+              <div className="who titled" data-tauri-drag-region="">
+                <PageMenu label="Pages of Add-ons" ids={Object.keys(ADDON_TABS) as AddonTab[]} names={ADDON_TABS} tab={view.tab} set={(tab) => setView({ page: "addons", tab })}>
+                  <span className="name">Add-ons</span>
+                </PageMenu>
+              </div>
             </header>
-            <Panel tab={view.tab}>
               {view.tab === "connectors" && <Connectors key={connection} bots={bots} />}
               {view.tab === "skills" && <Skills key={connection} bots={bots} />}
               {view.tab === "workplaces" && <Workplaces key={connection} projects={projects} />}
-            </Panel>
           </>
         )}
         {view?.page === "settings" && (
@@ -446,10 +428,12 @@ function App() {
         {view?.page === "project" && project && (
           <>
             <header data-tauri-drag-region="">
-              <div className="who" data-tauri-drag-region="deep"><h1>{project.name}</h1></div>
-              <Tabs ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)} />
+              <div className="who titled" data-tauri-drag-region="">
+                <PageMenu label={`Pages of ${project.name}`} ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)}>
+                  <span className="name">{project.name}</span>
+                </PageMenu>
+              </div>
             </header>
-            <Panel tab={view.tab}>
             {view.tab === "room" && <Room key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {view.tab === "bots" && <ProjectBots key={`${project.id}-${connection}`} project={project} bots={bots} />}
             {/* Surfaces open in the window's pane only, not on other devices. */}
@@ -469,21 +453,26 @@ function App() {
                 <DeleteProject key={`delete-${project.id}`} project={project} bots={bots} gone={() => setView({ page: "projects" })} />
               </>
             )}
-            </Panel>
           </>
         )}
         {view?.page === "bot" && bot && (
           <>
             <header data-tauri-drag-region="">
-              <div className="who" data-tauri-drag-region="deep">
-                <Avatar bot={bot} />
-                <h1>{bot.name}</h1>
+              <div className="who titled" data-tauri-drag-region="">
+                {bot.project && (
+                  <>
+                    <button type="button" className="crumb" onClick={() => openProject(bot.project!.id, "room")}>{bot.project.name}</button>
+                    <span className="slash" aria-hidden="true">/</span>
+                  </>
+                )}
+                <PageMenu label={`Pages of ${bot.name}`} ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)}>
+                  <Avatar bot={bot} />
+                  <span className="name">{bot.name}</span>
+                </PageMenu>
               </div>
-              <Tabs ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)} />
               {/* The conversation chip is drawn here by Conversations. */}
               {view.tab === "chat" && <div className="conversation" ref={setConversationSlot} data-tauri-drag-region="" />}
             </header>
-            <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
               <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation ?? view.conversation} slot={conversationSlot} showChanges={inShell ? (conversation) => setShown({ changes: { bot: bot.id, conversation } }) : undefined}>
@@ -522,7 +511,6 @@ function App() {
             )}
             {view.tab === "channels" && inShell && <Channels key={`${bot.id}-${connection}`} bot={bot.id} />}
             {view.tab === "settings" && <Settings key={`${bot.id}-${connection}`} bot={bot} onDeleted={() => setView(undefined)} />}
-            </Panel>
           </>
         )}
         {!state && !(view?.page === "bot" ? bot : view?.page === "project" ? project : view) && !(inShell && needed && !later) && (

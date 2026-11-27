@@ -82,15 +82,18 @@ input[role=switch]:checked::after { transform: translateX(calc(var(--switch-w) -
 input[role=switch]:disabled { opacity: .45; cursor: not-allowed; }
 label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 
-/* ---- Tabs ---- */
-[role=tablist] { display: flex; align-items: center; flex: 0 1 auto; gap: var(--space-0); min-width: 0; padding: var(--space-0); border-radius: calc(var(--radius-m) + var(--space-0)); background: var(--fill); overflow-x: auto; scrollbar-width: none; }
-/* One track, the chosen one raised on it; it keeps its weight so the words do not move. */
-[role=tab] { flex: none; background: none; color: var(--fg-muted); min-height: var(--control-h-small); padding: 0 var(--space-3); }
-[role=tab]:hover:not(:disabled) { background: none; color: var(--fg); }
-[role=tab][aria-selected=true], [role=tab][aria-selected=true]:hover:not(:disabled) { background: var(--bg-thumb); color: var(--fg); box-shadow: var(--shadow-1); }
-[role=tab]:focus-visible { outline-offset: -2px; }
-/* The panel adds no box: its contents lay out as the main area's own. */
-[role=tabpanel] { display: contents; }
+/* ---- Page menu: the page's title is a button; its menu lists the pages (RowMenu) ---- */
+.menu.title h1 { display: flex; min-width: 0; }
+button.title, button.crumb { background: none; min-width: 0; padding: 0 var(--space-2); }
+button.title:hover:not(:disabled), button.crumb:hover:not(:disabled) { background: var(--bg-hover); }
+button.title { gap: var(--space-2); max-width: 100%; }
+/* The project's name gives way before the bot's, down to a few letters. */
+button.crumb { flex: 0 100 auto; min-width: calc(var(--control-h) * 2); max-width: var(--chip-w); overflow: hidden; text-overflow: ellipsis; display: block; line-height: var(--control-h); color: var(--fg-muted); font-weight: 400; }
+button.crumb:hover:not(:disabled) { color: var(--fg); }
+.slash { color: var(--fg-muted); font-size: var(--size-head); line-height: var(--leading-head); }
+.title .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.title .page { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-muted); font-weight: 400; }
+.title .chevron { flex: none; color: var(--fg-muted); font-size: var(--size-small); }
 
 /* ---- Lines that tell: a note, an error, nothing here yet ---- */
 .note { color: var(--fg-muted); }
@@ -323,12 +326,16 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 
 main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-5) var(--space-5); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); }
 /* Every screen is one column of a width that reads well; the conversation sets its own. */
-main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
-/* No bar on top: who this is, the tabs and the conversation stay at the head of the sheet while the page scrolls under them. */
+main > * { width: 100%; max-width: var(--thread-w); margin-inline: auto; flex: none; }
+/* No bar on top: who this is and the conversation stay at the head of the sheet while the page scrolls under them. */
 main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--bg); }
 /* Who this is: the face and the name, as the page's title. */
 .who { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); }
 .who h1 { font-size: var(--size-head); line-height: var(--leading-head); }
+/* A title with a menu (and, for a bot in a project, the project's name before it) may be cut short, so the conversation keeps its place. */
+.who.titled { flex: 0 1 auto; min-width: 0; gap: 0; }
+/* The padding of the buttons is taken back on the left, so the first word starts on the column's edge. */
+.who.titled > :first-child { margin-left: calc(-1 * var(--space-2)); }
 
 .pane { position: relative; display: flex; flex-direction: column; margin-left: var(--space-2); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); min-width: 0; padding: 0 var(--space-3) var(--space-3); }
 .pane:focus { outline: none; }
@@ -472,7 +479,7 @@ button.primary kbd { color: inherit; background: color-mix(in oklab, currentColo
 .hints b { color: var(--fg); font-weight: var(--weight-strong); }
 
 /* ---- The bot's conversations: a chip at the end of the header opens the list; each row has a ⋯ for its actions; the foot has the actions on the whole ---- */
-/* With the pane open the row is short: the chip gives way first (its name is cut), then the tabs scroll. */
+/* With the pane open the row is short: the chip gives way first (its name is cut), then the title. */
 main > header > .conversation { display: flex; flex-shrink: 8; justify-content: flex-end; margin-left: auto; min-width: var(--control-w-short); }
 .popover.start { left: 0; right: auto; }
 .popover.below { top: calc(100% + var(--space-1)); bottom: auto; left: 0; right: auto; }
@@ -616,17 +623,10 @@ main > header > .conversation { display: flex; flex-shrink: 8; justify-content: 
   /* The words get a row of their own, the buttons the one under it; the popover is as wide as the pill. */
   .menu { position: static; }
   .popover { left: 0; right: 0; width: auto; }
-  .menu.more { position: relative; }
+  .menu.more, .menu.title { position: relative; }
   .menu.more .popover { left: auto; right: 0; width: max-content; }
 }
-/* A main area too narrow for one row (the window at its first size, a phone, the side pane open): the header is two rows, who and the conversation, then the tabs. */
-@container (max-width: 760px) {
-  main > header { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2) var(--space-3); padding-block: var(--space-2) var(--space-3); }
-  main > header > [role=tablist] { grid-row: 2; grid-column: 1 / -1; justify-self: start; max-width: 100%; }
-}
 @container (max-width: 640px) {
-  main > header > [role=tablist] { justify-self: stretch; }
-  [role=tab] { flex: 1 0 auto; padding: 0 var(--space-1); }
   /* The words get a row of their own, the buttons the one under it. */
   .composer { flex-wrap: wrap; }
   .composer textarea { order: -1; flex: 1 0 100%; }
