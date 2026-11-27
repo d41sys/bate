@@ -3,37 +3,37 @@
 :root {
   color-scheme: light dark;
 
-  /* Colour: one neutral grey with no hue, light and dark. The window is the ground, the page a white sheet on it,
-     and what sits on the sheet steps one fill at a time. Black is the main action; one green for links and focus,
-     one apricot for what needs the person. */
-  --bg: oklch(100% 0 0);
-  --bg-side: oklch(97.5% 0 0);
+  /* Colour: one neutral grey with no hue, light and dark. The window is the ground, the page a near-white sheet on it;
+     a field, a button and the chosen row are one grey fill, and nothing on the sheet has an edge. Black is the main action;
+     one green for links and focus, one apricot for what needs the person. */
+  --bg: oklch(99.2% 0 0);
+  --bg-side: oklch(96.8% 0 0);
   --bg-raised: oklch(100% 0 0);
-  --bg-soft: oklch(96.5% 0 0);
+  --bg-soft: oklch(96% 0 0);
   --bg-soft-2: oklch(93.5% 0 0);
   --bg-soft-3: oklch(90.5% 0 0);
   /* The part of a control that moves: the chosen tab, a switch's knob. */
   --bg-thumb: oklch(100% 0 0);
-  --bg-field: oklch(100% 0 0);
+  /* A field is its fill, with no edge (the owner's choice, #306: an empty field is under WCAG 1.4.11's 3:1). */
+  --bg-field: oklch(93.5% 0 0);
   --bg-hover: oklch(15% 0 0 / .05);
-  --bg-current: oklch(92.5% 0 0);
+  --bg-current: oklch(93% 0 0);
   --fg: oklch(15% 0 0);
-  --fg-muted: oklch(46% 0 0);
+  --fg-muted: oklch(48% 0 0);
   /* The few lines left: under the head of a table. */
   --border: oklch(92% 0 0);
   --border-strong: oklch(86% 0 0);
-  /* A field is known by its edge, so the edge has 3:1 against what is around it. */
-  --border-field: oklch(64% 0 0);
+  /* A switch that is off: its track has 3:1 against what is around it. */
+  --border-field: oklch(62% 0 0);
   --ink: oklch(15% 0 0);
   --on-ink: oklch(100% 0 0);
-  --bubble-user: oklch(95.5% 0 0);
+  --bubble-user: oklch(94.5% 0 0);
   --on-bubble-user: var(--fg);
   --accent: oklch(47% 0.1 165);
   --danger: oklch(50% 0.19 27);
   --on-danger: oklch(100% 0 0);
   --warn: oklch(42% 0.09 62);
   --warn-soft: oklch(95% 0.045 72);
-  --mark: oklch(75% 0.14 62);
   /* A diff: the fill of an added and of a removed line (the + and - sign says it too). */
   --diff-add: oklch(94% 0.05 150);
   --diff-del: oklch(94% 0.04 25);
@@ -50,20 +50,22 @@
   --fill: var(--bg-soft);
   --fill-hover: var(--bg-soft-2);
 
-  /* Type: the system's font; 15/22 for text, 16/26 for what is said in a chat. Three weights: 400, 500 and the strong one. */
+  /* Type: the system's font; 14/20 for text, 13/18 for the small lines, 15/24 for what is said in a chat. Three weights: 400, 500 and the strong one. */
   --font-ui: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --size-small: 13px;
-  --size-ui: 15px;
-  --size-title: 18px;
-  --size-head: 24px;
-  --size-display: 32px;
-  --leading: 22px;
-  --size-chat: 16px;
-  --leading-chat: 26px;
+  --size-ui: 14px;
+  --size-title: 15px;
+  --size-head: 20px;
+  --size-display: 28px;
+  --leading: 20px;
+  --leading-head: 28px;
+  --leading-display: 34px;
+  --size-chat: 15px;
+  --leading-chat: 24px;
   --leading-small: 18px;
   --weight-strong: 600;
-  --tracking-head: -0.025em;
+  --tracking-head: -0.012em;
 
   /* Space: a 4 px grid, and one half step. */
   --space-0: 2px;
@@ -74,31 +76,31 @@
   --space-5: 24px;
   --space-6: 40px;
 
-  /* Shape: rounded rectangles; a round button and a badge are the only pills. */
-  --radius-s: 6px;
-  --radius-m: 12px;
-  --radius-l: 20px;
-  --radius-bubble: 20px;
+  /* Shape: small rounded rectangles; a round button and a badge are the only pills. */
+  --radius-s: 4px;
+  --radius-m: 8px;
+  --radius-l: 12px;
+  --radius-bubble: 18px;
   --radius-pill: 999px;
-  --control-h: 40px;
-  --control-h-small: 32px;
-  --row-h: 48px;
-  --row-h-l: 56px;
-  --head-h: 72px;
+  --control-h: 32px;
+  --control-h-small: 28px;
+  --row-h: 36px;
+  --row-h-l: 44px;
+  --head-h: 56px;
   /* The room the window's own buttons take at the top left, in Bate's window. */
   --titlebar-h: 40px;
-  --avatar: 28px;
-  --avatar-l: 36px;
-  --side-w: 280px;
+  --avatar: 24px;
+  --avatar-l: 28px;
+  --side-w: 260px;
   --thread-w: 720px;
   --reply-w: 640px;
   --popover-w: 300px;
   --nav-w: 180px;
   --chip-w: 180px;
-  --switch-w: 36px;
-  --switch-h: 20px;
+  --switch-w: 32px;
+  --switch-h: 18px;
   --tip-w: 240px;
-  --control-w: 240px;
+  --control-w: 220px;
   --control-w-short: 112px;
 
   /* Motion: short, and none when the system asks for less. */
@@ -120,7 +122,7 @@
     --bg-soft-2: oklch(23.5% 0 0);
     --bg-soft-3: oklch(28% 0 0);
     --bg-thumb: oklch(32% 0 0);
-    --bg-field: oklch(11.5% 0 0);
+    --bg-field: oklch(21.5% 0 0);
     --bg-hover: oklch(100% 0 0 / .06);
     --bg-current: oklch(25% 0 0);
     --fg: oklch(97% 0 0);

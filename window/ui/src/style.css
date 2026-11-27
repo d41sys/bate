@@ -11,10 +11,11 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: var(--size-ui)/
 /* Scroll bars: thin, a quiet thumb on no track. */
 :root { scrollbar-color: var(--bg-soft-3) transparent; }
 * { scrollbar-width: thin; }
-h1 { font-size: var(--size-head); line-height: 30px; font-weight: var(--weight-strong); margin: 0; }
-h2 { font-size: var(--size-title); line-height: 24px; font-weight: var(--weight-strong); margin: var(--space-5) 0 var(--space-2); }
+h1 { font-size: var(--size-head); line-height: var(--leading-head); font-weight: var(--weight-strong); margin: 0; }
+/* A section's name is a quiet line over its rows, not a title. */
+h2 { font-size: var(--size-ui); line-height: var(--leading); font-weight: 500; color: var(--fg-muted); margin: var(--space-5) 0 var(--space-1); }
 h3 { font-size: var(--size-ui); font-weight: var(--weight-strong); margin: var(--space-4) 0 var(--space-1); }
-h1, h2, h3 { letter-spacing: var(--tracking-head); text-wrap: balance; }
+h1, h3 { letter-spacing: var(--tracking-head); } h1, h2, h3 { text-wrap: balance; }
 b, strong { font-weight: var(--weight-strong); }
 p { margin: var(--space-2) 0; text-wrap: pretty; }
 a { color: var(--accent); }
@@ -25,7 +26,7 @@ pre { background: var(--fill); padding: var(--space-3) var(--space-4); border-ra
 pre code { background: none; padding: 0; }
 summary { cursor: pointer; }
 table { border-collapse: collapse; }
-fieldset { border: 0; border-radius: var(--radius-l); background: var(--bg-soft); margin: var(--space-3) 0; padding: var(--space-3) var(--space-4); min-width: 0; }
+fieldset { border: 0; margin: var(--space-3) 0; padding: 0; min-width: 0; }
 /* The legend sits in the well, not on an edge. */
 legend { float: left; width: 100%; margin-bottom: var(--space-2); padding: 0; color: var(--fg-muted); font-size: var(--size-small); }
 legend + * { clear: both; }
@@ -33,7 +34,7 @@ legend + * { clear: both; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- Button: secondary unless it says otherwise ---- */
-button { font: inherit; font-weight: 500; color: var(--fg); min-height: var(--control-h); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-m); background: var(--fill); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); white-space: nowrap; transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease); }
+button { font: inherit; font-weight: 500; color: var(--fg); min-height: var(--control-h); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-m); background: var(--fill); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); white-space: nowrap; transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease); }
 button:hover:not(:disabled) { background: var(--fill-hover); }
 button:active:not(:disabled) { transform: scale(.98); }
 button:disabled { opacity: .45; cursor: not-allowed; }
@@ -46,18 +47,23 @@ button.danger:hover:not(:disabled) { background: color-mix(in oklab, var(--dange
 button.ghost { background: none; color: var(--fg-muted); }
 button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
 /* A button at the end of a settings row is small by itself; beside a text box or a select it keeps the box's height. */
-button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-3); font-size: var(--size-small); }
+button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
 /* A button that is one sign: it needs an aria-label. */
 button.round { width: var(--control-h); padding: 0; flex: none; border-radius: 50%; }
 /* A sign drawn inline: it takes the button's colour. */
-button.round svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+button.round svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 button.file { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; font-weight: inherit; text-decoration: underline; white-space: normal; }
 /* On a tinted or raised surface a control's fill steps up with it, so a button never has the fill it sits on. */
-.rows li, .group-rows, .banner, fieldset, .card, .question, .first-run, .sheet > form, .popover, .composer, .quick, .surface .body, .changes summary { --fill: var(--bg-soft-2); --fill-hover: var(--bg-soft-3); }
+.rows li, .banner, .card, .question, .first-run, .sheet > form, .popover, .composer, .quick, .surface .body, .changes summary { --fill: var(--bg-soft-2); --fill-hover: var(--bg-soft-3); }
 
-/* ---- Text field, select ---- */
-input:not([type=checkbox], [type=radio], [type=file], [type=range]), select, textarea { font: inherit; color: var(--fg); background: var(--bg-field); border: 1px solid var(--border-field); border-radius: var(--radius-m); min-height: var(--control-h); padding: var(--space-1) var(--space-3); max-width: 100%; }
+/* ---- Text field, select: a grey fill with no edge; the focus ring says where the words go ---- */
+input:not([type=checkbox], [type=radio], [type=file], [type=range]), select, textarea { font: inherit; color: var(--fg); background-color: var(--bg-field); border: 0; border-radius: var(--radius-m); min-height: var(--control-h); padding: 0 var(--space-3); max-width: 100%; }
 textarea { padding: var(--space-2) var(--space-3); line-height: var(--leading); resize: vertical; }
+/* A select is its value and a small chevron drawn in the text's quiet colour. */
+select { -webkit-appearance: none; appearance: none; padding-right: calc(var(--space-3) + var(--space-4)); background-image: linear-gradient(45deg, transparent 50%, var(--fg-muted) 50%), linear-gradient(135deg, var(--fg-muted) 50%, transparent 50%); background-position: calc(100% - var(--space-4)) 55%, calc(100% - var(--space-3)) 55%; background-size: 4px 4px; background-repeat: no-repeat; }
+/* At a settings row's end a select reads as its value; pointed at, it shows its fill. */
+.setting .control > select { background-color: transparent; text-align: right; text-align-last: right; }
+.setting .control > select:hover:not(:disabled), .setting .control > select:focus-visible { background-color: var(--bg-field); }
 ::placeholder { color: var(--fg-muted); opacity: 1; }
 input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
 input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
@@ -125,18 +131,17 @@ label:has(> input[role=switch]) { display: inline-flex; align-items: center; gap
 .codeblock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; }
 .codeblock pre { flex: 1 1 var(--popover-w); min-width: 0; margin: 0; }
 .rows li > .error { flex: 1 0 100%; margin: 0; }
-/* ---- Settings: a group is a heading over one card of rows. A row has its title and one small line on the left and its control at the end ---- */
+/* ---- Settings: a group is a quiet heading over plain rows on the page, with no well. A row has its title and one small line on the left and its control at the end ---- */
 .group { margin-block: var(--space-5) 0; }
-.group > h2 { margin: 0 0 var(--space-2); }
-.group-rows { background: var(--bg-soft); border-radius: var(--radius-l); padding: var(--space-1) var(--space-4); }
+.group > h2 { margin: 0 0 var(--space-1); }
 .group-rows .rows li { padding-inline: 0; background: none; }
-.group-rows > p { margin: 0; padding: var(--space-3) 0; }
+.group-rows > p { margin: 0; padding: var(--space-2) 0; }
 .group-rows > .note { font-size: var(--size-small); line-height: var(--leading-small); }
-.group-rows .actions { padding: var(--space-3) 0; }
+.group-rows .actions { padding: var(--space-2) 0; }
 .group + .actions { margin-top: var(--space-4); }
 /* A name and the small lines under it, in a row of settings or of a list. */
 .what > small { display: block; line-height: var(--leading-small); }
-.setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 var(--space-4); min-height: var(--row-h); padding: var(--space-2) 0; }
+.setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 var(--space-4); min-height: var(--row-h); padding: var(--space-1) 0; }
 .setting .what { min-width: 0; overflow-wrap: anywhere; }
 .setting > .error { grid-column: 1 / -1; margin: 0; padding-bottom: var(--space-1); }
 .control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
@@ -166,11 +171,16 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
   .settings nav ul { display: flex; overflow-x: auto; }
   .settings nav li { flex: none; }
 }
-/* A main area too narrow for a title and its field side by side: a row's control goes under its title, as wide as the column; a switch or a button stays at the end. */
-@container (max-width: 760px) {
+/* A text field's row: with no small line, the title and then the field across the rest of the row; with one, the title and its line over the field, as wide as the column. */
+.setting:has(> .control > input:not([type=checkbox], [type=radio], [type=color], [type=range], .short)):not(:has(> .what > small)) { grid-template-columns: auto minmax(0, 1fr); }
+.setting:has(> .what > small):has(> .control > input:not([type=checkbox], [type=radio], [type=color], [type=range], .short)) { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-2); }
+.setting:has(> .control > input:not([type=checkbox], [type=radio], [type=color], [type=range], .short)) .control > input { width: 100%; }
+/* A phone's column: every control but a switch or a button goes under its title. */
+@container (max-width: 480px) {
   .setting:not(.inline) { grid-template-columns: minmax(0, 1fr); row-gap: var(--space-2); }
   .setting:not(.inline) .control { justify-content: flex-start; flex-wrap: wrap; }
   .setting:not(.inline) .control > :where(input:not([type=checkbox], [type=radio], [type=color], [type=range]), select) { width: 100%; }
+  .setting:not(.inline) .control > select { background-color: var(--bg-field); text-align: left; text-align-last: left; }
 }
 /* A row to tick: a checkbox, the bot's avatar and name. One that cannot be ticked says why under its name. */
 .fields.stack label.row { display: flex; align-items: center; margin: 0; cursor: pointer; }
@@ -201,7 +211,7 @@ main > header:has(+ .settings) { max-width: calc(var(--thread-w) + var(--nav-w) 
 /* First run: one card in the middle of the page and one main button; the model server's fields stay folded until asked for. */
 main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); padding: var(--space-6) var(--space-5); display: grid; gap: var(--space-3); text-align: center; }
 .first-run h1, .first-run p { margin: 0; }
-.first-run h1 { font-size: var(--size-display); line-height: 38px; }
+.first-run h1 { font-size: var(--size-display); line-height: var(--leading-display); }
 .first-run h1 + p { color: var(--fg-muted); }
 .first-run button.primary { min-height: calc(var(--control-h) + var(--space-1)); }
 .first-run details { text-align: left; }
@@ -316,7 +326,7 @@ main > *, div:where([role=tabpanel]) > * { width: 100%; max-width: var(--thread-
 main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--space-4); min-height: var(--head-h); background: var(--bg); }
 /* Who this is: the face and the name, as the page's title. */
 .who { display: inline-flex; flex: none; align-items: center; gap: var(--space-2); }
-.who h1 { font-size: var(--size-head); line-height: 30px; }
+.who h1 { font-size: var(--size-head); line-height: var(--leading-head); }
 
 .pane { position: relative; display: flex; flex-direction: column; margin-left: var(--space-2); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); min-width: 0; padding: 0 var(--space-3) var(--space-3); }
 .pane:focus { outline: none; }

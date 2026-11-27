@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-// docs/design-system.md, Accessibility: text has 4.5:1 on what it lies on, a field's edge and a control's fill 3:1, in light and in dark.
+// docs/design-system.md, Accessibility: text has 4.5:1 on what it lies on, an off switch's track and the main fill 3:1, in light and in dark.
+// A field is a fill with no edge, by the owner's choice (#306), so no pair checks a field's edge; its words and placeholder are checked on its fill.
 // The pictures show one mode at a time and no number; this reads the tokens and works the numbers out.
 const css = readFileSync(new URL("./tokens.css", import.meta.url), "utf8");
 const [lightBlock, rest] = css.split("@media (prefers-color-scheme: dark)");
@@ -30,9 +31,10 @@ const ratio = (a: number[], b: number[]) => (Math.max(luminance(a), luminance(b)
 const PAIRS: [string, string, number][] = [
   ["--fg", "--bg", 4.5], ["--fg", "--bg-soft", 4.5], ["--fg", "--bg-soft-3", 4.5], ["--fg", "--bg-thumb", 4.5], ["--fg", "--bg-current", 4.5],
   ["--fg-muted", "--bg", 4.5], ["--fg-muted", "--bg-side", 4.5], ["--fg-muted", "--bg-soft", 4.5], ["--fg-muted", "--bg-soft-2", 4.5], ["--fg-muted", "--bg-raised", 4.5], ["--fg-muted", "--bg-current", 4.5],
+  ["--fg", "--bg-field", 4.5], ["--fg-muted", "--bg-field", 4.5],
   ["--on-ink", "--ink", 4.5], ["--on-danger", "--danger", 4.5], ["--on-bubble-user", "--bubble-user", 4.5], ["--warn", "--warn-soft", 4.5],
   ["--accent", "--bg", 4.5], ["--accent", "--bg-soft", 4.5], ["--danger", "--bg", 4.5], ["--danger", "--bg-soft", 4.5], ["--danger", "--bg-raised", 4.5],
-  ["--border-field", "--bg", 3], ["--border-field", "--bg-soft", 3], ["--border-field", "--bg-raised", 3], ["--border-field", "--bg-field", 3],
+  ["--border-field", "--bg", 3], ["--border-field", "--bg-soft", 3], ["--border-field", "--bg-raised", 3],
   ["--ink", "--bg", 3], ["--ink", "--bg-side", 3], ["--accent", "--bg-side", 3],
 ];
 
