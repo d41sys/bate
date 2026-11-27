@@ -28,15 +28,6 @@ export function stepBot(list: Bot[], from: string | undefined, by: 1 | -1): Bot 
   return list[at < 0 ? (by > 0 ? 0 : list.length - 1) : (at + by + list.length) % list.length];
 }
 
-/** The tab an arrow key (or Home, End) moves to from `tab`, wrapping round; undefined for any other key. */
-export function stepTab<T>(tabs: T[], tab: T, key: string): T | undefined {
-  const at = tabs.indexOf(tab);
-  if (key === "Home") return tabs[0];
-  if (key === "End") return tabs[tabs.length - 1];
-  if (key === "ArrowLeft") return tabs[(at - 1 + tabs.length) % tabs.length];
-  if (key === "ArrowRight") return tabs[(at + 1) % tabs.length];
-}
-
 const KEYS: Record<string, string> = { KeyK: "palette", KeyF: "find", KeyN: "new-bot", Comma: "settings", BracketLeft: "previous-bot", BracketRight: "next-bot" };
 type Chord = Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing">;
 

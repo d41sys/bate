@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
-export type MenuItem = { label: string; run: () => void; danger?: boolean };
+/** `current`: the item stands for what is shown now (a menu of pages); it is then a radio item, checked or not. */
+export type MenuItem = { label: string; run: () => void; danger?: boolean; current?: boolean };
 
 /**
  * The `⋯` button at the end of a row of a list, and the menu of the row's other actions, Delete among them.
  * Enter or Space opens it with the first item in focus; the arrows (Home, End) move, Enter runs one, Esc or a
  * click outside closes it (Esc is taken here, so it does not also stop a bot). `label` names the row.
+ * With `title` the button is instead the page's title (an `<h1>` holding `title` and a `▾`), and the menu lists the pages.
  */
-export function RowMenu({ label, items }: { label: string; items: MenuItem[] }) {
+export function RowMenu({ label, items, title }: { label: string; items: MenuItem[]; title?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  const entries = () => [...(wrap.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? [])];
+  const entries = () => [...(wrap.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? [])];
 
   useEffect(() => {
     if (!open) return;
@@ -42,29 +44,34 @@ export function RowMenu({ label, items }: { label: string; items: MenuItem[] }) 
     all[to].focus();
   };
 
+  const button = (
+    <button
+      ref={trigger}
+      type="button"
+      className={title ? "title" : "round ghost"}
+      aria-label={title ? undefined : `More actions: ${label}`}
+      aria-haspopup="menu"
+      aria-expanded={open}
+      data-tip={title ? undefined : "More actions"}
+      onClick={() => setOpen(!open)}
+    >
+      {title ? <>{title}<span className="chevron" aria-hidden="true">▾</span></> : <span aria-hidden="true">⋯</span>}
+    </button>
+  );
+
   return (
-    <div className="menu more" ref={wrap} onBlur={(e) => !wrap.current?.contains(e.relatedTarget as Node) && setOpen(false)}>
-      <button
-        ref={trigger}
-        type="button"
-        className="round ghost"
-        aria-label={`More actions: ${label}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        data-tip="More actions"
-        onClick={() => setOpen(!open)}
-      >
-        <span aria-hidden="true">⋯</span>
-      </button>
+    <div className={title ? "menu title" : "menu more"} ref={wrap} onBlur={(e) => !wrap.current?.contains(e.relatedTarget as Node) && setOpen(false)}>
+      {title ? <h1>{button}</h1> : button}
       {open && (
-        <div className="popover dropdown" role="menu" aria-label={label} onKeyDown={move}>
+        <div className={title ? "popover dropdown start" : "popover dropdown"} role="menu" aria-label={label} onKeyDown={move}>
           {items.map((i) => (
             <button
               key={i.label}
               type="button"
-              role="menuitem"
+              role={i.current === undefined ? "menuitem" : "menuitemradio"}
+              aria-checked={i.current}
               tabIndex={-1}
-              className={i.danger ? "row plain danger" : "row plain"}
+              className={["row plain", i.danger && "danger", i.current && "current"].filter(Boolean).join(" ")}
               onClick={() => {
                 setOpen(false);
                 trigger.current?.focus();
