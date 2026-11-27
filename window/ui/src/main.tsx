@@ -362,9 +362,9 @@ function App() {
 
   if (unpaired) return <Pair onPair={pair} />;
   return (
-    // In Bate's window there is no title bar: the sidebar, the header and the gaps between them move the window.
+    // In Bate's window there is no title bar: the ground round the sheets, a header's gaps and the page's title move the window; nothing that scrolls or opens does.
     <div className={inShell ? "app shell" : "app"} data-tauri-drag-region="">
-      <nav className="sidebar" aria-label="Projects and bots" data-tauri-drag-region="deep">
+      <nav className="sidebar" aria-label="Projects and bots">
         <ul>
           <li>{plain("Activity", view?.page === "attention", () => setView({ page: "attention" }), waiting > 0 && <span className="badge">{waiting} {waiting === 1 ? "needs" : "need"} you</span>)}</li>
         </ul>
@@ -408,26 +408,26 @@ function App() {
         {error && <p className="banner error" role="alert" onClick={() => setError("")}>{error}</p>}
         {view?.page === "attention" && (
           <>
-            <header data-tauri-drag-region="deep"><div className="who"><h1>Activity</h1></div></header>
+            <header data-tauri-drag-region=""><div className="who" data-tauri-drag-region="deep"><h1>Activity</h1></div></header>
             <Attention key={connection} bots={bots} open={(id, conversation) => openBot(id, "chat", conversation)} />
           </>
         )}
         {view?.page === "new-bot" && (
           <>
-            <header data-tauri-drag-region="deep"><div className="who"><h1>New bot</h1></div></header>
+            <header data-tauri-drag-region=""><div className="who" data-tauri-drag-region="deep"><h1>New bot</h1></div></header>
             <NewBot opened={(id) => openBot(id)} report={setError} />
           </>
         )}
         {view?.page === "projects" && (
           <>
-            <header data-tauri-drag-region="deep"><div className="who"><h1>Projects</h1></div></header>
+            <header data-tauri-drag-region=""><div className="who" data-tauri-drag-region="deep"><h1>Projects</h1></div></header>
             <Projects key={`${connection}-${view.asked}`} adding={view.asked !== undefined} bots={bots} projects={projects} open={openProject} />
           </>
         )}
         {view?.page === "addons" && (
           <>
-            <header data-tauri-drag-region="deep">
-              <div className="who"><h1>Add-ons</h1></div>
+            <header data-tauri-drag-region="">
+              <div className="who" data-tauri-drag-region="deep"><h1>Add-ons</h1></div>
               <Tabs ids={Object.keys(ADDON_TABS) as AddonTab[]} names={ADDON_TABS} tab={view.tab} set={(tab) => setView({ page: "addons", tab })} />
             </header>
             <Panel tab={view.tab}>
@@ -439,14 +439,14 @@ function App() {
         )}
         {view?.page === "settings" && (
           <>
-            <header data-tauri-drag-region="deep"><div className="who"><h1>Settings</h1></div></header>
+            <header data-tauri-drag-region=""><div className="who" data-tauri-drag-region="deep"><h1>Settings</h1></div></header>
             <AppSettings key={connection} section={view.section} choose={(section) => setView({ page: "settings", section })} />
           </>
         )}
         {view?.page === "project" && project && (
           <>
-            <header data-tauri-drag-region="deep">
-              <div className="who"><h1>{project.name}</h1></div>
+            <header data-tauri-drag-region="">
+              <div className="who" data-tauri-drag-region="deep"><h1>{project.name}</h1></div>
               <Tabs ids={projectTabs} names={PROJECT_TABS} tab={view.tab} set={(t) => openProject(project.id!, t)} />
             </header>
             <Panel tab={view.tab}>
@@ -474,14 +474,14 @@ function App() {
         )}
         {view?.page === "bot" && bot && (
           <>
-            <header data-tauri-drag-region="deep">
-              <div className="who">
+            <header data-tauri-drag-region="">
+              <div className="who" data-tauri-drag-region="deep">
                 <Avatar bot={bot} />
                 <h1>{bot.name}</h1>
               </div>
               <Tabs ids={botTabs} names={BOT_TABS} tab={view.tab} set={(t) => openBot(bot.id, t)} />
               {/* The conversation chip is drawn here by Conversations. */}
-              {view.tab === "chat" && <div className="conversation" ref={setConversationSlot} />}
+              {view.tab === "chat" && <div className="conversation" ref={setConversationSlot} data-tauri-drag-region="" />}
             </header>
             <Panel tab={view.tab}>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
