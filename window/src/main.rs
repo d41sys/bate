@@ -214,7 +214,8 @@ fn open_window_on(app: &AppHandle, bot: Option<&str>) -> tauri::Result<()> {
         .transparent(true)
         .effects(WindowEffectsConfig {
             effects: vec![WindowEffect::Sidebar],
-            state: Some(WindowEffectState::FollowsWindowActiveState),
+            // Always on: following the window's focus turns the ground opaque whenever another app is in front.
+            state: Some(WindowEffectState::Active),
             ..Default::default()
         })
         // Files dropped on the page reach the page (attachments), not the shell.
