@@ -21,6 +21,13 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  # The engine alone also builds for Linux: benchmark tasks run it inside Linux containers.
+  engine-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo build -p agentcore --locked
+
   # A `v*` tag publishes `Bate.app` as a GitHub release, signed ad hoc (a Developer ID signature
   # and notarisation need an Apple account: see `window/bundle.sh`), and with the
   # `BATE_UPDATE_KEY` secret set, the update feed for it.
