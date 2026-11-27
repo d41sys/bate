@@ -101,6 +101,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const [away, setAway] = useState(false);
   // Files are held over the chat.
   const [dropping, setDropping] = useState(false);
+  // The long messages opened with "Show all". Kept here, not in the row: a row scrolled far away is drawn anew.
+  const [whole, setWhole] = useState<ReadonlySet<number>>(new Set());
   // The newest message of the person's that the bot still has: what Retry sends again after a turn that failed or was stopped.
   const lastPrompt = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) {
@@ -525,6 +527,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                   // The call run that the bot is at now, if it is the last thing said.
                   working={bot.busy && row.index === lastIndex}
                   since={lastPrompt?.took === undefined ? lastPrompt?.began : undefined}
+                  all={whole.has(item.id)}
+                  toggleAll={() => setWhole((ids) => { const next = new Set(ids); if (!next.delete(item.id)) next.add(item.id); return next; })}
                   // An installed agent cannot go back in a conversation.
                   fixed={!!bot.agent?.length}
                   retry={retry}
@@ -703,12 +707,15 @@ type Actions = {
   stopReading: () => void;
   /** When the turn that runs began: the working line counts from it. */
   since?: number;
+  /** Whether a long message of the person's is shown whole, and what "Show all" does. */
+  all: boolean;
+  toggleAll: () => void;
 };
 
-function Row({ item, busy, working, since, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, since, all, toggleAll, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
-      return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} />;
+      return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} all={all} toggleAll={toggleAll} />;
     case "reply":
       return <Reply item={item} busy={busy} open={open} reading={reading} read={read} stopReading={stopReading} />;
     case "run":
@@ -779,13 +786,12 @@ function Elapsed({ since }: { since: number }) {
 }
 
 /** A message of the person's: a long one (a pasted log) is cut until asked for; its actions are Copy and, while the bot can still go back, Retry, Edit and Fork. */
-function Said({ item, busy, fixed, retry, edit, fork }: { item: Extract<Item, { kind: "user" }> } & Pick<Actions, "busy" | "fixed" | "retry" | "edit" | "fork">) {
-  const [all, setAll] = useState(false);
+function Said({ item, busy, fixed, retry, edit, fork, all, toggleAll }: { item: Extract<Item, { kind: "user" }> } & Pick<Actions, "busy" | "fixed" | "retry" | "edit" | "fork" | "all" | "toggleAll">) {
   const long = isLong(item.text);
   return (
     <>
       <p className={`bubble${item.past ? " past" : ""}${long && !all ? " folded" : ""}`}>{item.text}</p>
-      {long && <button type="button" className="small ghost" aria-expanded={all} onClick={() => setAll(!all)}>{all ? "Show less" : "Show all"}</button>}
+      {long && <button type="button" className="small ghost" aria-expanded={all} onClick={toggleAll}>{all ? "Show less" : "Show all"}</button>}
       <div className="actions">
         <CopyButton label="Copy the message" text={() => item.text} />
         {!item.past && !fixed && (
