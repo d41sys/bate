@@ -264,6 +264,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .sheet > form { margin: auto; width: min(var(--thread-w), 100%); max-height: 100%; overflow: auto; padding: 0 var(--space-5); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); }
 .sheet .rows li button { margin-left: auto; }
 .sheet p, .sheet li { overflow-wrap: anywhere; }
+/* A dialog's title is a title, not a group's quiet heading. */
+.sheet > form > h2:first-child { font-size: var(--size-title); line-height: var(--leading); font-weight: var(--weight-strong); color: var(--fg); margin-bottom: var(--space-2); }
 .sheet h3 { margin-top: var(--space-3); }
 .sheet ul:not(.rows) { margin: var(--space-1) 0; padding-left: var(--space-4); }
 .sheet .error { white-space: pre-line; }
@@ -336,7 +338,7 @@ main > header { position: sticky; top: 0; z-index: 1; display: flex; align-items
 /* The head: the title, cut in the middle when long so its end stays, and Close. */
 .pane-head { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) 0; }
 .pane-head button { font-size: var(--size-title); }
-.pane-head h2 { display: flex; flex: 1; min-width: 0; margin: 0; font-size: var(--size-ui); line-height: var(--leading); }
+.pane-head h2 { display: flex; flex: 1; min-width: 0; margin: 0; font-size: var(--size-ui); line-height: var(--leading); font-weight: var(--weight-strong); color: var(--fg); }
 .pane-head h2 > span { white-space: pre; }
 .pane-head h2 > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-head h2 > :last-child { flex: none; }

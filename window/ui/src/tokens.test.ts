@@ -49,3 +49,9 @@ for (const [mode, tokens] of [["light", light], ["dark", dark]] as const) {
     }
   });
 }
+
+// Dark only changes values: a token it sets that light lacks is unset in light (a search hit lost its outline so).
+test("light sets every token dark sets", () => {
+  const missing = Object.keys(read(rest.split("@media (prefers-reduced-motion")[0])).filter((name) => !(name in light));
+  assert.deepEqual(missing, []);
+});
