@@ -34,9 +34,11 @@ export const answers = (now) => {
 
   // The transcripts. `seq` grows by one for each entry.
   let seq = 0;
-  const row = (entry) => ({ seq: ++seq, entry });
+  // Each line is 4 seconds after the one before; `minutes` sets the clock to that long ago.
+  let at = now;
+  const row = (entry, minutes) => ({ seq: ++seq, at: (at = minutes === undefined ? at + 4000 : ago(minutes)), entry });
   const analyst = [
-    row({ type: "prompt", nonce: "n1", text: "Where does this firmware check for updates?" }),
+    row({ type: "prompt", nonce: "n1", text: "Where does this firmware check for updates?" }, 30),
     row({ type: "turn_start", nonce: "n1" }),
     row({ type: "thinking", delta: "The image is a squashfs behind a short header. Unpack it, then look for URLs in the update binary." }),
     row({ type: "tool_start", call: "c1", tool: "run", args: { command: "binwalk -e firmware.bin" } }),
@@ -51,13 +53,13 @@ export const answers = (now) => {
     row({ type: "text", delta: "- The request carries the device serial number.\n- The reply is JSON with a `url` and a `sha256`.\n- Nothing in the binary checks a signature yet.\n" }),
     row({ type: "checked", result: "passed", note: "Each claim points at a command's output.", by: "Daisy" }),
     row({ type: "turn_end", reason: "done" }),
-    row({ type: "prompt", nonce: "n2", text: "Check whether the manifest is signed before it is used." }),
+    row({ type: "prompt", nonce: "n2", text: "Check whether the manifest is signed before it is used." }, 4),
     row({ type: "turn_start", nonce: "n2" }),
     row({ type: "text", delta: "I will run the updater under a trace to see what it does with the reply." }),
     row({ type: "tool_start", call: "c5", tool: "run", args: { command: "strace -f -e trace=openat,write ./updater --once" } }),
   ];
   const daisy = [
-    row({ type: "prompt", nonce: "n3", text: "Decompile `updater` and list the functions that touch the manifest." }),
+    row({ type: "prompt", nonce: "n3", text: "Decompile `updater` and list the functions that touch the manifest." }, 2),
     row({ type: "turn_start", nonce: "n3" }),
     row({ type: "tool_start", call: "d1", tool: "run", args: { command: "objdump -d usr/bin/updater | grep -c manifest" } }),
     row({ type: "tool_end", call: "d1", output: "14", isError: false }),
@@ -65,7 +67,7 @@ export const answers = (now) => {
     row({ type: "tool_start", call: "d2", tool: "read", args: { path: "notes/update-check.md" } }),
   ];
   const scout = [
-    row({ type: "prompt", nonce: "n4", text: "What does the vendor say about signed updates?" }),
+    row({ type: "prompt", nonce: "n4", text: "What does the vendor say about signed updates?" }, 45),
     row({ type: "turn_start", nonce: "n4" }),
     row({ type: "tool_start", call: "s1", tool: "fetch", args: { url: "https://docs.example.net/updates/signing" } }),
     row({ type: "tool_end", call: "s1", output: "Updates are signed with an offline key. The device checks the signature before it unpacks.", isError: false }),
@@ -75,7 +77,7 @@ export const answers = (now) => {
   // A second conversation of Analyst's that holds one of everything a chat can show.
   const pasted = Array.from({ length: 12 }, (_, i) => `[   ${31 + i}.9021${i}4] eth0: link is not ready (try ${i + 1})`).join("\n");
   const parts = [
-    row({ type: "prompt", nonce: "m0", text: "Summarise the whole log." }),
+    row({ type: "prompt", nonce: "m0", text: "Summarise the whole log." }, 60 * 26 + 5),
     row({ type: "turn_start", nonce: "m0" }),
     row({ type: "text", delta: "It is 4,200 lines. A summary of all of it would hide what matters." }),
     row({ type: "turn_end", reason: "done" }),
@@ -107,7 +109,7 @@ export const answers = (now) => {
       ].join("\n\n"),
     }),
     row({ type: "turn_end", reason: "done" }),
-    row({ type: "prompt", nonce: "m2", text: `What are these lines?\n\n${pasted}` }),
+    row({ type: "prompt", nonce: "m2", text: `What are these lines?\n\n${pasted}` }, 50),
     row({ type: "turn_start", nonce: "m2" }),
     row({ type: "steered", text: "Only the ones after 35 seconds." }),
     row({ type: "text", delta: "They are the network driver asking again, once a second, until the cable answers." }),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dayTime } from "./times.ts";
+import { dayTime, took } from "./times.ts";
 
 // Saturday 21 November 2026, 10:00, local time: the expected clock is the system's own, whatever its locale.
 const now = new Date(2026, 10, 21, 10, 0).getTime();
@@ -32,4 +32,13 @@ test("older or further off is the date alone, with the year when it is not this 
   assert.ok(!old.includes("2026"));
   assert.ok(dayTime(at(5, 9, 0, 10, 2025), now).includes("2025"));
   assert.ok(!dayTime(at(12, 9, 0, 11), now).includes(clock(at(12, 9, 0))));
+});
+
+test("how long something took is in the largest two units", () => {
+  assert.equal(took(0), "0 s");
+  assert.equal(took(12_400), "12 s");
+  assert.equal(took(59_600), "1 min 0 s");
+  assert.equal(took(125_000), "2 min 5 s");
+  assert.equal(took(3_840_000), "1 h 4 min");
+  assert.equal(took(-5), "0 s");
 });

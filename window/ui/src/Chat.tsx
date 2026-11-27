@@ -1,14 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { inShell, listen, request, startDictation, type Failure } from "./service.ts";
-import { add, aim, build, changedFiles, checkText, describe, fold, given, isLong, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
+import { add, aim, build, changedFiles, checkText, dayStarts, describe, fold, given, isLong, WORKING, type Entry, type Item, type Part, type Question, type Row, type Shown } from "./chat.ts";
 import { Avatar } from "./Avatar.tsx";
 import { KeychainNotice } from "./Keychain.tsx";
 import { CopyButton, Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
 import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
-import { dayTime } from "./times.ts";
+import { clock, day, dayTime, took } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
 import { ArrowDown, ArrowUp, CalendarClock, Check, Circle, CircleAlert, CircleCheck, CircleDot, Clock, GitFork, Mic, Paperclip, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { upload } from "./upload.ts";
@@ -108,6 +108,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
       if (item.kind === "user") return item.past ? undefined : item;
     }
   }, [items]);
+  const days = useMemo(() => dayStarts(items), [items]);
   const rows = useVirtualizer({
     count: shown.length,
     getScrollElement: () => scroller.current,
@@ -182,7 +183,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
       if (frame.bot !== bot.id || (frame.conversation !== undefined && frame.conversation !== conversation)) return;
       if (frame.type === "transcript") {
         const entry = frame.entry as Entry;
-        const row = { seq: frame.seq as number, entry };
+        const row = { seq: frame.seq as number, at: frame.at as number | undefined, entry };
         live?.push(row);
         entries.current.push(row);
         arrived.current.set(row.seq, Date.now());
@@ -493,6 +494,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
         <div style={{ height: rows.getTotalSize(), position: "relative" }}>
           {rows.getVirtualItems().map((row) => {
             const item = shown[row.index];
+            const before = row.index > 0 ? shown[row.index - 1] : undefined;
             return (
               <div
                 key={row.key}
@@ -501,17 +503,28 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
                 className={`item ${item.kind}${item.id === marked ? " marked" : ""}${Date.now() - (arrived.current.get(item.id) ?? 0) < ARRIVING ? " arriving" : ""}`}
                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` }}
               >
-                {/* A work log: each of the person's messages, and the first thing the bot does after one, says who. */}
+                {/* A work log: each of the person's messages, and the first thing the bot does after one, says who.
+                    The person's says when (the first of a day, the day too); the bot's, how long the turn took. */}
                 {item.kind === "user" ? (
-                  <small className="from"><b>You</b></small>
+                  <small className="from">
+                    <b>You</b>
+                    {item.at !== undefined && <time dateTime={new Date(item.at).toISOString()}>{days.has(item.id) ? `${day(item.at)} ${clock(item.at)}` : clock(item.at)}</time>}
+                  </small>
                 ) : (
-                  (row.index === 0 || shown[row.index - 1].kind === "user") && <small className="from"><Avatar bot={bot} /><b>{bot.name}</b></small>
+                  (!before || before.kind === "user") && (
+                    <small className="from">
+                      <Avatar bot={bot} />
+                      <b>{bot.name}</b>
+                      {before?.kind === "user" && before.took !== undefined && <span>{took(before.took)}</span>}
+                    </small>
+                  )
                 )}
                 <Row
                   item={item}
                   busy={bot.busy || sending}
                   // The call run that the bot is at now, if it is the last thing said.
                   working={bot.busy && row.index === lastIndex}
+                  since={lastPrompt?.took === undefined ? lastPrompt?.began : undefined}
                   // An installed agent cannot go back in a conversation.
                   fixed={!!bot.agent?.length}
                   retry={retry}
@@ -688,9 +701,11 @@ type Actions = {
   reading: boolean;
   read?: (id: number, text: string) => void;
   stopReading: () => void;
+  /** When the turn that runs began: the working line counts from it. */
+  since?: number;
 };
 
-function Row({ item, busy, working, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
+function Row({ item, busy, working, since, fixed, retry, again, edit, fork, proceed, latest, open, changes, bot, reading, read, stopReading }: { item: Shown; working: boolean } & Actions) {
   switch (item.kind) {
     case "user":
       return <Said item={item} busy={busy} fixed={fixed} retry={retry} edit={edit} fork={fork} />;
@@ -715,7 +730,7 @@ function Row({ item, busy, working, fixed, retry, again, edit, fork, proceed, la
     case "working":
       return (
         <p role="status">
-          <span className="dots" aria-hidden="true"><i /><i /><i /></span> Working…
+          <span className="dots" aria-hidden="true"><i /><i /><i /></span> Working… {since !== undefined && <Elapsed since={since} />}
         </p>
       );
     case "retrying":
@@ -751,6 +766,16 @@ function Row({ item, busy, working, fixed, retry, again, edit, fork, proceed, la
     case "forked":
       return <p>Forked here. The bot goes on from before the greyed messages above; they are kept to read.</p>;
   }
+}
+
+/** How long the turn has run, counted each second. Not read out: a screen reader would say every second. */
+function Elapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+  return <span aria-hidden="true">{took(now - since)}</span>;
 }
 
 /** A message of the person's: a long one (a pasted log) is cut until asked for; its actions are Copy and, while the bot can still go back, Retry, Edit and Fork. */
