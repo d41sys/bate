@@ -34,6 +34,7 @@ import { LATER } from "./firstRun.ts";
 import { Palette, type Choice } from "./Palette.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import "./highlight.css";
+import { Blocks, Folder, Inbox, type LucideIcon, Plus, Settings as Gear } from "lucide-react";
 import "./style.css";
 
 // Only in the build `window/check-frames.sh` makes.
@@ -333,9 +334,10 @@ function App() {
     </li>
     );
   };
-  /** A row with no avatar: a project, or a page of the app. */
-  const plain = (text: string, current: boolean, go: () => void, badge?: ReactNode) => (
+  /** A row with an icon and no avatar: a project, or a page of the app. */
+  const plain = (text: string, Icon: LucideIcon, current: boolean, go: () => void, badge?: ReactNode) => (
     <button className={current ? "row plain current" : "row plain"} aria-current={current ? "page" : undefined} onClick={go}>
+      <Icon />
       <span className="label"><span>{text}</span></span>
       {badge}
     </button>
@@ -347,28 +349,28 @@ function App() {
     <div className={inShell ? "app shell" : "app"} data-tauri-drag-region="">
       <nav className="sidebar" aria-label="Projects and bots">
         <ul>
-          <li>{plain("Activity", view?.page === "attention", () => setView({ page: "attention" }), waiting > 0 && <span className="badge">{waiting} {waiting === 1 ? "needs" : "need"} you</span>)}</li>
+          <li>{plain("Activity", Inbox, view?.page === "attention", () => setView({ page: "attention" }), waiting > 0 && <span className="badge">{waiting} {waiting === 1 ? "needs" : "need"} you</span>)}</li>
         </ul>
         <div className="heading">
           <h2>Projects</h2>
-          <button className="round ghost" aria-label="New project" data-tip="New project" onClick={actions["new-project"]}>+</button>
+          <button className="round ghost" aria-label="New project" data-tip="New project" onClick={actions["new-project"]}><Plus /></button>
         </div>
         <ul>
           {lists.projects.map(({ project: p, bots: members }) => (
             <li key={p.id}>
-              {plain(p.name, view?.page === "project" && view.id === p.id, () => openProject(p.id!, view?.page === "project" ? view.tab : "room"))}
+              {plain(p.name, Folder, view?.page === "project" && view.id === p.id, () => openProject(p.id!, view?.page === "project" ? view.tab : "room"))}
               {members.length > 0 && <ul>{members.map(botRow)}</ul>}
             </li>
           ))}
         </ul>
         <div className="heading">
           <h2>Bots</h2>
-          <button className="round ghost" aria-label="New bot" data-tip="New bot (⌘N)" onClick={actions["new-bot"]}>+</button>
+          <button className="round ghost" aria-label="New bot" data-tip="New bot (⌘N)" onClick={actions["new-bot"]}><Plus /></button>
         </div>
         <ul>{lists.loose.map(botRow)}</ul>
         <ul className="foot">
-          <li>{plain("Add-ons", view?.page === "addons", () => setView({ page: "addons", tab: view?.page === "addons" ? view.tab : "connectors" }))}</li>
-          <li>{plain("Settings", view?.page === "settings", () => setView({ page: "settings" }))}</li>
+          <li>{plain("Add-ons", Blocks, view?.page === "addons", () => setView({ page: "addons", tab: view?.page === "addons" ? view.tab : "connectors" }))}</li>
+          <li>{plain("Settings", Gear, view?.page === "settings", () => setView({ page: "settings" }))}</li>
         </ul>
       </nav>
       <main>

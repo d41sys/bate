@@ -18,11 +18,11 @@ export const answers = (now) => {
   });
   const bots = [
     bot("b1", {
-      busy: true, waiting: true, avatar: "🔎", color: "#4a67d6", model: "gpt-6.2-sol", effort: "medium", project,
+      busy: true, waiting: true, avatar: "search", color: "#4a67d6", model: "gpt-6.2-sol", effort: "medium", project,
       instructions: "You read firmware images and say what they talk to. Show the evidence for each claim.", network: ["updates.example.net", "*.docs.example.net"], webSearch: true,
       check: "bot", checkBot: "b2",
     }),
-    bot("b2", { busy: true, avatar: "🌼", color: "#d6a01e", model: "gpt-6.2-sol", effort: "low", instructions: "You take a task from Analyst and finish it in your own folder.", project }),
+    bot("b2", { busy: true, avatar: "sprout", color: "#2f9e77", model: "gpt-6.2-sol", effort: "low", instructions: "You take a task from Analyst and finish it in your own folder.", project }),
     bot("b3", { agent: ["scout-agent", "--acp"], instructions: "Looks things up and keeps short notes." }),
   ];
   const projects = [

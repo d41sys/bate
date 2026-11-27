@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { inShell, listen, request } from "./service.ts";
 import { modelChoices } from "./models.ts";
 import type { Bot } from "./types.ts";
+import { Check, ChevronDown } from "lucide-react";
 
 const EFFORTS = ["minimal", "low", "medium", "high"];
 
@@ -75,7 +76,7 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
     <li key={m}>
       <button type="button" role="option" aria-selected={m === model} className="row plain" onClick={() => pick(m)}>
         <span className="label"><span>{label}</span></span>
-        {m === model && <span aria-hidden="true">✓</span>}
+        {m === model && <Check />}
       </button>
     </li>
   );
@@ -97,7 +98,7 @@ export function Model({ bot, bots }: { bot: Bot; bots: Bot[] }) {
           setOpen(!open);
         }}
       >
-        <span>{model || "App default"}</span> <span aria-hidden="true">▾</span>
+        <span>{model || "App default"}</span> <ChevronDown />
       </button>
       {open && (
         <div className="popover" role="dialog" aria-label="Model and thinking for this bot">

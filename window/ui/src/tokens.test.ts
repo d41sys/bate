@@ -30,9 +30,9 @@ const ratio = (a: number[], b: number[]) => (Math.max(luminance(a), luminance(b)
 // What lies on what, and the least it may have.
 const PAIRS: [string, string, number][] = [
   ["--fg", "--bg", 4.5], ["--fg", "--bg-soft", 4.5], ["--fg", "--bg-soft-3", 4.5], ["--fg", "--bg-current", 4.5],
-  ["--fg-muted", "--bg", 4.5], ["--fg-muted", "--bg-side", 4.5], ["--fg-muted", "--bg-glass", 4.5], ["--fg-muted", "--bg-soft", 4.5], ["--fg-muted", "--bg-soft-2", 4.5], ["--fg-muted", "--bg-raised", 4.5], ["--fg-muted", "--bg-current", 4.5],
+  ["--fg-muted", "--bg", 4.5], ["--fg-muted", "--bg-side", 4.5], ["--fg-muted", "--bg-soft", 4.5], ["--fg-muted", "--bg-soft-2", 4.5], ["--fg-muted", "--bg-raised", 4.5], ["--fg-muted", "--bg-current", 4.5],
   ["--fg", "--bg-field", 4.5], ["--fg-muted", "--bg-field", 4.5],
-  ["--on-ink", "--ink", 4.5], ["--on-danger", "--danger", 4.5], ["--on-bubble-user", "--bubble-user", 4.5], ["--warn", "--warn-soft", 4.5], ["--warn", "--bg-raised", 4.5],
+  ["--on-ink", "--ink", 4.5], ["--on-danger", "--danger", 4.5], ["--on-bubble-user", "--bubble-user", 4.5], ["--warn", "--warn-soft", 4.5],
   ["--accent", "--bg", 4.5], ["--accent", "--bg-soft", 4.5], ["--danger", "--bg", 4.5], ["--danger", "--bg-soft", 4.5], ["--danger", "--bg-raised", 4.5],
   ["--border-field", "--bg", 3], ["--border-field", "--bg-soft", 3], ["--border-field", "--bg-raised", 3],
   ["--ink", "--bg", 3], ["--ink", "--bg-side", 3], ["--accent", "--bg-side", 3],

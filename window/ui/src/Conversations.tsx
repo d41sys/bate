@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { listen, request } from "./service.ts";
 import { label, listed, when } from "./conversations.ts";
 import type { Conversation } from "./types.ts";
+import { ChevronDown, Ellipsis, Pin } from "lucide-react";
 
 /**
  * A bot's conversations: the one shown, a list to switch, rename, pin and archive them, a new one,
@@ -141,11 +142,7 @@ export function Conversations({ bot, want, slot, showChanges, children }: {
         <button type="button" aria-current={c.id === shown ? "true" : undefined} className={c.id === shown ? "row plain current" : "row plain"} onClick={() => show(c.id)}>
           <span className="label">
             <span>
-              {c.pinned && (
-                <svg className="pin" viewBox="0 0 24 24" role="img" aria-label="Pinned">
-                  <path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6zM12 14v7" />
-                </svg>
-              )}
+              {c.pinned && <Pin className="pin" role="img" aria-label="Pinned" />}
               {label(c)}
             </span>
             <small>{c.busy ? "Working…" : when(c.touchedAt)}</small>
@@ -158,7 +155,7 @@ export function Conversations({ bot, want, slot, showChanges, children }: {
           aria-expanded={acting === c.id}
           onClick={() => setActing(acting === c.id ? undefined : c.id)}
         >
-          ⋯
+          <Ellipsis />
         </button>
         {acting === c.id && (
           <span className="actions">
@@ -184,7 +181,7 @@ export function Conversations({ bot, want, slot, showChanges, children }: {
               aria-expanded={open}
               onClick={() => setOpen(!open)}
             >
-              <span>{now ? label(now) : "…"}</span> <span aria-hidden="true">▾</span>
+              <span>{now ? label(now) : "…"}</span> <ChevronDown />
             </button>
             {open && (
               <div className="popover below end" role="dialog" aria-label="Conversations of this bot">

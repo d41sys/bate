@@ -3,31 +3,29 @@
 :root {
   color-scheme: light dark;
 
-  /* Colour (#312): slate with a lavender hue in every grey, drawn dark first. The window is the ground, the page a sheet on it;
-     a field, a button and the chosen row are a fill, and nothing on the sheet has an edge. One lavender is the main action,
-     a switch that is on, the chosen row's tint, the person's message, links and focus; a deeper lavender for what needs the person. No yellow or brown. */
-  --bg: oklch(99.2% 0.004 285);
-  --bg-side: oklch(95.6% 0.012 285);
-  /* In Bate's own window the ground is a tint over the system's blurred material (#313): this tint, a little over half there, keeps the lavender. */
-  --bg-glass: oklch(94% 0.03 290);
+  /* Colour (#329): neutral greys, drawn dark first. The window is the ground, the page a sheet on it; a field, a button and
+     the chosen row are a fill, and nothing on the sheet has an edge. Lavender is the only colour: the main action, a switch
+     that is on, links and focus, and a deeper one for what needs the person. No yellow or brown. */
+  --bg: oklch(99.4% 0.001 285);
+  --bg-side: oklch(96.4% 0.003 285);
   --bg-raised: oklch(100% 0 0);
-  --bg-soft: oklch(96% 0.01 285);
-  --bg-soft-2: oklch(93.5% 0.012 285);
-  --bg-soft-3: oklch(90.5% 0.014 285);
+  --bg-soft: oklch(96.6% 0.003 285);
+  --bg-soft-2: oklch(94% 0.004 285);
+  --bg-soft-3: oklch(91% 0.005 285);
   /* A field is its fill, with no edge (the owner's choice, #306: an empty field is under WCAG 1.4.11's 3:1). */
-  --bg-field: oklch(94% 0.012 285);
-  --bg-hover: oklch(22% 0.03 285 / .05);
-  --bg-current: oklch(92.5% 0.035 300);
-  --fg: oklch(20% 0.03 285);
-  --fg-muted: oklch(48% 0.03 285);
+  --bg-field: oklch(94.6% 0.004 285);
+  --bg-hover: oklch(20% 0.01 285 / .05);
+  --bg-current: oklch(92.5% 0.006 285);
+  --fg: oklch(19% 0.008 285);
+  --fg-muted: oklch(47% 0.01 285);
   /* The few lines left: under the head of a table. */
-  --border: oklch(92% 0.01 285);
-  --border-strong: oklch(86% 0.012 285);
+  --border: oklch(92% 0.004 285);
+  --border-strong: oklch(86% 0.005 285);
   /* A switch that is off: its track has 3:1 against what is around it. */
-  --border-field: oklch(62% 0.02 285);
+  --border-field: oklch(62% 0.008 285);
   --ink: oklch(50% 0.17 300);
   --on-ink: oklch(100% 0 0);
-  --bubble-user: oklch(94.5% 0.03 300);
+  --bubble-user: oklch(95% 0.004 285);
   --on-bubble-user: var(--fg);
   --accent: oklch(48% 0.16 300);
   --danger: oklch(50% 0.19 27);
@@ -51,22 +49,22 @@
   --fill: var(--bg-soft);
   --fill-hover: var(--bg-soft-2);
 
-  /* Type: the system's font; 14/20 for text, 13/18 for the small lines, 15/24 for what is said in a chat. Three weights: 400, 500 and the strong one. */
+  /* Type: the system's font; 13/18 for text, 12/16 for the small lines, 14/22 for what is said in a chat, 15/20 for a page's title. Three weights: 400, 500 and the strong one. */
   --font-ui: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --size-small: 13px;
-  --size-ui: 14px;
-  --size-title: 15px;
-  --size-head: 20px;
-  --size-display: 28px;
-  --leading: 20px;
-  --leading-head: 28px;
-  --leading-display: 34px;
-  --size-chat: 15px;
-  --leading-chat: 24px;
-  --leading-small: 18px;
+  --size-small: 12px;
+  --size-ui: 13px;
+  --size-title: 14px;
+  --size-head: 15px;
+  --size-display: 22px;
+  --leading: 18px;
+  --leading-head: 20px;
+  --leading-display: 28px;
+  --size-chat: 14px;
+  --leading-chat: 22px;
+  --leading-small: 16px;
   --weight-strong: 600;
-  --tracking-head: -0.012em;
+  --tracking-head: -0.01em;
 
   /* Space: a 4 px grid, and one half step. */
   --space-0: 2px;
@@ -83,23 +81,24 @@
   --radius-l: 8px;
   --radius-bubble: 6px;
   --radius-pill: 999px;
-  --control-h: 32px;
-  --control-h-small: 28px;
-  --row-h: 36px;
-  --row-h-l: 44px;
-  --head-h: 56px;
+  --control-h: 28px;
+  --control-h-small: 24px;
+  --row-h: 32px;
+  --row-h-l: 40px;
+  --head-h: 48px;
   /* The room the window's own buttons take at the top left, in Bate's window. */
   --titlebar-h: 40px;
-  --avatar: 24px;
-  --avatar-l: 28px;
-  --side-w: 260px;
+  --avatar: 20px;
+  /* A drawn icon: on a control, in a row, on a bot's face. */
+  --icon: 16px;
+  --side-w: 240px;
   --thread-w: 720px;
   --reply-w: 640px;
   --popover-w: 300px;
-  --nav-w: 180px;
+  --nav-w: 168px;
   --chip-w: 180px;
-  --switch-w: 32px;
-  --switch-h: 18px;
+  --switch-w: 28px;
+  --switch-h: 16px;
   --tip-w: 240px;
   --control-w: 220px;
   --control-w-short: 112px;
@@ -113,27 +112,26 @@
   --beat: 1400ms;
 }
 
-/* Dark is where the palette starts: a slate ground, sheets a step darker, each surface above them lighter, lavender the main action. */
+/* Dark is where the palette starts: a graphite ground, sheets a step darker, each surface above them lighter, lavender the main action. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: oklch(19.5% 0.02 283);
-    --bg-side: oklch(24% 0.022 285);
-    --bg-glass: oklch(28% 0.06 287);
-    --bg-raised: oklch(24% 0.02 283);
-    --bg-soft: oklch(23.5% 0.02 283);
-    --bg-soft-2: oklch(28% 0.02 283);
-    --bg-soft-3: oklch(32.5% 0.019 283);
-    --bg-field: oklch(26% 0.019 283);
+    --bg: oklch(17.5% 0.004 285);
+    --bg-side: oklch(21.5% 0.005 285);
+    --bg-raised: oklch(22% 0.005 285);
+    --bg-soft: oklch(21.5% 0.005 285);
+    --bg-soft-2: oklch(25.5% 0.005 285);
+    --bg-soft-3: oklch(30% 0.005 285);
+    --bg-field: oklch(23.5% 0.005 285);
     --bg-hover: oklch(100% 0 0 / .05);
-    --bg-current: oklch(31% 0.05 300);
-    --fg: oklch(96% 0.006 285);
-    --fg-muted: oklch(74% 0.02 285);
-    --border: oklch(27% 0.02 283);
-    --border-strong: oklch(35% 0.02 283);
-    --border-field: oklch(56% 0.02 285);
+    --bg-current: oklch(27.5% 0.006 285);
+    --fg: oklch(95% 0.003 285);
+    --fg-muted: oklch(71% 0.008 285);
+    --border: oklch(26% 0.005 285);
+    --border-strong: oklch(34% 0.005 285);
+    --border-field: oklch(56% 0.008 285);
     --ink: oklch(72% 0.13 300);
     --on-ink: oklch(18% 0.03 300);
-    --bubble-user: oklch(29% 0.045 300);
+    --bubble-user: oklch(25.5% 0.005 285);
     --accent: oklch(80% 0.1 300);
     --danger: oklch(74% 0.14 25);
     --on-danger: oklch(14% 0 0);
@@ -152,4 +150,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   :root { --fast: 0ms; --slow: 0ms; }
+}
+
+/* A finger needs more than a pointer: on a touch screen a control and a row are as tall as they were before the sizes went down (#329). */
+@media (pointer: coarse) {
+  :root { --control-h: 36px; --control-h-small: 32px; --row-h: 40px; }
 }

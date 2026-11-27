@@ -6,6 +6,7 @@ import { Sheet } from "./Sheet.tsx";
 import { inShell, request } from "./service.ts";
 import { STARTERS } from "./firstRun.ts";
 import type { Bot, BotFilePreview } from "./types.ts";
+import { Face, IconPicker } from "./Avatar.tsx";
 
 /** A new bot: a name, what it is for (the first line of its instructions) and a sign. A card fills the fields. */
 export function NewBot({ opened, report }: { opened: (bot: string) => void; report: (message: string) => void }) {
@@ -44,7 +45,7 @@ export function NewBot({ opened, report }: { opened: (bot: string) => void; repo
                 setAvatar(s.avatar);
               }}
             >
-              <span className="avatar" aria-hidden="true">{s.avatar}</span>
+              <Face avatar={s.avatar} name={s.name} />
               <span className="label"><span>{s.name}</span><small>{s.purpose}</small></span>
             </button>
           </li>
@@ -57,7 +58,7 @@ export function NewBot({ opened, report }: { opened: (bot: string) => void; repo
           Purpose
           <textarea maxLength={8000} rows={3} placeholder="What this bot is for and how it should answer" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
         </label>
-        <label>Avatar <input maxLength={8} placeholder="One emoji" value={avatar} onChange={(e) => setAvatar(e.target.value)} /></label>
+        <div className="field">Icon <IconPicker value={avatar} name={name} onChange={setAvatar} /></div>
         <button disabled={!name.trim()}>Create</button>
         {error && <p className="error" role="alert">{error}</p>}
       </form>

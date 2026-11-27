@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { ChevronDown, Ellipsis } from "lucide-react";
 
 /** `current`: the item stands for what is shown now (a menu of pages); it is then a radio item, checked or not. */
 export type MenuItem = { label: string; run: () => void; danger?: boolean; current?: boolean };
@@ -55,7 +56,7 @@ export function RowMenu({ label, items, title }: { label: string; items: MenuIte
       data-tip={title ? undefined : "More actions"}
       onClick={() => setOpen(!open)}
     >
-      {title ? <>{title}<span className="chevron" aria-hidden="true">▾</span></> : <span aria-hidden="true">⋯</span>}
+      {title ? <>{title}<ChevronDown className="chevron" /></> : <Ellipsis />}
     </button>
   );
 

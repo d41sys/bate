@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { SANDBOX, fileUrl } from "./frame.ts";
 import { cutMiddle, placePane } from "./pane.ts";
+import { X } from "lucide-react";
 
 /** A bot's file, in the pane. */
 export function FilePane({ bot, path, close }: { bot: string; path: string; close: () => void }) {
@@ -63,7 +64,7 @@ export function Pane({ label, title, close, children }: {
         />
         <div className="pane-head">
           <h2 title={title}><span>{start}</span><span>{end}</span></h2>
-          <button type="button" className="round ghost" aria-label="Close" data-tip="Close (Esc)" onClick={close}>×</button>
+          <button type="button" className="round ghost" aria-label="Close" data-tip="Close (Esc)" onClick={close}><X /></button>
         </div>
         {children}
       </aside>

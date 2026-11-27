@@ -24,7 +24,13 @@ code, pre, kbd { font-family: var(--font-mono); font-size: max(.92em, var(--size
 code { background: var(--fill); padding: 0 var(--space-1); border-radius: var(--radius-s); }
 pre { background: var(--fill); padding: var(--space-3) var(--space-4); border-radius: var(--radius-m); margin: var(--space-2) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 pre code { background: none; padding: 0; }
-summary { cursor: pointer; }
+/* What opens has a small drawn arrow before its words, turned down when it is open; a run of calls has it after its words, and a file in the changes has none. */
+summary { cursor: pointer; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before, .run > summary::after { content: ""; display: inline-block; flex: none; width: 5px; height: 5px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--fast) var(--ease); }
+summary::before { margin: 0 var(--space-2) var(--space-0) var(--space-0); }
+details[open] > summary::before, .run[open] > summary::after { transform: rotate(45deg); }
+.run summary::before, .changes summary::before { content: none; }
 table { border-collapse: collapse; }
 fieldset { border: 0; margin: var(--space-3) 0; padding: 0; min-width: 0; }
 /* The legend sits in the well, not on an edge. */
@@ -38,6 +44,8 @@ button { font: inherit; font-weight: 500; color: var(--fg); min-height: var(--co
 button:hover:not(:disabled) { background: var(--fill-hover); }
 button:active:not(:disabled) { transform: scale(.98); }
 button:disabled { opacity: .45; cursor: not-allowed; }
+/* A main button that cannot be used yet is a grey one with quiet words: faded, its white words could not be read in light. */
+button.primary:disabled, form button:not([type=button]):disabled { opacity: 1; background: var(--fill); color: var(--fg-muted); }
 /* The one action a form is for: its submit button is primary without being told. */
 button.primary, form button:not([type=button]) { background: var(--ink); color: var(--on-ink); }
 button.primary:hover:not(:disabled), form button:not([type=button]):hover:not(:disabled) { background: color-mix(in oklab, var(--ink) 84%, var(--bg)); }
@@ -50,8 +58,8 @@ button.ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg
 button.small, .setting .control:not(:has(> input:not([type=color], [type=checkbox]), > select)) > button { min-height: var(--control-h-small); padding: 0 var(--space-2); font-size: var(--size-small); }
 /* A button that is one sign: it needs an aria-label. */
 button.round { width: var(--control-h); padding: 0; flex: none; border-radius: 50%; }
-/* A sign drawn inline: it takes the button's colour. */
-button.round svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* A drawn icon (the icon package marks each with this class): it takes the colour of the words beside it. */
+svg.lucide { width: var(--icon); height: var(--icon); flex: none; stroke-width: 1.75; }
 button.file { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; font-weight: inherit; text-decoration: underline; white-space: normal; }
 /* On a tinted or raised surface a control's fill steps up with it, so a button never has the fill it sits on. */
 .rows li, .banner, .card, .question, .first-run, .sheet > form, .popover, .composer, .quick, .surface .body, .changes summary { --fill: var(--bg-soft-2); --fill-hover: var(--bg-soft-3); }
@@ -67,10 +75,17 @@ select { -webkit-appearance: none; appearance: none; padding-right: calc(var(--s
 ::placeholder { color: var(--fg-muted); opacity: 1; }
 input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
 input[type=checkbox], input[type=radio] { accent-color: var(--ink); }
-.fields label { display: block; margin: var(--space-3) 0; }
+.fields label, .fields .field { display: block; margin: var(--space-3) 0; }
 .fields textarea { display: block; width: 100%; }
 /* A form with each label over its control, as wide as the column. */
-.fields.stack label { display: grid; gap: var(--space-1); }
+.fields.stack label, .fields.stack .field { display: grid; gap: var(--space-1); }
+/* The choice of a bot's icon: a row of signs, each under a radio button that is not drawn; the chosen one has the main colour's ring. */
+.icon-picker { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.icon-picker > span { display: inline-grid; place-items: center; width: var(--control-h); height: var(--control-h); border-radius: var(--radius-m); background: var(--fill); font-weight: var(--weight-strong); }
+.icon-picker > span:hover { background: var(--fill-hover); }
+.icon-picker input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.icon-picker > span:has(:checked) { background: var(--bg-current); box-shadow: inset 0 0 0 2px var(--ink); }
+.icon-picker > span:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .fields.stack input:not([type=checkbox], [type=radio], [type=file], [type=range]) { width: 100%; }
 /* A label that is one checkbox and its words stays in a line, in a stacked form too. */
 .fields.stack label:has(> input[type=checkbox]) { display: flex; align-items: center; gap: var(--space-2); }
@@ -95,7 +110,8 @@ button.title:focus-visible, button.crumb:focus-visible { outline-offset: -2px; }
 .slash { margin-inline: var(--space-1); color: var(--fg-muted); font-size: var(--size-head); line-height: var(--leading-head); }
 .title .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .title .page { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-muted); font-weight: 400; }
-.title .chevron { flex: none; color: var(--fg-muted); font-size: var(--size-small); }
+/* The small arrow of a title or a chip that opens a list. */
+.title .chevron, .chip > svg.lucide { width: var(--size-small); height: var(--size-small); color: var(--fg-muted); }
 
 /* ---- Lines that tell: a note, an error, nothing here yet ---- */
 .note { color: var(--fg-muted); }
@@ -227,8 +243,8 @@ main > .first-run { margin: auto; max-width: calc(var(--thread-w) / 2); padding:
 .starters button { width: 100%; height: 100%; justify-content: flex-start; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); border-radius: var(--radius-l); text-align: left; font-weight: 400; }
 .starters button[aria-pressed=true] { background: var(--bg-current); box-shadow: inset 0 0 0 2px var(--ink); }
 .starters .label { display: grid; gap: var(--space-1); min-width: 0; white-space: normal; }
-/* A bot's question is the one thing on the page in the colour of what needs the person: it floats over the conversation, above the composer, with a bar on its start edge, so that it is not taken for the person's own message, which has a lavender tint too. */
-.question { overflow-wrap: anywhere; flex: none; position: sticky; bottom: 0; z-index: 1; background: color-mix(in oklab, var(--warn-soft) 55%, var(--bg-raised)); box-shadow: var(--shadow-1), inset 3px 0 0 var(--warn); }
+/* A bot's question is the one thing on the page in the colour of what needs the person: it floats over the conversation, above the composer. */
+.question { overflow-wrap: anywhere; flex: none; position: sticky; bottom: 0; z-index: 1; background: color-mix(in oklab, var(--warn-soft) 55%, var(--bg-raised)); }
 /* On its colour a fill is a shade of the text's colour, so it is of the card's hue, not grey on it. */
 .question, .attention > li:has(.question) { --fill: color-mix(in oklab, var(--fg) 8%, transparent); --fill-hover: color-mix(in oklab, var(--fg) 14%, transparent); }
 .question > p { margin: var(--space-2) 0 0; }
@@ -278,8 +294,9 @@ main > .first-run { margin: auto; max-width: calc(var(--thread-w) / 2); padding:
 /* The buttons stay in sight while a long dialog scrolls. */
 .sheet .actions { position: sticky; bottom: 0; padding: var(--space-2) 0 var(--space-4); background: var(--bg-raised); }
 
-/* ---- Avatar: the bot's colour as a tint and a ring, so the sign on it always reads ---- */
-.avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: var(--radius-m); flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: var(--fg); background: color-mix(in srgb, var(--tint, var(--fg-muted)) 22%, var(--bg-raised)); box-shadow: inset 0 0 0 1.5px var(--tint, var(--border-strong)); }
+/* ---- Avatar: the bot's sign (an icon, or its first letter) on a tint of its colour ---- */
+.avatar { display: inline-grid; place-items: center; width: var(--avatar); height: var(--avatar); border-radius: var(--radius-m); flex: none; font-size: var(--size-small); font-weight: var(--weight-strong); color: color-mix(in oklab, var(--tint, var(--fg-muted)) 50%, var(--fg)); background: color-mix(in oklab, var(--tint, var(--fg-muted)) 20%, var(--bg-raised)); }
+.avatar svg.lucide { width: 80%; height: 80%; stroke-width: 1.5; }
 
 /* ---- The window: sidebar, main area, side pane ---- */
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
@@ -288,28 +305,30 @@ main > .first-run { margin: auto; max-width: calc(var(--thread-w) / 2); padding:
 .app.shell .sidebar { margin-top: calc(var(--titlebar-h) - var(--space-1)); }
 /* In Bate's own window the ground lets the desktop through, blurred by the system's sidebar material (#313): the page under it is transparent, and the ground's tint is a little over half there. The sheets stay solid. */
 body:has(> #root > .app.shell) { background: transparent; }
-.app.shell { background: color-mix(in oklab, var(--bg-glass) 55%, transparent); }
+.app.shell { background: color-mix(in oklab, var(--bg-side) 55%, transparent); }
 .sidebar h2 { font-size: var(--size-small); line-height: var(--leading); font-weight: 500; letter-spacing: 0; color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
 /* A section's heading with its one action beside it. */
 .sidebar .heading { display: flex; align-items: center; justify-content: space-between; }
 .sidebar .heading h2 { margin-block: 0; }
 .sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-0); }
-.sidebar ul ul { padding-left: var(--space-4); }
+/* A project's bots start under its name, past its icon. */
+.sidebar ul ul { padding-left: var(--space-5); }
 /* The pages of the app sit at the foot. */
 .sidebar .foot { margin-top: auto; }
-.row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-3); padding: 0 var(--space-2); border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
+.row { width: 100%; min-height: var(--row-h); justify-content: flex-start; gap: var(--space-2); padding: 0 var(--space-2); border-radius: var(--radius-m); background: none; font-weight: 400; text-align: left; }
 .row:hover:not(:disabled) { background: var(--bg-hover); }
 .row.current { background: var(--bg-current); }
-.row .label { display: grid; min-width: 0; line-height: 20px; }
+.row .label { display: grid; min-width: 0; line-height: var(--leading); }
 .row .label > * { overflow: hidden; text-overflow: ellipsis; }
-/* A state under the name, so that a long name keeps its width. */
-.row .label > .badge { margin-left: 0; justify-self: start; }
 .row small { font-weight: 400; }
-/* A row with no avatar: a project, or a page of the app. */
+/* A row with an icon and no avatar: a project, or a page of the app. */
 .row.plain { min-height: var(--control-h); }
-/* A bot's row is taller, with a bigger face and room above and below a state under its name; chosen, it keeps its weight so that its words do not move. */
-.sidebar .row:not(.plain) { min-height: var(--row-h-l); padding-block: var(--space-1); }
-.sidebar .avatar { width: var(--avatar-l); height: var(--avatar-l); font-size: var(--size-title); }
+.row.plain > svg.lucide { color: var(--fg-muted); }
+/* In the sidebar every row is one line of one height: the name, cut when it is long, and the state at the row's end. Chosen, a row keeps its weight so that its words do not move. */
+.sidebar .row { min-height: var(--control-h); }
+.sidebar .row .label { flex: 1; display: flex; align-items: center; gap: var(--space-2); }
+.sidebar .row .label > :first-child { flex: 1; min-width: 0; }
+.sidebar .row .label > .badge, .sidebar .row .label > small { flex: none; margin-left: 0; }
 /* A bot's row with its `⋯` menu over its end; a pointer sees the menu when it is over the row or has the focus, a touch screen always (not in the strip: see below). */
 .sidebar li.bot { position: relative; }
 /* The row is as wide as the sidebar and keeps one padding, so its words never move; the menu lies over its end on a fill of its own. */
@@ -317,7 +336,7 @@ body:has(> #root > .app.shell) { background: transparent; }
 .sidebar li.bot > .more { position: absolute; top: 0; bottom: 0; right: var(--space-1); align-items: center; }
 .sidebar li.bot > .more > button { background: var(--bg-current); }
 @media (hover: hover) {
-  .sidebar li.bot > .row { padding-right: var(--space-3); }
+  .sidebar li.bot > .row { padding-right: var(--space-2); }
   .sidebar li.bot > .more { opacity: 0; }
   .sidebar li.bot:hover > .more, .sidebar li.bot:focus-within > .more, .sidebar li.bot > .more:has([aria-expanded=true]) { opacity: 1; }
   /* The working dot gives the row's end to the menu while it shows. */
@@ -328,8 +347,6 @@ body:has(> #root > .app.shell) { background: transparent; }
 /* A state on a row: a word on its own fill. `quiet` is for what does not need the person. */
 .badge { margin-left: auto; display: inline-flex; align-items: center; flex: none; padding: 0 var(--space-2); border-radius: var(--radius-s); background: var(--warn-soft); color: var(--warn); font-size: var(--size-small); font-weight: var(--weight-strong); }
 .badge.quiet { background: var(--fill); color: var(--fg-muted); }
-/* On the chosen row, which is lavender too, the badge stands on the sheet's own colour. */
-.row.current .badge:not(.quiet) { background: var(--bg-raised); }
 
 main { container-type: inline-size; display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 0 var(--space-5) var(--space-5); border-radius: var(--radius-l); background: var(--bg); box-shadow: var(--shadow-0); }
 /* A work log: every page's column starts at the sheet's start edge, not its centre. */
@@ -411,15 +428,11 @@ main:has(> .chat) > * { max-width: none; }
 .item.working p { margin: 0; }
 .item.arriving { animation: arrive var(--slow) var(--ease); }
 /* A run of calls: one line (a mark, what happened, a chevron) that opens to a row for each call, named by what it acted on. */
-.run > summary { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; list-style: none; }
-.run > summary::-webkit-details-marker { display: none; }
-.run > summary::after { content: "›"; transition: transform var(--fast) var(--ease); }
-.run[open] > summary::after { transform: rotate(90deg); }
+.run > summary { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; }
 .run > summary:hover { color: var(--fg); }
-.mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; line-height: 1; }
-.mark.ok::before { content: "✓"; }
+.mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; }
+.mark svg.lucide { width: 100%; height: 100%; }
 .mark.bad { color: var(--danger); }
-.mark.bad::before { content: "✕"; }
 .mark.spin { border: 2px solid var(--border-strong); border-top-color: var(--fg-muted); border-radius: 50%; animation: spin var(--spin) linear infinite; }
 .run > ul { list-style: none; margin: var(--space-1) 0; padding: 0 0 0 var(--space-5); }
 .run li { padding: var(--space-0) 0; }
@@ -479,7 +492,7 @@ main:has(> .chat) > * { max-width: none; }
 .popover { position: absolute; bottom: calc(100% + var(--space-2)); right: 0; z-index: 2; width: var(--popover-w); max-width: calc(100vw - 2 * var(--space-2)); display: grid; gap: var(--space-2); padding: var(--space-2); background: var(--bg-raised); border-radius: var(--radius-l); box-shadow: var(--shadow-2); font-size: var(--size-ui); font-weight: 400; white-space: normal; }
 .popover ul { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow: auto; }
 .popover p { margin: 0; }
-.popover label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.popover label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding-inline: var(--space-3); }
 .popover .row { justify-content: space-between; }
 .popover .row .label { flex: 1; }
 .composer .popover button[type=button]:not(.primary) { color: var(--fg); }
@@ -503,8 +516,10 @@ main > header > .conversation { display: flex; flex-shrink: 8; justify-content: 
 .popover li > .actions { flex: 1 0 100%; justify-content: flex-end; padding: 0 var(--space-2) var(--space-1); }
 .popover .foot { display: grid; }
 .popover .foot .row { min-height: var(--control-h); padding: 0 var(--space-3); }
-/* A pinned conversation: a drawn pin before its name. */
-.pin { width: 12px; height: 12px; margin-right: var(--space-1); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: -1px; }
+/* A pinned conversation: a pin before its name. */
+svg.pin { width: var(--size-small); height: var(--size-small); margin-right: var(--space-1); vertical-align: -1px; }
+/* In a menu the ring is drawn inside the item, so it does not run into the menu's own edge. */
+.popover.dropdown .row:focus-visible { outline-offset: -2px; }
 @media (hover: hover) {
   .popover li > .more { opacity: 0; }
   .popover li:hover > .more, .popover li:focus-within > .more, .popover li.acting > .more { opacity: 1; }
