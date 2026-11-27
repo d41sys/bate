@@ -1,5 +1,5 @@
 {
-  "about": "The model stops at once: no text, no call.",
+  "about": "The model stops at once, three times: no text, no call. Asked again twice, the turn then ends.",
   "style": "any server",
   "files": {},
   "prompts": [

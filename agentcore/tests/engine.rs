@@ -1511,6 +1511,112 @@ fn the_size_the_server_counted_says_when_to_compact() {
 }
 
 #[test]
+fn an_empty_reply_is_asked_again_with_a_note_that_is_not_kept() {
+    let dir = workdir("empty-again");
+    let model = Model::serve(vec![
+        vec![thinking("Hmm.")],
+        vec![text("The answer.")],
+        vec![text("Next.")],
+    ]);
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    engine.prompt_as("n1", "Q1");
+    let events = engine.until(is_turn_end);
+    assert!(
+        events.contains(&Event::Text {
+            delta: "The answer.".into()
+        }) && matches!(
+            events.last(),
+            Some(Event::TurnEnd {
+                reason: TurnEnd::Done,
+                error: None
+            })
+        ),
+        "{events:?}"
+    );
+    let again = model.requests()[1]["messages"].as_array().unwrap().clone();
+    assert!(
+        again.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("Your last reply was empty"),
+        "{again:?}"
+    );
+    engine.exchange("n2", "Q2");
+    let later = sent(&model, 2);
+    assert!(
+        later.contains("The answer.") && !later.contains("Your last reply was empty"),
+        "{later}"
+    );
+}
+
+#[test]
+fn a_summary_that_calls_a_tool_is_not_kept_even_with_text() {
+    let dir = workdir("compact-calls");
+    // The third reply answers the request for a summary with a little text and a tool call.
+    let model = Model::serve(vec![
+        vec![text("A1")],
+        vec![text("A2")],
+        vec![
+            text("Let me look first."),
+            call("c1", "read", json!({"path": "a.txt"})),
+        ],
+        vec![text("A3")],
+    ]);
+    let mut engine = Engine::start_with(&dir, &model, &[("BATE_MODEL_CONTEXT", "100")]);
+    engine.open_new();
+    let long = "x".repeat(150);
+    engine.exchange("n1", &format!("Q1 {long}"));
+    engine.exchange("n2", &format!("Q2 {long}"));
+    engine.exchange("n3", "Q3");
+    let last = sent(&model, 3);
+    assert!(
+        last.contains("Q1") && !last.contains("Let me look first."),
+        "{last}"
+    );
+}
+
+#[test]
+fn a_connector_offers_at_most_128_tools() {
+    let dir = workdir("mcp-many");
+    let script = dir.join("fake-mcp");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"1\"}}}" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$(cat tools.json)" ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let tools: Vec<Value> = (0..130)
+        .map(|i| json!({"name": format!("t{i}"), "description": "T", "inputSchema": {"type": "object"}}))
+        .collect();
+    fs::write(
+        dir.join("tools.json"),
+        json!({ "tools": tools }).to_string(),
+    )
+    .unwrap();
+    let model = Model::serve(replies(&["Done."]));
+    let mut engine = Engine::start(&dir, &model);
+    engine.open_new();
+    let connectors = vec![connector("fake", stdio(&script))];
+    assert_eq!(engine.request(Op::Connectors { connectors }), None);
+    engine.exchange("n1", "hi");
+    let names = tool_names(&model, 0);
+    let offered: Vec<_> = names.iter().filter(|n| n.starts_with("fake__")).collect();
+    assert_eq!(offered.len(), 128);
+    assert!(
+        offered.contains(&&"fake__t127".to_owned()) && !offered.contains(&&"fake__t128".to_owned())
+    );
+}
+
+#[test]
 fn after_a_refusal_for_size_the_summary_gets_older_tool_results_cut() {
     let dir = workdir("overflow-cleared");
     fs::write(
@@ -3423,8 +3529,9 @@ fn a_server_error_is_asked_again_and_the_conversation_shows_it() {
     engine.open_new();
     engine.prompt("hi");
     let events = engine.until(is_turn_end);
+    // 20 ms give or take a fifth: engines that failed together do not ask again together.
     assert!(
-        matches!(&events[0], Event::Retry { attempt: 1, of: 5, wait_ms: 20, error } if error.contains("503")),
+        matches!(&events[0], Event::Retry { attempt: 1, of: 5, wait_ms: 15..=24, error } if error.contains("503")),
         "{events:?}"
     );
     assert_eq!(
@@ -3491,10 +3598,16 @@ fn a_call_that_keeps_failing_is_given_up_after_five_retries_with_growing_waits()
     engine.open_new();
     engine.prompt("hi");
     let events = engine.until(is_turn_end);
-    assert_eq!(
-        retries(&events),
-        [(1, 20), (2, 40), (3, 80), (4, 160), (5, 320)]
-    );
+    let waits = retries(&events);
+    assert_eq!(waits.len(), 5, "{waits:?}");
+    // Each wait doubles, give or take a fifth.
+    for (i, &(attempt, wait)) in waits.iter().enumerate() {
+        let base = 20u64 << i;
+        assert!(
+            attempt == i as u32 + 1 && (base * 4 / 5 - 1..=base * 6 / 5).contains(&wait),
+            "{waits:?}"
+        );
+    }
     assert!(
         matches!(events.last(), Some(Event::TurnEnd { reason: TurnEnd::Error, error: Some(e) }) if e.contains("500"))
     );
@@ -3620,6 +3733,27 @@ fn responses_turn(engine: &mut Engine, model: &Model, nonce: &str, text: &str) -
     engine.prompt_as(nonce, text);
     give_responses_token(engine, model);
     engine.until(is_turn_end)
+}
+
+#[test]
+fn responses_calls_of_one_conversation_share_its_prompt_cache_key() {
+    let dir = workdir("engine-cache-key");
+    let completed = json!({"type": "response.completed", "response": {"status": "completed"}});
+    let reply = |text: &str| json!({"type": "response.output_text.delta", "delta": text});
+    let model = Model::replay(vec![
+        responses_body(&[reply("One."), completed.clone()]),
+        responses_body(&[reply("Two."), completed]),
+    ]);
+    let mut engine = Engine::start_manual_token(&dir, &model, &[]);
+    let session = engine.open_new();
+    responses_turn(&mut engine, &model, "n1", "first");
+    responses_turn(&mut engine, &model, "n2", "second");
+    let keys: Vec<Value> = model
+        .requests()
+        .iter()
+        .map(|r| r["prompt_cache_key"].clone())
+        .collect();
+    assert_eq!(keys, [json!(session), json!(session)]);
 }
 
 fn said(events: &[Event]) -> String {

@@ -7,6 +7,8 @@ use proto::Tokens;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -217,6 +219,9 @@ fn responses_body(ask: &Ask, search: bool) -> Value {
     if let Some(effort) = ask.effort {
         body["reasoning"] = json!({"effort": effort});
     }
+    if let Some(key) = ask.cache_key {
+        body["prompt_cache_key"] = json!(key);
+    }
     body
 }
 
@@ -313,6 +318,14 @@ pub struct Ask<'a> {
     pub tools: &'a Value,
     /// Offer the provider's web search tool; only a Responses call does.
     pub web_search: bool,
+    /// The conversation's id, so a Responses provider sends its calls to the same prompt cache.
+    pub cache_key: Option<&'a str>,
+}
+
+/// `wait` give or take a fifth, so engines that failed together do not all ask again at once.
+fn jitter(wait: Duration) -> Duration {
+    let random = BuildHasher::hash_one(&RandomState::new(), ());
+    wait.mul_f64(0.8 + (random % 1001) as f64 / 2500.0)
 }
 
 /// A time from the environment in milliseconds (the tests make these short).
@@ -406,9 +419,10 @@ impl Provider {
                 Err(fail) if fail.transient && !streamed && retries < RETRIES && !last => fail,
                 done => return done.map_err(|fail| fail.why),
             };
-            let wait = fail
-                .wait
-                .map_or(self.wait * 2u32.pow(retries), |w| w.min(MAX_ASKED));
+            let wait = fail.wait.map_or_else(
+                || jitter(self.wait * 2u32.pow(retries)),
+                |w| w.min(MAX_ASKED),
+            );
             retries += 1;
             last = fail.once;
             on(Delta::Retry {

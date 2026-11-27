@@ -75,9 +75,17 @@ const CONTEXT: usize = 32_000;
 /// A `token` answer: the model server, its key, the API it speaks, the model to call, and
 /// that model's context size in tokens if the service knows it.
 type Token = (String, Option<String>, Api, String, Option<usize>);
-const SUMMARISE: &str = "Summarise the conversation so far for your own later use: what the user wants, \
-    what was decided, what was found, which files changed, and what is left to do. \
-    Answer with the summary only and do not call tools.";
+const SUMMARISE: &str = "Summarise the conversation so far for your own later use: the earlier messages \
+    will be gone, and this summary is all you keep of them. In short lines, in this order: what the user \
+    wants, with every constraint and preference they stated; what was decided, and why; what was done \
+    and found, with the exact file paths, commands, names and error text needed to go on; what is in \
+    progress, and the next step. If the conversation begins with an earlier summary, keep what still \
+    holds from it; where newer messages differ, they win. Answer with the summary only and do not call tools.";
+/// How many times a reply with no text and no tool call is asked again.
+const EMPTY_TRIES: u32 = 2;
+/// Sent after the conversation, and not kept, when the model's reply was empty.
+const EMPTY: &str = "Your last reply was empty. Answer now: say what you found or did, or call a \
+    tool if there is more to do.";
 /// Parts, in lower case, of what model servers answer when the conversation is more than the
 /// model holds: the list pi keeps (`packages/ai/src/utils/overflow.ts`), without the entries
 /// that also fit a rate limit.
@@ -476,6 +484,9 @@ impl Turn {
         // Numbers the tool calls a server sent without an id.
         let mut unnamed = 0;
         let mut repeats = Repeats::default();
+        // Empty replies in a row, each asked again with `EMPTY` after the conversation.
+        let mut empties = 0;
+        let empty = json!({"role": "user", "content": EMPTY});
         // Model replies that called tools, run so far.
         let mut rounds = 0;
         // Whether the conversation was already summarised for the model call that comes next.
@@ -530,7 +541,14 @@ impl Turn {
                 Err(_) if self.control.aborted() => return Ok(TurnEnd::Aborted),
                 Err(e) => return Err(e),
             };
-            let ask = self.ask_model(&model, &system, &session.messages, None, &tools);
+            let mut ask = self.ask_model(
+                &model,
+                &system,
+                &session.messages,
+                (empties > 0).then_some(&empty),
+                &tools,
+            );
+            ask.cache_key = Some(&session.id);
             let reply = match self.stream(&url, key.as_deref(), api, &ask, |d| {
                 self.out.send(&event(d))
             }) {
@@ -571,6 +589,12 @@ impl Turn {
             if let Some(usage) = usage.filter(|u| u.input > 0) {
                 session.measured(usage.input as usize);
             }
+            // Only thinking, or nothing: small models do this, and the turn would end with no answer.
+            if !aborted && calls.is_empty() && text.trim().is_empty() && empties < EMPTY_TRIES {
+                empties += 1;
+                continue;
+            }
+            empties = 0;
             if !text.is_empty() || !calls.is_empty() {
                 session.push(assistant(&text, &calls)).map_err(saved)?;
             }
@@ -1048,6 +1072,7 @@ impl Turn {
             last,
             tools,
             web_search: self.web_search,
+            cache_key: None,
         }
     }
 
@@ -1104,12 +1129,14 @@ impl Turn {
         let mut ask = self.ask_model(&model, system, older, Some(&instruction), tools);
         // The summary is no place for a search.
         ask.web_search = false;
+        ask.cache_key = Some(&session.id);
         let reply = self.stream(&url, key.as_deref(), api, &ask, |_| {})?;
         if reply.aborted {
             return Err("aborted".into());
         }
         let summary = reply.text.trim();
-        if summary.is_empty() {
+        // A tool call says the model went on working: its text is no summary.
+        if summary.is_empty() || !reply.calls.is_empty() {
             return Err("the model returned no summary".into());
         }
         let kept = messages.len() - cut;
