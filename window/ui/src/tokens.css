@@ -12,8 +12,6 @@
   --bg-soft: oklch(96% 0.01 285);
   --bg-soft-2: oklch(93.5% 0.012 285);
   --bg-soft-3: oklch(90.5% 0.014 285);
-  /* The part of a control that moves: a switch's knob. */
-  --bg-thumb: oklch(100% 0 0);
   /* A field is its fill, with no edge (the owner's choice, #306: an empty field is under WCAG 1.4.11's 3:1). */
   --bg-field: oklch(94% 0.012 285);
   --bg-hover: oklch(22% 0.03 285 / .05);
@@ -122,7 +120,6 @@
     --bg-soft: oklch(23.5% 0.02 283);
     --bg-soft-2: oklch(28% 0.02 283);
     --bg-soft-3: oklch(32.5% 0.019 283);
-    --bg-thumb: oklch(36% 0.018 283);
     --bg-field: oklch(26% 0.019 283);
     --bg-hover: oklch(100% 0 0 / .05);
     --bg-current: oklch(31% 0.05 300);

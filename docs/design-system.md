@@ -38,7 +38,7 @@ All in `window/ui/src/tokens.css`.
 
 | Family | Tokens | Use |
 |---|---|---|
-| Surface | `--bg-side`, `--bg`, `--bg-raised`, `--bg-soft`, `--bg-soft-2`, `--bg-soft-3`, `--bg-field`, `--bg-thumb`, `--page` | The ground (the window, with the sidebar on it); a sheet (the page, the pane); what floats (the composer, a card, a popover, a dialog); a tile or a well; a control's fill on a tile or on what floats; that control pointed at; the inside of a field; the part of a control that moves (a switch's knob); white under a shown file |
+| Surface | `--bg-side`, `--bg`, `--bg-raised`, `--bg-soft`, `--bg-soft-2`, `--bg-soft-3`, `--bg-field`, `--page` | The ground (the window, with the sidebar on it); a sheet (the page, the pane); what floats (the composer, a card, a popover, a dialog); a tile or a well; a control's fill on a tile or on what floats; that control pointed at; the inside of a field; white under a shown file |
 | Fill of a control | `--fill`, `--fill-hover` | What `<button>`, `<code>`, `<pre>` and a quiet badge are filled with. `--bg-soft` and `--bg-soft-2` on a sheet; a tile, a well and anything raised set them one step up for what is inside; the question card sets them to a shade of the text's colour |
 | State fill | `--bg-hover`, `--bg-current` | Under the pointer (a row, a ghost button); the chosen row |
 | Text | `--fg`, `--fg-muted` | Text; secondary text and placeholders |
