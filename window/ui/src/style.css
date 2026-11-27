@@ -267,8 +267,8 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 /* ---- The window: sidebar, main area, side pane ---- */
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); height: 100vh; padding: var(--space-2) var(--space-2) var(--space-2) 0; background: var(--bg-side); }
 .sidebar { padding: var(--space-1) var(--space-2); overflow: auto; display: flex; flex-direction: column; gap: var(--space-2); }
-/* In Bate's own window the page runs under the title bar: the window's buttons sit over the top of the sidebar. */
-.app.shell .sidebar { padding-top: var(--titlebar-h); }
+/* In Bate's own window the page runs under the title bar: the window's buttons sit on the ground above the sidebar, which moves the window (the sidebar, which scrolls, does not). */
+.app.shell .sidebar { margin-top: calc(var(--titlebar-h) - var(--space-1)); }
 .sidebar h2 { font-size: var(--size-small); line-height: var(--leading); font-weight: 500; letter-spacing: 0; color: var(--fg-muted); margin: var(--space-1) var(--space-2) 0; }
 /* A section's heading with its one action beside it. */
 .sidebar .heading { display: flex; align-items: center; justify-content: space-between; }
@@ -292,14 +292,16 @@ main > .first-run { margin-block: auto; max-width: calc(var(--thread-w) / 2); pa
 .sidebar .avatar { width: var(--avatar-l); height: var(--avatar-l); font-size: var(--size-title); }
 /* A bot's row with its `⋯` menu over its end; a pointer sees the menu when it is over the row or has the focus, a touch screen always (not in the strip: see below). */
 .sidebar li.bot { position: relative; }
-/* The row is as wide as the sidebar; while its menu shows, the row keeps room for it. */
+/* The row is as wide as the sidebar and keeps one padding, so its words never move; the menu lies over its end on a fill of its own. */
 .sidebar li.bot > .row { padding-right: calc(var(--control-h) + var(--space-2)); }
 .sidebar li.bot > .more { position: absolute; top: 0; bottom: 0; right: var(--space-1); align-items: center; }
+.sidebar li.bot > .more > button { background: var(--bg-current); }
 @media (hover: hover) {
+  .sidebar li.bot > .row { padding-right: var(--space-3); }
   .sidebar li.bot > .more { opacity: 0; }
   .sidebar li.bot:hover > .more, .sidebar li.bot:focus-within > .more, .sidebar li.bot > .more:has([aria-expanded=true]) { opacity: 1; }
-  .sidebar li.bot > .row { padding-right: var(--space-3); }
-  .sidebar li.bot:hover > .row, .sidebar li.bot:focus-within > .row, .sidebar li.bot:has(> .more [aria-expanded=true]) > .row { padding-right: calc(var(--control-h) + var(--space-2)); }
+  /* The working dot gives the row's end to the menu while it shows. */
+  .sidebar li.bot:hover .pulse, .sidebar li.bot:focus-within .pulse { opacity: 0; }
 }
 /* A working bot's row: a dot that breathes beside "Working…". */
 .pulse { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--ink); animation: beat var(--beat) var(--ease) infinite; }
@@ -577,7 +579,7 @@ main > header > .conversation { display: flex; flex-shrink: 8; justify-content: 
   /* The sidebar becomes a strip of projects and bots across the top. */
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); padding: 0 var(--space-2) var(--space-2); }
   .app.shell { padding-top: var(--titlebar-h); }
-  .app.shell .sidebar { padding-top: var(--space-1); }
+  .app.shell .sidebar { margin-top: 0; }
   .sidebar { flex-direction: row; align-items: center; padding-inline: 0; }
   /* A heading stays, close to its `+`, which alone says nothing; a list with no row takes no room. */
   .sidebar .heading { flex: none; }
