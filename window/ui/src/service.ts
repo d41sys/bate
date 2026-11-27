@@ -92,6 +92,18 @@ export const openInBate = (bot: string) => invoke("open_in_bate", { bot }) as Pr
 /** The system's panel for a folder or a file: the path chosen, or null when the person cancels (the shell's; not on another device). */
 export const pickPath = (folder: boolean) => invoke("pick_path", { folder }) as Promise<string | null>;
 
+export type Look = "system" | "light" | "dark";
+/** The appearance chosen in Settings, kept on this Mac (the page's storage). */
+export const savedLook = (): Look => {
+  const look = localStorage.getItem("bate.look");
+  return look === "light" || look === "dark" ? look : "system";
+};
+/** Sets the app's appearance: every window and its frame follow (the shell's; not on another device). */
+export const setLook = (look: Look) => {
+  localStorage.setItem("bate.look", look);
+  return invoke("plugin:app|set_app_theme", { theme: look === "system" ? null : look }) as Promise<void>;
+};
+
 export type Frame = { type: string; bot?: string; [field: string]: unknown };
 
 let next = 0;

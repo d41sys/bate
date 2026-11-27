@@ -1,7 +1,7 @@
 import { type ReactNode, StrictMode, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { inQuickPanel, inShell, listen, newWindow, notifyWaiting, openAtStart, openInBrowser, pair, request, serviceNote, setBadge } from "./service.ts";
+import { inQuickPanel, inShell, listen, newWindow, notifyWaiting, openAtStart, openInBrowser, pair, request, savedLook, serviceNote, setBadge, setLook } from "./service.ts";
 import { QuickAsk } from "./QuickAsk.tsx";
 import { Pair } from "./Devices.tsx";
 import type { Bot, Project } from "./types.ts";
@@ -562,6 +562,9 @@ addEventListener("click", (e) => {
     openInBrowser(link.href);
   }
 });
+
+// The shell starts with the system's appearance; a choice made in Settings is set again in each window's page.
+if (inShell && savedLook() !== "system") void setLook(savedLook());
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>

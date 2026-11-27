@@ -55,7 +55,7 @@ export const screens = [
 
   {
     name: "settings", title: "Settings (the app's)", steps: [SETTINGS],
-    parts: ["#settings-chatgpt", "#settings-model", "#settings-devices", "#settings-helper", "#settings-quick", "#settings-updates", "#settings-report"],
+    parts: ["#settings-appearance", "#settings-chatgpt", "#settings-model", "#settings-devices", "#settings-helper", "#settings-quick", "#settings-updates", "#settings-report"],
   },
   { name: "palette", title: "Palette", steps: [{ code: "KeyK", metaKey: true }], parts: ["#palette-list"] },
   { name: "quick-ask", title: "Quick Ask", steps: [], parts: ["textarea"], globals: { __BATE_QUICK__: true } },
