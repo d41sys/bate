@@ -502,14 +502,17 @@ main:has(> .chat) > * { margin-inline: auto; }
 .plan li { display: flex; align-items: center; gap: var(--space-2); }
 .plan [aria-current] { font-weight: var(--weight-strong); color: var(--fg); }
 .plan [aria-current] .mark { color: var(--accent); }
-/* A conversation with nothing said: the bot's face and name, and where to write. */
-.items:has(> .empty) { display: grid; align-content: center; }
-.items > .empty { display: grid; justify-items: center; gap: var(--space-1); margin: 0; }
-.items > .empty .avatar { width: calc(var(--avatar) * 2); height: calc(var(--avatar) * 2); margin-bottom: var(--space-2); font-size: var(--size-head); }
-.items > .empty strong { color: var(--fg); font-size: var(--size-head); }
-/* What an empty conversation offers: a click puts the words in the box. */
-.prompts { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); margin-top: var(--space-4); }
-.prompts button { padding-inline: var(--space-3); border-radius: var(--radius-pill); }
+/* A conversation with nothing said: one group in the middle of the page. The bot's face beside a line for the hour, the message box (room for three lines) under it, and the starters under the box. */
+.chat.fresh { justify-content: center; padding-bottom: var(--space-6); }
+.chat.fresh > .items { flex: none; overflow: visible; }
+.items > .empty { display: flex; align-items: center; justify-content: center; gap: var(--space-3); margin: 0 0 var(--space-5); }
+.items > .empty .avatar { width: var(--leading-display); height: var(--leading-display); font-size: var(--size-head); }
+.items > .empty strong { color: var(--fg); font-size: var(--size-display); line-height: var(--leading-display); }
+.chat.fresh .composer textarea { min-height: calc(3 * var(--leading-chat) + 2 * var(--space-2)); }
+/* What an empty conversation offers: quiet tabs, an icon and a few words each; a click puts the words in the box. */
+.prompts { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-1) var(--space-2); margin-top: var(--space-4); }
+.prompts button { padding-inline: var(--space-3); border-radius: var(--radius-pill); background: none; color: var(--fg-muted); }
+.prompts button:hover { background: var(--bg-hover); color: var(--fg); }
 /* The way back to the latest message, over the log's foot while the person reads further up. */
 .jump { position: relative; height: 0; z-index: 1; }
 .jump button { position: absolute; bottom: var(--space-2); left: 50%; translate: -50%; background: var(--bg-raised); box-shadow: var(--shadow-2); }
@@ -524,7 +527,7 @@ main:has(> .chat) > * { margin-inline: auto; }
 .composer { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); margin-top: var(--space-2); padding: var(--space-2); border-radius: var(--radius-box); background: var(--bg-raised); box-shadow: var(--shadow-1); }
 /* While the words are being written its ring takes the accent. */
 .composer:focus-within { box-shadow: 0 0 0 2px var(--accent); }
-.composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: var(--space-2); resize: none; outline: none; }
+.composer textarea { flex: 1; min-width: 0; max-height: 40vh; border: 0; background: none; padding: var(--space-2); resize: none; outline: none; font-size: var(--size-chat); line-height: var(--leading-chat); }
 /* A bot's conversation: the words have the first row to themselves; under it, Attach and Dictate at the start, and at the end the context ring, the model and the one round button (Send, or Stop while the bot works). */
 .composer:has(> .end) > textarea { flex: 1 0 100%; }
 .composer .end { display: flex; align-items: center; gap: var(--space-1); min-width: 0; margin-left: auto; }

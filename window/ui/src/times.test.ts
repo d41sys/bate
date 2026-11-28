@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dayTime, took } from "./times.ts";
+import { dayTime, greeting, took } from "./times.ts";
 
 // Saturday 21 November 2026, 10:00, local time: the expected clock is the system's own, whatever its locale.
 const now = new Date(2026, 10, 21, 10, 0).getTime();
@@ -41,4 +41,8 @@ test("how long something took is in the largest two units", () => {
   assert.equal(took(125_000), "2 min 5 s");
   assert.equal(took(3_840_000), "1 h 4 min");
   assert.equal(took(-5), "0 s");
+});
+
+test("the greeting follows the hour, and the small hours are late, not morning", () => {
+  assert.deepEqual([0, 4, 5, 11, 12, 17, 18, 23].map(greeting), ["It's late.", "It's late.", "Good morning.", "Good morning.", "Good afternoon.", "Good afternoon.", "Good evening.", "Good evening."]);
 });
