@@ -8,7 +8,7 @@ import type { Bot, Project } from "./types.ts";
 import { Model } from "./Model.tsx";
 import { Chat } from "./Chat.tsx";
 import { Changes } from "./Changes.tsx";
-import { Conversations } from "./Conversations.tsx";
+import { Conversations, Talks } from "./Conversations.tsx";
 import { Mail } from "./Mail.tsx";
 import { FilePane, Pane } from "./Pane.tsx";
 import { SurfaceView, Surfaces } from "./Surfaces.tsx";
@@ -34,7 +34,7 @@ import { LATER } from "./firstRun.ts";
 import { Palette, type Choice } from "./Palette.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import "./highlight.css";
-import { Blocks, Folder, Inbox, type LucideIcon, Plus, Settings as Gear } from "lucide-react";
+import { Blocks, Folder, Inbox, type LucideIcon, Plus, Settings as Gear, SquarePen } from "lucide-react";
 import "./style.css";
 
 // Only in the build `window/check-frames.sh` makes.
@@ -174,7 +174,10 @@ function App() {
     setLater(on);
   };
   const project = view?.page === "project" ? projects.find((p) => p.id === view.id) : undefined;
-  const openBot = (id: string, tab: BotTab = "chat", conversation?: string) => setView({ page: "bot", id, tab, conversation });
+  // The same bot again keeps the conversation it shows, unless another is named.
+  const openBot = (id: string, tab: BotTab = "chat", conversation?: string) =>
+    setView((v) => ({ page: "bot", id, tab, conversation: conversation ?? (v?.page === "bot" && v.id === id ? v.conversation : undefined) }));
+  const newTalk = (id: string) => request<{ conversation: string }>("new_conversation", { bot: id }).then((d) => openBot(id, "chat", d.conversation), (e: Error) => setError(e.message));
   const openProject = (id: string, tab: ProjectTab = "room") => setView({ page: "project", id, tab });
   const order = shownBots(bots, projects);
   // Like a click on its row: the tab in front stays.
@@ -368,7 +371,9 @@ function App() {
           <button className="round ghost" aria-label="New bot" data-tip="New bot (⌘N)" onClick={actions["new-bot"]}><Plus /></button>
         </div>
         <ul>{lists.loose.map(botRow)}</ul>
+        {bot && view?.page === "bot" && <Talks key={`${bot.id}-${connection}`} bot={bot.id} shown={view.conversation} open={(c) => openBot(bot.id, "chat", c)} />}
         <ul className="foot">
+          {bot && view?.page === "bot" && <li><button className="row new" onClick={() => void newTalk(bot.id)}><SquarePen />New conversation</button></li>}
           <li>{plain("Add-ons", Blocks, view?.page === "addons", () => setView({ page: "addons", tab: view?.page === "addons" ? view.tab : "connectors" }))}</li>
           <li>{plain("Settings", Gear, view?.page === "settings", () => setView({ page: "settings" }))}</li>
         </ul>
@@ -477,7 +482,14 @@ function App() {
             </header>
             {view.tab === "chat" && <Mail key={`mail-${bot.id}-${connection}`} bot={bot.id} bots={bots} />}
             {view.tab === "chat" && (
-              <Conversations key={`conversations-${bot.id}-${connection}`} bot={bot.id} want={jump?.conversation ?? view.conversation} slot={conversationSlot} showChanges={inShell ? (conversation) => setShown({ changes: { bot: bot.id, conversation } }) : undefined}>
+              <Conversations
+                key={`conversations-${bot.id}-${connection}`}
+                bot={bot.id}
+                want={jump?.conversation ?? view.conversation}
+                slot={conversationSlot}
+                showChanges={inShell ? (conversation) => setShown({ changes: { bot: bot.id, conversation } }) : undefined}
+                shownAs={(c) => setView((v) => (v?.page === "bot" && v.id === bot.id && v.conversation !== c ? { ...v, conversation: c } : v))}
+              >
                 {(conversation, show, offerCompact) => <Chat
                   key={`${bot.id}-${conversation}-${connection}`}
                   bot={bot}
