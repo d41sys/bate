@@ -104,6 +104,8 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
   const lastIndex = shown.length - (shown[shown.length - 1] === WORKING ? 2 : 1);
   // The conversation whose first page has come: until then an empty chat is not said to be empty.
   const [loaded, setLoaded] = useState<string>();
+  // Nothing said yet: the page is a greeting with the box under it, in the middle.
+  const fresh = loaded === conversation && shown.length === 0;
   // How full the model is, when the engine has said.
   const [filled, setFilled] = useState<Fullness>();
   // The person reads further up: a button brings the latest message back.
@@ -305,7 +307,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     watch.observe(el);
     return () => watch.disconnect();
   }, []);
-  // The message box is as tall as its words, up to the limit the style sets.
+  // The message box is as tall as its words, up to the limit the style sets; the empty page gives it a taller least height, so it is measured again when that page ends.
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
@@ -313,7 +315,7 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     el.style.height = `${el.scrollHeight}px`;
     // Measuring made the box one line for a moment, which pulled the chat off its end.
     if (atBottom.current) rows.scrollToEnd();
-  }, [text]);
+  }, [text, fresh]);
   // A narrower box (the side pane opening) wraps its words onto more lines: measure again, or the last ones are cut.
   useEffect(() => {
     const el = box.current;
@@ -450,8 +452,6 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     }
   };
 
-  // Nothing said yet: the page is a greeting with the box under it, in the middle.
-  const fresh = loaded === conversation && shown.length === 0;
   return (
     <section
       className={`chat${dropping ? " dropping" : ""}${fresh ? " fresh" : ""}`}
