@@ -8,9 +8,9 @@ import { CopyButton, Markdown } from "./Markdown.ts";
 import { QuestionCard } from "./Question.tsx";
 import { answerCommand } from "./secret.ts";
 import { canRead, hush, readable, speak } from "./speech.ts";
-import { clock, day, dayTime, took } from "./times.ts";
+import { clock, day, dayTime, greeting, took } from "./times.ts";
 import type { Bot, QueuedPrompt } from "./types.ts";
-import { ArrowDown, ArrowUp, CalendarClock, Circle, CircleAlert, CircleCheck, CircleDot, Clock, GitFork, Mic, Paperclip, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CalendarClock, Circle, CircleAlert, CircleCheck, CircleDot, Clock, Eye, FileText, GitFork, ListChecks, Mic, Paperclip, PenLine, Pencil, Plus, RotateCcw, Square, Volume2, X } from "lucide-react";
 import { upload } from "./upload.ts";
 import { useLater } from "./useLater.ts";
 
@@ -21,12 +21,12 @@ const PAGE = 2000;
 
 /** How long (ms) a row that just came in counts as arriving: a little longer than its fade (`--slow`). */
 const ARRIVING = 400;
-/** What an empty conversation offers: a click puts the words in the box and sends nothing. */
-const STARTERS: [label: string, words: string][] = [
-  ["Plan a task", "Help me plan this task: "],
-  ["Explain a file", "Explain what this file does: "],
-  ["Review my changes", "Review the changes in this folder and list what could break."],
-  ["Write a first draft", "Write a first draft of "],
+/** What an empty conversation offers under the box: a click puts the words in the box and sends nothing. */
+const STARTERS: [label: string, words: string, Icon: typeof ArrowUp][] = [
+  ["Plan a task", "Help me plan this task: ", ListChecks],
+  ["Explain a file", "Explain what this file does: ", FileText],
+  ["Review my changes", "Review the changes in this folder and list what could break.", Eye],
+  ["Write a first draft", "Write a first draft of ", PenLine],
 ];
 
 type Hit = { seq: number };
@@ -450,9 +450,11 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
     }
   };
 
+  // Nothing said yet: the page is a greeting with the box under it, in the middle.
+  const fresh = loaded === conversation && shown.length === 0;
   return (
     <section
-      className={dropping ? "chat dropping" : "chat"}
+      className={`chat${dropping ? " dropping" : ""}${fresh ? " fresh" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setDropping(e.dataTransfer.types.includes("Files"));
@@ -497,16 +499,10 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           if (more && el.scrollTop < 300) older.current();
         }}
       >
-        {loaded === conversation && shown.length === 0 && (
+        {fresh && (
           <div className="empty">
             <Avatar bot={bot} />
-            <strong>{bot.name}</strong>
-            <span>Nothing is said here yet. Write below to start.</span>
-            <div className="prompts">
-              {STARTERS.map(([label, words]) => (
-                <button key={label} type="button" className="small" onClick={() => { setText(words); box.current?.focus(); }}>{label}</button>
-              ))}
-            </div>
+            <strong>{greeting(new Date().getHours())}</strong>
           </div>
         )}
         <div style={{ height: rows.getTotalSize(), position: "relative" }}>
@@ -691,6 +687,13 @@ export function Chat({ bot, conversation, onFork, jump, find = false, used = () 
           )}
         </span>
       </form>
+      {fresh && (
+        <div className="prompts">
+          {STARTERS.map(([label, words, Icon]) => (
+            <button key={label} type="button" onClick={() => { setText(words); box.current?.focus(); }}><Icon />{label}</button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

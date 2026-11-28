@@ -15,6 +15,8 @@ export const when = (r: Pick<Routine, "schedule">) => (r.schedule ? `Every ${r.s
 
 const DAY = 86_400_000;
 export const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+/** The line an empty conversation opens with, for the hour of the day (0 to 23). */
+export const greeting = (hour: number) => (hour < 5 ? "It's late." : hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.");
 export const midnight = (ms: number) => new Date(new Date(ms).setHours(0, 0, 0, 0)).getTime();
 // Whole calendar days apart; a day of 23 or 25 hours (the clocks changed) still counts as one.
 const daysApart = (ms: number, now: number) => Math.round((midnight(ms) - midnight(now)) / DAY);
