@@ -44,14 +44,22 @@
   /* What floats is known by its shadow: a faint ring and a soft fall. */
   --shadow-1: 0 0 0 1px oklch(15% 0 0 / .07), 0 1px 2px oklch(15% 0 0 / .04), 0 12px 32px -12px oklch(15% 0 0 / .14);
   --shadow-2: 0 0 0 1px oklch(15% 0 0 / .08), 0 4px 12px oklch(15% 0 0 / .06), 0 32px 64px -16px oklch(15% 0 0 / .24);
+  /* The message box: a ring and a soft fall of its own, and a stronger ring while it is written in. */
+  --shadow-box: 0 0 0 1px oklch(15% 0 0 / .1), 0 1px 2px oklch(15% 0 0 / .04), 0 10px 28px -12px oklch(15% 0 0 / .14);
+  --shadow-box-focus: 0 0 0 1px oklch(15% 0 0 / .2), 0 1px 2px oklch(15% 0 0 / .05), 0 16px 38px -14px oklch(15% 0 0 / .2);
 
   /* What a control is filled with, and when pointed at. A tinted or raised surface steps both up (style.css). */
   --fill: var(--bg-soft);
   --fill-hover: var(--bg-soft-2);
 
-  /* Type: the system's font; 13/18 for text, 12/16 for the small lines, 14/22 for what is said in a chat, 15/20 for a page's title. Three weights: 400, 500 and the strong one. */
+  /* Type: the system's font; 13/18 for text, 12/16 for the small lines; in a chat 16/28 for what the bot says and 14/22 for the person's bubble; 15/24 in the message box; 15/20 for a page's title. The greeting of an empty conversation is the system's serif, 36/44. Three weights: 400, 500 and the strong one. */
   --font-ui: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-greeting: ui-serif, "New York", Georgia, serif;
+  --size-greeting: 36px;
+  --leading-greeting: 44px;
+  --size-bubble: 14px;
+  --leading-bubble: 22px;
   --size-small: 12px;
   --size-ui: 13px;
   --size-title: 14px;
@@ -60,9 +68,9 @@
   --leading: 18px;
   --leading-head: 20px;
   --leading-display: 28px;
-  --size-chat: 14px;
-  --leading-chat: 22px;
-  --size-chat-head: 17px;
+  --size-chat: 16px;
+  --leading-chat: 28px;
+  --size-chat-head: 19px;
   --leading-chat-head: 24px;
   --leading-small: 16px;
   --weight-strong: 600;
@@ -81,8 +89,8 @@
   --radius-s: 3px;
   --radius-m: 6px;
   --radius-l: 8px;
-  --radius-bubble: 14px;
-  --radius-box: 16px;
+  --radius-bubble: 16px;
+  --radius-box: 20px;
   --radius-pill: 999px;
   --control-h: 30px;
   --control-h-small: 26px;
@@ -94,8 +102,12 @@
   --avatar: 20px;
   /* A drawn icon: on a control, in a row, on a bot's face. */
   --icon: 16px;
-  --side-w: 240px;
+  /* A bot's face at the head of its turn in a chat. */
+  --avatar-chat: 24px;
+  --side-w: 264px;
   --thread-w: 720px;
+  /* A conversation's column: wider than a page's, for 16 px text. */
+  --chat-w: 880px;
   --popover-w: 300px;
   --nav-w: 168px;
   --chip-w: 180px;
@@ -143,6 +155,8 @@
     --diff-add: oklch(30% 0.06 150);
     --diff-del: oklch(30% 0.07 25);
     --scrim: oklch(0% 0 0 / .65);
+    --shadow-box: 0 0 0 1px oklch(100% 0 0 / .1), 0 10px 28px -12px oklch(0% 0 0 / .5);
+    --shadow-box-focus: 0 0 0 1px oklch(100% 0 0 / .2), 0 16px 38px -14px oklch(0% 0 0 / .6);
     /* On dark a fall reads as a hole: a faint light ring, and a fall only under a popover or a dialog. */
     --shadow-0: 0 0 0 1px oklch(100% 0 0 / .07);
     --shadow-1: 0 0 0 1px oklch(100% 0 0 / .08);

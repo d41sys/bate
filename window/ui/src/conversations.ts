@@ -14,3 +14,6 @@ export function when(ms: number, now = Date.now()): string {
 
 /** The list the switcher shows: archived ones only on request, and never the one that is open. */
 export const listed = (all: Conversation[], open: string, archived: boolean) => all.filter((c) => archived || !c.archived || c.id === open);
+
+/** The sidebar's few: not archived, the pinned first, then the one used last. */
+export const recent = (all: Conversation[], few: number) => all.filter((c) => !c.archived).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.touchedAt - a.touchedAt).slice(0, few);

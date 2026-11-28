@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { label, listed, when } from "./conversations.ts";
+import { label, listed, recent, when } from "./conversations.ts";
 import type { Conversation } from "./types.ts";
 
 const made = (id: string, more: Partial<Conversation> = {}): Conversation => ({
@@ -25,4 +25,9 @@ test("archived conversations are hidden until asked for, but not the one that is
   assert.deepEqual(listed(all, "a", false).map((c) => c.id), ["a"]);
   assert.deepEqual(listed(all, "b", false).map((c) => c.id), ["a", "b"]);
   assert.deepEqual(listed(all, "a", true).map((c) => c.id), ["a", "b", "c"]);
+});
+
+test("the sidebar's few are the pinned, then the ones used last, and never an archived one", () => {
+  const all = [made("old", { touchedAt: 1 }), made("new", { touchedAt: 9 }), made("kept", { touchedAt: 2, pinned: true }), made("gone", { touchedAt: 10, archived: true }), made("mid", { touchedAt: 5 })];
+  assert.deepEqual(recent(all, 3).map((c) => c.id), ["kept", "new", "mid"]);
 });

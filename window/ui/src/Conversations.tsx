@@ -1,7 +1,8 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listen, request } from "./service.ts";
-import { label, listed, when } from "./conversations.ts";
+import { ago } from "./attention.ts";
+import { label, listed, recent, when } from "./conversations.ts";
 import type { Conversation } from "./types.ts";
 import { ChevronDown, Ellipsis, Pin } from "lucide-react";
 
@@ -12,12 +13,14 @@ import { ChevronDown, Ellipsis, Pin } from "lucide-react";
  * `want` names one to show (a search hit); `show` switches to another (a fork). The chip that opens the
  * list is drawn into `slot`, a place in the page's header.
  */
-export function Conversations({ bot, want, slot, showChanges, children }: {
+export function Conversations({ bot, want, slot, showChanges, shownAs, children }: {
   bot: string;
   want?: string;
   slot: HTMLElement | null;
   /** Opens the diff of what the bot changed; absent where there is no pane (other devices). */
   showChanges?: (conversation: string) => void;
+  /** Told which conversation is shown, at first and after each switch: the sidebar marks it. */
+  shownAs?: (conversation: string) => void;
   children: (conversation: string, show: (id: string) => void, offerCompact: (item: { run: () => void; disabled: boolean } | null) => void) => ReactNode;
 }) {
   const [all, setAll] = useState<Conversation[]>([]);
@@ -90,6 +93,9 @@ export function Conversations({ bot, want, slot, showChanges, children }: {
   const shown = chosen ?? current;
   // The last export is of the conversation that was shown then.
   useEffect(() => setSaved(""), [shown]);
+  useEffect(() => {
+    if (shown) shownAs?.(shown);
+  }, [shown]);
   if (!shown) return <p className="note">{error || "Loading the conversations…"}</p>;
   const now = all.find((c) => c.id === shown);
 
@@ -210,6 +216,45 @@ export function Conversations({ bot, want, slot, showChanges, children }: {
       {error && <p className="error" role="alert">{error}</p>}
       {saved && <p className="note" role="status">Saved to <code>{saved}</code></p>}
       {children(shown, show, offerCompact)}
+    </>
+  );
+}
+
+/** How many conversations the sidebar lists; the header's list has them all. */
+const FEW = 8;
+
+/** The open bot's conversations in the sidebar: the pinned and the newest few, each with how long ago it was used. */
+export function Talks({ bot, shown, open }: { bot: string; shown?: string; open: (conversation: string) => void }) {
+  const [all, setAll] = useState<Conversation[]>([]);
+  useEffect(() => {
+    let gone = false;
+    const load = () => request<{ conversations: Conversation[] }>("list_conversations", { bot }).then((d) => gone || setAll(d.conversations), () => {});
+    void load();
+    const stop = listen((frame) => {
+      if (frame.type === "bots_changed" || (frame.type === "conversations_changed" && frame.bot === bot)) void load();
+    });
+    return () => {
+      gone = true;
+      stop();
+    };
+  }, [bot]);
+  const live = all.filter((c) => !c.archived).length;
+  if (!live) return null;
+  return (
+    <>
+      <div className="heading"><h2>Conversations<span className="count">{live}</span></h2></div>
+      <ul className="talks">
+        {recent(all, FEW).map((c) => (
+          <li key={c.id}>
+            <button className={c.id === shown ? "row plain current" : "row plain"} aria-current={c.id === shown ? "true" : undefined} onClick={() => open(c.id)}>
+              <span className="label">
+                <span>{label(c)}</span>
+                <small>{c.busy ? "Working…" : ago(c.touchedAt)}</small>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
     </>
   );
 }
